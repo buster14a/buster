@@ -3869,6 +3869,9 @@ typedef enum X86Syntax
     X(BND_JMP_RM64, "bnd jmp", 0xf2, 1, 0xff, D4, 0, 0, 0, NONE, EQ, 8, RM) \
     X(BND_RET, "bnd ret", 0xf2, 1, 0xc3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(BND_RET_IMM16, "bnd ret", 0xf2, 1, 0xc2, NO, 2, 0, 0, NONE, NONE, 0, IMM) \
+    /* AMD's return-stack-buffer hint, which GNU as writes for `rep ret` and `repz ret`, and its repne spelling. */ \
+    X(REP_RET, "rep ret", 0xf3, 1, 0xc3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REPNE_RET, "repne ret", 0xf2, 1, 0xc3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(NOTRACK_BND_JMP_R64, "notrack bnd jmp", 0xf23e, 1, 0xff, D4, 0, 0, 0, NONE, GQ, 8, RM) \
     X(NOTRACK_BND_JMP_M64, "notrack bnd jmp", 0xf23e, 1, 0xff, D4, 0, 0, 0, NONE, M, 8, RM) \
     X(NOTRACK_BND_CALL_R64, "notrack bnd call", 0xf23e, 1, 0xff, D2, 0, 0, 0, NONE, GQ, 8, RM) \

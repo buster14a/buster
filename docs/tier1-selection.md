@@ -69,7 +69,8 @@ emit no late copies. This emitter has no frame or callee-saved-register changes.
 
 Calls, phis, switches, floating values, byte/word arithmetic, dynamic shifts,
 division/remainder, stack/symbol addresses, spill fragments and rematerialized
-fragments are explicit unsupported/allocation results in `tier1_select_emit`.
+fragments are explicit unsupported/allocation results in `tier1_select_emit`:
+it has neither call preservation nor the edge moves a phi needs.
 No semantic error silently falls back to another tier. The separate
 `tier1_emit.c` consumer described below handles allocated spill fragments
 without weakening that API's checks.
@@ -80,8 +81,11 @@ without weakening that API's checks.
 error_node)` returns `Tier1SelectError`. Both the vector and scalar paths invoke
 their corresponding IR verifier. A cross-block value use requires the supplied
 dominator intervals; structural verification alone is insufficient. This slice
-requires value definitions to precede uses in physical instruction order and
-does not accept phis.
+requires value definitions to precede uses in physical instruction order, but
+for a phi's operands, which may follow it (a loop's back edge). An integer phi
+selects `TIER1_RULE_PHI` (#140): no records and no effective uses, since its
+operands are uses on its block's incoming edges, which the CFG consumer's edge
+moves read (`tier1_emit_cfg.c`, in the [pipeline guide](tier1-pipeline.md)).
 
 The borrowed function remains immutable and alive until emission finishes.
 Input, result and scratch storage must not overlap unused arena capacity;
@@ -215,8 +219,10 @@ The last returns, ends in `IR_UNREACHABLE`, or contains exactly one branch to
 itself. Forward identity jumps emit no record. The empty terminal sink emits
 a real self-jump targeting its block after the prologue; a preceding call is
 not assumed to terminate. Terminal paths emit no return epilogue. This admits
-the typed lowerer's parameter preheader and terminal suffix while general
-joins, nonempty backedges and phi moves still need an edge-location consumer.
+the typed lowerer's parameter preheader and terminal suffix. Every other
+function, with general joins, nonempty backedges and phis, goes through the CFG
+consumer, `tier1_emit_cfg.c` (#140), which allocates over the CFG
+(`tier1_cfg.c`) and moves values along its edges.
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
@@ -250,10 +256,10 @@ and encoding, publish them through `link_add_code_fixups` with the encoder's
 instruction ends. The references retain instruction indices, not guessed byte
 offsets. The older frameless `tier1_select_emit` API still rejects call plans.
 
-Indirect and variadic calls, stack arguments, floating-point and aggregate
-arguments/results, and general terminal-call CFGs are outside this bounded path.
-The supported empty terminal sink does not establish acceptance of source
-functions with conditional branches or unreachable continuation blocks.
+Indirect and variadic calls, stack arguments, and floating-point and aggregate
+arguments/results are outside this bounded path. Calls in general CFGs, loops
+among them, go through the CFG consumer, which saves the registers of values
+live past each call. Neither establishes acceptance of source functions.
 Unsupported calls and allocation/target/capacity errors publish no partial
 result. Correct execution of these component fixtures does not establish
 atomic-builtin, full-source ABI or corpus acceptance.
@@ -324,8 +330,9 @@ frame planning, fragment emission, branch sizing and encoding. Original
 registers. Both paths run against an independent integer oracle with stored
 values and with rematerialized constants, fixed/red-zone/frame-pointer frames,
 and stack probes. Independent allocation verification checks the produced
-fragments. Failures cover target denial, scratch-register conflicts, capacity,
-unsupported frame policies and general CFG backedges. Narrow-value fixtures
+fragments. Failures cover target denial, scratch-register conflicts, capacity
+and unsupported frame policies; a backedge through the entry now goes through
+the CFG consumer, after an added entry block. Narrow-value fixtures
 check canonical upper bits, exact byte/word accesses beside guard pages,
 sign boundaries, real spills and rematerialization. Terminal fixtures check
 explicit traps and empty self-loop sinks in bounded child processes, including
