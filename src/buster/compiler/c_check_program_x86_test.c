@@ -1940,14 +1940,12 @@ static void check_test_program_x86_target_attributes(CheckTest* test, const char
         check_test_program_boundary_target(test,
                                            "typedef int v4si __attribute__((vector_size(16)));"
                                            "__attribute__((target(\"no-avx512vl\"))) int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
-                                           "target-attribute-without-avx512vl", true, false, 0, 2,
-                                           "vector types in a function whose target attribute turns off AVX-512F or AVX-512VL", &zen);
+                                           "target-attribute-without-avx512vl", true, true, 0, 2, NULL, &zen);
         check_test_program_march = "-march=x86-64";
         check_test_program_boundary_target(test,
                                            "typedef int v4si __attribute__((vector_size(16)));"
                                            "__attribute__((target(\"avx512f,avx512vl\"))) int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
-                                           "target-attribute-vectors-in-a-baseline-unit", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL",
-                                           &baseline);
+                                           "target-attribute-vectors-in-a-baseline-unit", true, true, 0, 2, NULL, &baseline);
     }
 }
 
