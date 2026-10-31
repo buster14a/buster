@@ -1107,7 +1107,12 @@ composite type, creates distinct local/global symbols and passes selected
 `CheckDataObject` records to `check_data_emit` in `c_check_data.c`. It never
 reparses declarations or binds identifiers again. An actual initializer wins
 over later tentative or external declarations. Automatic objects and
-unreferenced function bodies produce no data atom.
+unreferenced function bodies produce no data atom. An object's alignment is its
+type's or its declarations' largest alignment attribute's, and without one at
+least 16 for an array of 16 bytes or more, as the x86-64 psABI aligns a global
+array and clang declares it, an `extern` one too, which clang's optimized code
+stores into with aligned SSE moves (`check_data_declared_alignment`, #978);
+compound literals and string literals keep their types' alignment.
 
 The emitter consumes checked aggregate initializer plans, including brace
 elision, designated/range stores, bit-fields, compatible string copies and
@@ -1333,6 +1338,9 @@ What the lowering covers past scalars (#145's programs):
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
   of their own size and alignment (up to 1 GB each), reached through
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+  An array of 16 bytes or more whose declaration has no alignment attribute or
+  specifier is aligned to at least 16, as the x86-64 psABI and clang align a
+  local array (`type_large_array`, #978); a compound literal keeps its type's.
   Past 16 bytes' alignment, Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
 - **Values aligned past 8 bytes.** A scalar local or parameter whose alignment
@@ -3175,9 +3183,12 @@ record of them. A fixture records clang's verdict on its violation:
 - acceptance with a warning clang gives by default, for 33;
 - acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
 
-Every valid twin is accepted.
+Every valid twin is accepted. A warning fixture also records the line clang's warning has (`warning`), and the
+catalogue requires it from clang and from the checker: `CheckCorpusOracle.check_warning` makes
+`check_corpus_file_outcome` compare the checker's first kept sparse warning's presumed line (`CheckCorpusPath.first_warning_line`,
+from the reader's and the initializer walk's events and the translation unit's final undefined-internal analysis) with it.
 
-The first survey of the catalogue (main at `321f597`) found 14 of the 644 sources differing from clang, each
+The first survey of the catalogue (main at `321f597`) found 14 of the first 644 sources differing from clang, each
 fixed with its fixture there:
 - **Rejected, where clang takes them:**
   - declarations and members of no declarator;
@@ -3196,8 +3207,20 @@ subobjects, symbolic pointers and active union selections. Each lookup checks th
 volatile, incomplete and effectful initializers supply no value proof. Runtime loads retain their effects,
 including const atomic loads. An enumerator publishes ordinary ICE evidence after its definition.
 
-The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
-declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
+Every warning the 33 get is the checker's at clang's line: the fourteen default warnings #705 lists
+now have producers, their sparse events and the driver's rendering. They are `-Wnon-literal-null-conversion`
+(a non-literal integer constant zero converted to a pointer, from a zero literal's source provenance that
+parentheses and selections keep), `-Wliteral-range` (a floating literal past its type's magnitude, at the
+literal), the ungrouped ordered pointer/integer comparison, `-Wmissing-declarations` (a declaration of no
+declarator, at file scope and for a member), the ungrouped plain `_Complex` assumption,
+`-Wgnu-variable-sized-type-not-at-end`, `-Wstatic-local-in-inline` with its `static` note, the
+`-Wmany-braces-around-scalar-init` excess brace, `-Winitializer-overrides` with its prior-initialization note,
+`-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
+for an unnamed parameter before C23. Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
+driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
+compares the driver's complete diagnostics with clang's for every producer and policy, and
+`test-checker`'s catalogue compares each warning's line.
 
 ## Corpus comparison and semantic mutations
 

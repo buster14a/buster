@@ -97,6 +97,11 @@ struct Tier1EmitResult
     // take records past a node's share.
     uint32_t reference_capacity;
     uint32_t fixed_count;
+    // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,
+    // which the frame saves; and how many values live across a call it gave them.
+    uint32_t callee_registers;
+    uint32_t callee_used;
+    uint32_t crossing_values;
     const uint8_t* symbol_access;
     uint32_t symbol_access_count;
     uint32_t call_stores;
@@ -740,7 +745,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         {
             const Tier1SelectRecords selected = tier1_select_expand(&holes);
             const bool returns = plan->function->op[node] == IR_RET;
-            if (returns && (selected.count == 0 || selected.records[selected.count - 1].form != X86_FORM_RET))
+            if (selected.overflowed || (returns && (selected.count == 0 || selected.records[selected.count - 1].form != X86_FORM_RET)))
             {
                 error = TIER1_EMIT_INVALID;
             }

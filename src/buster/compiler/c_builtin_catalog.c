@@ -55,8 +55,9 @@
 // error: no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
-// take 0x380 to 0x390, and its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
-// stdc ones and the carry chains) 0x3a0 to 0x3c7.
+// take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
+// stdc ones and the carry chains) 0x3a0 to 0x3c7, and its floating builtins past the first ones (c_check_builtin_float.c:
+// isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -393,7 +394,17 @@
     X(OPENCL_ATOMIC_FETCH_XOR, 0x439u, "__opencl_atomic_fetch_xor", BUSTER_CBUILTIN_SOURCE) \
     X(OPENCL_ATOMIC_INIT, 0x43au, "__opencl_atomic_init", BUSTER_CBUILTIN_SOURCE) \
     X(OPENCL_ATOMIC_LOAD, 0x43bu, "__opencl_atomic_load", BUSTER_CBUILTIN_SOURCE) \
-    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE)
+    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE) \
+    X(ISNORMAL, 0x3d0u, "__builtin_isnormal", BUSTER_CBUILTIN_SOURCE) \
+    X(ISSUBNORMAL, 0x3d1u, "__builtin_issubnormal", BUSTER_CBUILTIN_SOURCE) \
+    X(ISZERO, 0x3d2u, "__builtin_iszero", BUSTER_CBUILTIN_SOURCE) \
+    X(ISSIGNALING, 0x3d3u, "__builtin_issignaling", BUSTER_CBUILTIN_SOURCE) \
+    X(ISFPCLASS, 0x3d4u, "__builtin_isfpclass", BUSTER_CBUILTIN_SOURCE) \
+    X(SIGNBITF, 0x3d5u, "__builtin_signbitf", BUSTER_CBUILTIN_SOURCE) \
+    X(SIGNBITL, 0x3d6u, "__builtin_signbitl", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -529,6 +540,28 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
 static __attribute__((unused)) bool cbuiltin_vector(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_NONTEMPORAL_STORE) || (id >= CBUILTIN_ELEMENTWISE_ACOS && id <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE);
+    return result;
+}
+
+// Whether an identity is one of clang's floating classifications past the first ones (isnormal, issubnormal, iszero,
+// issignaling and isfpclass, 0x3d0 to 0x3d4), which take a real floating argument unconverted, as isnan does.
+static __attribute__((unused)) bool cbuiltin_float_class(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ISNORMAL && id <= CBUILTIN_ISFPCLASS;
+    return result;
+}
+
+// Whether an identity is clang's signbitf or signbitl, whose fixed prototypes convert their argument first (0x3d5, 0x3d6).
+static __attribute__((unused)) bool cbuiltin_float_signbit(uint32_t id)
+{
+    const bool result = id == CBUILTIN_SIGNBITF || id == CBUILTIN_SIGNBITL;
+    return result;
+}
+
+// Whether an identity is one of clang's canonicalize builtins, x * 1.0 of their prototypes' types (0x3d7 to 0x3d9).
+static __attribute__((unused)) bool cbuiltin_float_canonicalize(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEL;
     return result;
 }
 

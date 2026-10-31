@@ -278,6 +278,20 @@ typedef enum CheckTier1Stage
     CHECK_TIER1_STAGE_COUNT,
 } CheckTier1Stage;
 
+// What Tier 1's code of a body holds: its records, and the allocation's traffic, its spills' stores and reloads, the
+// saves and restores around its calls and fixed registers' sequences, its recomputed constants and its edges' moves.
+typedef struct CheckTier1Counts CheckTier1Counts;
+struct CheckTier1Counts
+{
+    uint32_t records;
+    uint32_t spill_stores;
+    uint32_t spill_loads;
+    uint32_t call_stores;
+    uint32_t call_loads;
+    uint32_t rematerializations;
+    uint32_t edge_moves;
+};
+
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
 typedef struct CheckTier1Report CheckTier1Report;
 struct CheckTier1Report
@@ -286,6 +300,14 @@ struct CheckTier1Report
     uint32_t stages[CHECK_TIER1_STAGE_COUNT];
     uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
     uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
+    // The counts of Tier 1's bodies, summed.
+    uint64_t records;
+    uint64_t spill_stores;
+    uint64_t spill_loads;
+    uint64_t call_stores;
+    uint64_t call_loads;
+    uint64_t rematerializations;
+    uint64_t edge_moves;
 };
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
@@ -367,7 +389,7 @@ static bool check_tier1_ready = false;
 // CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
 // `output` as it was.
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           Arena* output, Tier0Code* code, uint32_t* operation);
+                                           Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
@@ -476,8 +498,10 @@ struct CheckEmitRun
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
-    // With --tier1, what became of each body: its CheckTier1Stage, and a refused selection's IR operation in bits 8 up.
+    // With --tier1, what became of each body: its CheckTier1Stage, and a refused selection's IR operation in bits 8 up;
+    // and Tier 1's code's counts, for the bodies it compiled.
     uint32_t* tier1_outcomes;
+    CheckTier1Counts* tier1_counts;
     uint64_t* costs;
     uint64_t* boundaries;
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -648,7 +672,7 @@ static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run
     uint32_t operation = 0;
     const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
                                           check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                              lane->scratch, &run->codes[b], &operation);
+                                                              lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
     run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
     return stage == CHECK_TIER1_COMPILED;
 }
@@ -1422,6 +1446,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // --tier1's outcomes, and its tables, once: the cost model's (x86_zen5.c), which its selection reads.
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
+    run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
     if (run.tier1_outcomes != 0)
     {
         // A body a failure before it left unreached has none (an outcome past the stages).
@@ -1433,7 +1458,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->status = check_tier1_ready ? result->status : CHECK_PROGRAM_BACKEND;
     }
     valid = valid && (count == 0 || (run.codes != 0 && run.bodies != 0)) && (frames == 0 || run.frames != 0) && run.costs != 0 &&
-            (!tier1 || (run.tier1_outcomes != 0 && check_tier1_ready));
+            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready));
     uint64_t total = 0;
     uint64_t largest = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
@@ -1564,6 +1589,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.stages[stage < CHECK_TIER1_STAGE_COUNT ? stage : 0] += stage < CHECK_TIER1_STAGE_COUNT;
         lanes->tier1_report.operations[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_SELECTION;
         lanes->tier1_report.emission[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_EMISSION;
+        const CheckTier1Counts* counts = &run.tier1_counts[b];
+        const bool compiled = stage == CHECK_TIER1_COMPILED;
+        lanes->tier1_report.records += compiled ? counts->records : 0;
+        lanes->tier1_report.spill_stores += compiled ? counts->spill_stores : 0;
+        lanes->tier1_report.spill_loads += compiled ? counts->spill_loads : 0;
+        lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
+        lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
+        lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
+        lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.
@@ -2710,5 +2744,16 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         }
     }
     valid = valid && check_program_define_aliases(code, program);
+    // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
+    // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
+    // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.
+    for (SymbolId symbol = 1; valid && symbol < code->link.symbols.count; symbol += 1)
+    {
+        if ((code->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL &&
+            code->link.symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE)
+        {
+            code->link.symbols.flags[symbol] = (uint8_t)((code->link.symbols.flags[symbol] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
+        }
+    }
     return valid;
 }

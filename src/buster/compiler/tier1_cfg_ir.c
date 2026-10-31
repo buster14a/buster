@@ -284,6 +284,9 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
                     for (uint32_t e = cfg.predecessor_offsets[b]; e < cfg.predecessor_offsets[b + 1]; e += 1)
                     {
                         uint32_t incoming = BUSTER_TIER1_CFG_NONE;
+                        // As in ir_interpreter_enter_block's scan: the vector form loads words past the phi's pairs, which
+                        // no value uses, and MSan's model charges the whole loaded vector. The loop is short; keep it scalar.
+#pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
                         for (uint32_t pair = 0; pair < function->b[i]; pair += 1)
                         {
                             const uint32_t* entry = function->extra + function->a[i] + (uint64_t)pair * 2;

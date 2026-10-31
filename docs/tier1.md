@@ -99,7 +99,10 @@ each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
 standard error after the command, how many functions each tier compiled and the
 step, and for the selector the IR operation, that refused each of the others,
 and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
-that step (`tier1-refused	NAME	selection	call`):
+that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
+1's code: its records, its spills' stores and reloads, the saves and restores
+around its calls and fixed registers' sequences, its recomputed constants and its
+edges' moves:
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
@@ -123,7 +126,19 @@ by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
 the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
 read, and any other value live past the node there saved around it in a
 call-save row). A parameter's register binds its definition's interval alone
-(`Tier1CfgInput.definition_registers`). Still refused: floating point, narrow
+(`Tier1CfgInput.definition_registers`); where that leaves a use in the interval
+no register, the allocation runs again with every parameter free, and the entry's
+moves bring each from its incoming register (`tier1_emit_cfg_entry`). Freeing a
+parameter live across a call there too, in a callee-saved register from the
+entry on, cut the saves around speedtest1's calls but spilled more and ran
+slower, so a bound parameter stays bound. Values live across a call take the
+callee-saved registers (`rbx`, `r12` to `r15`), which the prologue saves once,
+rather than caller-saved ones that every call saves and restores around itself
+(`tier1_emit_cfg_callee`: from the first allocation's intervals, each value whose
+interval covers a call is allocated again with the callee-saved registers alone,
+every other with the caller-saved ones; the first allocation stands where the
+second fails). On speedtest1 that halved the saves around calls (41,464 to 20,710
+records) and the spills' stores and reloads (15,028 to 7,550). Still refused: floating point, narrow
 call arguments (the IR doesn't keep their signedness, which the callee's
 extension needs), stack arguments, labels, switches, aggregates by value and
 variadic definitions.
@@ -131,6 +146,30 @@ variadic definitions.
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
 #142's campaigns.
+
+Measured on the 9700X ([step 5's
+record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)
+and [step
+6's](https://github.com/buster14a/buster-performance/tree/ca1c5a8/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step6)):
+speedtest1, with 2,208 of its 2,709 functions by Tier 1, gives Tier 0's
+verification hash by both paths and runs in 226.9 ms, against Tier 0's 257.1
+ms, clang -O0's 293.6 ms and clang -O2's 131.4 ms. Before the selection's walks
+of C's truth values, addresses and divisions by powers of two (#141's items in
+`tier1_select.c`) it ran in 285.7 ms. By sampled cycles, the functions Tier 1
+compiles take 26% fewer as its code than as Tier 0's (41% fewer than before the
+walks). What still costs: a narrow value's zero extension is a `movzx`, though
+its register is zero-extended already; `&&`, `||` and `?:` results whose depth
+slot carries values of several types stay in memory (single-type ones promote
+since #983); a frame
+object's address is a `lea` rather than part of its users' memory operands; the
+pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
+function, is Tier 0's (its switch). 80 of #142's programs, 40 per generator, gave
+66 passes at both tiers and 14 failures, all in clang's own steps, and 40 more by
+the scalar path alone 36 passes and 4 such failures. The default path's compile
+time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
+the walks, which leave 40% fewer records to emit); the checker's unit, which
+compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
+36.9 s without them.
 
 ## Current integration boundary
 
