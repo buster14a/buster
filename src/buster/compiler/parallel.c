@@ -18,8 +18,10 @@
 // with its outcome, its time and its CPU time (which shows the CPUs it kept busy), then its output, in the list's order,
 // each as soon as it and every command before it have ended; with --github between `::group::` and `::endgroup::`, so
 // that GitHub's log folds each one under its heading, and with an `::error::` annotation for each that failed. Last
-// comes a summary line, and a line naming each command that failed. The exit status is 0 when every command exited with
-// status 0, and 1 otherwise.
+// comes a summary line, and a line naming each command that failed. A command that exits with status 77 (Automake's
+// skip code) is reported as skipped, counted apart, and doesn't fail the run; a test that leaves a check to another
+// stage says so in its output and exits 77. The exit status is 0 when every command passed or was skipped, and 1
+// otherwise.
 //
 // The report never holds up the run. A command's output is read into memory when it ends and its capture closed, so
 // that only running commands hold one, however many have ended before the report reaches them; and the report goes out
@@ -81,6 +83,8 @@ extern char** environ;
 #define BUSTER_PARALLEL_MAX_TIMEOUT_SECONDS 86400ull
 // A command's outcome, as its heading and the summary print it.
 #define BUSTER_PARALLEL_OUTCOME_BYTES 512
+// The exit status a command gives when it leaves its check to another stage: Automake's skip code.
+#define BUSTER_PARALLEL_SKIP_STATUS 77
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The list
@@ -356,8 +360,10 @@ struct ParallelResult
     // The runner killed it at its timeout, or sent its group the signal that stopped the run.
     bool timed_out;
     bool interrupted;
-    // It ended with exit status 0, before its timeout.
+    // It ended with exit status 0, before its timeout, or with the skip status, which leaves its check to another
+    // stage.
     bool passed;
+    bool skipped;
     // Its part of the report, its heading with its outcome and time and then its output, once it has ended (or the run
     // stopped before it started): null until then.
     String8 report;
@@ -368,6 +374,7 @@ struct ParallelSummary
 {
     uint64_t passed;
     uint64_t failed;
+    uint64_t skipped;
     uint64_t not_started;
     // The most commands that ran at once.
     uint64_t peak;
@@ -439,6 +446,10 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
     else if (result->start_error != 0)
     {
         snprintf(reason, sizeof(reason), "failed (can't start %s: %s)", options->shell, strerror(result->start_error));
+    }
+    else if (result->skipped)
+    {
+        snprintf(reason, sizeof(reason), "skipped");
     }
     else if (result->passed)
     {
@@ -661,9 +672,9 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
 {
     const uint64_t mark = arena->length;
     char line[BUSTER_PARALLEL_OUTCOME_BYTES];
-    int length = snprintf(line, sizeof(line), "parallel: %llu commands in %.1f s, %.1f s of CPU, at most %llu CPUs at once: %llu passed, %llu failed, %llu not started",
+    int length = snprintf(line, sizeof(line), "parallel: %llu commands in %.1f s, %.1f s of CPU, at most %llu CPUs at once: %llu passed, %llu failed, %llu skipped, %llu not started",
                           (unsigned long long)list->count, parallel_seconds(summary->elapsed), parallel_seconds(summary->cpu), (unsigned long long)jobs,
-                          (unsigned long long)summary->passed, (unsigned long long)summary->failed, (unsigned long long)summary->not_started);
+                          (unsigned long long)summary->passed, (unsigned long long)summary->failed, (unsigned long long)summary->skipped, (unsigned long long)summary->not_started);
     bool built = length > 0 && parallel_append(arena, line, (uint64_t)length);
     if (summary->signal != 0)
     {
@@ -678,7 +689,7 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
     built = built && parallel_append(arena, "\n", 1);
     for (uint64_t i = 0; i < list->count; i += 1)
     {
-        if (!results[i].passed && results[i].state == PARALLEL_STATE_ENDED)
+        if (!results[i].passed && !results[i].skipped && results[i].state == PARALLEL_STATE_ENDED)
         {
             char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
             parallel_outcome(&results[i], options, outcome, sizeof(outcome));
@@ -783,6 +794,7 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
             } while (waited < 0 && errno == EINTR);
             result->status = status;
             result->cpu = waited == result->pid ? parallel_cpu_time(&usage) : 0;
+            result->skipped = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_PARALLEL_SKIP_STATUS && !result->timed_out;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;
             result->end = now;
@@ -947,10 +959,11 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
             for (uint64_t i = 0; i < list->count; i += 1)
             {
                 summary.passed += results[i].passed;
+                summary.skipped += results[i].skipped;
                 summary.not_started += results[i].state == PARALLEL_STATE_WAITING;
                 summary.cpu += results[i].cpu;
             }
-            summary.failed = list->count - summary.passed - summary.not_started;
+            summary.failed = list->count - summary.passed - summary.skipped - summary.not_started;
             closing = parallel_render_summary(arena, list, options, results, &summary, jobs, signal_error, &summary.memory_full);
             finished = true;
         }
@@ -1037,7 +1050,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     }
     sigaction(SIGCHLD, &previous_child, 0);
     sigprocmask(SIG_SETMASK, &previous_mask, 0);
-    summary.succeeded = summary.passed == list->count && summary.signal == 0 && !summary.report_lost && !summary.memory_full;
+    summary.succeeded = summary.passed + summary.skipped == list->count && summary.signal == 0 && !summary.report_lost && !summary.memory_full;
     return summary;
 }
 

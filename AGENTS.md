@@ -1407,8 +1407,9 @@ builds on CPUs without the complete vector feature set use the scalar fallback.
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
-compiler's own `main.c` self-check in the TSan and MSan rows, whose measured
-memory (docs/ci.md) exceeds a hosted runner's. ASan combines UBSan, bounds,
+compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
+measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
+in a separate step after the suite. ASan combines UBSan, bounds,
 leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
@@ -1809,9 +1810,13 @@ processes under it that were waited for: over its time, the CPUs it kept busy),
 then its output, in the list's order as soon as it and every command before it
 have ended; with `--github`, between `::group::` and `::endgroup::`, and an
 `::error::` annotation for each that failed. Then come a summary line, with the
-commands' CPU time, and a line naming each command that failed. The exit status
-is 1 if a command failed or couldn't start, a signal stopped the run, or the
-report was lost. The report never holds up the run (#276's review):
+commands' CPU time and their passed, failed, skipped and not-started counts, and
+a line naming each command that failed. A command that exits with status 77
+(Automake's skip code) is reported as skipped and counted apart, and a test
+that leaves a check to another stage says so in its output and exits 77. The
+exit status is 1 if a command failed or couldn't start, a signal stopped the
+run, or the report was lost; a skipped command doesn't fail it. The report never
+holds up the run (#276's review):
 a command's output is read into memory when it ends and its capture closed, so
 that only running commands hold one, and the report goes out only as fast as its
 reader takes it, at most `PIPE_BUF` bytes at a time into a pipe or a terminal
@@ -1900,7 +1905,8 @@ as expected with its times and CPU times written as `*`:
   the shell's): standard input reads nothing though the runner's is a file
   with a line in it, and no other than the three is open (an external `true`
   redirected to each from 3 to 63), though the runner has one open without
-  `FD_CLOEXEC`;
+  `FD_CLOEXEC`; a command that prints its reason and exits 77 is skipped,
+  counted apart, and doesn't fail the run;
 - at once: three commands that each wait for the other two pass with 3 jobs;
   with one job, four commands' starts and ends in a log come in turn; and eight
   with 3 jobs are never more than 3 at once, by the runner's times;
