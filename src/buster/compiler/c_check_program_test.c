@@ -1698,6 +1698,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             fprintf(stderr, "test-checker: program lower status=%u/%u token=%u/%u backend=%u/%u\n", lower[0].status, lower[1].status,
                     lower[0].token, lower[1].token, lower[0].backend_node, lower[1].backend_node);
+            fprintf(stderr, "test-checker: lower reason=%s / %s\n", lower[0].reason != NULL ? lower[0].reason : "", lower[1].reason != NULL ? lower[1].reason : "");
         }
         if (lowered)
         {
