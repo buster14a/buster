@@ -13,10 +13,15 @@
 //   end
 //   complete FILES FUNCTIONS FORMS   last, written only after every file, function and form has passed
 //
-// Decimals have no sign and no leading zero. The reader takes exactly that text: a missing completion record, a
-// completion count other than the records', an edge out of range or out of order, or any other byte refuses the
-// whole export. It rebuilds each CFG's predecessor view as the stable transpose of its successors, sorted by source,
-// as ir_build_cfg builds it. This is measurement tooling outside the compile path, with no vector path.
+// Decimals have no sign and no leading zero. The reader takes exactly that text: a missing completion record, an
+// edge out of range or out of order, or any other byte refuses the whole export. The records' own structure is
+// checked too, not only the completion's counts: every function a complete corpus passed wrote exactly its three
+// forms, 0, 1 and 2 in that order, under one file and function name, so the records must group into those triplets
+// and FUNCTIONS must be their number (FORMS the records' own count, as before). FILES alone stays
+// producer-supplied provenance: a file with no function of its own left no record to enumerate, so the reader can
+// only require it not to fall below the file names the records do carry. It rebuilds
+// each CFG's predecessor view as the stable transpose of its successors, sorted by source, as ir_build_cfg builds
+// it. This is measurement tooling outside the compile path, with no vector path.
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -42,7 +47,8 @@ struct DominatorExport
 {
     DominatorExportGraph* graphs;
     uint32_t count;
-    // The completion record's counts of files and functions; its count of forms is the records'.
+    // The completion record's counts. `functions` and the record count are verified against the records' triplets;
+    // `files` only had to cover the file names they carry, the rest of it producer-supplied provenance.
     uint64_t files;
     uint64_t functions;
     uint64_t blocks;
@@ -258,6 +264,31 @@ static bool dominators_export_read(Arena* arena, const uint8_t* bytes, uint64_t 
     valid = valid && dominators_export_literal(&text, "complete ") && dominators_export_number(&text, UINT64_MAX, ' ', &export.files);
     valid = valid && dominators_export_number(&text, UINT64_MAX, ' ', &export.functions) && dominators_export_number(&text, UINT64_MAX, '\n', &forms);
     valid = valid && forms == records && text.position == length;
+    // The completion counts are corpus claims the records must prove: each function a complete export passed wrote
+    // forms 0, 1 and 2 in order under one file and function name, so the records group into exactly those triplets
+    // and FUNCTIONS is their number. `files` had more to count: files with no function of their own left no record,
+    // so it is accepted only down to the file names the records carry.
+    uint64_t functions = 0;
+    uint64_t file_names = 0;
+    for (uint32_t record = 0; valid && record < export.count; record += 1)
+    {
+        const DominatorExportGraph* graph = &export.graphs[record];
+        const uint32_t form = record % 3;
+        valid = graph->form == form;
+        if (valid && form == 0)
+        {
+            functions += 1;
+            file_names += record == 0 || graph->file_length != export.graphs[record - 1].file_length ||
+                          memcmp(graph->file, export.graphs[record - 1].file, graph->file_length) != 0;
+        }
+        if (valid && form != 0)
+        {
+            const DominatorExportGraph* first = &export.graphs[record - form];
+            valid = graph->file_length == first->file_length && graph->name_length == first->name_length &&
+                    memcmp(graph->file, first->file, graph->file_length) == 0 && memcmp(graph->name, first->name, graph->name_length) == 0;
+        }
+    }
+    valid = valid && export.count % 3 == 0 && functions == export.functions && file_names <= export.files;
     if (valid)
     {
         *result = export;

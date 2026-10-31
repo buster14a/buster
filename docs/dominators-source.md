@@ -36,6 +36,15 @@ and fails the command. The file contains the exact successor edge multiset and
 the source file and function names, hex-encoded so that paths with spaces or
 newlines stay unambiguous.
 
+`benchmark-dominators --cfg FILE` reads the export back and refuses it whole
+unless it is exactly a complete corpus: each function's records must be its
+three forms — lowered, vector-promoted, scalar-promoted — in order under one
+file and function name, the function count must be those triplets' number, and
+the form count the records'. The file count stays producer-supplied metadata:
+files with no function of their own left no record to enumerate, so the reader
+only requires it not to fall below the file names the records carry, and the
+benchmark reports it as such rather than verified provenance.
+
 The result line reports attempted `forms`, failed forms and individual `checks`.
 A successful nonempty run has three checked forms per emitted source function.
 A failed form additionally reports the source file, function, representation,

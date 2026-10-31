@@ -407,7 +407,9 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
     uint64_t checksum = 0;
     if (success)
     {
-        printf("dominators CFG benchmark: %s, %u records (files=%" PRIu64 " functions=%" PRIu64 "), %u selected", name, export.count, export.files, export.functions, selected);
+        // The reader verified the records' triplet structure and the function count; `files` alone is the
+        // producer's own claim, which zero-function files leave nothing in the text to enumerate.
+        printf("dominators CFG benchmark: %s, %u records (files=%" PRIu64 " producer-supplied, functions=%" PRIu64 "), %u selected", name, export.count, export.files, export.functions, selected);
         if (form != UINT64_MAX)
         {
             printf(" of form %" PRIu64, form);
