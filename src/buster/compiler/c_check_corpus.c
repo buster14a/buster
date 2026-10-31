@@ -1959,7 +1959,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
                 left->tentative[token] == right->tentative[token] && left->initializer_nodes[token] == right->initializer_nodes[token] &&
                 left->initializer_begins[token] == right->initializer_begins[token] && left->initializer_ends[token] == right->initializer_ends[token] &&
-                left->token_nodes[token] == right->token_nodes[token] && left->string_ids[token] == right->string_ids[token] &&
+                left->token_nodes[token] == right->token_nodes[token] && left->evaluation_nodes[token] == right->evaluation_nodes[token] &&
+                left->string_ids[token] == right->string_ids[token] &&
                 left->body_declarations[token] == right->body_declarations[token] &&
                 left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
                 left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
@@ -2275,6 +2276,7 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     uint32_t token = 0;
     while (comparable && token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
            x->objects[token] == y->objects[token] && x->declaration_bodies[token] == y->declaration_bodies[token] && x->token_nodes[token] == y->token_nodes[token] &&
+           x->evaluation_nodes[token] == y->evaluation_nodes[token] &&
            x->declaration_kinds[token] == y->declaration_kinds[token] && x->linkage[token] == y->linkage[token] && x->defined[token] == y->defined[token])
     {
         token += 1;
@@ -2320,9 +2322,11 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     }
     else if (token < x->token_count)
     {
-        snprintf(text, capacity, "token %u: declaration %u against %u, type %#x against %#x, object %u against %u, body %u against %u, node %u against %u",
+        snprintf(text, capacity, "token %u: declaration %u against %u, type %#x against %#x, object %u against %u, body %u against %u, node %u against %u, "
+                 "evaluation %u against %u",
                  token, x->declarations[token], y->declarations[token], x->declared_types[token], y->declared_types[token], x->objects[token], y->objects[token],
-                 x->declaration_bodies[token], y->declaration_bodies[token], x->token_nodes[token], y->token_nodes[token]);
+                 x->declaration_bodies[token], y->declaration_bodies[token], x->token_nodes[token], y->token_nodes[token],
+                 x->evaluation_nodes[token], y->evaluation_nodes[token]);
     }
     else if (!check_corpus_environments_equal(&x->environment, &y->environment))
     {
