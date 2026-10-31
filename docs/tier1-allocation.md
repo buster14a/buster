@@ -106,27 +106,66 @@ value-indexed size, alignment and conservative lifetime columns. Rematerialized
 values allocate no spill slot unless another interval of the same value really
 spills. Output statistics count vector and scalar intervals, transitions,
 maximum pressure, retained arena bytes and peak temporary bytes.
+`vector_intervals` counts the intervals of classes admitted to the
+regular-class path below; that path's matching is scalar code, so the count
+measures admission, not SIMD lanes or instructions.
 
 ## Assignment
 
 Both paths validate and count-sort position events. End events precede starts
-at the same position. The common vector path applies to a class whose ranges
-all have its full register mask and whose maximum pressure fits. An AVX-512
-inclusive prefix sum of event deltas gives pressure/depth. Ends open reuse
-chains at that depth, and starts consume them. Fresh roots take distinct
-physical registers; simultaneous pointer-jumping rounds resolve inherited
-registers. This uses at most maximum pressure registers, including arbitrary
-input order and noncontiguous physical masks.
+at the same position. The common path, `tier1_allocate`'s, applies to a class
+whose ranges all have its full register mask and whose maximum pressure fits.
+It walks the class's events in order, with one register per pressure level:
+- an end at level d deposits its interval's register there;
+- the next start at level d takes it, the most recent end that no other start
+  has taken;
+- a start at a level no end has reached takes a fresh register.
 
-The counting-sort placement and depth matching currently use scalar indexed
-stores. Pointer jumping uses scalar indirect loads into contiguous lane
-buffers, then vector change detection and publication, avoiding Zen 5's costly
-gather. This is a hybrid implementation, not a claim that the entire matching
-step implements the proposed nearest-smaller-values vector kernel. The whole
-preparation/assignment benchmark charges these phases and their scratch space.
+A start's partner started earlier, so its register is already final when the
+two are matched, and the one pass assigns every register. This uses at most
+maximum pressure registers, including arbitrary input order and noncontiguous
+physical masks. `test-tier1-allocation` compares these registers with an
+independent implementation of the same rule, which walks positions without the
+event sort.
+
+That matching stays scalar, for a measured reason. It used to resolve the
+partners' registers afterwards: pointer-jumping rounds over every interval,
+after an AVX-512 prefix sum that recounted the pressure the class loop already
+counts. Both recomputed what the sequential matching knew. Removing them (#140)
+left every output the same and made the whole call faster on the 9700X:
+
+| Workload | Intervals | Vector path, before | after | Scalar path, before | after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| tiny-fit | 16 | 103 | 65 | 187 | 75 |
+| small-fit | 128 | 96 | 54 | 174 | 63 |
+| large-fit | 2,048 | 114 | 53 | 172 | 61 |
+| large-pressure | 16,384 | 232 | 118 | 231 | 118 |
+
+These are `benchmark-tier1-allocation`'s cycles per interval: medians of five
+processes, pinned to CPU 2, before and after the change, with the same ratios
+after 100 ms of scalar work. The scalar column also has the scan's end-event
+expiry below, and large-pressure, which is overfull, takes the scan on both
+paths.
+
+The [stopgap record](https://github.com/buster14a/buster-performance/tree/35f63a2eafc3e5471a8818b19cf3c216a89655d4/docs/measurements/tier1-allocation-stopgap-140-2026-10-30) has the logs, the differential against
+the previous code and the method. A data-parallel formulation of the matching
+itself is #140's candidate vector path: heights by byte prefix sums, partners
+by a window-maximum descent, registers by in-register pointer jumping over
+64-lane chunks. Its first prototype assigned about 7.2 cycles per instruction
+on one unconstrained block, tied with a scalar lowest-free loop on short
+temporaries and ahead of it on chains
+([review record](https://github.com/buster14a/buster-performance/tree/d3fb9c012d666cb13082f4e359d4d25928633768/docs/measurements/tier1-allocation-140-review-2026-10-30)).
+
+The hot functions copy the input's column pointers into a local struct, since
+under `-fno-strict-aliasing` each store into the arena would otherwise make
+clang reload them. They pass the original `input` to their helpers, so that the
+copy's address doesn't escape: an escaped copy could alias the stores too, and
+the counting sort's placement loop then reloaded its column from the stack.
 
 Constrained or overfull classes defer to a scalar scan bounded by their
-physical-register count. It honors available-register hints, then evicts an
+physical-register count. An interval frees its register at its end event,
+unless an eviction gave that register to another interval (the scan's
+`active[r] == interval` check). It honors available-register hints, then evicts an
 unpinned active interval whose next use is farther away. Without use columns,
 the end position is the conservative next-use estimate. A value without a
 register gets a spill/rematerialization fragment. An eviction closes its
@@ -277,6 +316,24 @@ bitmap, compares complete allocations with explicitly prefiltered inputs, and
 exercises indexed capacity rollback after an existing arena prefix. The 8,192
 nonoverlapping fixed/value interval fixture checks every resulting register
 without invoking the deliberately quadratic allocation verifier.
+
+`tier1_allocate_expiry_test.c` adds literal traces, on both entry points and
+both classes, which run even with `--count 0`:
+- an evicted interval's old end while its successor still holds the register;
+- a reload of the same value into another register before its original end,
+  which must free that current register;
+- simultaneous and duplicate required uses, and two distinct values that
+  cannot share one register;
+- a capacity layout.
+
+Their expected fragments, logical fields and values are written out, not
+replayed. A byte-by-byte capacity sweep of each entry point's own boundary
+requires the ample output on success, and the prior arena prefix and result
+object on failure. The first three traces each reject a mutant: a register
+freed without `tier1_allocate_scan`'s ownership guard, a stale register freed at
+the end, and eviction that ignores the other operands pinned at its position. In
+`tier1_allocate_scan_uses` that guard cannot fail, since an eviction sets the
+victim's register to `UINT8_MAX` and a reload records the new one.
 
 The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
 reversed chain, independent moves, long and disjoint cycles, fan-out and
