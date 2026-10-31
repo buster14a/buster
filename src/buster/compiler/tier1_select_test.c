@@ -1610,7 +1610,16 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
                                 else
                                 {
                                     tier1_select_test_expect(test, plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == converted - 1 && !plan->covered[converted], "conversion preserves its exact selected source use");
-                                    tier1_select_test_expect(test, plan->patterns[converted].width == ir_type_bits[types[to]] / 8 && plan->patterns[converted].source_width == ir_type_bits[types[from]] / 8, "conversion keeps logical widths separately from register storage");
+                                    const bool narrow_copy = op == IR_ZEXT && (from == 1 || from == 2);
+                                    if (narrow_copy)
+                                    {
+                                        tier1_select_test_expect(test, plan->patterns[converted].rule == TIER1_RULE_COPY, "zero extension of a canonical narrow value selects a copy");
+                                        tier1_select_test_expect(test, plan->patterns[converted].width == tier1_select_width(types[to]) && plan->patterns[converted].source_width == ir_type_bits[types[from]] / 8, "narrow copy keeps canonical width with its narrow source width");
+                                    }
+                                    else
+                                    {
+                                        tier1_select_test_expect(test, plan->patterns[converted].width == ir_type_bits[types[to]] / 8 && plan->patterns[converted].source_width == ir_type_bits[types[from]] / 8, "conversion keeps logical widths separately from register storage");
+                                    }
                                 }
                                 for (uint32_t destination = 0; destination < BUSTER_ARRAY_LENGTH(destinations); destination += 1)
                                 {
@@ -1653,6 +1662,77 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
     arena_release(&scratch);
     arena_release(&output);
     arena_release(&input);
+}
+
+static void tier1_select_test_copy_elision(Tier1SelectTest* test)
+{
+    // Issue #981: a copy from canonical storage in its own register is nothing, but a 32-bit copy that may
+    // come from a parameter or call result keeps its clearing move. Truncations and zero extensions always emit.
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        const Tier1SelectHoles same =
+        {
+            .rule = TIER1_RULE_COPY,
+            .width = (uint8_t)width,
+            .source_width = 0,
+            .destination = X86_REGISTER_RAX,
+            .left = X86_REGISTER_RAX,
+        };
+        const bool clears = width == 4;
+        tier1_select_test_expect(test, tier1_select_expand(&same).count == (clears ? 1 : 0), "same-register copy keeps its move only where it may clear dirty bits");
+        Tier1SelectHoles moved = same;
+        moved.left = X86_REGISTER_RCX;
+        const Tier1SelectRecords copy = tier1_select_expand(&moved);
+        tier1_select_test_expect(test, copy.count == 1 && copy.records[0].form == (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32), "copy to another register moves the full storage width");
+    }
+    const uint8_t narrow_widths[] = {1, 2, 4};
+    for (uint32_t s = 0; s < 3; s += 1)
+    {
+        const uint8_t source = narrow_widths[s];
+        Tier1SelectHoles narrow =
+        {
+            .rule = TIER1_RULE_COPY,
+            .width = 4,
+            .source_width = source,
+            .destination = X86_REGISTER_RAX,
+            .left = X86_REGISTER_RAX,
+        };
+        tier1_select_test_expect(test, tier1_select_expand(&narrow).count == 0, "same-register copy of a canonical narrow value emits nothing");
+        narrow.left = X86_REGISTER_RCX;
+        const Tier1SelectRecords moved = tier1_select_expand(&narrow);
+        tier1_select_test_expect(test, moved.count == 1 && moved.records[0].form == X86_FORM_MOV_R32_RM32, "narrow copy to another register moves");
+        Tier1SelectHoles wide =
+        {
+            .rule = TIER1_RULE_COPY,
+            .width = 8,
+            .source_width = source,
+            .destination = X86_REGISTER_RAX,
+            .left = X86_REGISTER_RAX,
+        };
+        tier1_select_test_expect(test, tier1_select_expand(&wide).count == 0, "same-register 64-bit narrow copy emits nothing");
+        wide.left = X86_REGISTER_RCX;
+        const Tier1SelectRecords wide_moved = tier1_select_expand(&wide);
+        tier1_select_test_expect(test, wide_moved.count == 1 && wide_moved.records[0].form == X86_FORM_MOV_R64_RM64, "64-bit narrow copy to another register moves the full storage width");
+        Tier1SelectHoles zext =
+        {
+            .rule = TIER1_RULE_ZERO_EXTEND,
+            .width = 8,
+            .source_width = source,
+            .destination = X86_REGISTER_RAX,
+            .left = X86_REGISTER_RAX,
+        };
+        const Tier1SelectRecords extended = tier1_select_expand(&zext);
+        tier1_select_test_expect(test, extended.count == 1, "zero extension always emits, even in place");
+        Tier1SelectHoles truncated =
+        {
+            .rule = TIER1_RULE_TRUNCATE,
+            .width = source == 4 ? 4 : source,
+            .destination = X86_REGISTER_RAX,
+            .left = X86_REGISTER_RAX,
+        };
+        const Tier1SelectRecords trunc = tier1_select_expand(&truncated);
+        tier1_select_test_expect(test, trunc.count == 1, "same-register truncation still clears bits past its width");
+    }
 }
 
 static void tier1_select_test_narrow_memory(Tier1SelectTest* test)
@@ -2732,6 +2812,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_calls(&test);
             tier1_select_test_call_barriers(&test);
             tier1_select_test_conversions(&test);
+            tier1_select_test_copy_elision(&test);
             tier1_select_test_narrow_memory(&test);
             tier1_select_test_narrow_values(&test);
             tier1_select_test_narrow_refusals(&test);
