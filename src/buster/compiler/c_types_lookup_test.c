@@ -603,13 +603,15 @@ static void type_lookup_test_scratch(TypeTestTally* tally)
         const uint32_t expected = record != 0 ? type_lookup_member(table, record, 1, &expected_offset, &qualifiers) : 0;
         type_test_expect(tally, expected != 0 && expected_offset == 0, check, "the leaf under 100 anonymous members isn't found");
         Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = scratch.arena->capacity;
         uint32_t answered = 0;
         uint32_t unknown = 0;
         for (uint64_t room = 0; expected != 0 && room <= BUSTER_TYPE_TEST_SCRATCH_ROOM; room += 16)
         {
             const uint64_t length = scratch.arena->length;
-            const uint64_t left = scratch.arena->capacity - scratch.arena->length;
-            arena_push_array(scratch.arena, left > room ? left - room : 0, 1, 1);
+            // `room` bytes left for the walk, by the arena's bound rather than by pushing the rest of its reservation
+            // (a commit that large may refuse where the reservation's address space did not).
+            scratch.arena->capacity = room < capacity - length ? length + room : capacity;
             uint64_t offsets[2] = { UINT64_MAX, UINT64_MAX };
             const uint32_t walked = type_lookup_walk(table, record, 1, &offsets[0], &qualifiers);
             const uint32_t found = type_find_member(table, record, 1, &offsets[1]);
@@ -621,6 +623,7 @@ static void type_lookup_test_scratch(TypeTestTally* tally)
             unknown += walked == BUSTER_TYPE_MEMBER_UNKNOWN;
             arena_pop_to(scratch.arena, length);
         }
+        scratch.arena->capacity = capacity;
         type_test_expect(tally, answered != 0 && unknown != 0, check, "the room never made the walk fail, or never let it through");
         scratch_end(scratch);
         type_test_table_close(&test);
