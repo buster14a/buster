@@ -1,0 +1,87 @@
+name: Issue 775 validation
+on:
+  push:
+    branches: [codex/775-baseline-vectors]
+    paths: [.github/workflows/issue-775-validation.yml]
+permissions:
+  contents: read
+jobs:
+  apply:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: codex/775-baseline-vectors
+      - id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/buster/compiler/c_check_program_lower.c')
+          s=p.read_text()
+          a=s.index('// Whether the target takes Tier 0\'s vector values:')
+          b=s.index('// The widest vector register',a)
+          s=s[:a]+s[b:]
+          s=s.replace('check_lower_vector_target(program->target.features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR','BUSTER_TYPED_CLASSES')
+          s=s.replace('check_lower_vector_target(program->target.features & writer->target.features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR','BUSTER_TYPED_CLASSES')
+          s=s.replace('check_lower_unsupported(writer, class != BUSTER_TYPED_CLASS_VECTOR ? "values of this type" :\n                                        check_lower_vector_target(writer->program->target.features) ? "vector types in a function whose target attribute turns off SSE2" :\n                                        "vector types without SSE2");','check_lower_unsupported(writer, "values of this type");')
+          s=s.replace('// The classes check_lower_emit takes, those below this: BUSTER_TYPED_CLASSES, or BUSTER_TYPED_CLASS_VECTOR where the\n    // unit\'s target or the function\'s has no AVX-512F and AVX-512VL, whose EVEX forms Tier 0\'s vector entries are\n    // (check_lower_vector_target): the unit\'s decides the convention, as clang\'s x86-64 ABI does.','// The classes check_lower_emit takes, those below this: BUSTER_TYPED_CLASSES. SSE2 belongs to every\n    // supported x86-64 target; vector rows and transport select legal forms from the function\'s target.')
+          s=s.replace('// class\'s, which check_lower_half_entry writes as Tier 0\'s; any other is refused, a vector\'s where the function\'s target\n// hasn\'t AVX-512F and AVX-512VL.','// class\'s, which check_lower_half_entry writes as Tier 0\'s; any other class is refused.')
+          assert 'check_lower_vector_target' not in s
+          p.write_text(s)
+          p=Path('src/buster/compiler/c_check_program_vector_test.c')
+          p.write_text(p.read_text().replace('mem[n%3]','mem[(unsigned)n%3]'))
+          PY
+          git diff --check
+          git config user.name ChatGPT
+          git config user.email noreply@openai.com
+          git add src/buster/compiler
+          env -u BUSTER_DCO_SIGN_OFF git commit -m 'fix: use the implicit SSE2 baseline and keep fixture indexing bounded'
+          git push origin HEAD:refs/heads/codex/775-baseline-vectors
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: apply
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: znver5
+      BUSTER_DEBUG_INFO: 0
+      BUSTER_ORACLE_CACHE: check
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.apply.outputs.commit }}
+          persist-credentials: false
+      - run: bash tools/ci/setup-benchpress.sh
+      - name: Build and run vector checks under the runner hook's shared lock
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/issue775"
+          taskset -c 0-7 ./build.sh > "$RUNNER_TEMP/issue775/build.log" 2>&1
+          result=$?
+          cat "$RUNNER_TEMP/issue775/build.log"
+          if [ "$result" -eq 0 ]; then
+            taskset -c 2 ./build/compiler test-tier0 > "$RUNNER_TEMP/issue775/tier0.log" 2>&1
+            a=$?
+            taskset -c 2 ./build/compiler test-checker --program-vectors > "$RUNNER_TEMP/issue775/vectors.log" 2>&1
+            b=$?
+            cat "$RUNNER_TEMP/issue775/tier0.log" "$RUNNER_TEMP/issue775/vectors.log"
+            printf 'tier0=%s vectors=%s\n' "$a" "$b"
+            result=$((a | b))
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/issue775/commit.txt"
+          exit "$result"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue775-validation
+          path: ${{ runner.temp }}/issue775
+          retention-days: 7
