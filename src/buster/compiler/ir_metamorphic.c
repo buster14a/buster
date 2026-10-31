@@ -697,7 +697,7 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
     else if (pass <= 4)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.scalar = scalar;
+        options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         options.passes = pass == 1 ? BUSTER_IR_OPTIMIZE_SCCP : pass == 2 ? BUSTER_IR_OPTIMIZE_DCE :
                          pass == 3 ? BUSTER_IR_OPTIMIZE_CFG : BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
         IrOptimizeResult optimized = { 0 };

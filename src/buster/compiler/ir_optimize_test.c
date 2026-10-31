@@ -483,10 +483,11 @@ static void ir_optimize_test_compare(IrOptimizeTest* test, const IrFunction* f, 
     const uint64_t tm = scratch->length;
     IrOptimizeOptions options = ir_optimize_options();
     options.passes = passes;
+    options.path = BUSTER_IR_OPTIMIZE_VECTOR;
     IrOptimizeResult vector = { 0 };
     IrOptimizeResult scalar = { 0 };
     const IrCheck vc = ir_optimize(f, vector_arena, scratch, options, &vector);
-    options.scalar = true;
+    options.path = BUSTER_IR_OPTIMIZE_SCALAR;
     const IrCheck sc = ir_optimize(f, scalar_arena, scratch, options, &scalar);
     if ((vc.error != IR_OK || sc.error != IR_OK) && test->failures < 8)
     {
@@ -505,7 +506,7 @@ static void ir_optimize_test_compare(IrOptimizeTest* test, const IrFunction* f, 
             ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.effects == after.effects && (before.status != 1 || before.value == after.value), "independent execution, effects and faults preserved");
         }
         arena_pop_to(scalar_arena, sm);
-        options.scalar = false;
+        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
         options.sweep_limit = 0;
         const IrCheck fallback = ir_optimize(f, scalar_arena, scratch, options, &scalar);
         ir_optimize_test_expect(test, fallback.error == IR_OK && ir_optimize_test_equal(&vector.function, &scalar.function), "forced worklist completion is exact");
@@ -859,7 +860,7 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
                 const uint64_t sm = scratch->length;
                 IrOptimizeOptions options = ir_optimize_options();
                 options.passes = passes;
-                options.scalar = scalar != 0;
+                options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 IrOptimizeResult result = { .folded = 139 };
                 const IrOptimizeResult saved = result;
                 const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
@@ -1054,7 +1055,7 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         {
             const uint64_t mark = vector->length;
             IrOptimizeOptions options = ir_optimize_options();
-            options.scalar = path != 0;
+            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             const IrFunction* out = &result.function;

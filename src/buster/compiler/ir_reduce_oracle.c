@@ -108,7 +108,7 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
                     {
                         IrOptimizeOptions options = ir_optimize_options();
                         options.passes = oracle->passes;
-                        options.scalar = path != 0;
+                        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                         IrOptimizeResult optimized = { 0 };
                         const IrCheck check = ir_optimize(function, &optimized_storage, &execution, options, &optimized);
                         if (check.error != IR_OK)
