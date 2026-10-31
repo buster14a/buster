@@ -275,6 +275,11 @@ designs and the compilers already built this way.
   existing-stream runtime expansion. `test-check-builtins`,
   `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
   `test-builtin-varargs` distinguish semantic constraints from emitted execution.
+  The bit builtins (bitreverse, clrsb, the generic counts, C23's stdc ones and
+  the carry chains: `c_check_builtin_bits.c`, `c_builtin_bits_lower.c`) are the
+  graph's miscellaneous builtins; `test-check-builtins-bits` checks their folds
+  against the host compiler's builtins, and `test-checker --program-bits` runs
+  them natively against clang -O0's build.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus

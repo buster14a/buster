@@ -52,7 +52,8 @@ struct CheckBuiltinMiscResult
     // visits; ordinary runtime evaluation still uses evaluated_operands and action.value, including all effects.
     CheckValue constant_value;
     uint32_t constant_evaluated_operands;
-    CheckConversion argument_conversions[3];
+    // A carry chain's four (c_check_builtin_bits.c); every other's at most three.
+    CheckConversion argument_conversions[4];
     uint32_t evaluated_operands;
     uint32_t warnings;
     uint32_t unsupported;
@@ -439,6 +440,8 @@ static void check_builtin_misc_frame(TypeTable* table, const CheckBuiltinMiscAct
     check_action_inherit(&output->action.value, values);
 }
 
+#include "c_check_builtin_bits.c"
+
 static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output)
 {
     *output = (CheckBuiltinMiscResult){
@@ -463,7 +466,16 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_RETURN_ADDRESS:
         case CBUILTIN_EXTRACT_RETURN_ADDR:
         case CBUILTIN_FROB_RETURN_ADDR: minimum = maximum = 1; break;
-        default: check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0); break;
+        default:
+            if (cbuiltin_bits(input->id))
+            {
+                cbuiltin_bits_arity(input->id, &minimum, &maximum);
+            }
+            else
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
+            }
+            break;
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE && (input->argument_count < minimum || input->argument_count > maximum))
     {
@@ -475,7 +487,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE)
     {
-        CheckValue values[3] = { 0 };
+        CheckValue values[4] = { 0 };
         output->runtime_builtin = input->id;
         output->evaluated_operands = (UINT32_C(1) << input->argument_count) - 1;
         for (uint32_t i = 0; i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
@@ -506,7 +518,12 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                 case CBUILTIN_RETURN_ADDRESS:
                 case CBUILTIN_EXTRACT_RETURN_ADDR:
                 case CBUILTIN_FROB_RETURN_ADDR: check_builtin_misc_frame(table, input, output, values); break;
-                default: break;
+                default:
+                    if (cbuiltin_bits(input->id))
+                    {
+                        check_builtin_bits(table, input, output, values);
+                    }
+                    break;
             }
         }
     }

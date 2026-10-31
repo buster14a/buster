@@ -683,12 +683,18 @@ static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIn
 static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
 {
     CheckOp op = CHECK_OP_COUNT;
-    if (id == CBUILTIN_BIT_CAST)
+    if (id == CBUILTIN_NONE)
+    {
+        // An ordinary call's, which every call of a unit asks for (check_input's call close): none of the families'.
+        op = CHECK_OP_COUNT;
+    }
+    else if (id == CBUILTIN_BIT_CAST)
     {
         op = CHECK_OP_BUILTIN_BIT_CAST;
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
-        id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR)
+        id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
+        cbuiltin_bits(id))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -1698,7 +1704,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         check_builtin_misc(types, &input, &checked, 1);
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        for (uint32_t i = 0; i < action->argument_count && i < 3; i += 1)
+        for (uint32_t i = 0; i < action->argument_count && i < 4; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }

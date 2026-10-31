@@ -485,6 +485,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_atomic_test.c"
 #include "buster/compiler/c_check_builtin_atomic_rmw_test.c"
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
+#include "buster/compiler/c_check_builtin_bits_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
 #pragma clang optimize off
@@ -1198,6 +1199,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-typed-overflow") == 0)
     {
         result = run_check_builtin_typed_overflow_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-bits") == 0)
+    {
+        result = run_check_builtin_bits_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-rounds") == 0)
     {

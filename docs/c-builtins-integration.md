@@ -763,12 +763,15 @@ active #141 owner and needs its own exact-revision acceptance evidence.
 
 ## Corpus-driven typed overflow and rounding
 
-`c_check_builtin_typed_overflow.c` implements `umull_overflow` through ordinary
-`unsigned long`, `unsigned long`, `unsigned long*` parameter conversions before
-the generic multiply-overflow action. Its formal destination is unqualified;
-discarded pointer qualifiers remain diagnostics. A successful action always
-retains the destination write. Wider or complex conversion payloads without a
-real implementation remain explicit unsupported cases.
+`c_check_builtin_typed_overflow.c` implements clang's 18 typed overflow
+builtins, `sadd_overflow` to `umulll_overflow` (`umull_overflow` among them): each has
+the ordinary `T`, `T`, `T*` prototype of its signedness and width (int, long or
+long long), whose parameter conversions precede the generic add, sub or
+multiply-overflow action (`check_builtin_typed_overflows` names each one's).
+Its formal destination is unqualified; discarded pointer qualifiers remain
+diagnostics. A successful action always retains the destination write. Wider or
+complex conversion payloads without a real implementation remain explicit
+unsupported cases.
 
 `c_check_builtin_rounds.c` treats `flt_rounds` as a zero-argument, nonconstant
 `int` query of the floating environment. Its helper reads x87 rounding control
@@ -798,6 +801,79 @@ thread's genuine writable `int32` errno address and uses the Linux SysV
 No helper calls a math symbol that could recurse when the source defines it.
 The helper body requires normal branch sizing and unknown-effect call
 semantics. These adapters do not establish source or Tier1 acceptance.
+
+## Bit builtins
+
+`c_check_builtin_bits.c` checks clang's other bit builtins as the graph's
+miscellaneous builtins (`cbuiltin_bits`, catalog codes 0x3a0 to 0x3c7):
+`bitreverse8` to `bitreverse64` and `bitreverseg`, `bswapg`, `clrsb`, `clrsbl`
+and `clrsbll`, `clzs` and `ctzs`, `popcountg`, `clzg` and `ctzg`, C23's 16
+`__builtin_stdc_` builtins, and the carry chains `addcb` to `addcll` and
+`subcb` to `subcll`. Their rules are clang 23's Sema:
+
+- a fixed prototype (`bitreverse8` to 64, `clrsb`, `clzs`, `ctzs`, the carry
+  chains) converts each argument as if by assignment, with the ordinary pointer
+  rules for a carry's pointer: another signedness or a lost qualifier warns,
+  another pointee is an error, as clang 23's `-Wincompatible-pointer-types` is;
+- `popcountg` and `clzg`'s and `ctzg`'s first argument take an unsigned
+  integer type unconverted (bool, plain char where it is unsigned, an
+  enumeration of an unsigned type and unsigned `_BitInt`s among them);
+  `clzg`'s and `ctzg`'s optional second argument, the result for zero, takes
+  its integer promotions (a bit-field's by its width), which must give `int`;
+- `bitreverseg` and `bswapg` take any integer type and give it, `bswapg`'s
+  `_BitInt`s of a multiple of 16 bits, of 8 or of 1;
+- the stdc ones take an unsigned integer type that is no bool or enumeration
+  and give `unsigned int`, `bool` (`has_single_bit`) or the argument's type
+  (`bit_floor`, `bit_ceil`); `rotate_left` and `rotate_right` take an unsigned
+  integer type (bools and enumerations admitted) and a count of any integer
+  type, which counts modulo the width, a negative one's mathematical remainder.
+
+Each folds as clang's evaluator does, in its operand's width of up to 128 bits,
+where every argument it reads is a constant: `clzs`, `ctzs`, and `clzg` and
+`ctzg` without a second argument, of zero are undefined (a fault, as
+`check_builtins` gives `clz` of zero), and a carry chain, whose store of its
+carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
+is refused by name.
+
+`c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
+zero-extended from its width, as clang's code computes on its `iN`: SWAR
+popcounts (a smear for leading zeros), reversals by masked swaps of halves,
+selections by multiplying with a compare's 0 or 1, without branches. A rotation
+masks its count for a width that is a power of two and takes a remainder for
+another `_BitInt`'s. A carry chain adds or subtracts twice, each carry a
+compare of the wrapped sum, and stores their OR at its pointer before its
+result, as clang's code does.
+
+An operand of 65 to 128 bits (`__int128`, a `_BitInt`) is a 16-byte frame
+object whose two limbs the recipe loads, as the overflow builtins' are: it
+counts limb by limb (the second limb's count added where the first is zero),
+reverses and swaps bytes limb by limb, exchanging the limbs and shifting the
+128 bits down past its width, and rotates by 128-bit shifts of a variable
+count (each limb shifted by the count's part below 64, the crossing bits
+carried, a whole limb moved where the count is 64 or more). A wide result is
+written to a frame object of its own, its high limb extended from its width,
+and read back as one I128 or U128 value. A wide rotation count's remainder
+comes from its limbs': 2^64's and 2^128's remainders are constants of the
+width.
+
+clang 23's code generation, and LLVM's main, evaluates `bitreverseg`'s
+argument twice, and `bswapg`'s for widths other than 1 and 8: `EmitScalarExpr`
+reads its width, then `emitBuiltinWithOneOverloadedType` emits the argument
+again, which repeats its side effects and volatile reads. This compiler
+evaluates it once, as a call does. test-checker's
+`bits-reversal-and-swap-arguments-evaluated-once` agrees with clang's build of
+a model that evaluates each argument first, and
+`bits-clang-evaluates-reversal-and-swap-arguments-twice` differs from clang's
+build of the same source, so that a fix in clang shows.
+
+`test-check-builtins-bits` checks every fold, result type and conversion
+against the host compiler's own builtins on boundary and random values of 27
+operand types and 7 count types, the refusals and the carry chains' pointer
+rules; `test-checker --program-bits` checks source fixtures by both paths
+against clang and runs programs of every builtin natively against clang -O0's
+build, 128-bit and wide `_BitInt` operands, results and counts among them. No
+unit of the corpora calls these builtins, so the folds stay scalar: the checker
+asks once per call, in source order, as for the other miscellaneous builtins.
 
 ## Intrinsic checking contracts
 
@@ -1133,6 +1209,7 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-atomic-rmw-helpers
 ./build/compiler test-builtin-terminal-helpers
 ./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-bits
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-rounds-helper
 ./build/compiler test-check-builtins-math

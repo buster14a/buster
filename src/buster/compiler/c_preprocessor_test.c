@@ -7285,6 +7285,46 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_USUBLL_OVERFLOW, "__builtin_usubll_overflow", false, true, false },
         { CBUILTIN_UMUL_OVERFLOW, "__builtin_umul_overflow", false, true, false },
         { CBUILTIN_UMULLL_OVERFLOW, "__builtin_umulll_overflow", false, true, false },
+        { CBUILTIN_BITREVERSE8, "__builtin_bitreverse8", false, true, true },
+        { CBUILTIN_BITREVERSE16, "__builtin_bitreverse16", false, true, true },
+        { CBUILTIN_BITREVERSE32, "__builtin_bitreverse32", false, true, true },
+        { CBUILTIN_BITREVERSE64, "__builtin_bitreverse64", false, true, true },
+        { CBUILTIN_BITREVERSEG, "__builtin_bitreverseg", false, true, true },
+        { CBUILTIN_BSWAPG, "__builtin_bswapg", false, true, true },
+        { CBUILTIN_CLRSB, "__builtin_clrsb", false, true, true },
+        { CBUILTIN_CLRSBL, "__builtin_clrsbl", false, true, true },
+        { CBUILTIN_CLRSBLL, "__builtin_clrsbll", false, true, true },
+        { CBUILTIN_CLZS, "__builtin_clzs", false, true, true },
+        { CBUILTIN_CTZS, "__builtin_ctzs", false, true, true },
+        { CBUILTIN_POPCOUNTG, "__builtin_popcountg", false, true, true },
+        { CBUILTIN_CLZG, "__builtin_clzg", false, true, true },
+        { CBUILTIN_CTZG, "__builtin_ctzg", false, true, true },
+        { CBUILTIN_STDC_LEADING_ZEROS, "__builtin_stdc_leading_zeros", false, true, true },
+        { CBUILTIN_STDC_LEADING_ONES, "__builtin_stdc_leading_ones", false, true, true },
+        { CBUILTIN_STDC_TRAILING_ZEROS, "__builtin_stdc_trailing_zeros", false, true, true },
+        { CBUILTIN_STDC_TRAILING_ONES, "__builtin_stdc_trailing_ones", false, true, true },
+        { CBUILTIN_STDC_FIRST_LEADING_ZERO, "__builtin_stdc_first_leading_zero", false, true, true },
+        { CBUILTIN_STDC_FIRST_LEADING_ONE, "__builtin_stdc_first_leading_one", false, true, true },
+        { CBUILTIN_STDC_FIRST_TRAILING_ZERO, "__builtin_stdc_first_trailing_zero", false, true, true },
+        { CBUILTIN_STDC_FIRST_TRAILING_ONE, "__builtin_stdc_first_trailing_one", false, true, true },
+        { CBUILTIN_STDC_COUNT_ZEROS, "__builtin_stdc_count_zeros", false, true, true },
+        { CBUILTIN_STDC_COUNT_ONES, "__builtin_stdc_count_ones", false, true, true },
+        { CBUILTIN_STDC_HAS_SINGLE_BIT, "__builtin_stdc_has_single_bit", false, true, true },
+        { CBUILTIN_STDC_BIT_WIDTH, "__builtin_stdc_bit_width", false, true, true },
+        { CBUILTIN_STDC_BIT_FLOOR, "__builtin_stdc_bit_floor", false, true, true },
+        { CBUILTIN_STDC_BIT_CEIL, "__builtin_stdc_bit_ceil", false, true, true },
+        { CBUILTIN_STDC_ROTATE_LEFT, "__builtin_stdc_rotate_left", false, true, true },
+        { CBUILTIN_STDC_ROTATE_RIGHT, "__builtin_stdc_rotate_right", false, true, true },
+        { CBUILTIN_ADDCB, "__builtin_addcb", false, true, false },
+        { CBUILTIN_ADDCS, "__builtin_addcs", false, true, false },
+        { CBUILTIN_ADDC, "__builtin_addc", false, true, false },
+        { CBUILTIN_ADDCL, "__builtin_addcl", false, true, false },
+        { CBUILTIN_ADDCLL, "__builtin_addcll", false, true, false },
+        { CBUILTIN_SUBCB, "__builtin_subcb", false, true, false },
+        { CBUILTIN_SUBCS, "__builtin_subcs", false, true, false },
+        { CBUILTIN_SUBC, "__builtin_subc", false, true, false },
+        { CBUILTIN_SUBCL, "__builtin_subcl", false, true, false },
+        { CBUILTIN_SUBCLL, "__builtin_subcll", false, true, false },
         { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false, true, false },
         { CBUILTIN_ATOMIC_LOAD_N, "__atomic_load_n", false, true, false },
         { CBUILTIN_ATOMIC_STORE, "__atomic_store", false, true, false },
@@ -7506,8 +7546,10 @@ static bool pp_test_implemented_features(const char* directory)
         result &= (capabilities & BUSTER_CBUILTIN_CAP_TIER1) == 0;
         result &= (capabilities & BUSTER_CBUILTIN_CAP_SOURCE) == 0 || (capabilities & BUSTER_CBUILTIN_SOURCE) == BUSTER_CBUILTIN_SOURCE;
         result &= (capabilities & BUSTER_CBUILTIN_CAP_CONSTEXPR) == 0 || (capabilities & BUSTER_CBUILTIN_SOURCE) == BUSTER_CBUILTIN_SOURCE;
-        // cbuiltin_resolve refuses a name that doesn't start with "__" before it looks at the catalog.
+        // cbuiltin_resolve refuses a name that doesn't start with "__" before it looks at the catalog, and cbuiltin_entry
+        // one that starts with "__builtin_ia32_", the intrinsic catalog's.
         result &= cbuiltin_catalog[i].length >= 2 && cbuiltin_catalog[i].name[0] == '_' && cbuiltin_catalog[i].name[1] == '_';
+        result &= !(cbuiltin_catalog[i].length > 15 && memcmp(cbuiltin_catalog[i].name, "__builtin_ia32_", 15) == 0);
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inventory); i += 1)
     {

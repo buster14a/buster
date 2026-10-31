@@ -84,8 +84,10 @@ static const CheckBuiltinTypedOverflowInfo check_builtin_typed_overflows[] =
 // The typed overflow builtin `id`'s row, or null for any other builtin.
 static const CheckBuiltinTypedOverflowInfo* check_builtin_typed_overflow_info(CBuiltinId id)
 {
+    // Only umull_overflow's id and the family's range name one; another builtin's skips the scan.
     const CheckBuiltinTypedOverflowInfo* result = NULL;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_builtin_typed_overflows); i += 1)
+    const bool candidate = id == CBUILTIN_UMULL_OVERFLOW || (id >= CBUILTIN_SADD_OVERFLOW && id <= CBUILTIN_UMULLL_OVERFLOW);
+    for (uint32_t i = 0; candidate && i < BUSTER_ARRAY_LENGTH(check_builtin_typed_overflows); i += 1)
     {
         result = check_builtin_typed_overflows[i].id == id ? check_builtin_typed_overflows + i : result;
     }
