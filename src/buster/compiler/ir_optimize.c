@@ -16,12 +16,22 @@
 #define BUSTER_IR_OPTIMIZE_SCCP 1u
 #define BUSTER_IR_OPTIMIZE_DCE 2u
 #define BUSTER_IR_OPTIMIZE_CFG 4u
+#define BUSTER_IR_OPTIMIZE_AUTO 0u
+#define BUSTER_IR_OPTIMIZE_VECTOR 1u
+#define BUSTER_IR_OPTIMIZE_SCALAR 2u
 
 typedef struct IrOptimizeOptions IrOptimizeOptions;
 struct IrOptimizeOptions
 {
     uint32_t passes;
     uint32_t sweep_limit;
+    // The caller's requested path. AUTO picks a twin by the function's size (#860): the vector passes' per-call
+    // set-up (verification, the dominator rows and the CFG's pointer jumping, in prepare and again in result
+    // verification) doesn't pay on small functions, so below the measured bound the scalar passes run. VECTOR and
+    // SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
+    uint32_t path;
+    // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
+    // the internal pieces without ir_optimize set it directly (ir_optimize_licm.c, ir_optimize_sroa.c).
     bool scalar;
 };
 
@@ -72,6 +82,7 @@ static __attribute__((unused)) IrOptimizeOptions ir_optimize_options(void)
     const IrOptimizeOptions result = {
         .passes = BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG,
         .sweep_limit = BUSTER_IR_OPTIMIZE_DEFAULT_SWEEPS,
+        .path = BUSTER_IR_OPTIMIZE_AUTO,
     };
     return result;
 }
@@ -1590,14 +1601,28 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
     return check;
 }
 
+// #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's functions and
+// benchmark-ir-source's corpus: below it the vector passes' per-call set-up doesn't pay and the scalar passes run.
+#define BUSTER_IR_OPTIMIZE_AUTO_BOUND 4096u
+#define BUSTER_IR_OPTIMIZE_AUTO_BLOCK_COST 16u
+
+static bool ir_optimize_auto_scalar(const IrFunction* function)
+{
+    const uint64_t cost = (uint64_t)function->instruction_count + BUSTER_IR_OPTIMIZE_AUTO_BLOCK_COST * (uint64_t)function->block_count;
+    const bool result = cost <= BUSTER_IR_OPTIMIZE_AUTO_BOUND;
+    return result;
+}
+
 static IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scratch, IrOptimizeOptions options, IrOptimizeResult* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
-    if (output != scratch && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
+    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
     {
+        options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
+                         (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
         check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
