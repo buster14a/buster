@@ -103,7 +103,12 @@ The admitted families are:
   common Jcc aliases, `loop/loope/loopne/jrcxz`, `ret/leave/nop/int3/ud2/syscall`,
   `clc/stc/cmc/cld/std`, `cbw/cwde/cdqe/cwd/cdq/cqo`;
 - SSE2 `movaps/movups/movapd/movupd/movdqa/movdqu`, packed float
-  `add/sub/mul/div` on `ps/pd`, `xorps/xorpd/pxor/paddd/psubd`;
+  `add/sub/mul/div` on `ps/pd`, `xorps/xorpd/pxor`, and SSE2's packed integer
+  arithmetic, compares, packs, unpacks and shifts (`paddb/w/d/q`,
+  `psubb/w/d/q`, `pcmpeqb/w/d`, `pcmpgtb/w/d`, `pmaddwd`, `pmulhw/lw/udq`,
+  `packsswb/dw`, `packuswb`, `punpckl/hbw/wd/dq/qdq`, `psll/psrl/psra` on
+  words, doublewords and quadwords, `pand/pandn/por`, and `pavgb/w`,
+  `pmaxsw`, `pminsw`, `pminub`, `pmaxub`, `pmulhuw`);
 - the corresponding VEX forms and `vzeroupper`; 512-bit AVX-512F packed float
   arithmetic/moves, `vpaddd/vpsubd/vpxord/vmovdqa32/vmovdqu32`, with destination
   masks/zeroing and supported `{1to8}`/`{1to16}` memory broadcasts;
@@ -148,6 +153,8 @@ The admitted families are:
   instruction its bytes are then the line's (`66 f0 0f b1`), where GNU as
   writes the prefix it emitted alone first (`f0 66 0f b1`), as clang's
   integrated assembler does too: the same instruction;
+- compiler control-flow markers: `endbr64`, and `notrack`/`bnd` before a near
+  `call` or `jmp` (each as one mnemonic with its branch, like `rep movs`);
 - what naked functions' templates use (#147): `pushfq/popfq`, SSE2's `movq`
   between an XMM register and a general one or memory, the x87's `fld` and
   `fstp` of 4, 8 and 10 bytes (AT&T's `flds/fldl/fldt` and
@@ -162,8 +169,10 @@ The admitted families are:
 Only forms covered by the frontend's operand-role grammar are admitted.
 Missing families, rounding/SAE, explicit instruction-prefix syntax, far
 branches, 16/32-bit execution modes, other segment registers, VSIB, section
-groups, GOT/TLS relocation modifiers, debug directives and macro-assembler
-directives are diagnosed. An unsupported form never reaches the trusted encoder.
+groups, GOT/TLS relocation modifiers other than `@PLT`, `@GOTPCREL` and
+`@GOTPCRELX`, debug directives other than the compiler's `.file`, `.loc`,
+`.uleb128` and `.sleb128` data, and macro-assembler directives are diagnosed.
+An unsupported form never reaches the trusted encoder.
 
 Statements end at newline or semicolon. `#` and `//` start line comments;
 `/* ... */` comments preserve statement newlines. Strings preserve embedded
@@ -187,11 +196,11 @@ Directives:
 | Purpose | Supported directives |
 | --- | --- |
 | Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes |
-| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.type` (`function/object/notype`), `.size` |
+| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size` |
 | Constants | `.equ`/`.set` (absolute and defined before use; either may reassign), `.equiv` (rejects redefinition) |
-| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.ascii`, `.asciz`/`.string`, `.zero` |
+| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.zero` |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none) |
-| Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym` |
+| Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file`, `.loc`, and LLVM's `.prefalign` are accepted but add no debug or alignment information |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
 
 Each section keeps its own name, properties, alignment, layout and atom, including
@@ -237,7 +246,10 @@ pattern takes the shorter field without a register to give its width too:
 byte takes the field's bits, signed or unsigned. `x86_match_initialize` needs
 `x86_semantics_initialize` first.
 Relocations are PC32/PLT32, ABS32/ABS32S and ABS64 with explicit signed 64-bit
-addends. Symbolic byte/word data, nonrepresentable expressions and oversized
+addends. A symbol's `@PLT` makes a call or jump a PLT32 reference;
+`@GOTPCREL` and `@GOTPCRELX` on a RIP-relative memory operand read the GOT
+slot, in the relaxable form where the shared linker may rewrite the
+instruction. Symbolic byte/word data, nonrepresentable expressions and oversized
 fields fail instead of truncating. Absolute memory uses signed disp32; 16/32-bit
 LEA destinations use ABS32 because those instructions truncate the address.
 
@@ -292,7 +304,7 @@ columns, references and diagnostics.
 `Link`, a diagnostic byte offset/message and phase timings. The source, index
 and output arena must remain alive while the result is consumed. Initialize
 the caller-owned `X86MatchIndex` and encoder once. Failure restores the caller's
-arena position and clears the output link. Sources are bounded to 16 MiB,
+arena position and clears the output link. Sources are bounded to 64 MiB,
 sections to 256 MiB, and expression stacks to 128 entries.
 
 The section adapter in `assembler_sections.c` hands `object_build` optional
@@ -788,7 +800,7 @@ must remain in the shared-interface inventory.
 | Statements/expressions → shared `x86_match` → fragments/records | Symbols and relative expressions retain identity/addends. Public input rejects unsupported forms and validates records before trusted encoding. |
 | Fragments/labels/alignment → monotone layout → encoding/Link | Variable fragment counts and final offsets; branches promote, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
 
-The public source is bounded (16 MiB limit); the driver can read streams and
+The public source is bounded (64 MiB limit); the driver can read streams and
 keeps its own terminator, while reusable `asm_assemble` takes a counted slice.
 Caller arenas own tokens, fragments, symbols, emitted bytes and Link, and must
 outlive object construction. Logical counts, allocated capacities and section
