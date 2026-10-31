@@ -130,11 +130,16 @@ static void check_test_warning_set(CheckTest* test)
     CheckWarningSet lane = set;
     lane.arena = &private_arena;
     lane.borrowed = true;
-    const uint32_t* prefix = set.keys;
+    const uint64_t* prefix = set.keys;
     valid = valid && check_warning_set_contains(&lane, 17) && check_warning_set_add(&lane, 7) && check_warning_set_add(&lane, 7);
     check_test_expect(test, valid && lane.count == 258 && set.count == 257 && lane.keys != prefix && set.keys == prefix &&
                            !check_warning_set_contains(&set, 7) && check_warning_set_contains(&lane, 7),
                       "a lane's first insertion copies its frozen table and repeated source facts are idempotent");
+    const uint64_t first_kind = UINT64_C(3) << 32 | 7;
+    const uint64_t second_kind = UINT64_C(9) << 32 | 7;
+    check_test_expect(test, check_warning_set_add(&lane, first_kind) && check_warning_set_add(&lane, second_kind) && lane.count == 260 &&
+                           check_warning_set_contains(&lane, first_kind) && check_warning_set_contains(&lane, second_kind) &&
+                           !check_warning_set_contains(&set, first_kind), "different semantic kinds at one source token retain independent full-width identities");
     Arena limited = private_arena;
     limited.capacity = limited.length;
     CheckWarningSet failed = set;

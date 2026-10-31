@@ -2972,4 +2972,6 @@ static void check_actions(TypeTable* table, const CheckAction* actions, CheckAct
     }
 }
 
+#include "c_check_warning_semantics.c"
+
 #endif

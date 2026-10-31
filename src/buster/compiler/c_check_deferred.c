@@ -608,12 +608,16 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->types = &lane->types;
     reader->arena = &arenas->output;
     reader->scratch = &arenas->scratch;
+    reader->warning_query_arena = &arenas->results;
     reader->warning_events = (CheckWarningBuffer){ .arena = &arenas->output };
     reader->const_values = (CheckConstBuffer){ .arena = &arenas->output, .prefix = &top->output->const_values };
     input->const_values = check_const_view(&reader->const_values);
     reader->literal_warnings = top->literal_warnings;
     reader->literal_warnings.arena = &arenas->output;
     reader->literal_warnings.borrowed = true;
+    reader->source_warning_keys = top->source_warning_keys;
+    reader->source_warning_keys.arena = &arenas->output;
+    reader->source_warning_keys.borrowed = true;
     reader->variable_sized_records = top->variable_sized_records;
     reader->variable_sized_records.arena = &arenas->output;
     reader->variable_sized_records.borrowed = true;
@@ -981,6 +985,10 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->literal_warnings = top->literal_warnings;
     reader->literal_warnings.arena = reader->arena;
     reader->literal_warnings.borrowed = true;
+    reader->warning_bound_open = BUSTER_CHECK_NONE;
+    reader->source_warning_keys = top->source_warning_keys;
+    reader->source_warning_keys.arena = reader->arena;
+    reader->source_warning_keys.borrowed = true;
     reader->variable_sized_records = top->variable_sized_records;
     reader->variable_sized_records.arena = reader->arena;
     reader->variable_sized_records.borrowed = true;

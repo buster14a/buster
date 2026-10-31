@@ -1985,6 +1985,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning);
     }
+    CheckWarningEvent event;
+    if (check_warning_ordered_event(reader->types, action, checked, action->node, reader->ends[action->node] + 1, &event))
+    {
+        check_input_warning_once(reader, &event);
+    }
 }
 
 // These values exist only in constant_p argument closures. Ordinary actions and their diagnostics remain the
@@ -2540,6 +2545,19 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, &checked);
+                if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && first >= input->first && first < input->end)
+                {
+                    const uint32_t source = input->next_value[first - input->first];
+                    uint32_t begin = source;
+                    while (begin < input->end && reader->first_child[begin] < begin)
+                    {
+                        begin = reader->first_child[begin];
+                    }
+                    if (source >= input->first && source < input->end)
+                    {
+                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, begin, reader->ends[source] + 1, action.source_position);
+                    }
+                }
                 check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
@@ -2751,6 +2769,11 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 if (valid)
                 {
                     check_constant_action(input, &action, callee, &checked);
+                    if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && operation.arity == 2)
+                    {
+                        const CheckConstantRange right = ranges[*value_count + 1];
+                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, right.first, right.end, range.end);
+                    }
                     if (checked.diagnostic == CHECK_DIAG_NONE && proofs != 0 && input->proof_active[operation.token - input->first])
                     {
                         speculative.arguments = action.arguments;

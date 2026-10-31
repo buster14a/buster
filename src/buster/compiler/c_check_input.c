@@ -607,6 +607,25 @@ static bool check_deferred_shared(const CheckDeferred* deferred);
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
+typedef struct CheckWarningQueryPoint CheckWarningQueryPoint;
+struct CheckWarningQueryPoint
+{
+    uint32_t token;
+    uint32_t query;
+};
+typedef struct CheckWarningQueryFrame CheckWarningQueryFrame;
+struct CheckWarningQueryFrame
+{
+    uint32_t first;
+    uint32_t end;
+};
+typedef struct CheckWarningQueries CheckWarningQueries;
+struct CheckWarningQueries
+{
+    const CheckWarningQueryPoint* points;
+    uint32_t count;
+    bool prepared;
+};
 struct CheckInputSpecifierJob
 {
     uint32_t first;
@@ -658,7 +677,12 @@ struct CheckInputReader
     uint32_t const_warning_capacity;
     bool literal_tables_disabled;
     CheckWarningSet literal_warnings;
+    CheckWarningSet source_warning_keys;
     CheckWarningSet variable_sized_records;
+    // An independently checked array bound is a semantic unevaluation barrier, even inside sizeof/typeof.
+    uint32_t warning_bound_open;
+    Arena* warning_query_arena;
+    CheckWarningQueries warning_queries;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -986,6 +1010,62 @@ static void check_input_warning(CheckInputReader* reader, uint32_t id, uint32_t 
         .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
     };
     check_input_warning_event(reader, &event, NULL, 0);
+}
+
+static void check_input_warning_once(CheckInputReader* reader, const CheckWarningEvent* event)
+{
+    const uint64_t key = (uint64_t)event->kind << 32 | ((uint64_t)event->token + 1);
+    if (!check_warning_set_contains(&reader->source_warning_keys, key))
+    {
+        const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+        reader->output->resource |= !retained;
+        if (retained)
+        {
+            check_input_warning_event(reader, event, NULL, 0);
+        }
+    }
+}
+
+#include "c_check_warning_queries.c"
+
+static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
+                                      uint32_t first, uint32_t end, uint32_t completion)
+{
+    const Parser* parser = reader->parser;
+    if (check_warning_null_integer(reader->types, destination, value) && first < end && end <= parser->tokens.count)
+    {
+        while (first + 1 < end && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == end - 1)
+        {
+            first += 1;
+            end -= 1;
+        }
+        const bool literal = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_NUMBER && parser->tokens.names[first] == 0;
+        if (!literal)
+        {
+            uint32_t token = first;
+            for (uint32_t steps = 0; steps < end - first; steps += 1)
+            {
+                const uint32_t parent = parser->tree.parents[token];
+                if (parent < first || parent >= end)
+                {
+                    break;
+                }
+                token = parent;
+            }
+            token = parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST || parser->tokens.kinds[first] == PARSE_KIND_GENERIC ? first : token;
+            const CheckWarningEvent event = {
+                .id = CHECK_WARNING_ID_NON_LITERAL_NULL,
+                .kind = CHECK_WARNING_EVENT_NON_LITERAL_NULL,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = check_input_warning_unevaluated(reader, token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = completion,
+                .payload = { .first_type = destination, .token = reader->warning_bound_open },
+            };
+            check_input_warning_once(reader, &event);
+        }
+    }
 }
 
 // A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
@@ -2280,6 +2360,11 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
         result->valid = result->type != 0;
     }
     reader->output->resource |= result->resource;
+    CheckWarningEvent event;
+    if (check_literal_warning_event(result, token, &event))
+    {
+        check_input_warning_once(reader, &event);
+    }
     arena_pop_to(reader->scratch, mark);
 }
 
@@ -4310,7 +4395,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (!is_typedef && !function && !file && is_static)
                 {
-                    check_input_static_local_warning(reader, name, type, i);
+                    check_input_static_local_warning(reader, first, type, i);
                 }
                 if (kind == PARSE_KIND_EQUAL)
                 {
@@ -6719,7 +6804,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .const_values = { .arena = arena },
         .literal_tables_disabled = !literal_tables,
         .literal_warnings = { .arena = arena },
+        .source_warning_keys = { .arena = arena },
         .variable_sized_records = { .arena = arena },
+        .warning_bound_open = BUSTER_CHECK_NONE,
+        .warning_query_arena = arena,
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },

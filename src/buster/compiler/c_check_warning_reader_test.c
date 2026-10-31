@@ -13,6 +13,7 @@ static void check_test_warning_reader(CheckTest* test)
         uint32_t count;
         uint32_t notes;
         uint32_t standard;
+        uint32_t suppressed;
     } cases[] = {
         { "unsigned;\n", CHECK_WARNING_ID_MISSING_DECLARATIONS, 1 },
         { "struct {int x;};\n", CHECK_WARNING_ID_MISSING_DECLARATIONS, 1 },
@@ -43,6 +44,16 @@ static void check_test_warning_reader(CheckTest* test)
         { "int f(long);int g(int (*p)(int)){return p(1);}\n", CHECK_WARNING_ID_C23_PARAMETER, 0 },
         { "int f(void){return 1;}\n", CHECK_WARNING_ID_C23_PARAMETER, 0 },
         { "int f(long){return 1;}\n", CHECK_WARNING_ID_C23_PARAMETER, 0, 0, 2023 },
+        { "int*p;int f(void){return sizeof(p=1-1);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 0, 0, 0, 1 },
+        { "int*p;int f(void){return __alignof__(p=1-1);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 0 },
+        { "int*p;__typeof__(p=1-1) q;\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 0, 0, 0, 1 },
+        { "int*p;int f(void){return _Generic((p=1-1),int*:1,default:0);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 0, 0, 0, 1 },
+        { "int*p;int f(int n){return sizeof(int[((p=1-1)!=0)+n]);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 1 },
+        { "int*p;int f(int n){return __alignof__(int[((p=1-1)!=0)+n]);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 1 },
+        { "int*p;int f(int n){return sizeof(int[sizeof(p=1-1)+n]);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 0, 0, 0, 1 },
+        { "int*p;int f(void){return sizeof(int[0&&(p=1-1)]);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 1 },
+        { "int*p;typedef __typeof__(p<2) T;T x;\n", CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, 1 },
+        { "int*p;int f(void){return sizeof(p<2);}\n", CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, 1 },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -68,18 +79,20 @@ static void check_test_warning_reader(CheckTest* test)
                                parse_translation_unit(&parser, &pp) && check_input(&input, &parser, &pp, &types.table, &retained, &scratch);
             uint32_t count = 0;
             uint32_t notes = 0;
+            uint32_t suppressed = 0;
             for (uint32_t i = 0; ready && i < input.warning_events.count; i += 1)
             {
                 const CheckWarningEvent* event = input.warning_events.events + i;
                 if (event->id == cases[c].id)
                 {
-                    count += 1;
+                    count += (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0;
                     notes += event->note_count;
+                    suppressed += (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0;
                 }
             }
             char message[160];
             snprintf(message, sizeof(message), "reader warning fixture %u (%s) has its independent source count and attached-note count", c, scalar ? "scalar" : "vector");
-            check_test_expect(test, ready && !input.resource && count == cases[c].count && notes == cases[c].notes, message);
+            check_test_expect(test, ready && !input.resource && count == cases[c].count && notes == cases[c].notes && suppressed == cases[c].suppressed, message);
             parse_release(&parser);
             pp_release(&pp);
             intern_release(&identifiers);
