@@ -1298,10 +1298,22 @@ decisions in #154 and on #117's configuration):
   Builtins use the shared catalog's explicit source and constant-expression
   capabilities, plus the preprocessor's four `__is_target_*` builtins. Native
   intrinsic names come from the actual x86 lowering rows/leaves, intersected
-  with the checker's frozen source scope; the full Clang recognition catalog
-  is not an implementation list. The fourteen fortified libc builtins reuse
+  with the checker's source scope (the frozen inventory and its sorted
+  supplementary names, `c_builtin_supplementary_scope.inc`); the full Clang
+  recognition catalog is not an implementation list. The fourteen fortified libc builtins reuse
   the checker's separate exact-name admission table and ordinary native call
-  path (#803); none has a source constant-expression capability.
+  path (#803); none has a source constant-expression capability. An
+  implemented builtin answers 1 only where clang 23 makes it one, as clang's
+  `__has_builtin` decides (#148): the language modes of its row in clang's
+  table (`__builtin_c23_va_start` in C23 alone; a GNU mode's, Microsoft's and
+  the other languages' rows; `pp_builtin_language`) and its required target
+  features, the row's expression of clang's feature names evaluated against
+  the unit's features as clang resolves them from `-march` and the `-m` flags
+  (`pp_builtin_features`, with `c_builtin_intrinsic_features.c`'s evaluator).
+  So `__builtin_ia32_aadd32` answers 0 at `-march=znver5`, which lacks
+  RAO-INT, as clang's does. `test-preprocessor --clang` compares every one of
+  clang's 3,775 builtin names with `clang -E`'s answer in eleven target and
+  language configurations, and the gates' facts with clang's table.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.
@@ -1315,8 +1327,9 @@ instruction-set features or waive argument/type/ABI restrictions: native
 lowering still refuses unsupported cases. `__has_constexpr_builtin` has its
 own narrower source-evaluation qualification, not the standalone fold bit.
 
-The cleanup, startup/shutdown and weak-symbol consumers are described in the
-[checker guide](c-checker.md). Overloadable calls and contextual addresses use
+The cleanup, startup/shutdown, weak-symbol, alias, ifunc, weakref and
+retain (#147) consumers are described in the [checker guide](c-checker.md).
+Overloadable calls and contextual addresses use
 the checker's selected object and its emitted ABI name (#821); local/anonymous
 tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
@@ -1326,13 +1339,15 @@ Accepted but unimplemented attributes remain zero, including `always_inline`,
 `noinline`, `format`, `noreturn`, `unused`, `nodiscard`,
 `maybe_unused` and `deprecated`. The last three have parsed records but no
 implemented diagnostic consumer; reporting their C23 date codes would falsely
-advertise that consumer. Unpublished alias/ifunc/weakref/common/retention effects
-also remain zero. Generic GNU atomic load/store/exchange/compare-exchange,
-GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
-unadvertised; scalar GNU atomics and implemented C11 atomics are advertised.
+advertise that consumer. The unpublished common symbols' effect also
+remains zero. Generic GNU atomic load/store/exchange/compare-exchange,
+GNU lock-free queries and test-and-set/clear remain unadvertised, and so do
+the vector builtins the checker checks but no lowering takes (elementwise
+clmul, the masked memory builtins and the matrix ones); scalar GNU atomics and
+implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
 
-`test-preprocessor` checks an independent 181-name generic builtin inventory,
+`test-preprocessor` checks an independent 233-name generic builtin inventory,
 the fourteen fortified names and their source/constexpr/refusal boundaries, old and
 new language modes, scoped/underscore/macro spellings, oracle isolation and
 protected input tails. `test-checker` compares intrinsic answers against the

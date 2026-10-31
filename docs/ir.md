@@ -8,8 +8,10 @@ test corpus is imported.
 
 ## Status and consumers
 
-The producers are `ir_lower_typed` / `ir_lower_typed_scalar`, which take the C
-driver's typed streams (`check_program_emit`'s `Tier0Function`s, #133), the
+The producers are `ir_lower_typed` / `ir_lower_typed_scalar` and their explicit
+output-target variants `ir_lower_typed_target` / `ir_lower_typed_target_scalar`,
+which take the C driver's typed streams (`check_program_emit`'s
+`Tier0Function`s, #133), the
 handwritten fixtures, `ir_parse.c` (#175) and the synthetic benchmarks. The
 consumers are the two verifiers, the CFG and use-list builders, the printer,
 `ssa_ir.c`'s promotion (#134), the optimizer passes (#139), the interpreters
@@ -27,11 +29,24 @@ and explicit register variables as `asm` operands among them) passes.
 `benchmark-ir-source` measures the IR's bytes per source token on `sqlite3.c`
 ("Bytes per source token" below).
 
-The adapter refuses what no function of those corpora has: vector values
-(`VECTOR`, `IR_ERROR_TYPE`), #136's machine operations (`X86` rows) and #148's
-frame address (`FRAME_ADDRESS`, both `IR_ERROR_OPCODE`), which have no IR type or
-operation. The stable printer's text
-is read back by `ir_parse.c` (#175).
+The explicit-target adapter admits #732's bounded 128/256/512-bit `VECTOR`
+transports and #717's exact i32 arithmetic/bitwise/comparison `X86` rows. The
+[SIMD contract](ir-simd.md) specifies widths, mask expansion, required output
+features and transactional refusal of other forms. Legacy entry points grant
+no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
+with `IR_ERROR_OPCODE`.
+The stable printer's text is read back by `ir_parse.c` (#175).
+
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c` checks actual C
+producers, both lowering paths and both text parsers. It explicitly requires
+transactional refusal by the still-scalar SSA promoter, not successful
+promotion; ordinary corpus mode continues to require promotion. The shared
+interpreter executes vector/mask operations with sparse wide payloads while
+retaining the 16-byte scalar value API. First-class vector entry values and
+vector/mask calls remain unsupported. Native selection and opmask allocation
+are separate consumers: [#141](https://github.com/buster14a/buster/issues/141)
+and [#179](https://github.com/buster14a/buster/issues/179), respectively; see the
+[backend handoff](tier1.md#vector-and-opmask-handoff).
 
 ## Lifetime and stage contract
 
@@ -334,7 +349,7 @@ as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
-refused, as `X86` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
+refused, as #147's `TAIL_CALL` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -361,9 +376,11 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`VECTOR` values are refused with `IR_ERROR_TYPE`, and `X86` rows and
-`FRAME_ADDRESS` with `IR_ERROR_OPCODE`, at their entry, after validation and
-before anything is allocated: no function of the corpora has one. A static
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_OPCODE`, and the
+vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
+for the output target (any, through the old entry points) with
+`IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything
+is allocated: no function of the scalar corpora has one. A static
 assertion pins the typed kinds' count, `X86` the last, so that a new kind fails to
 build until this adapter lowers or refuses it, since the plan and the emitter
 would take an unnamed kind for a binary operation.
@@ -484,8 +501,9 @@ comparisons produce `i1`, explicitly extended to the stream's `i32` result.
 The typed endpoint becomes a void return for a void function and an `undef`
 return for nonvoid fallthrough, whose value the existing stream leaves unspecified.
 The caller must diagnose source-language constraints before lowering. The adapter
-handles all currently defined typed kinds and classes but vectors and `X86` rows;
-it does not invent missing volatile or prototype information. In particular,
+handles the scalar corpus and the explicit-target SIMD subset described above,
+while refusing other `X86` rows, `FRAME_ADDRESS` and `TAIL_CALL`; it does not
+invent missing volatile or prototype information. In particular,
 the stream provides argument classes and a variadic bit but no
 named-parameter count: this adapter checks all supplied classes as
 fixed parameters. A source producer must preserve the effective call-site
@@ -678,6 +696,8 @@ scalar constructor (`BUSTER_SSA_IR_VECTOR_CELLS`, docs/ssa.md): on the 9700X
 scalar work), under its twin's 151.1, with 2,208 instructions per entry against
 2,535 and 13.4 throttled dispatch slots per instruction against 31.5 ([the
 record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29)).
+#134's later measurement of both promotions, with each path's phis, is in [the SSA
+guide](ssa.md)'s "Benchmark".
 
 Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the same
 instructions but 0.0004% and writes the same object. The checker's unit compiled

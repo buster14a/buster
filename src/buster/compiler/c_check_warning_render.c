@@ -90,6 +90,9 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
+        case CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE:
+            result = "'gnu_inline' attribute requires function to be marked 'inline', attribute ignored";
+            break;
         case CHECK_WARNING_EVENT_GNU_ARRAY_FOLD:
             result = "variable length array folded to constant array as an extension";
             break;
@@ -133,6 +136,12 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
+            result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_BUILTIN_HEADER:
+            result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of its header", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_UNDEFINED_INTERNAL:
             result = check_warning_text(scratch, "function '%.*s' has internal linkage but is not defined", (int)name.length, name.pointer);
             break;
@@ -152,6 +161,7 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
             result = check_warning_text(scratch, "use 'static' to give inline function '%.*s' internal linkage", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
+        case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         default: break;
     }
     return result;

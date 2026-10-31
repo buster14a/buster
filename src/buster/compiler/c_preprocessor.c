@@ -94,6 +94,7 @@
 #include "c_builtin_catalog.c"
 #include "c_builtin_fortify.c"
 #include "c_builtin_source_intrinsics.c"
+#include "c_builtin_intrinsic_features.c"
 #include "buster/compiler/x86_target.c"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
@@ -253,6 +254,7 @@ struct PPOptions
 {
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
+    uint8_t implicit_library_diagnostic;
     bool implicit_function_system;
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
@@ -264,6 +266,10 @@ struct PPOptions
     // Retained independently for the future scheduler; it cannot enable an ISA feature.
     X86Architecture tune;
     bool freestanding;
+    // Plain library names only: explicit __builtin_ spellings remain available. Names borrow command-line storage.
+    bool no_builtin;
+    const char* const* no_builtin_functions;
+    uint32_t no_builtin_function_count;
     // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
     // -g. All zero is clang's defaults with no option.
     PredefinesOptions predefines;
@@ -16697,6 +16703,7 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 // Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
 // Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
 static const PPFeature pp_implemented_attribute[] = {
+    { "alias", 1 },
     { "aligned", 1 },
     { "cleanup", 1 },
     { "constructor", 1 },
@@ -16704,10 +16711,12 @@ static const PPFeature pp_implemented_attribute[] = {
     { "ext_vector_type", 1 },
     { "fallthrough", 1 },
     { "gnu_inline", 1 },
+    { "ifunc", 1 },
     { "mode", 1 },
     { "naked", 1 },
     { "overloadable", 1 },
     { "packed", 1 },
+    { "retain", 1 },
     { "section", 1 },
     { "target", 1 },
     { "transparent_union", 1 },
@@ -16715,20 +16724,24 @@ static const PPFeature pp_implemented_attribute[] = {
     { "vector_size", 1 },
     { "visibility", 1 },
     { "weak", 1 },
+    { "weakref", 1 },
 };
 static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::ext_vector_type", 1 },
     { "clang::overloadable", 1 },
     { "fallthrough", 201910 },
+    { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
     { "gnu::cleanup", 1 },
     { "gnu::constructor", 1 },
     { "gnu::destructor", 1 },
     { "gnu::fallthrough", 1 },
     { "gnu::gnu_inline", 1 },
+    { "gnu::ifunc", 1 },
     { "gnu::mode", 1 },
     { "gnu::naked", 1 },
     { "gnu::packed", 1 },
+    { "gnu::retain", 1 },
     { "gnu::section", 1 },
     { "gnu::target", 1 },
     { "gnu::transparent_union", 1 },
@@ -16736,6 +16749,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::vector_size", 1 },
     { "gnu::visibility", 1 },
     { "gnu::weak", 1 },
+    { "gnu::weakref", 1 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
@@ -16810,6 +16824,63 @@ static bool pp_target_gnu(const uint8_t* name, uint32_t length)
     return result;
 }
 
+// Whether clang 23 makes a name a builtin of the unit by its row's language modes (`languages`, the token of clang's
+// table: Builtin::Context's builtinIsSupported): ALL_LANGUAGES in every C mode, ALL_GNU_LANGUAGES in GNU's, C23_LANG
+// from C23 on; never the modes buster has no option for (Microsoft's extensions, C2y, coroutines, Objective-C, C++,
+// OpenCL, HLSL, CUDA).
+static bool pp_builtin_language(const PPOptions* options, const char* languages)
+{
+    const bool result = strcmp(languages, "ALL_LANGUAGES") == 0 || (strcmp(languages, "ALL_GNU_LANGUAGES") == 0 && options->language.gnu) ||
+                        (strcmp(languages, "C23_LANG") == 0 && options->language.standard >= 2023);
+    return result;
+}
+
+// Whether a builtin's required target features hold in the unit, which clang's __has_builtin answers by
+// (Builtin::evaluateRequiredTargetFeatures): `features`, an expression of clang's feature names (',' and, '|' or),
+// against the target's features as clang resolves them from -march and the -m flags (predefines_resolve), each of
+// c_predefines.c's names available or not, as clang's feature map has them. An empty expression requires nothing.
+// Only an x86 builtin's has features, and headers query none, so the table is made for each query rather than kept.
+static bool pp_builtin_features(const PPOptions* options, const char* features)
+{
+    bool result = features[0] == 0;
+    if (!result)
+    {
+        PredefinesFeatures resolved;
+        int32_t cpu;
+        // The options resolved when they were parsed (pp_parse_options' predefines_target), so they do again.
+        predefines_resolve(&options->predefines, &resolved, &cpu);
+        CBuiltinIntrinsicFeature table[BUSTER_ARRAY_LENGTH(predefines_features)];
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_features); i += 1)
+        {
+            table[i] = (CBuiltinIntrinsicFeature){
+                .name = predefines_features[i].name,
+                .name_length = (uint32_t)strlen(predefines_features[i].name),
+                .available = predefines_has(resolved, i),
+            };
+        }
+        CBuiltinIntrinsicFeatureFrame frames[8];
+        result = c_builtin_intrinsic_features_evaluate(features, (uint32_t)strlen(features), table, BUSTER_ARRAY_LENGTH(table), frames,
+                                                       BUSTER_ARRAY_LENGTH(frames)) == CBUILTIN_INTRINSIC_FEATURE_AVAILABLE;
+    }
+    return result;
+}
+
+// buster's __has_builtin of a name (#806, #148): 1 for a builtin it implements, its source checking and Tier 0 lowering
+// shipped (the catalog's source capability, the x86 intrinsics' rows and leaves, the fortified builtins and its own
+// queries), that clang makes a builtin of the unit by its language modes and whose required target features hold
+// there, as clang answers (pp_builtin_language, pp_builtin_features).
+static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uint8_t* name, uint32_t length)
+{
+    const CBuiltinSourceScope* scope = cbuiltin_source_scope(name, length);
+    const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) && pp_builtin_language(options, cbuiltin_languages(name, length));
+    const bool intrinsic =
+        cbuiltin_source_intrinsic(name, length) && pp_builtin_language(options, scope->languages) && pp_builtin_features(options, scope->features);
+    const uint32_t result =
+        pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, options->language.standard) | catalog |
+        intrinsic | cbuiltin_fortify_source(name, length);
+    return result;
+}
+
 // A feature query's answer for `name`: clang's (`options->clang_features`, the oracle's mode) or what buster implements.
 // The sanitizer features follow the sanitizers the options leave on (c_predefines.c's predefines_sanitizer_feature). The
 // target queries answer for the target triple in both modes, as clang's read a name: case aside, and the operating
@@ -16831,13 +16902,12 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
             break;
         case PP_BUILTIN_HAS_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
-                           : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard) |
-                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) | cbuiltin_source_intrinsic(name, length) |
-                                 cbuiltin_fortify_source(name, length);
+                           : pp_implemented_builtin_query(options, name, length);
             break;
         case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard)
-                           : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+                           : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) &&
+                                 pp_builtin_language(options, cbuiltin_languages(name, length));
             break;
         case PP_BUILTIN_HAS_FEATURE:
             result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer
@@ -20086,6 +20156,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     // Fold this diagnostic's option mappings in source order for both possible language defaults. The final -std
     // chooses one: disabling then enabling a default error leaves a warning, while enabling an error preserves it.
     uint8_t implicit_before_c99 = 1;
+    uint8_t implicit_library_before_c99 = 2;
     uint8_t implicit_since_c99 = 3;
     bool implicit_mapped = false;
     bool implicit_no_error = false;
@@ -20156,6 +20227,24 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             options->clang_features = true;
         }
+        else if (strcmp(argument, "-fno-builtin") == 0 || strcmp(argument, "-fbuiltin") == 0)
+        {
+            options->no_builtin = strcmp(argument, "-fno-builtin") == 0;
+        }
+        else if (strncmp(argument, "-fno-builtin-", 13) == 0)
+        {
+            const char** names = (const char**)options->no_builtin_functions;
+            if (names == NULL)
+            {
+                names = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
+                options->no_builtin_functions = names;
+            }
+            result = names != NULL;
+            if (result)
+            {
+                names[options->no_builtin_function_count++] = argument + 13;
+            }
+        }
         else if (strcmp(argument, "-ffreestanding") == 0)
         {
             options->freestanding = true;
@@ -20223,6 +20312,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                  strcmp(argument, "-Wno-all") == 0 || strcmp(argument, "-Wno-everything") == 0)
         {
             implicit_before_c99 = 1;
+            implicit_library_before_c99 = 1;
             implicit_since_c99 = 1;
             implicit_mapped = true;
             implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
@@ -20231,6 +20321,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                  strcmp(argument, "-Wno-error-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=all") == 0)
         {
             implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
+            implicit_library_before_c99 = implicit_library_before_c99 == 3 ? 2 : implicit_library_before_c99;
             implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
             implicit_no_error = true;
         }
@@ -20238,12 +20329,14 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                  strcmp(argument, "-Werror-implicit-function-declaration") == 0 || strcmp(argument, "-Werror=all") == 0)
         {
             implicit_before_c99 = 3;
+            implicit_library_before_c99 = 3;
             implicit_since_c99 = 3;
             implicit_mapped = true;
         }
         else if (strcmp(argument, "-Wimplicit-function-declaration") == 0 || strcmp(argument, "-Wimplicit") == 0 || strcmp(argument, "-Wall") == 0)
         {
             implicit_before_c99 = implicit_before_c99 == 1 ? 2 : implicit_before_c99;
+            implicit_library_before_c99 = implicit_library_before_c99 == 1 ? 2 : implicit_library_before_c99;
             implicit_since_c99 = implicit_since_c99 == 1 ? 2 : implicit_since_c99;
             implicit_mapped = true;
         }
@@ -20348,6 +20441,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     uint8_t implicit = options->language.standard >= 1999 ? implicit_since_c99 : implicit_before_c99;
     implicit = implicit == 1 && !implicit_mapped && implicit_everything ? 2 : implicit;
     options->implicit_function_diagnostic = implicit == 2 && !implicit_no_error && warning_errors ? 3 : implicit;
+    const uint8_t library = implicit_library_before_c99 == 2 && !implicit_no_error && warning_errors ? 3 : implicit_library_before_c99;
+    options->implicit_library_diagnostic = options->language.standard >= 1999 ? options->implicit_function_diagnostic : library;
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;

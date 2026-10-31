@@ -31,7 +31,7 @@ struct CheckProgramHelper
     SymbolId symbol;
     Tier0Code code;
     uint32_t parameter_count;
-    TypeId parameter_types[6];
+    TypeId parameter_types[7];
     TypeId result_type;
     // A read/modify/write leaf's (c_builtin_atomic_rmw_helpers.c) value format.
     CBuiltinAtomicRmwFormat rmw_format;
@@ -193,9 +193,13 @@ static const char* check_program_helper_atomic_reason(const CheckBuiltinAtomicEf
     {
         reason = "a misaligned atomic object, which clang calls libatomic for";
     }
-    else if ((bits & (BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT | BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW)) != 0)
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW) != 0)
     {
         reason = "atomic arithmetic, minimum or maximum of floating values";
+    }
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT) != 0)
+    {
+        reason = "atomic operations on floating values other than float and double";
     }
     else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_BOOL_RMW) != 0)
     {
@@ -213,10 +217,11 @@ static const char* check_program_helper_atomic_reason(const CheckBuiltinAtomicEf
 }
 
 // A read/modify/write's leaf (c_builtin_atomic_rmw_helpers.c), of its builtin, width and value format: integer and pointer
-// bits, bool's 0 or 1, for min and max a signed integer's, and for GNU's exchange a float's or a double's (the lowering
-// passes and takes their bits, check_lower_helper). A call passes the object's address and its fixed arguments
+// bits, bool's 0 or 1, for min and max a signed integer's, and for GNU's exchange and clang's IEEE maximum and minimum a
+// float's or a double's (the lowering passes and takes their bits, check_lower_helper). A call passes the object's address and its fixed arguments
 // (GNU's compare-exchange the expected object's address), the orders and GNU's weak flag as ints, and takes the old or new
-// bits, or whether a compare-exchange stored (a legacy release nothing). A legacy call's protected variables aren't taken.
+// bits, or whether a compare-exchange stored or a test_and_set's byte was set (a legacy release and a clear nothing). A
+// legacy call's protected variables aren't taken.
 static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, const CheckBuiltinAtomicEffect* effect, const CheckBuiltinAtomicRmwRule* rule,
                                                     uint32_t arguments, CheckProgramHelper* helper, const char** reason)
 {
@@ -230,9 +235,10 @@ static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, 
     const bool integer = valid_type && check_action_integer_type(types, effect->value_type, &width, &is_signed);
     const bool pointer = valid_type && check_action_kind(types, effect->value_type) == BUSTER_TYPE_KIND_POINTER;
     const TypeId plain = valid_type ? type_unqualified(type_strip_aligned(types, effect->value_type)) : 0;
-    const bool floating = rule->id == CBUILTIN_ATOMIC_EXCHANGE_N && (plain == BUSTER_TYPE_FLOAT || plain == BUSTER_TYPE_DOUBLE);
-    // A legacy release is a store, no read/modify/write of its object.
-    const bool release = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_RELEASE;
+    const bool floating = (rule->id == CBUILTIN_ATOMIC_EXCHANGE_N || check_builtin_atomic_rmw_ieee(rule->operation)) &&
+                          (plain == BUSTER_TYPE_FLOAT || plain == BUSTER_TYPE_DOUBLE);
+    // A legacy release is a store, no read/modify/write of its object, and so is a clear.
+    const bool release = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_RELEASE || rule->operation == CHECK_BUILTIN_ATOMIC_RMW_CLEAR;
     if (effect->runtime_builtin != rule->id || !effect->compiler_barrier || effect->rmw == release || !valid_type ||
         effect->evaluated_operands != (UINT32_C(1) << rule->fixed_count) - 1 || arguments == BUSTER_CHECK_NONE)
     {
@@ -251,7 +257,7 @@ static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, 
     else if (!integer && !pointer && !floating)
     {
         status = CHECK_PROGRAM_UNSUPPORTED;
-        *reason = "atomic read-modify-write of floating values but GNU's exchange";
+        *reason = "atomic read-modify-write of floating values but GNU's exchange and clang's IEEE maximum and minimum";
     }
     if (status == CHECK_PROGRAM_OK)
     {
@@ -267,7 +273,8 @@ static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, 
                           floating ? CBUILTIN_ATOMIC_RMW_F64_BITS : ordered && is_signed ? CBUILTIN_ATOMIC_RMW_SIGNED_BITS : CBUILTIN_ATOMIC_RMW_INTEGER_BITS,
             .rmw = true,
         };
-        const uint32_t first_int = rule->legacy ? rule->fixed_count : compare ? 3 : 2;
+        // The byte flag's order is its second argument.
+        const uint32_t first_int = rule->legacy ? rule->fixed_count : compare ? 3 : check_builtin_atomic_rmw_byte(rule->operation) ? 1 : 2;
         for (uint32_t i = 0; i < rule->fixed_count; i += 1)
         {
             helper->parameter_types[i] = i >= first_int ? BUSTER_TYPE_INT : BUSTER_TYPE_ULONG;
@@ -372,9 +379,11 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     }
     for (uint32_t a = 0; valid && a < program->stream->atomic_count; a += 1)
     {
+        // C11's builtins and GNU's generic forms (a scoped family's of them too) use the implicit widths' leaves where their
+        // objects are native ones (check_lower_atomic_prepare).
         const CheckBuiltinAtomicEffect* effect = program->stream->atomics + a;
-        const CBuiltinId id = (CBuiltinId)graph->members[effect->node];
-        if (check_builtin_atomic_c11(id) && effect->object_type != 0 &&
+        const CBuiltinId id = check_builtin_atomic_base((CBuiltinId)graph->members[effect->node]);
+        if ((check_builtin_atomic_c11(id) || check_builtin_atomic_generic(id)) && effect->object_type != 0 &&
             check_builtin_atomic_c11_native(program->types, CBUILTIN_C11_ATOMIC_LOAD, effect->value_type, effect->object_size,
                                             effect->alignment_known && effect->minimum_alignment >= effect->object_size))
         {
@@ -469,7 +478,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     // the leaf takes or gives them (CBuiltinX86HelperInfo.vectors), the arguments' types at the
                     // builtin's prototype's (one for every use).
                     const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + leaf;
-                    if (graph->argument_counts == 0 || graph->argument_counts[node] != info->parameter_count ||
+                    const bool output = info->amx != 0 && info->output_bytes != 0;
+                    if (graph->argument_counts == 0 || graph->argument_counts[node] + output != info->parameter_count ||
                         info->parameter_count > BUSTER_ARRAY_LENGTH(helper.parameter_types))
                     {
                         result->status = CHECK_PROGRAM_INVALID;
@@ -569,14 +579,30 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     }
                     else
                     {
-                        const uint32_t arguments = graph->argument_counts != 0 ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
-                        const CheckBuiltinAtomicEffect* effect = stream->atomics + atomic;
-                        if (check_builtin_atomic_c11(id))
+                        // A scoped family's builtin plans its base's (check_builtin_atomic_base), on the base's arguments: the
+                        // lowering evaluates and drops its scope, the last.
+                        const CBuiltinId base = check_builtin_atomic_base(id);
+                        const uint32_t scoped = check_builtin_atomic_scope(id) != CHECK_BUILTIN_ATOMIC_SCOPE_NONE;
+                        const uint32_t count = graph->argument_counts != 0 ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
+                        const uint32_t arguments = count != BUSTER_CHECK_NONE && count >= scoped ? count - scoped : count;
+                        CheckBuiltinAtomicEffect scope_less = stream->atomics[atomic];
+                        if (scoped != 0 && arguments < 32)
+                        {
+                            scope_less.evaluated_operands &= (UINT32_C(1) << arguments) - 1;
+                        }
+                        const CheckBuiltinAtomicEffect* effect = &scope_less;
+                        if (base == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || base == CBUILTIN_ATOMIC_IS_LOCK_FREE || check_builtin_atomic_generic(base))
+                        {
+                            // A lock-free query is a constant or libatomic's runtime query (check_lower_atomic_query), and GNU's
+                            // generic forms use the implicit widths' leaves or libatomic (check_lower_atomic_prepare).
+                            folded = true;
+                        }
+                        else if (check_builtin_atomic_c11(base))
                         {
                             const bool aligned = effect->alignment_known && effect->minimum_alignment >= effect->object_size;
                             const uint8_t kind = check_action_kind(program->types, effect->value_type);
                             const bool representation = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
-                            if (representation || !check_builtin_atomic_c11_native(program->types, id, effect->value_type, effect->object_size, aligned))
+                            if (representation || !check_builtin_atomic_c11_native(program->types, base, effect->value_type, effect->object_size, aligned))
                             {
                                 // The lowering uses libatomic's generic ABI for representations the native leaves don't take.
                                 folded = true;
@@ -584,8 +610,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                             else
                             {
                                 CheckBuiltinAtomicEffect normalized = *effect;
-                                const bool compare = id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK;
-                                const uint32_t parameters = arguments + compare + (id == CBUILTIN_C11_ATOMIC_INIT);
+                                const bool compare = base == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || base == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK;
+                                const uint32_t parameters = arguments + compare + (base == CBUILTIN_C11_ATOMIC_INIT);
                                 normalized.evaluated_operands = (1u << parameters) - 1;
                                 normalized.unsupported = 0;
                                 if (compare && (effect->value_type == BUSTER_TYPE_FLOAT || effect->value_type == BUSTER_TYPE_DOUBLE))
@@ -597,7 +623,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         }
                         else
                         {
-                            result->status = check_program_helper_atomic(program, effect, id, arguments, &helper, &result->reason);
+                            result->status = check_program_helper_atomic(program, effect, base, arguments, &helper, &result->reason);
                         }
                     }
                 }

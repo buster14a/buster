@@ -64,6 +64,12 @@
     BUSTER_CHECK_X86_FORMS(name, CHECK_X86_LOWER_BINARY, 1, swap, form, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512, features)
 #define BUSTER_CHECK_X86_SHIFTS(name, form, element, features) \
     BUSTER_CHECK_X86_FORMS(name, CHECK_X86_LOWER_SHIFT, element, false, form, X_X_XM128_EVEX, Y_Y_XM128_EVEX, Z_Z_XM128, features)
+// A family of one form name with an immediate argument (its index) at 16, 32 and 64 bytes: `x`, `y` and `z` are its
+// forms' suffixes.
+#define BUSTER_CHECK_X86_IMMEDIATES(name, family, element, swap, immediate, form, x, y, z, features) \
+    BUSTER_CHECK_X86_RULE(name "128", family, element, 16, false, swap, immediate, X86_FORM_##form##_##x, features) \
+    BUSTER_CHECK_X86_RULE(name "256", family, element, 32, false, swap, immediate, X86_FORM_##form##_##y, features) \
+    BUSTER_CHECK_X86_RULE(name "512", family, element, 64, false, swap, immediate, X86_FORM_##form##_##z, features)
 // A truncation under a mask of `bytes` bytes into a result of `result` bytes (TRUNCATE's `other`), and the stores of
 // one at each width, whose forms are the register ones into memory.
 #define BUSTER_CHECK_X86_TRUNCATION(name, element, bytes, form, result, features) \
@@ -113,6 +119,23 @@
 #define BUSTER_CHECK_X86_FMA(name, element, bytes, form, round_form, into) \
     BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_MASK_TERNARY, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_##form, 0, false, 0, X86_FORM_##round_form, CHECK_X86_ROUND_ER, CHECK_X86_INTO_##into)
+// A ternary logic's rule (TERNARY's of an immediate, its fourth argument): merged into a under its mask, or with `into`
+// A_ZEROED zeroed where the mask's bits are clear (CHECK_X86_INTO_*).
+#define BUSTER_CHECK_X86_TERNARY_LOGIC(name, element, bytes, form, into) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_TERNARY, element, bytes, false, false, 3, X86_FORM_##form, 0, false, \
+      0, 0, CHECK_X86_ROUND_NONE, CHECK_X86_INTO_##into)
+// A fix-up's rule (TERNARY's of an immediate, its fourth argument, as a ternary logic's): VFIXUPIMM's of b's elements by
+// c's table, merged into a under its mask or zeroed (`into`), with round_form where its last argument suppresses the
+// exceptions (`rounding` SAE: the 64-byte and scalar ones').
+#define BUSTER_CHECK_X86_FIXUPIMM(name, element, bytes, form, into, round_form, rounding) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_TERNARY, element, bytes, false, false, 3, X86_FORM_##form, 0, false, \
+      0, X86_FORM_##round_form, CHECK_X86_ROUND_##rounding, CHECK_X86_INTO_##into)
+// A compare of floats by a predicate, its third argument (BINARY_IMMEDIATE's into a vector, COMPARE's into a mask under a
+// mask, SCALAR_COMPARE's into an int): `predicate` the immediate as the form takes it (CHECK_X86_PREDICATE_*), with
+// round_form where its last argument suppresses the exceptions (a round_form that is the form itself ignores it).
+#define BUSTER_CHECK_X86_FLOAT_COMPARE(name, family, element, bytes, form, round_form, rounding, predicate, features, extensions) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, element, bytes, false, false, 2, X86_FORM_##form, 0, \
+      false, features, X86_FORM_##round_form, CHECK_X86_ROUND_##rounding, CHECK_X86_PREDICATE_##predicate, extensions)
 // A REDUCE rule of 64 bytes' elements.
 #define BUSTER_CHECK_X86_REDUCE(name, element, reduction) \
     BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_reduce_" name, sizeof("__builtin_ia32_reduce_" name) - 1, CHECK_X86_LOWER_REDUCE, element, 64, false, false, \
@@ -317,6 +340,14 @@
     BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_ktestzdi", CHECK_X86_LOWER_KBINARY, 8, X86_FORM_KANDQ_K_K_K, true, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftlihi", CHECK_X86_LOWER_KSHIFT, 2, X86_FORM_KSHIFTLW_K_K_IMM8, false, 0)
     BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftlidi", CHECK_X86_LOWER_KSHIFT, 8, X86_FORM_KSHIFTLQ_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
+    // #148: the masks' other shifts, of bytes, doublewords and words and quadwords right (KSHIFTL and KSHIFTR, the count
+    // the immediate's low byte, which gives 0 past the mask's bits, as clang's code gives).
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftliqi", CHECK_X86_LOWER_KSHIFT, 1, X86_FORM_KSHIFTLB_K_K_IMM8, false, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftlisi", CHECK_X86_LOWER_KSHIFT, 4, X86_FORM_KSHIFTLD_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftriqi", CHECK_X86_LOWER_KSHIFT, 1, X86_FORM_KSHIFTRB_K_K_IMM8, false, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftrihi", CHECK_X86_LOWER_KSHIFT, 2, X86_FORM_KSHIFTRW_K_K_IMM8, false, 0)
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftrisi", CHECK_X86_LOWER_KSHIFT, 4, X86_FORM_KSHIFTRD_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftridi", CHECK_X86_LOWER_KSHIFT, 8, X86_FORM_KSHIFTRQ_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
     // Compress and expand, of bytes and words with AVX-512VBMI2.
     BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressqi", "_mask", CHECK_X86_LOWER_COMPRESS, 1, false, VPCOMPRESSB, XM128_X, YM256_Y, ZM512_Z, BUSTER_X86_FEATURE(AVX512VBMI2))
     BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compresshi", "_mask", CHECK_X86_LOWER_COMPRESS, 2, false, VPCOMPRESSW, XM128_X, YM256_Y, ZM512_Z, BUSTER_X86_FEATURE(AVX512VBMI2))
@@ -366,7 +397,12 @@
                                 BUSTER_X86_FEATURE(GFNI))
     // One vector by an immediate: VPSHUFD's destination in reg, VPROLD's and VPSLLDQ's in vvvv (`swap`).
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufd512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 64, false, 1, X86_FORM_VPSHUFD_Z_ZM512_IMM8, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_prold512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 64, true, 1, X86_FORM_VPROLD_Z_ZM512_IMM8, 0, 0)
+    // The rotates by an immediate at each width (#148), VPROL's and VPROR's of doublewords and quadwords: the count the
+    // immediate's whole byte, which the instruction takes modulo the elements' bits, as clang's funnel shifts take theirs.
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prold", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, true, 1, VPROLD, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prolq", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, true, 1, VPROLQ, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prord", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, true, 1, VPRORD, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prorq", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, true, 1, VPRORQ, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pslldqi128_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 16, true, 1, X86_FORM_VPSLLDQ_X_XM128_IMM8, 0, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpconflictsi_512", CHECK_X86_LOWER_UNARY, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPCONFLICTD_Z_ZM512, 0,
                                 BUSTER_X86_FEATURE(AVX512CD))
@@ -375,6 +411,57 @@
     // Three vectors: the first is the destination. VPTERNLOG's immediate is its fourth argument and its mask its fifth.
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pternlogd512_mask", CHECK_X86_LOWER_TERNARY, 4, 64, false, 3, X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8, 0, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pternlogq512_mask", CHECK_X86_LOWER_TERNARY, 8, 64, false, 3, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8, 0, 0)
+    // #148: the ternary logic of 16 and 32 bytes, merged into a under the mask, and zeroed (the maskz builtins, the 64-byte
+    // ones' too); the concatenating shifts by an immediate (VPSHLD, VPSHRD: a's and b's elements joined, a's the high half
+    // in a left shift's and the low one in a right one's, as clang's funnel shifts join them, the count modulo the
+    // elements' bits); the sums of absolute differences of each lane's doublewords (VDBPSADBW) and of byte blocks (VEX's
+    // VMPSADBW, and AVX10.2's of 64 bytes); the carry-less products of quadwords (VPCLMULQDQ: VEX's of 16 bytes, PCLMUL's,
+    // and of 32, VPCLMULQDQ's, and EVEX's of 64); and the affine transforms of GF(2^8) of the bytes and of their inverses
+    // (VGF2P8AFFINEQB, VGF2P8AFFINEINVQB). Each takes the immediate's whole byte, as the instruction reads it.
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd128_mask", 4, 16, VPTERNLOGD_X_X_XM128_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd128_maskz", 4, 16, VPTERNLOGD_X_X_XM128_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd256_mask", 4, 32, VPTERNLOGD_Y_Y_YM256_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd256_maskz", 4, 32, VPTERNLOGD_Y_Y_YM256_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd512_maskz", 4, 64, VPTERNLOGD_Z_Z_ZM512_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq128_mask", 8, 16, VPTERNLOGQ_X_X_XM128_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq128_maskz", 8, 16, VPTERNLOGQ_X_X_XM128_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq256_mask", 8, 32, VPTERNLOGQ_Y_Y_YM256_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq256_maskz", 8, 32, VPTERNLOGQ_Y_Y_YM256_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq512_maskz", 8, 64, VPTERNLOGQ_Z_Z_ZM512_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshldd", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, false, 2, VPSHLDD, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshldq", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, false, 2, VPSHLDQ, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshldw", CHECK_X86_LOWER_BINARY_IMMEDIATE, 2, false, 2, VPSHLDW, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshrdd", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, false, 2, VPSHRDD, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshrdq", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, false, 2, VPSHRDQ, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshrdw", CHECK_X86_LOWER_BINARY_IMMEDIATE, 2, false, 2, VPSHRDW, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_dbpsadbw", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, false, 2, VDBPSADBW, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_mpsadbw128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, false, 2, X86_FORM_VMPSADBW_X_X_XM128_IMM8, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_mpsadbw256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, false, 2, X86_FORM_VMPSADBW_Y_Y_YM256_IMM8, BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_mpsadbw512", sizeof("__builtin_ia32_mpsadbw512") - 1, CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 64, false, false, 2,
+                            X86_FORM_VMPSADBW_Z_Z_ZM512_IMM8, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_CHECK_X86_AVX10)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pclmulqdq128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 16, false, false, 2, X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8,
+                          BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(PCLMUL))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pclmulqdq256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, false, 2, X86_FORM_VPCLMULQDQ_Y_Y_YM256_IMM8,
+                          BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(VPCLMULQDQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pclmulqdq512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, false, 2, X86_FORM_VPCLMULQDQ_Z_Z_ZM512_IMM8,
+                          BUSTER_X86_FEATURE(VPCLMULQDQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineqb_v16qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, 2, X86_FORM_VGF2P8AFFINEQB_X_X_XM128_IMM8_EVEX, 0,
+                                BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineqb_v32qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, 2, X86_FORM_VGF2P8AFFINEQB_Y_Y_YM256_IMM8_EVEX, 0,
+                                BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineinvqb_v16qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, 2,
+                                X86_FORM_VGF2P8AFFINEINVQB_X_X_XM128_IMM8_EVEX, 0, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineinvqb_v32qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, 2,
+                                X86_FORM_VGF2P8AFFINEINVQB_Y_Y_YM256_IMM8_EVEX, 0, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineinvqb_v64qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 64, false, 2, X86_FORM_VGF2P8AFFINEINVQB_Z_Z_ZM512_IMM8,
+                                0, BUSTER_X86_FEATURE(GFNI))
     // The dot products of AVX-512VNNI: of bytes (unsigned by signed) and of words, each with signed saturation (`s`).
     BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpdpbusd", CHECK_X86_LOWER_TERNARY, 4, false, VPDPBUSD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
                            BUSTER_X86_FEATURE(AVX512VNNI))
@@ -473,6 +560,59 @@
                           BUSTER_X86_FEATURE(AVX2))
     // An element of 64 bits of a 256-bit vector: its lane extracted first where it is past the low one.
     BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v4di", CHECK_X86_LOWER_EXTRACT, 8, 32, false, false, 1, X86_FORM_VPEXTRQ_RM64_X_IMM8_EVEX, BUSTER_X86_FEATURE(AVX512DQ))
+    // #148: the rest of the elements and lanes. The elements of 256-bit vectors and of 8-byte ones (__v4hi's, in an XMM
+    // register's first bytes), extracted and inserted at the index's low bits (around an insertion, a 256-bit vector's lane
+    // taken out and put back), a float's into the floating result (VPERMILPS of it); the lanes of 128 and 256 bits inserted
+    // at the index's low bits (VINSERTF32X4 to VINSERTI64X2, and VEX's vinsertf128 builtins as VINSERTF32X4) and extracted,
+    // under a mask into w (VEXTRACTF32X4 to VEXTRACTI64X2) or not (extract128i256, VEXTRACTI32X4's); and INSERTPS's
+    // element of b into a under its zero mask, the immediate's whole byte, as clang's code takes it.
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v4sf", CHECK_X86_LOWER_EXTRACT, 4, 16, false, false, 1, X86_FORM_VPERMILPS_X_XM128_IMM8_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v4hi", CHECK_X86_LOWER_EXTRACT, 2, 8, false, false, 1, X86_FORM_VPEXTRW_R32_X_IMM8_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v8si", CHECK_X86_LOWER_EXTRACT, 4, 32, false, false, 1, X86_FORM_VPEXTRD_RM32_X_IMM8_EVEX, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v16hi", CHECK_X86_LOWER_EXTRACT, 2, 32, false, false, 1, X86_FORM_VPEXTRW_R32_X_IMM8_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v32qi", CHECK_X86_LOWER_EXTRACT, 1, 32, false, false, 1, X86_FORM_VPEXTRB_RM32_X_IMM8_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_set_v4hi", CHECK_X86_LOWER_INSERT, 2, 8, false, false, 2, X86_FORM_VPINSRW_X_X_RM32_IMM8_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_set_v8si", CHECK_X86_LOWER_INSERT, 4, 32, false, false, 2, X86_FORM_VPINSRD_X_X_RM32_IMM8_EVEX, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_set_v4di", CHECK_X86_LOWER_INSERT, 8, 32, false, false, 2, X86_FORM_VPINSRQ_X_X_RM64_IMM8_EVEX, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_set_v16hi", CHECK_X86_LOWER_INSERT, 2, 32, false, false, 2, X86_FORM_VPINSRW_X_X_RM32_IMM8_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_set_v32qi", CHECK_X86_LOWER_INSERT, 1, 32, false, false, 2, X86_FORM_VPINSRB_X_X_RM32_IMM8_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertf32x4", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 64, false, 2, X86_FORM_VINSERTF32X4_Z_Z_XM128_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertf32x4_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VINSERTF32X4_Y_Y_XM128_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertf32x8", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 64, false, 2, X86_FORM_VINSERTF32X8_Z_Z_YM256_IMM8, 32,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertf64x2_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VINSERTF64X2_Y_Y_XM128_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertf64x2_512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, 2, X86_FORM_VINSERTF64X2_Z_Z_XM128_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertf64x4", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, 2, X86_FORM_VINSERTF64X4_Z_Z_YM256_IMM8, 32, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_inserti32x4_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_inserti32x8", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 64, false, 2, X86_FORM_VINSERTI32X8_Z_Z_YM256_IMM8, 32,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_inserti64x2_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VINSERTI64X2_Y_Y_XM128_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_inserti64x2_512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, 2, X86_FORM_VINSERTI64X2_Z_Z_XM128_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vinsertf128_pd256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VINSERTF32X4_Y_Y_XM128_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vinsertf128_ps256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VINSERTF32X4_Y_Y_XM128_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vinsertf128_si256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VINSERTF32X4_Y_Y_XM128_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extractf32x4_mask", CHECK_X86_LOWER_EXTRACT_LANE, 4, 64, false, 1, X86_FORM_VEXTRACTF32X4_XM128_Z_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extractf32x4_256_mask", CHECK_X86_LOWER_EXTRACT_LANE, 4, 32, false, 1, X86_FORM_VEXTRACTF32X4_XM128_Y_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extractf32x8_mask", CHECK_X86_LOWER_EXTRACT_LANE, 4, 64, false, 1, X86_FORM_VEXTRACTF32X8_YM256_Z_IMM8, 32,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extractf64x2_256_mask", CHECK_X86_LOWER_EXTRACT_LANE, 8, 32, false, 1, X86_FORM_VEXTRACTF64X2_XM128_Y_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extractf64x2_512_mask", CHECK_X86_LOWER_EXTRACT_LANE, 8, 64, false, 1, X86_FORM_VEXTRACTF64X2_XM128_Z_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extractf64x4_mask", CHECK_X86_LOWER_EXTRACT_LANE, 8, 64, false, 1, X86_FORM_VEXTRACTF64X4_YM256_Z_IMM8, 32, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extracti32x4_256_mask", CHECK_X86_LOWER_EXTRACT_LANE, 4, 32, false, 1, X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extracti32x8_mask", CHECK_X86_LOWER_EXTRACT_LANE, 4, 64, false, 1, X86_FORM_VEXTRACTI32X8_YM256_Z_IMM8, 32,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extracti64x2_256_mask", CHECK_X86_LOWER_EXTRACT_LANE, 8, 32, false, 1, X86_FORM_VEXTRACTI64X2_XM128_Y_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extracti64x2_512_mask", CHECK_X86_LOWER_EXTRACT_LANE, 8, 64, false, 1, X86_FORM_VEXTRACTI64X2_XM128_Z_IMM8, 16,
+                                BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_extract128i256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 32, false, 1, X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_insertps128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 16, false, 2, X86_FORM_VINSERTPS_X_X_XM32_IMM8_EVEX, 0, 0)
     // #148's SSE shuffles, which stb_image, dr_libs and minimp3 reach through the SSE2, SSSE3 and SSE4.1 intrinsics, by
     // the existing families: shuffles, a byte shift and an align by an immediate (the instruction's whole byte, as clang
     // -O0's code takes it). The packs, multiplications, maximums, minimums and conversion those intrinsics reach too are
@@ -483,6 +623,65 @@
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_psrldqi128_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 16, true, 1, X86_FORM_VPSRLDQ_X_XM128_IMM8, 0, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufps", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 16, false, 2, X86_FORM_VSHUFPS_X_X_XM128_IMM8_EVEX, 0, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_palignr128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, 2, X86_FORM_VPALIGNR_X_X_XM128_IMM8_EVEX, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufpd", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 16, false, 2, X86_FORM_VSHUFPD_X_X_XM128_IMM8, 0, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pblendw128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 2, 16, false, 2, X86_FORM_VPBLENDW_X_X_XM128_IMM8, 0, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufd256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 32, false, 1, X86_FORM_VPSHUFD_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_permdi256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 32, false, 1, X86_FORM_VPERMQ_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_palignr256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, 2, X86_FORM_VPALIGNR_Y_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX2))
+    // #148: one vector or two by an immediate, at the widths the inventory lacked. The aligns of doublewords and quadwords
+    // (VALIGND, VALIGNQ: the immediate's low bits, which the instruction reads, as clang's code masks it); the shuffles of
+    // 128-bit lanes (VSHUFF32X4 to VSHUFI64X2), of floats and doubles (VSHUFPS, VSHUFPD) and of the words in each lane's
+    // quadwords (VPSHUFHW, VPSHUFLW); each lane's byte shifts (VPSLLDQ, VPSRLDQ: zeros past its 15 bytes, as clang's
+    // code gives) and byte align (VPALIGNR); the permutes by an immediate (VPERMPD, VPERMQ, VPERMILPS, VPERMILPD, and
+    // VEX's VPERM2F128 and VPERM2I128, whose bits 3 and 7 zero a lane, as clang's code does); and VEX's blends (VBLENDPS,
+    // VBLENDPD, VPBLENDD, VPBLENDW: b's element where the immediate's bit is set, VPBLENDW's byte each 128-bit lane's).
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_alignd128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 16, false, 2, X86_FORM_VALIGND_X_X_XM128_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_alignd256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VALIGND_Y_Y_YM256_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_alignq128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 16, false, 2, X86_FORM_VALIGNQ_X_X_XM128_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_alignq256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shuf_f32x4", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 64, false, 2, X86_FORM_VSHUFF32X4_Z_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shuf_f64x2", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, 2, X86_FORM_VSHUFF64X2_Z_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shuf_f32x4_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VSHUFF32X4_Y_Y_YM256_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shuf_f64x2_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VSHUFF64X2_Y_Y_YM256_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shuf_i32x4_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VSHUFI32X4_Y_Y_YM256_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shuf_i64x2_256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufpd256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VSHUFPD_Y_Y_YM256_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufpd512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, 2, X86_FORM_VSHUFPD_Z_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufps256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VSHUFPS_Y_Y_YM256_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufps512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 64, false, 2, X86_FORM_VSHUFPS_Z_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufhw256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 2, 32, false, 1, X86_FORM_VPSHUFHW_Y_YM256_IMM8_EVEX, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufhw512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 2, 64, false, 1, X86_FORM_VPSHUFHW_Z_ZM512_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshuflw256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 2, 32, false, 1, X86_FORM_VPSHUFLW_Y_YM256_IMM8_EVEX, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshuflw512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 2, 64, false, 1, X86_FORM_VPSHUFLW_Z_ZM512_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pslldqi256_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 32, true, 1, X86_FORM_VPSLLDQ_Y_YM256_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pslldqi512_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 64, true, 1, X86_FORM_VPSLLDQ_Z_ZM512_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_psrldqi256_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 32, true, 1, X86_FORM_VPSRLDQ_Y_YM256_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_psrldqi512_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 64, true, 1, X86_FORM_VPSRLDQ_Z_ZM512_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_palignr512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 64, false, 2, X86_FORM_VPALIGNR_Z_Z_ZM512_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_permdf256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 32, false, 1, X86_FORM_VPERMPD_Y_YM256_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_permdf512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 64, false, 1, X86_FORM_VPERMPD_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_permdi512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 64, false, 1, X86_FORM_VPERMQ_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermilpd", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 16, false, 1, X86_FORM_VPERMILPD_X_XM128_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermilpd256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 32, false, 1, X86_FORM_VPERMILPD_Y_YM256_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermilpd512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 64, false, 1, X86_FORM_VPERMILPD_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermilps", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 16, false, 1, X86_FORM_VPERMILPS_X_XM128_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermilps256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 32, false, 1, X86_FORM_VPERMILPS_Y_YM256_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermilps512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 64, false, 1, X86_FORM_VPERMILPS_Z_ZM512_IMM8, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vperm2f128_pd256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VPERM2F128_Y_Y_YM256_IMM8, 0,
+                                BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vperm2f128_ps256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VPERM2F128_Y_Y_YM256_IMM8, 0,
+                                BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vperm2f128_si256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VPERM2F128_Y_Y_YM256_IMM8, 0,
+                                BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_permti256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VPERM2I128_Y_Y_YM256_IMM8, 0,
+                                BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_blendpd", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 16, false, 2, X86_FORM_VBLENDPD_X_X_XM128_IMM8, 0, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_blendpd256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, 2, X86_FORM_VBLENDPD_Y_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_blendps", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 16, false, 2, X86_FORM_VBLENDPS_X_X_XM128_IMM8, 0, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_blendps256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VBLENDPS_Y_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pblendd128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 16, false, 2, X86_FORM_VPBLENDD_X_X_XM128_IMM8, 0, BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pblendd256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 32, false, 2, X86_FORM_VPBLENDD_Y_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pblendw256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 2, 32, false, 2, X86_FORM_VPBLENDW_Y_Y_YM256_IMM8, 0, BUSTER_X86_FEATURE(AVX2))
     // Two vectors' operations, the form's dest, a, b (or with `swap` dest, b, a: VPERMPS's and VPERMPD's indices first).
     BUSTER_CHECK_X86_BINARIES("__builtin_ia32_packssdw", VPACKSSDW, false, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_BINARIES("__builtin_ia32_packsswb", VPACKSSWB, false, BUSTER_CHECK_X86_BW)
@@ -1001,6 +1200,107 @@
     BUSTER_CHECK_X86_ONE("sha1nexte", BINARY, 4, 16, SHA1NEXTE_X_XM128, BUSTER_X86_FEATURE(SHA))
     BUSTER_CHECK_X86_ONE("sha256msg1", BINARY, 4, 16, SHA256MSG1_X_XM128, BUSTER_X86_FEATURE(SHA))
     BUSTER_CHECK_X86_ONE("sha256msg2", BINARY, 4, 16, SHA256MSG2_X_XM128, BUSTER_X86_FEATURE(SHA))
+    // #148: the rest of AVX-512's operations of floats by an immediate under a mask: the mantissas (VGETMANT, by the
+    // immediate's interval and sign control), the reductions (VREDUCE) and the roundings to a scale (VRNDSCALE) of a's
+    // elements into w; the ranges (VRANGE, by the immediate's selection and sign control) of a's and b's merged into w;
+    // the scalar ones of b's first element into w's, a's others, whose immediate follows their mask but getmant's; the
+    // classes of a's elements into a mask (VFPCLASS, a bit of the immediate per class); and the fix-ups (VFIXUPIMM) of
+    // b's elements by the responses c's elements choose, from a, merged into a or zeroed. A 64-byte one and a scalar one
+    // take the exceptions' suppression their last argument asks for. Each takes the immediate's whole byte.
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantps128_mask", MASK_UNARY, 4, 16, 1, VGETMANTPS_X_XM128_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantps256_mask", MASK_UNARY, 4, 32, 1, VGETMANTPS_Y_YM256_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantps512_mask", MASK_UNARY, 4, 64, 1, VGETMANTPS_Z_ZM512_IMM8, 0, VGETMANTPS_Z_Z_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantpd128_mask", MASK_UNARY, 8, 16, 1, VGETMANTPD_X_XM128_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantpd256_mask", MASK_UNARY, 8, 32, 1, VGETMANTPD_Y_YM256_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantpd512_mask", MASK_UNARY, 8, 64, 1, VGETMANTPD_Z_ZM512_IMM8, 0, VGETMANTPD_Z_Z_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantss_round_mask", MASK_MERGE, 4, 16, 2, VGETMANTSS_X_X_XM32_IMM8, 0, VGETMANTSS_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("getmantsd_round_mask", MASK_MERGE, 8, 16, 2, VGETMANTSD_X_X_XM64_IMM8, 0, VGETMANTSD_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reduceps128_mask", MASK_UNARY, 4, 16, 1, VREDUCEPS_X_XM128_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reduceps256_mask", MASK_UNARY, 4, 32, 1, VREDUCEPS_Y_YM256_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reduceps512_mask", MASK_UNARY, 4, 64, 1, VREDUCEPS_Z_ZM512_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VREDUCEPS_Z_Z_SAE_IMM8,
+                                       SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reducepd128_mask", MASK_UNARY, 8, 16, 1, VREDUCEPD_X_XM128_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reducepd256_mask", MASK_UNARY, 8, 32, 1, VREDUCEPD_Y_YM256_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reducepd512_mask", MASK_UNARY, 8, 64, 1, VREDUCEPD_Z_ZM512_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VREDUCEPD_Z_Z_SAE_IMM8,
+                                       SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reducess_mask", MASK_MERGE, 4, 16, 4, VREDUCESS_X_X_XM32_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VREDUCESS_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("reducesd_mask", MASK_MERGE, 8, 16, 4, VREDUCESD_X_X_XM64_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VREDUCESD_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rndscaleps_128_mask", MASK_UNARY, 4, 16, 1, VRNDSCALEPS_X_XM128_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rndscaleps_256_mask", MASK_UNARY, 4, 32, 1, VRNDSCALEPS_Y_YM256_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rndscalepd_128_mask", MASK_UNARY, 8, 16, 1, VRNDSCALEPD_X_XM128_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rndscalepd_256_mask", MASK_UNARY, 8, 32, 1, VRNDSCALEPD_Y_YM256_IMM8, 0, NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rndscaless_round_mask", MASK_MERGE, 4, 16, 4, VRNDSCALESS_X_X_XM32_IMM8, 0, VRNDSCALESS_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rndscalesd_round_mask", MASK_MERGE, 8, 16, 4, VRNDSCALESD_X_X_XM64_IMM8, 0, VRNDSCALESD_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangeps128_mask", MASK_MERGE, 4, 16, 2, VRANGEPS_X_X_XM128_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangeps256_mask", MASK_MERGE, 4, 32, 2, VRANGEPS_Y_Y_YM256_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangeps512_mask", MASK_MERGE, 4, 64, 2, VRANGEPS_Z_Z_ZM512_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VRANGEPS_Z_Z_Z_SAE_IMM8,
+                                       SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangepd128_mask", MASK_MERGE, 8, 16, 2, VRANGEPD_X_X_XM128_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangepd256_mask", MASK_MERGE, 8, 32, 2, VRANGEPD_Y_Y_YM256_IMM8, BUSTER_X86_FEATURE(AVX512DQ), NONE, NONE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangepd512_mask", MASK_MERGE, 8, 64, 2, VRANGEPD_Z_Z_ZM512_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VRANGEPD_Z_Z_Z_SAE_IMM8,
+                                       SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangess128_round_mask", MASK_MERGE, 4, 16, 4, VRANGESS_X_X_XM32_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VRANGESS_X_X_X_SAE_IMM8,
+                                       SAE)
+    BUSTER_CHECK_X86_ROUNDED_IMMEDIATE("rangesd128_round_mask", MASK_MERGE, 8, 16, 4, VRANGESD_X_X_XM64_IMM8, BUSTER_X86_FEATURE(AVX512DQ), VRANGESD_X_X_X_SAE_IMM8,
+                                       SAE)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclassps128_mask", CHECK_X86_LOWER_MASK_BINARY, 4, 16, false, false, 1, X86_FORM_VFPCLASSPS_K_XM128_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclassps256_mask", CHECK_X86_LOWER_MASK_BINARY, 4, 32, false, false, 1, X86_FORM_VFPCLASSPS_K_YM256_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclassps512_mask", CHECK_X86_LOWER_MASK_BINARY, 4, 64, false, false, 1, X86_FORM_VFPCLASSPS_K_ZM512_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclasspd128_mask", CHECK_X86_LOWER_MASK_BINARY, 8, 16, false, false, 1, X86_FORM_VFPCLASSPD_K_XM128_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclasspd256_mask", CHECK_X86_LOWER_MASK_BINARY, 8, 32, false, false, 1, X86_FORM_VFPCLASSPD_K_YM256_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclasspd512_mask", CHECK_X86_LOWER_MASK_BINARY, 8, 64, false, false, 1, X86_FORM_VFPCLASSPD_K_ZM512_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclassss_mask", CHECK_X86_LOWER_MASK_BINARY, 4, 16, false, false, 1, X86_FORM_VFPCLASSSS_K_XM32_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_fpclasssd_mask", CHECK_X86_LOWER_MASK_BINARY, 8, 16, false, false, 1, X86_FORM_VFPCLASSSD_K_XM64_IMM8,
+                          BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmps128_mask", 4, 16, VFIXUPIMMPS_X_X_XM128_IMM8, A, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmps128_maskz", 4, 16, VFIXUPIMMPS_X_X_XM128_IMM8, A_ZEROED, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmps256_mask", 4, 32, VFIXUPIMMPS_Y_Y_YM256_IMM8, A, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmps256_maskz", 4, 32, VFIXUPIMMPS_Y_Y_YM256_IMM8, A_ZEROED, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmps512_mask", 4, 64, VFIXUPIMMPS_Z_Z_ZM512_IMM8, A, VFIXUPIMMPS_Z_Z_Z_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmps512_maskz", 4, 64, VFIXUPIMMPS_Z_Z_ZM512_IMM8, A_ZEROED, VFIXUPIMMPS_Z_Z_Z_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmpd128_mask", 8, 16, VFIXUPIMMPD_X_X_XM128_IMM8, A, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmpd128_maskz", 8, 16, VFIXUPIMMPD_X_X_XM128_IMM8, A_ZEROED, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmpd256_mask", 8, 32, VFIXUPIMMPD_Y_Y_YM256_IMM8, A, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmpd256_maskz", 8, 32, VFIXUPIMMPD_Y_Y_YM256_IMM8, A_ZEROED, NONE, NONE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmpd512_mask", 8, 64, VFIXUPIMMPD_Z_Z_ZM512_IMM8, A, VFIXUPIMMPD_Z_Z_Z_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmpd512_maskz", 8, 64, VFIXUPIMMPD_Z_Z_ZM512_IMM8, A_ZEROED, VFIXUPIMMPD_Z_Z_Z_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmss_mask", 4, 16, VFIXUPIMMSS_X_X_XM32_IMM8, A, VFIXUPIMMSS_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmss_maskz", 4, 16, VFIXUPIMMSS_X_X_XM32_IMM8, A_ZEROED, VFIXUPIMMSS_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmsd_mask", 8, 16, VFIXUPIMMSD_X_X_XM64_IMM8, A, VFIXUPIMMSD_X_X_X_SAE_IMM8, SAE)
+    BUSTER_CHECK_X86_FIXUPIMM("fixupimmsd_maskz", 8, 16, VFIXUPIMMSD_X_X_XM64_IMM8, A_ZEROED, VFIXUPIMMSD_X_X_X_SAE_IMM8, SAE)
+    // #148: the compares of floats by a predicate, their immediate: into a vector of all-ones and zeros (VEX's VCMPPS,
+    // VCMPPD, VCMPSS and VCMPSD), into a mask under a mask (EVEX's, AVX512-FP16's half-precision ones too), and into an
+    // int (vcomisd and vcomiss: the first elements', as vcomish's). A packed one's predicate is clang's code's: the fcmp
+    // of the immediate's low 4 bits outside a constrained function (CHECK_X86_PREDICATE_FCMP). In a function with
+    // FENV_ACCESS keep the packed predicate and SAE, as clang's constrained intrinsic does; scalar ones keep the
+    // immediate's whole byte and the exceptions' suppression its rounding control asks for.
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps", BINARY_IMMEDIATE, 4, 16, VCMPPS_X_X_XM128_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd", BINARY_IMMEDIATE, 8, 16, VCMPPD_X_X_XM128_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps256", BINARY_IMMEDIATE, 4, 32, VCMPPS_Y_Y_YM256_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd256", BINARY_IMMEDIATE, 8, 32, VCMPPD_Y_Y_YM256_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpss", BINARY_IMMEDIATE, 4, 16, VCMPSS_X_X_XM32_IMM8, NONE, NONE, BYTE, BUSTER_X86_FEATURE(AVX), 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpsd", BINARY_IMMEDIATE, 8, 16, VCMPSD_X_X_XM64_IMM8, NONE, NONE, BYTE, BUSTER_X86_FEATURE(AVX), 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps128_mask", COMPARE, 4, 16, VCMPPS_K_X_XM128_IMM8, NONE, NONE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps256_mask", COMPARE, 4, 32, VCMPPS_K_Y_YM256_IMM8, NONE, NONE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps512_mask", COMPARE, 4, 64, VCMPPS_K_Z_ZM512_IMM8, VCMPPS_K_Z_Z_SAE_IMM8, SAE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd128_mask", COMPARE, 8, 16, VCMPPD_K_X_XM128_IMM8, NONE, NONE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd256_mask", COMPARE, 8, 32, VCMPPD_K_Y_YM256_IMM8, NONE, NONE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd512_mask", COMPARE, 8, 64, VCMPPD_K_Z_ZM512_IMM8, VCMPPD_K_Z_Z_SAE_IMM8, SAE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpss_mask", COMPARE, 4, 16, VCMPSS_K_X_XM32_IMM8, VCMPSS_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpsd_mask", COMPARE, 8, 16, VCMPSD_K_X_XM64_IMM8, VCMPSD_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("vcomiss", SCALAR_COMPARE, 4, 16, VCMPSS_K_X_XM32_IMM8, VCMPSS_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("vcomisd", SCALAR_COMPARE, 8, 16, VCMPSD_K_X_XM64_IMM8, VCMPSD_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph128_mask", COMPARE, 2, 16, VCMPPH_K_X_XM128_IMM8, NONE, NONE, FCMP, 0, BUSTER_CHECK_X86_FP16)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph256_mask", COMPARE, 2, 32, VCMPPH_K_Y_YM256_IMM8, NONE, NONE, FCMP, 0, BUSTER_CHECK_X86_FP16)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph512_mask", COMPARE, 2, 64, VCMPPH_K_Z_ZM512_IMM8, VCMPPH_K_Z_Z_SAE_IMM8, SAE, FCMP, 0, BUSTER_CHECK_X86_FP16)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpsh_mask", COMPARE, 2, 16, VCMPSH_K_X_XM16_IMM8, VCMPSH_K_X_X_SAE_IMM8, SAE, BYTE, 0, BUSTER_CHECK_X86_FP16)
     // The intersections' pairs of masks, stored by KMOVB (AVX512-DQ's) or, of 16 lanes, KMOVW.
     BUSTER_CHECK_X86_ONE("vp2intersect_d_128", INTERSECT, 4, 16, VP2INTERSECTD_K_X_XM128, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))
     BUSTER_CHECK_X86_ONE("vp2intersect_d_256", INTERSECT, 4, 32, VP2INTERSECTD_K_Y_YM256, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))

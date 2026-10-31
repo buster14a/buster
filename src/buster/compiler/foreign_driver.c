@@ -19,18 +19,18 @@
 // Named semantic symbols are selected from the final Link, after all maps. Each lane counts and then compacts its
 // ID range into one checked arena allocation; the ordered prefixes preserve IDs across lanes. The exact twin runs
 // on lane zero. All name loads are logically bounded, and the descriptor lives through writing. -s skips selection.
-// The lanes (#594): --lanes N runs N, at most one per CPU the process may run on; without it, the link runs on as many
-// as its objects' bytes pay for (foreign_driver_lanes), at most BUSTER_FOREIGN_DRIVER_LANES and one per CPU, which the
-// command line's first inputs decide: the calling thread opens them, as one lane's open phase would, until their
-// objects come to the bytes that pay for the most lanes (foreign_open_first), and the lanes open the rest. A link of a
-// few objects so runs on one lane, as fast as with --lanes 1, and starts no thread.
-// On more than one lane the command then starts one team (lane_team_start, #501): the resolution, the conversion and
-// the writer each run on its threads, which wait on futexes between them and keep their scratch arenas from one to the
-// next (lane_team_keep_scratch), rather than on a group of their own, and the release stage stops it. Without its
-// threads a link of --lanes fails before resolving, and one that chose its lanes runs on one.
+// The lanes (#594, #905): the command's session has the most lanes it may take, --lanes N's or
+// BUSTER_FOREIGN_DRIVER_LANES, at most one per CPU the process may run on, created once after its arguments and before
+// any input is opened. With --lanes the link runs on them; without it, on as many as its objects' bytes pay for
+// (foreign_driver_lanes), which the command line's first inputs decide: lane 0 opens them, as one lane's open phase
+// would, until their objects come to the bytes that pay for the most lanes (foreign_open_first), and the lanes open the
+// rest. A link of a few objects so runs on one lane, as fast as with --lanes 1; only --lanes 1 (or one CPU) creates no
+// thread. The resolution, the conversion and the writer are rounds of the link's flow (a LaneFlow) on the session's lanes,
+// which keep their scratch arenas from one to the next (#501) and stay parked when the link is done, for the process's
+// exit to end. A session whose threads can't start runs the link on one lane, --lanes or not.
 // --time reports each stage's wall time on standard error after the link, as wild's --time and mold's --perf do: the
-// first inputs' opening with their objects' bytes, the team's start, the resolution's phases (the slowest lane's), the
-// conversion, the optional passes and the writer's phases (lane 0's).
+// session's start, the first inputs' opening with their objects' bytes, the resolution's phases (the slowest lane's),
+// the conversion, the optional passes and the writer's phases (lane 0's).
 
 typedef struct ForeignDriver ForeignDriver;
 struct ForeignDriver
@@ -126,6 +126,8 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
     uint32_t count = 1;
     bool pie = false;
     bool static_link = false;
+    // Scoped -static is only an input-search control; foreign_arguments owns its saved flags and underflow check.
+    uint32_t state_depth = 0;
     bool shared = false;
     bool no_interpreter = false;
     for (int i = 0; valid && i < argc; i += 1)
@@ -184,9 +186,22 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             pie = true;
         }
+        else if (strcmp(argument, "--push-state") == 0 || strcmp(argument, "--pop-state") == 0)
+        {
+            if (strcmp(argument, "--push-state") == 0)
+            {
+                state_depth += 1;
+            }
+            else if (state_depth != 0)
+            {
+                state_depth -= 1;
+            }
+            inputs[count] = argv[i];
+            count += 1;
+        }
         else if (strcmp(argument, "-static") == 0)
         {
-            static_link = true;
+            static_link = static_link || state_depth == 0;
             inputs[count] = argv[i];
             count += 1;
         }
@@ -519,9 +534,9 @@ static void foreign_driver_write_lane(void* argument)
 typedef enum ForeignDriverStage
 {
     FOREIGN_DRIVER_STAGE_ARGUMENTS,
+    FOREIGN_DRIVER_STAGE_LANES,
     FOREIGN_DRIVER_STAGE_INTERPRETER,
     FOREIGN_DRIVER_STAGE_OPEN,
-    FOREIGN_DRIVER_STAGE_LANES,
     FOREIGN_DRIVER_STAGE_RESOLVE,
     FOREIGN_DRIVER_STAGE_CONVERT,
     FOREIGN_DRIVER_STAGE_DEDUP_UNWIND,
@@ -549,7 +564,8 @@ static uint32_t foreign_driver_lanes(uint64_t bytes, uint32_t most)
 
 // The CPUs this process may run on, at least 1. Lanes past them share CPUs, and each of their syncs waits for a lane the
 // scheduler has set aside: on the 9700X, eight lanes on one CPU took a hello world's link from 0.6 ms to 342 ms, each
-// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU.
+// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU, and without --lanes one per
+// core (BUSTER_LANE_SESSION_PER_CORE).
 static uint32_t foreign_driver_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -583,19 +599,20 @@ static void foreign_driver_resolve_phases(const Foreign* foreign, uint64_t* slow
     }
 }
 
-// The report: the whole and its lanes, each stage, the first inputs' objects' `bytes`, which with `chosen` chose the
-// lanes, the resolution's phases (`resolve`, the slowest lane's time in each), the conversion's (`convert`,
-// foreign_link_build_mode's) and the writer's, from lane 0's timestamps; the writer's first part is the lanes' dispatch
-// and the symbol selection, up to executable_write's own start. `ends` holds each stage's end, `begin` the start; a
-// stage that didn't run ends where the one before did.
-static void foreign_driver_report(uint32_t lanes, bool chosen, uint64_t bytes, const uint64_t* resolve, const uint64_t* convert, uint64_t begin, const uint64_t* ends,
-                                  uint64_t write_begin, const ExecutableResult* written)
+// The report: the whole and its lanes, each stage, the session's lanes (`session`, fewer than the `asked` after a failed
+// start, #905), the first inputs' objects' `bytes`, which with `chosen` chose the lanes, the resolution's phases
+// (`resolve`, the slowest lane's time in each), the conversion's (`convert`, foreign_link_build_mode's) and the
+// writer's, from lane 0's timestamps; the writer's first part is the lanes' dispatch and the symbol selection, up to
+// executable_write's own start. `ends` holds each stage's end, `begin` the start; a stage that didn't run ends where the
+// one before did.
+static void foreign_driver_report(uint32_t lanes, uint32_t session, uint32_t asked, bool chosen, uint64_t bytes, const uint64_t* resolve, const uint64_t* convert,
+                                  uint64_t begin, const uint64_t* ends, uint64_t write_begin, const ExecutableResult* written)
 {
     static const char* const stages[FOREIGN_DRIVER_STAGES] = {
         "arguments",
+        "lanes",
         "interpreter",
         "open",
-        "lanes",
         "resolve",
         "convert",
         "dedup-unwind",
@@ -639,6 +656,10 @@ static void foreign_driver_report(uint32_t lanes, bool chosen, uint64_t bytes, c
     for (uint32_t stage = 0; stage < FOREIGN_DRIVER_STAGES; stage += 1)
     {
         fprintf(stderr, "  %-13s %9.3f ms", stages[stage], (double)(ends[stage] - previous) / 1e6);
+        if (stage == FOREIGN_DRIVER_STAGE_LANES)
+        {
+            fprintf(stderr, " session %u of %u", session, asked);
+        }
         if (stage == FOREIGN_DRIVER_STAGE_OPEN && chosen)
         {
             fprintf(stderr, " objects %llu bytes", (unsigned long long)bytes);
@@ -667,33 +688,48 @@ static void foreign_driver_report(uint32_t lanes, bool chosen, uint64_t bytes, c
     }
 }
 
-static int run_foreign_link(int argc, char** argv)
+// A link's command as its session's flow runs it (#905): its arguments, parsed before the session starts, the most
+// lanes it takes, when its arguments and its session's start ended, the session's lanes, and its exit status.
+typedef struct ForeignDriverRun ForeignDriverRun;
+struct ForeignDriverRun
 {
-    const uint64_t begin = foreign_driver_now();
+    uint64_t begin;
+    uint64_t arguments_end;
+    uint64_t lanes_end;
+    Arena arena;
+    Arena names;
+    ForeignDriver driver;
+    bool succeeded;
+    uint32_t most;
+    uint32_t session_lanes;
+    // The link's flow of rounds (#905): the resolution's, the conversion's and the write's (ForeignFlowRound).
+    LaneFlow flow;
+    int result;
+};
+
+// The link, on lane 0 of its session, whose other lanes serve the stages' lane_run regions.
+static int foreign_driver_link(ForeignDriverRun* run)
+{
+    const uint64_t begin = run->begin;
     uint64_t ends[FOREIGN_DRIVER_STAGES] = { 0 };
     uint64_t write_begin = 0;
     ExecutableResult written = { 0 };
-    Arena arena = arena_reserve(1ull << 36);
-    Arena names = arena_reserve(1ull << 34);
-    ForeignDriver driver = { 0 };
-    bool succeeded = arena.base != 0 && names.base != 0 && foreign_driver_arguments(&driver, argc, argv, &arena);
+    Arena arena = run->arena;
+    Arena names = run->names;
+    ForeignDriver driver = run->driver;
+    bool succeeded = run->succeeded;
     Foreign foreign = { 0 };
     Runtime runtime = { 0 };
     ForeignLink converted = { 0 };
     ForeignUnwindDedupLink deduplicated = { 0 };
     uint64_t convert[FOREIGN_LINK_PHASES] = { 0 };
-    if (!succeeded || driver.help)
-    {
-        foreign_driver_usage();
-    }
-    // The most lanes the link takes: --lanes's, or without it BUSTER_FOREIGN_DRIVER_LANES, of which its objects' bytes
-    // then decide how many pay; at most one per CPU.
-    const uint32_t cpus = foreign_driver_cpus();
-    const uint32_t asked = driver.lanes != 0 ? driver.lanes : BUSTER_FOREIGN_DRIVER_LANES;
-    const uint32_t most = asked < cpus ? asked : cpus;
+    // The most lanes the link takes, which its session has (one if its threads couldn't start): --lanes's, or without it
+    // BUSTER_FOREIGN_DRIVER_LANES, of which its objects' bytes then decide how many pay; at most one per CPU.
+    const uint32_t most = run->most < run->session_lanes ? run->most : run->session_lanes;
     uint32_t lanes = most;
     uint64_t object_bytes = 0;
-    ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = foreign_driver_now();
+    ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = run->arguments_end;
+    ends[FOREIGN_DRIVER_STAGE_LANES] = run->lanes_end;
     if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
     {
         succeeded = runtime_discover_interpreter(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
@@ -716,34 +752,11 @@ static int run_foreign_link(int argc, char** argv)
         }
     }
     ends[FOREIGN_DRIVER_STAGE_OPEN] = foreign_driver_now();
-    // The command's lanes, which every stage's lane_run then takes (see the file's comment). One lane needs none, nor
-    // the team's room, 34 KB that the stack would otherwise zero, which the arena gives only to more. Without --lanes, a
-    // link whose threads can't start runs on one lane, as it would have below the lanes' bytes.
-    LaneTeam* team = 0;
-    if (succeeded && !driver.help && lanes > 1)
-    {
-        team = BUSTER_ARENA_PUSH_ARRAY(&arena, LaneTeam, 1);
-        if (team != 0)
-        {
-            *team = (LaneTeam){ 0 };
-        }
-        const bool started = team != 0 && lane_team_start(team, lanes, 0);
-        if (started)
-        {
-            // The stages follow one another: each finds the scratch pages the last one touched (#501).
-            lane_team_keep_scratch(team);
-        }
-        else if (driver.lanes == 0)
-        {
-            lanes = 1;
-        }
-        else
-        {
-            fprintf(stderr, "link-foreign: cannot start linker workers\n");
-            succeeded = false;
-        }
-    }
-    ends[FOREIGN_DRIVER_STAGE_LANES] = foreign_driver_now();
+    // The session's lanes, which lane 1 has been starting meanwhile (#905): lane 0 learns how they started
+    // (lane_flow_lanes), and the resolution, the conversion and the write are rounds of the link's flow on them.
+    const uint32_t flow_lanes = lane_flow_lanes(&run->flow);
+    lanes = lanes < flow_lanes ? lanes : flow_lanes;
+    foreign.flow = &run->flow;
     if (succeeded && !driver.help)
     {
         foreign_run_lanes(&foreign, lanes, 0);
@@ -860,7 +873,10 @@ static int run_foreign_link(int argc, char** argv)
             .strip_all = driver.strip_all,
             .symbols_ready = true,
         };
-        succeeded = lane_run(lanes, foreign_driver_write_lane, &write, 0) && write.succeeded;
+        lane_flow_round_begin(&run->flow, FOREIGN_FLOW_WRITE, &write, lanes);
+        foreign_driver_write_lane(&write);
+        lane_flow_round_end(&run->flow);
+        succeeded = write.succeeded;
         written = write.result;
         if (!succeeded)
         {
@@ -878,7 +894,6 @@ static int run_foreign_link(int argc, char** argv)
     // The resolution's lane states, which foreign_release frees, give their phases' times first.
     uint64_t resolve[FOREIGN_PHASES];
     foreign_driver_resolve_phases(&foreign, resolve);
-    lane_team_stop(team);
     foreign_release(&foreign);
     runtime_release(&runtime);
     arena_release(&names);
@@ -886,7 +901,83 @@ static int run_foreign_link(int argc, char** argv)
     ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
     if (time)
     {
-        foreign_driver_report(lanes, driver.lanes == 0, object_bytes, resolve, convert, begin, ends, write_begin, &written);
+        // The session's lanes, which lane 0 knows since it began serving them, and those it asked for: by default one per
+        // core, at most.
+        const uint32_t asked = lane_session_current() != NULL ? lane_session_asked() : run->most;
+        foreign_driver_report(lanes, lane_session_settle(), asked < run->most ? asked : run->most, driver.lanes == 0, object_bytes, resolve, convert, begin, ends,
+                              write_begin, &written);
     }
     return succeeded ? 0 : 1;
+}
+
+// The link's flow, which every lane of its session runs (#905), a LaneFlow: lane 0 links alone, and each of its stages'
+// wide parts is a round, which lane 0 runs its part of itself and the other lanes follow by its kind (ForeignFlowRound).
+static void foreign_driver_flow(void* argument)
+{
+    ForeignDriverRun* run = argument;
+    if (lane_index() == 0)
+    {
+        // The lanes asked for, which lane 1 starts while lane 0 opens the first inputs: lane 0 learns how they started
+        // before the resolution (foreign_driver_link).
+        run->session_lanes = lane_count();
+        run->lanes_end = foreign_driver_now();
+        lane_flow_begin(&run->flow);
+        run->result = foreign_driver_link(run);
+        lane_flow_end(&run->flow);
+    }
+    else
+    {
+        void* operation = 0;
+        for (uint32_t round = lane_flow_next(&run->flow, &operation); round != FOREIGN_FLOW_END; round = lane_flow_next(&run->flow, &operation))
+        {
+            if (operation != 0)
+            {
+                switch ((ForeignFlowRound)round)
+                {
+                    case FOREIGN_FLOW_RESOLVE: foreign_lane_main(operation); break;
+                    case FOREIGN_FLOW_CONVERT: foreign_link_lane(operation); break;
+                    case FOREIGN_FLOW_WRITE: foreign_driver_write_lane(operation); break;
+                    case FOREIGN_FLOW_END: break;
+                }
+            }
+            lane_widen();
+        }
+    }
+}
+
+// The command's arguments, then its session, before any input is opened (#905): as many lanes as it may take, without
+// --lanes at most one per core of its CPUs, which lane 1 counts while lane 0 opens the first inputs
+// (BUSTER_LANE_SESSION_PER_CORE), and which stay parked for the process's exit once the link is done. A session whose
+// threads can't start runs the link on one lane, --lanes or not; --time reports the lanes it ran on.
+static int run_foreign_link(int argc, char** argv)
+{
+    ForeignDriverRun run = { .begin = foreign_driver_now(), .result = 1 };
+    run.arena = arena_reserve(1ull << 36);
+    run.names = arena_reserve(1ull << 34);
+    run.succeeded = run.arena.base != 0 && run.names.base != 0 && foreign_driver_arguments(&run.driver, argc, argv, &run.arena);
+    if (!run.succeeded || run.driver.help)
+    {
+        foreign_driver_usage();
+    }
+    const uint32_t cpus = foreign_driver_cpus();
+    const uint32_t asked = run.driver.lanes != 0 ? run.driver.lanes : BUSTER_FOREIGN_DRIVER_LANES;
+    run.most = asked < cpus ? asked : cpus;
+    run.arguments_end = foreign_driver_now();
+    // The session in an arena of its own, in base pages (a static one's first touch faults in a huge page of .bss),
+    // which the process's exit releases with the lanes parked on it.
+    Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
+    LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
+    const uint32_t per_core = run.driver.lanes == 0 ? BUSTER_LANE_SESSION_PER_CORE : 0;
+    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_PARK_AT_END | per_core;
+    if (session == NULL || lane_session_run(session, run.succeeded && !run.driver.help ? run.most : 1, NULL, foreign_driver_flow, &run, flags) == 0)
+    {
+        run.session_lanes = 1;
+        run.lanes_end = foreign_driver_now();
+        const Lane group = lane_alone();
+        lane_flow_begin(&run.flow);
+        run.result = foreign_driver_link(&run);
+        lane_flow_end(&run.flow);
+        lane_restore(group);
+    }
+    return run.result;
 }

@@ -63,20 +63,22 @@ struct X86IntrinsicCase
 // VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads, AVX10.2's intrinsics of AVX-VNNI-INT8's and
 // AVX-VNNI-INT16's dot products (masked, merged and zeroed, and at 64 bytes), SHA512's, SM3's and SM4's; then AVX10.2's
 // saturating conversions, bf16 operations and compares, conversions to and from 8-bit floats and of two vectors of
-// floats to halves, and dot products of halves, MOVRS's vector loads and AVX512-BMM's products of bit matrices; then the
-// system instructions of extensions no host of the tests has, or whose effects are on the machine's state (a
-// transaction's, the user interrupts', the tiles' configuration, MSRs): RAO-INT's, CLDEMOTE, SERIALIZE, UINTR's,
-// PTWRITE, UMONITOR, LWP's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST, TSXLDTRK's, AMX-TILE's
-// configuration's, ENQCMD's and USER_MSR's, whose effects the traces compare in order with their stores; and the
-// leaves' (c_builtin_x86_helpers.c): Key Locker's, whose aesenc and aesdec ones branch on ZF, WAITPKG's UMWAIT and
+// floats to halves, dot products of halves and sums of absolute differences of 64 bytes' blocks (#148: the probe's
+// function of _mm512_mpsadbw_epu8, a macro of a constant immediate, and AVX512-FP16's compares, by predicates whose
+// operands clang's code swaps and with the exceptions' suppression), MOVRS's vector loads and AVX512-BMM's products of
+// bit matrices; then the system instructions of extensions no host of the tests has, or whose effects are on the
+// machine's state (a transaction's, the user interrupts', the tiles' configuration, MSRs): RAO-INT's, CLDEMOTE,
+// SERIALIZE, UINTR's, PTWRITE, UMONITOR, LWP's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST, TSXLDTRK's,
+// AMX-TILE's configuration's, ENQCMD's and USER_MSR's, whose effects the traces compare in order with their stores; and
+// the leaves' (c_builtin_x86_helpers.c): Key Locker's, whose aesenc and aesdec ones branch on ZF, WAITPKG's UMWAIT and
 // TPAUSE, and RTM's XBEGIN, whose paths the traces follow. clang's code of the aesenc and aesdec ones stores the result
 // where ZF is 1 and zeros where it is 0, the other way from Intel's manual, clang's own keylockerintrin.h and GCC's
 // code, which the compiler follows: their cases compare clang's paths with their conditions negated (inverted). Last,
-// AVX10.2's bf16 arithmetic, square roots and fused multiply-adds, and some of their masked forms: in a unit whose target
-// hasn't AVX10.2, znver5's, clang computes the arithmetic in float, its excess precision, and folds a negated operand of
-// a multiply-add into the form. tools/ci/correctness.tests runs the command again with --march diamondrapids, whose
-// target has AVX10.2, and --option -mno-apxf, on tests/x86-intrinsics/avx10.2-units.txt's cases, whose arithmetic is then
-// AVX10.2's own.
+// AVX10.2's bf16 arithmetic, square roots and fused multiply-adds, and some of their masked forms: in a unit whose
+// target hasn't AVX10.2, znver5's, clang computes the arithmetic in float, its excess precision, and folds a negated
+// operand of a multiply-add into the form. tools/ci/correctness.tests runs the command again with --march
+// diamondrapids, whose target has AVX10.2, and --option -mno-apxf, on tests/x86-intrinsics/avx10.2-units.txt's cases,
+// whose arithmetic is then AVX10.2's own.
 static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_add_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_mask_add_epi32)
@@ -89,6 +91,9 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_V(_mm_mask_store_sbh)
     BUSTER_X86_INTRINSIC_X(buster_intrinsic_sub_ab)
     BUSTER_X86_INTRINSIC_X(buster_intrinsic_sub_ba)
+    BUSTER_X86_INTRINSIC_X(buster_intrinsic_fshl_bytes)
+    BUSTER_X86_INTRINSIC_X(buster_intrinsic_fshr_bytes)
+    BUSTER_X86_INTRINSIC_X(_mm_rot_epi8)
     BUSTER_X86_INTRINSIC_X(_mm_frcz_ps)
     BUSTER_X86_INTRINSIC_X(_mm_frcz_pd)
     BUSTER_X86_INTRINSIC_X(_mm_frcz_ss)
@@ -459,6 +464,11 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_Z(_mm512_dpph_ps)
     BUSTER_X86_INTRINSIC_Y(_mm256_dpph_ps)
     BUSTER_X86_INTRINSIC_X(_mm_dpph_ps)
+    BUSTER_X86_INTRINSIC_Z(buster_intrinsic_mpsadbw512)
+    BUSTER_X86_INTRINSIC_B(buster_intrinsic_cmp_ph128)
+    BUSTER_X86_INTRINSIC_H(buster_intrinsic_mask_cmp_ph256)
+    BUSTER_X86_INTRINSIC_I(buster_intrinsic_cmp_round_ph512)
+    BUSTER_X86_INTRINSIC_B(buster_intrinsic_mask_cmp_round_sh)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi16)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi32)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi64)
@@ -576,9 +586,26 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
 #undef BUSTER_X86_INTRINSIC_V
 #undef BUSTER_X86_INTRINSIC_INVERTED_B
 
-// The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order.
+// The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order, byte
+// funnel shifts of distinct halves, alongside _mm_rot_epi8's identical halves, and a macro's intrinsic of an immediate
+// (AVX10.2's sums of absolute differences of 64 bytes' blocks, AVX512-FP16's compares), whose address a case takes
+// through a function.
 static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_sub_ab(__m128i a, __m128i b) { return _mm_sub_epi32(a, b); }\n"
-                                                    "__m128i buster_intrinsic_sub_ba(__m128i a, __m128i b) { return _mm_sub_epi32(b, a); }\n";
+                                                    "__m128i buster_intrinsic_sub_ba(__m128i a, __m128i b) { return _mm_sub_epi32(b, a); }\n"
+                                                    "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshl_bytes(__m128i a,__m128i b,__m128i c)"
+                                                    "{return (__m128i)__builtin_elementwise_fshl((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n"
+                                                    "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshr_bytes(__m128i a,__m128i b,__m128i c)"
+                                                    "{return (__m128i)__builtin_elementwise_fshr((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n"
+                                                    "__attribute__((target(\"avx10.2\"))) __m512i buster_intrinsic_mpsadbw512(__m512i a,__m512i b)"
+                                                    "{return _mm512_mpsadbw_epu8(a,b,0x2d);}\n"
+                                                    "__attribute__((target(\"avx512fp16,avx512vl\"))) __mmask8 buster_intrinsic_cmp_ph128(__m128h a,__m128h b)"
+                                                    "{return _mm_cmp_ph_mask(a,b,_CMP_GT_OQ);}\n"
+                                                    "__attribute__((target(\"avx512fp16,avx512vl\"))) __mmask16 buster_intrinsic_mask_cmp_ph256(__mmask16 k,__m256h a,"
+                                                    "__m256h b){return _mm256_mask_cmp_ph_mask(k,a,b,_CMP_NGE_UQ);}\n"
+                                                    "__attribute__((target(\"avx512fp16\"))) __mmask32 buster_intrinsic_cmp_round_ph512(__m512h a,__m512h b)"
+                                                    "{return _mm512_cmp_round_ph_mask(a,b,_CMP_NEQ_US,_MM_FROUND_NO_EXC);}\n"
+                                                    "__attribute__((target(\"avx512fp16\"))) __mmask8 buster_intrinsic_mask_cmp_round_sh(__mmask8 k,__m128h a,__m128h b)"
+                                                    "{return _mm_mask_cmp_round_sh_mask(k,a,b,_CMP_GE_OS,_MM_FROUND_NO_EXC);}\n";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The objects
@@ -2191,6 +2218,17 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
             trace->flags_boolean = 0;
         }
     }
+    else if ((number == X86_FORM_VPCMPEQD_X_X_XM128 || number == X86_FORM_VPCMPEQD_Y_Y_YM256) && written >= 0 &&
+             instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->vvvv == instruction->rm)
+    {
+        // An integer equality compare with itself gives all ones, independent of the register's previous value.
+        // Clang materializes fshl's byte -1 count this way; the compiler loads the same repeated-byte constant.
+        uint8_t ones[32];
+        memset(ones, 255, sizeof(ones));
+        const uint32_t count = operands[written].bytes;
+        x86_intrinsic_fill(bytes, count, x86_intrinsic_constant(trace, ones, count));
+        x86_intrinsic_write(trace, &operands[written], bytes, count, BUSTER_X86_REST_ZERO, false);
+    }
     else if (select)
     {
         // A masked move's source, or a blend's rm, where the mask's bits are set, and elsewhere the destination's old
@@ -3077,7 +3115,7 @@ static bool x86_intrinsic_test_node_text(void)
     bool valid = end != 0;
     if (valid)
     {
-        X86IntrinsicNode nodes[8] = { 0 };
+        X86IntrinsicNode nodes[32] = { 0 };
         X86IntrinsicTrace trace = { .nodes = nodes, .text = (char*)end - BUSTER_X86_INTRINSIC_TEXT };
         memcpy(end - 10, "v0:16v0:16", 10);
         nodes[0] = (X86IntrinsicNode){ .text = BUSTER_X86_INTRINSIC_TEXT - 10, .length = 5 };
@@ -3115,6 +3153,31 @@ static bool x86_intrinsic_test_node_text(void)
                 valid = action == X86_INTRINSIC_NEXT && !trace.failed && result > BUSTER_X86_INTRINSIC_ZERO && result < trace.node_count &&
                         nodes[result].length == sizeof(expected) - 1 &&
                         memcmp(trace.text + nodes[result].text, expected, sizeof(expected) - 1) == 0 && valid;
+            }
+        }
+        // Both VEX widths' all-ones idiom, and a nonidentical-source control that must remain an expression.
+        for (uint32_t wide = 0; wide < 2; wide += 1)
+        {
+            for (uint32_t same = 0; same < 2; same += 1)
+            {
+                memset(nodes, 0, sizeof(nodes));
+                trace = (X86IntrinsicTrace){ .nodes = nodes, .text = (char*)end - BUSTER_X86_INTRINSIC_TEXT };
+                const uint32_t a = x86_intrinsic_named(&trace, X86_INTRINSIC_ARGUMENT, 64, "v0");
+                const uint32_t b = x86_intrinsic_named(&trace, X86_INTRINSIC_ARGUMENT, 64, "v1");
+                x86_intrinsic_fill(trace.vector[0], 64, a);
+                x86_intrinsic_fill(trace.vector[1], 64, b);
+                const X86Decoded equal = { .instruction = { .form = wide != 0 ? X86_FORM_VPCMPEQD_Y_Y_YM256 : X86_FORM_VPCMPEQD_X_X_XM128,
+                                                            .reg = 2, .vvvv = 0, .rm = same != 0 ? 0 : 1, .mode = BUSTER_X86_REGISTER_DIRECT } };
+                uint64_t target = 0;
+                const X86IntrinsicAction action = x86_intrinsic_step(&trace, &equal, (X86IntrinsicPlaceInCode){ 0 }, &target);
+                const uint32_t count = wide != 0 ? 32 : 16;
+                valid = action == X86_INTRINSIC_NEXT && !trace.failed && valid;
+                for (uint32_t j = 0; j < 64; j += 1)
+                {
+                    uint8_t byte = 0;
+                    const bool constant = x86_intrinsic_constant_byte(&trace, trace.vector[2][j], &byte);
+                    valid = (j >= count ? constant && byte == 0 : same != 0 ? constant && byte == 255 : !constant) && valid;
+                }
             }
         }
         munmap(end + (uint64_t)page_size - mapped, mapped);

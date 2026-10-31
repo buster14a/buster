@@ -101,6 +101,7 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_REGPARM,
     CHECK_ATTRIBUTE_ALIGN_VALUE,
     CHECK_ATTRIBUTE_NO_BUILTIN,
+    CHECK_ATTRIBUTE_MUSTTAIL,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -316,6 +317,9 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "naked", CHECK_ATTRIBUTE_NAKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_stack_protector", CHECK_ATTRIBUTE_NO_STACK_PROTECTOR, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "fallthrough", CHECK_ATTRIBUTE_FALLTHROUGH, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
+    // clang::'s scope.
+    { "musttail", CHECK_ATTRIBUTE_MUSTTAIL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "unsequenced", CHECK_ATTRIBUTE_UNSEQUENCED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "reproducible", CHECK_ATTRIBUTE_REPRODUCIBLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
 };
@@ -758,7 +762,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const bool named = token == last && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] != 0;
         const bool literal = token == last && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
         const uint32_t name = named ? parser->tokens.names[token] : 0;
-        const uint32_t handle = named ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+        const uint32_t handle = named ? check_input_library_binding(reader, name, token) : 0;
         valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
         reader->output->resource |= named && !valid;
         error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
@@ -809,7 +813,63 @@ static bool check_input_attribute_late_kind(const CheckInputAttribute* attribute
     const CheckInputAttributeKind kind = attribute->kind;
     const bool standard_noreturn = kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword &&
                                   attribute->first == attribute->name_token;
-    return kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR || standard_noreturn;
+    return kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
+           kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_RETAIN || kind == CHECK_ATTRIBUTE_GNU_INLINE || standard_noreturn;
+}
+
+// One bit per late attribute class. Standard and GNU noreturn are different classes.
+static uint8_t check_input_attribute_late_bit(const CheckInputAttribute* attribute)
+{
+    uint8_t bit = 0;
+    if (check_input_attribute_late_kind(attribute))
+    {
+        switch (attribute->kind)
+        {
+            case CHECK_ATTRIBUTE_WEAK: bit = 1u << 0; break;
+            case CHECK_ATTRIBUTE_CONSTRUCTOR: bit = 1u << 1; break;
+            case CHECK_ATTRIBUTE_DESTRUCTOR: bit = 1u << 2; break;
+            case CHECK_ATTRIBUTE_USED: bit = 1u << 3; break;
+            case CHECK_ATTRIBUTE_RETAIN: bit = 1u << 4; break;
+            case CHECK_ATTRIBUTE_GNU_INLINE: bit = 1u << 5; break;
+            case CHECK_ATTRIBUTE_NORETURN: bit = 1u << 6; break;
+            default: break;
+        }
+    }
+    return bit;
+}
+
+static uint8_t check_input_attribute_late_mask(const CheckInputAttributes* attributes, uint8_t function_flags)
+{
+    uint8_t mask = 0;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool missing_inline = attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE && (function_flags & CHECK_INPUT_FUNCTION_INLINE) == 0;
+        mask |= !attribute->ignored && !missing_inline ? check_input_attribute_late_bit(attribute) : 0;
+    }
+    return mask;
+}
+
+// clang's musttail attribute (#147) as its attribute's reading has it, clang's errors at the attribute (its scope's name
+// for clang::musttail): one of arguments, which it takes none of, and one of its place anywhere but a statement's
+// attributes (CheckInputReader.statement_attributes), a declaration's (a label's among them). Its statement is a return's,
+// or another's (check_input_statement_attributes). Whether it is valid; an error reported is the attributes' (no second
+// one for them).
+static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const bool arguments = attribute->argument_end > attribute->argument_first;
+    const bool valid = !arguments && reader->statement_attributes;
+    if (!valid)
+    {
+        check_input_report(reader, attribute->first, arguments ? CHECK_INPUT_MUSTTAIL_ARGUMENTS : CHECK_INPUT_MUSTTAIL_DECLARATION);
+        if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+        {
+            attributes->error = arguments ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : CHECK_ATTRIBUTE_ERROR_SUBJECT;
+            attributes->error_first = attribute->first;
+            attributes->error_end = attribute->end;
+        }
+    }
+    return valid;
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
@@ -820,10 +880,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     bool valid = i < end && parser->tokens.names[i] != 0;
     bool namespace_known = true;
     bool scoped = false;
+    bool clang_scope = false;
     if (valid && standard && i + 2 < end && parser->tokens.kinds[i + 1] == PARSE_KIND_COLON && parser->tokens.kinds[i + 2] == PARSE_KIND_COLON)
     {
         const String8 scope = check_input_attribute_name(reader, parser->tokens.names[i]);
-        namespace_known = check_input_attribute_equal(scope, "gnu") || check_input_attribute_equal(scope, "clang");
+        clang_scope = check_input_attribute_equal(scope, "clang");
+        namespace_known = check_input_attribute_equal(scope, "gnu") || clang_scope;
         scoped = true;
         i += 3;
         attribute.name_token = i;
@@ -849,6 +911,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                                        check_input_attribute_equal(name, "unsequenced") || check_input_attribute_equal(name, "reproducible");
             rule = standard_name ? rule : 0;
         }
+        // musttail is clang's own: GNU's spelling and clang::'s, but no gnu::musttail, which clang ignores as an unknown
+        // attribute and this refuses as one.
+        rule = rule != 0 && rule->kind == CHECK_ATTRIBUTE_MUSTTAIL && scoped && !clang_scope ? 0 : rule;
         attribute.argument_first = i;
         attribute.argument_end = i;
         if (i < end && parser->tokens.kinds[i] == PARSE_KIND_L_PAREN)
@@ -866,9 +931,19 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
-            reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK;
-            reader->late_attributes |= check_input_attribute_late_kind(&attribute);
-            valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
+            reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_WEAKREF;
+            const bool late_kind = check_input_attribute_late_kind(&attribute);
+            reader->late_attributes |= late_kind;
+            // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
+            check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
+            if (rule->kind == CHECK_ATTRIBUTE_MUSTTAIL)
+            {
+                valid = check_input_attribute_musttail(reader, attributes, &attribute);
+            }
+            else
+            {
+                valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
+            }
         }
         else if (valid)
         {
@@ -1285,39 +1360,102 @@ static TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttr
     return attributes == 0 || attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? result : 0;
 }
 
-// clang's no_builtin is permitted on a function's definition alone: on another function's declaration it is an error at
-// its name, and on anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as
-// written, as an argument that names no library function is, which clang warns about and ignores: no code here makes a
-// call of a library function that the source doesn't. Whether the declaration's attributes are valid.
-static bool check_input_attribute_definition(CheckInputReader* reader, CheckInputAttributes* attributes, bool function, bool definition)
+// The declaration whose attributes check_input_attribute_definition checks: its name's token; whether it is a function's
+// (not a typedef's), a typedef's, and at file scope; whether it defines a function (a body) or a variable (an
+// initializer, or at file scope a tentative definition with external linkage); and whether a variable has external
+// linkage.
+typedef struct CheckInputAttributeSubject CheckInputAttributeSubject;
+struct CheckInputAttributeSubject
+{
+    uint32_t name;
+    bool function;
+    bool is_typedef;
+    bool file;
+    bool function_definition;
+    bool variable_definition;
+    bool external;
+};
+
+// One pass over a declaration's attributes, for those whose place on a definition matters. clang's no_builtin is
+// permitted on a function's definition alone: on another function's declaration it is an error at its name, and on
+// anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as written, as an
+// argument that names no library function is, which clang warns about and ignores: no code here makes a call of a
+// library function that the source doesn't.
+// GNU's alias, ifunc and weakref attributes (#147), as clang's Sema takes them, in their order: an alias (or a weakref's
+// target, which clang makes one) on a definition is an error at the attribute, "definition 'f' cannot also be an alias";
+// and an alias, ifunc or weakref target after another that makes the declaration a definition (hasDefiningAttr), on a
+// function, or on a variable with external linkage, is too (handleAliasAttr, handleIFuncAttr, checkAttributesAfterMerging).
+// An ifunc anywhere but on a function is ignored (clang warns, which isn't modeled). A weakref on a typedef is an error;
+// in a block it is too, and dropped; and one without a target is the next error, at the list's first attribute, after
+// which clang drops it (ProcessDeclAttributeList). Whether the declaration's attributes are valid.
+static bool check_input_attribute_definition(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttributeSubject subject)
 {
     bool valid = true;
+    bool defining = subject.function ? subject.function_definition : subject.variable_definition;
+    bool weakref = false;
+    bool targeted = false;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
+        const CheckInputAttributeKind kind = attribute->ignored ? CHECK_ATTRIBUTE_UNKNOWN : attribute->kind;
+        attribute->ignored |= kind == CHECK_ATTRIBUTE_IFUNC && !subject.function;
+        const bool aliasing = kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_IFUNC && subject.function) ||
+                              (kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0 && !subject.is_typedef && subject.file);
         if (attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN)
         {
-            attribute->ignored |= !function;
-            valid = !function || definition;
+            attribute->ignored |= !subject.function;
+            valid = !subject.function || subject.function_definition;
             if (!valid)
             {
                 check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
             }
         }
+        else if (kind == CHECK_ATTRIBUTE_WEAKREF && (subject.is_typedef || !subject.file))
+        {
+            check_input_report_subject(reader, attribute->name_token, subject.is_typedef ? CHECK_INPUT_WEAKREF_SUBJECT : CHECK_INPUT_WEAKREF_CONTEXT, subject.name);
+            valid = false;
+        }
+        else if (aliasing && !subject.is_typedef && defining && (subject.function || subject.external || subject.variable_definition))
+        {
+            check_input_report_subject(reader, attribute->name_token, kind == CHECK_ATTRIBUTE_IFUNC ? CHECK_INPUT_IFUNC_DEFINITION : CHECK_INPUT_ALIAS_DEFINITION,
+                                       subject.name);
+            valid = false;
+        }
+        defining |= aliasing;
+        weakref |= kind == CHECK_ATTRIBUTE_WEAKREF;
+        targeted |= kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0);
+    }
+    if (valid && weakref && !targeted)
+    {
+        check_input_report_subject(reader, attributes->records[0].name_token, CHECK_INPUT_WEAKREF_ALIAS, subject.name);
+        valid = false;
     }
     return valid;
 }
 
+// An alias, ifunc or weakref declaration defines its entity even though it has no body or initializer (clang's
+// hasDefiningAttr). Keep that fact separate from `defined`, whose users also identify bodies (for example, the old-style
+// parameter compatibility check).
+static bool check_input_attribute_alias_definition(const CheckInputAttributes* attributes)
+{
+    bool alias = false;
+    for (uint32_t i = 0; !alias && attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        alias = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC ||
+                                        (attribute->kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0));
+    }
+    return alias;
+}
+
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
-// declaration must precede the definition (Sema's checkNewAttributesAfterDef): of those the emission gives a meaning to,
-// weak, constructor and destructor, which then make no symbol weak or array entry (#147), and unscoped standard
-// noreturn, which must not stop code generation's target-feature walk (#775). An earlier accepted noreturn remains in
-// that earlier declaration's records. A specifier's list is each declarator's: one declarator's is copied before its
-// records are marked.
-static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous)
+// declaration must precede the definition (Sema's checkNewAttributesAfterDef): weak, constructor, destructor, used,
+// retain, gnu_inline and unscoped standard noreturn. Earlier accepted attributes remain in their declaration records.
+// A specifier's list is each declarator's: one declarator's is copied before its records are marked.
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
     const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
-    const bool after = attributes != 0 && reader->definition_seen[previous] && !reader->defined[token];
+    const bool after = attributes != 0 && reader->definition_origins[previous] && !reader->defined[token];
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
     {
@@ -1326,9 +1464,66 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
     const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
     reader->output->resource |= late && !copied;
-    for (uint32_t i = 0; copied && i < copy->count; i += 1)
+    // Deferred bodies replay in source order for these attributes. In particular, do not inspect token columns
+    // owned by other lanes. Build an object-indexed mask once on the serial path, then update it as declarations bind.
+    if (late && reader->lane)
     {
-        copy->records[i].ignored |= check_input_attribute_late_kind(&copy->records[i]);
+        check_input_lane_refuse(reader, true, "a body declares a late attribute");
+    }
+    if (copied && !reader->lane && reader->late_attribute_masks == NULL)
+    {
+        const uint32_t count = reader->parser->tokens.count;
+        reader->late_attribute_masks = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)count + 1);
+        reader->output->resource |= reader->late_attribute_masks == NULL;
+        if (reader->late_attribute_masks != NULL)
+        {
+            memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
+            for (uint32_t first = 0; first < token; first += 8)
+            {
+                const uint32_t lanes = BUSTER_SCALAR_PATH(reader->parser->options.scalar) ?
+                    (uint32_t)check_input_scan_all(first, token) & 0xff :
+                    check_input_scan_pointers((const void* const*)reader->output->attributes, first, token);
+                for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+                {
+                    const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
+                    const uint32_t object = reader->objects[d];
+                    if (object != 0 && object <= count)
+                    {
+                        reader->late_attribute_masks[object] |= check_input_attribute_late_mask(reader->output->attributes[d], reader->output->function_flags[d]);
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; copied && !reader->lane && reader->late_attribute_masks != NULL && i < copy->count; i += 1)
+    {
+        CheckInputAttribute* attribute = copy->records + i;
+        if (!attribute->ignored && check_input_attribute_late_kind(attribute))
+        {
+            const bool inherited = (reader->late_attribute_masks[reader->objects[previous]] & check_input_attribute_late_bit(attribute)) != 0;
+            attribute->ignored = true;
+            const bool missing_inline = attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE &&
+                                        (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_INLINE) == 0;
+            if (!inherited || missing_inline)
+            {
+                const CheckWarningEvent event = {
+                    .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                    .kind = missing_inline ? CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE : CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+                    .token = attribute->name_token,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = point,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                const CheckWarningNote note = {
+                    .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                    .token = reader->definition_origins[previous] - 1,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, missing_inline ? NULL : &note, missing_inline ? 0 : 1);
+            }
+        }
     }
     if (copied)
     {

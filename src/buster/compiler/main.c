@@ -606,6 +606,12 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // executable, run and compared with its expected output.
 #include "buster/compiler/c_testsuite.c"
 
+// #134's test-ssa-source: every function of real and generated C promoted by both of ssa_ir.c's paths with the SSA
+// verifier's checks, and each program with a main run by the IR's interpreter in its three forms (all locals in memory,
+// and each path's SSA), against its expected output.
+#include "buster/compiler/ssa_source_generate.c"
+#include "buster/compiler/ssa_source_test.c"
+
 // The other units' main_command, each in its own unit (at the top).
 int main_unit_x86(int argc, char** argv, bool* found);
 int main_unit_frontend(int argc, char** argv, bool* found);
@@ -1260,6 +1266,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_ir_source_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-source") == 0)
+    {
+        result = run_ssa_source_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
@@ -1557,6 +1567,13 @@ static int main_driver(int argc, char** argv)
     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
     lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;
 #endif
+    // A test's hook, in every build (#905): the session's lane of this index fails to start (LaneProcess.fail_at),
+    // written only when it is set.
+    const char* fail_at = getenv("BUSTER_TEST_LANE_FAIL_AT");
+    if (fail_at != 0)
+    {
+        lane_process.fail_at = (uint32_t)strtoul(fail_at, 0, 10);
+    }
     const int guardian = worker_budget_guardian_command(argc, argv);
     // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before
     // dispatch, including -E and parse commands that need no worker lease themselves.

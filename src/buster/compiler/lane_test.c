@@ -51,6 +51,32 @@
 //     with lane_team_keep_scratch kept, emptied, and released when the team stops.
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
 //     forked child refuses the inherited team without waiting for workers that exist only in its parent.
+//   - Sessions (#905): sessions of 1, 2, 3 and 8 lanes, and lazy ones of 1, 3 and 8, each lane running the flow once,
+//     lane 0 on the calling thread, with capacity - 1 threads created (LaneProcess.threads_created, and the process's
+//     threads) and joined after; a session of one creates none. In the flow: every lane but lane 0 with the
+//     asynchronous signals blocked and the synchronous ones not; a signal sent to the process handled on lane 0; parked
+//     broadcasts from each lane; narrowings to 1, 2, 3, every lane and more, nested, each narrowed group syncing,
+//     broadcasting and taking parts, the others untouched; a flow of rounds (LaneFlow) of 1, 3, every lane and more, of
+//     two kinds, lane 0 running its part itself and the others theirs by kind, each round's lanes running it once, a
+//     nested run in a round refused; a lane alone running lane_run on itself; a run, a team, a cold group and a session
+//     of several refused where they would create a thread; and a child forked
+//     from lane 0, which forgets the session and runs as one lane. Then sessions whose third lane fails to start
+//     (LaneProcess.fail_at), eagerly and lazily, and a lazy one whose second does: the lanes created joined, the flow on
+//     lane 0 alone; sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eagerly, lazily and lazily with
+//     a flow of rounds that lane 0 begins before it settles, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
+//     of this process's CPUs in pairs, in fours and all one core: as many lanes as the capacity and the cores allow, each
+//     round on them, each lane's lane_session_asked as many, a lazy session's lane 1 created though it runs on one,
+//     where one core leaves it no other lane; and in a child, a session that leaves its lanes parked at its end (but in
+//     sanitizer builds, which join them).
+//   - Cores (#905): lane_cores on a test topology of SMT siblings n and n + 8 (Linux's numbering of AMD's), adjacent
+//     pairs (Intel's), single threads (efficient cores), CPUs without a list, lists that don't parse (a dash without a
+//     number, letters, nothing, a range backwards, a letter after it), that leave their CPU out or that the read's buffer
+//     cuts, a newline, a CPU whose sibling's list doesn't parse (so that it must be skipped), siblings past the mask's
+//     words and an empty mask, against counts worked out by hand; a topology that doesn't exist, every CPU a core; and
+//     lane_core_count against /proc/cpuinfo's cores of this process's CPUs (lane_test_cpuinfo), where it lists them,
+//     then with the process's affinity set to a core's two siblings, one, and to CPUs of two cores, two. Before them,
+//     that oracle's reader on texts of /proc/cpuinfo's shape (lane_test_cpuinfo_controls): four processors' blocks with
+//     long flags lines of names with digits, values at and past their bounds, malformed values and near-miss keys.
 //
 // A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
 // the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
@@ -73,6 +99,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 #define BUSTER_LANE_TEST_MAX_LANES 8
@@ -1093,8 +1121,8 @@ static bool lane_test_unwatch(void)
 static void lane_test_report_hang(int signal_number)
 {
     (void)signal_number;
-    static const char* const names[] = { "ranges", "syncs", "alone", "scratch", "exchange", "parts", "team lifetime" };
-    static const uint8_t lengths[] = { 6, 5, 5, 7, 8, 5, 13 };
+    static const char* const names[] = { "ranges", "syncs", "alone", "scratch", "exchange", "parts", "advance", "team lifetime", "sessions" };
+    static const uint8_t lengths[] = { 6, 5, 5, 7, 8, 5, 7, 13, 8 };
     static const char digits[] = "012345678";
     static const char middle[] = " on ";
     static const char elapsed[] = " lanes didn't finish in " BUSTER_LANE_TEST_STRINGIFY(BUSTER_LANE_TEST_TIMEOUT_SECONDS) " s\n";
@@ -1786,6 +1814,895 @@ static uint64_t lane_test_teams(void)
     return failures;
 }
 
+// The parts a session check's narrowed lanes take.
+#define BUSTER_LANE_TEST_SESSION_PARTS 29
+
+// /proc/cpuinfo's cores (#905), an oracle of lane_cores' that doesn't read sysfs' sibling lists, for this file's tests
+// and the drivers' (test-check-lanes, test-foreign, test-parallel). A line's key is what comes before its colon, but
+// blanks, and only the processor, physical id and core id lines' values are read (#933's review: the flags line's
+// digits, read as one number, overflowed a signed one): each value is one decimal below UINT32_MAX, between blanks, so
+// that no package and core pack into the sentinel, UINT64_MAX. Whether `line` (`length` bytes) is `key`'s.
+static bool lane_test_cpuinfo_key(const char* line, size_t length, const char* key)
+{
+    const size_t key_length = strlen(key);
+    const char* colon = memchr(line, ':', length);
+    bool matches = colon != 0 && (size_t)(colon - line) >= key_length && memcmp(line, key, key_length) == 0;
+    for (const char* c = line + key_length; matches && c < colon; c += 1)
+    {
+        matches = *c == ' ' || *c == '\t';
+    }
+    return matches;
+}
+
+// The value of a line (`length` bytes) that lane_test_cpuinfo_key matched, or -1 where it isn't one decimal below
+// UINT32_MAX between blanks; the conversion stops before its value could pass the bound.
+static int64_t lane_test_cpuinfo_value(const char* line, size_t length)
+{
+    const char* end = line + length;
+    const char* colon = memchr(line, ':', length);
+    const char* c = colon != 0 ? colon + 1 : end;
+    while (c < end && (*c == ' ' || *c == '\t'))
+    {
+        c += 1;
+    }
+    uint64_t value = 0;
+    bool valid = c < end && *c >= '0' && *c <= '9';
+    while (valid && c < end && *c >= '0' && *c <= '9')
+    {
+        const uint64_t digit = (uint64_t)(*c - '0');
+        valid = value <= (UINT32_MAX - 1 - digit) / 10;
+        value = valid ? value * 10 + digit : value;
+        c += 1;
+    }
+    while (c < end && (*c == ' ' || *c == '\t' || *c == '\n'))
+    {
+        c += 1;
+    }
+    return valid && c == end ? (int64_t)value : -1;
+}
+
+// lane_test_cpuinfo's reading of `file` (null for none): each processor's physical id and core id as one number,
+// package << 32 | core, in `cores` (BUSTER_LANE_CPU_MASK_WORDS * 64 entries, UINT64_MAX for a processor it doesn't list
+// with both). A processor line starts a processor and forgets the package, and a line of one of the three keys whose
+// value doesn't read leaves its field unknown. Returns how many processors it lists with both.
+static uint32_t lane_test_cpuinfo_read(FILE* file, uint64_t* cores)
+{
+    const uint32_t room = BUSTER_LANE_CPU_MASK_WORDS * 64;
+    for (uint32_t cpu = 0; cpu < room; cpu += 1)
+    {
+        cores[cpu] = UINT64_MAX;
+    }
+    char* line = 0;
+    size_t size = 0;
+    int64_t processor = -1;
+    int64_t package = -1;
+    uint32_t listed = 0;
+    ssize_t length = file != 0 ? getline(&line, &size, file) : -1;
+    while (length > 0)
+    {
+        const bool processor_line = lane_test_cpuinfo_key(line, (size_t)length, "processor");
+        const bool package_line = lane_test_cpuinfo_key(line, (size_t)length, "physical id");
+        const bool core_line = lane_test_cpuinfo_key(line, (size_t)length, "core id");
+        const int64_t value = processor_line || package_line || core_line ? lane_test_cpuinfo_value(line, (size_t)length) : -1;
+        processor = processor_line ? value : processor;
+        package = processor_line ? -1 : package_line ? value : package;
+        if (core_line && processor >= 0 && processor < room && package >= 0 && value >= 0 && cores[processor] == UINT64_MAX)
+        {
+            cores[processor] = (uint64_t)package << 32 | (uint64_t)value;
+            listed += 1;
+        }
+        length = getline(&line, &size, file);
+    }
+    free(line);
+    return listed;
+}
+
+// /proc/cpuinfo's cores, by lane_test_cpuinfo_read.
+static uint32_t lane_test_cpuinfo(uint64_t* cores)
+{
+    FILE* file = fopen("/proc/cpuinfo", "r");
+    const uint32_t listed = lane_test_cpuinfo_read(file, cores);
+    if (file != 0)
+    {
+        fclose(file);
+    }
+    return listed;
+}
+
+// The distinct cores of the CPUs in `mask` (BUSTER_LANE_CPU_MASK_WORDS words) by lane_test_cpuinfo's `cores`, and in
+// *unlisted how many of those CPUs it doesn't list, for which it is no oracle.
+static uint32_t lane_test_cpuinfo_cores(const uint64_t* cores, const uint64_t* mask, uint32_t* unlisted)
+{
+    uint32_t distinct = 0;
+    *unlisted = 0;
+    for (uint32_t cpu = 0; cpu < BUSTER_LANE_CPU_MASK_WORDS * 64; cpu += 1)
+    {
+        if (((mask[cpu / 64] >> (cpu % 64)) & 1) != 0)
+        {
+            bool seen = false;
+            for (uint32_t earlier = 0; earlier < cpu; earlier += 1)
+            {
+                seen = seen || (((mask[earlier / 64] >> (earlier % 64)) & 1) != 0 && cores[earlier] == cores[cpu]);
+            }
+            distinct += cores[cpu] != UINT64_MAX && !seen ? 1 : 0;
+            *unlisted += cores[cpu] == UINT64_MAX ? 1 : 0;
+        }
+    }
+    return distinct;
+}
+
+_Static_assert(BUSTER_LANE_CPU_MASK_WORDS * 64 == 1024, "lane_test_cpuinfo_controls' texts name the room's last processor and the next");
+
+// lane_test_cpuinfo_read on texts of /proc/cpuinfo's shape, read through fmemopen (#933's review). First four
+// processors' blocks of every line a Zen 5's has, each flags line 1,024 names with digits: two packages, processors 0
+// and 2 one core's siblings. Then texts of one processor each, which must give it its entry or none:
+//   - blanks around the colon and none, a last line without its newline, and leading zeros;
+//   - the room's last processor and the next, and the largest package and core and the next of each;
+//   - numbers past 64 bits, and values that aren't one decimal (a sign, letters, a fraction, two numbers, none);
+//   - keys that only start like the three, or that start with them, and a line without a colon;
+//   - a processor line that doesn't read, which mustn't leave its core to the processor before;
+//   - a processor without a package, a core before any processor, and a processor listed twice.
+static uint64_t lane_test_cpuinfo_controls(void)
+{
+    uint64_t failures = 0;
+    uint64_t* cores = malloc(BUSTER_LANE_CPU_MASK_WORDS * 64 * sizeof(uint64_t));
+    char* text = 0;
+    size_t text_length = 0;
+    FILE* stream = cores != 0 ? open_memstream(&text, &text_length) : 0;
+    static const char* const names[] = { "fpu", "sse4_1", "sse4_2", "x2apic", "3dnowprefetch", "avx2", "avx512f", "avx512dq",
+                                          "avx512_bf16", "avx512_vp2intersect", "avx_vnni", "f16c", "x86_64", "v_vmsave_vmload", "perfctr_core", "cpb" };
+    static const uint32_t packages[] = { 0, 0, 0, 1 };
+    static const uint32_t core_ids[] = { 0, 1, 0, 0 };
+    for (uint32_t processor = 0; stream != 0 && processor < BUSTER_ARRAY_LENGTH(packages); processor += 1)
+    {
+        fprintf(stream, "processor\t: %u\nvendor_id\t: AuthenticAMD\ncpu family\t: 26\nmodel\t\t: 68\nmodel name\t: AMD Ryzen 7 9700X 8-Core Processor\n", processor);
+        fprintf(stream, "stepping\t: 0\nmicrocode\t: 0xb404023\ncpu MHz\t\t: 4950.000\ncache size\t: 1024 KB\nphysical id\t: %u\nsiblings\t: 16\n", packages[processor]);
+        fprintf(stream, "core id\t\t: %u\ncpu cores\t: 8\napicid\t\t: 15\ninitial apicid\t: 15\nfpu\t\t: yes\ncpuid level\t: 16\nflags\t\t:", core_ids[processor]);
+        for (uint32_t i = 0; i < 64 * BUSTER_ARRAY_LENGTH(names); i += 1)
+        {
+            fprintf(stream, " %s", names[i % BUSTER_ARRAY_LENGTH(names)]);
+        }
+        fprintf(stream, "\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso\nbogomips\t: 7586.11\nTLB size\t: 3072 4K pages\n");
+        fprintf(stream, "clflush size\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\n");
+    }
+    const bool written = stream != 0 && fclose(stream) == 0;
+    FILE* blocks = written ? fmemopen(text, text_length, "r") : 0;
+    const uint32_t blocks_listed = blocks != 0 ? lane_test_cpuinfo_read(blocks, cores) : 0;
+    const uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0x1f };
+    uint32_t unlisted = 0;
+    const uint32_t distinct = blocks != 0 ? lane_test_cpuinfo_cores(cores, mask, &unlisted) : 0;
+    failures += blocks != 0 && blocks_listed == 4 && cores[0] == 0 && cores[1] == 1 && cores[2] == 0 && cores[3] == UINT64_C(1) << 32 && cores[4] == UINT64_MAX ? 0 : 1;
+    failures += blocks != 0 && distinct == 3 && unlisted == 1 ? 0 : 1;
+    if (blocks != 0)
+    {
+        fclose(blocks);
+    }
+    free(text);
+    typedef struct LaneTestCpuinfo LaneTestCpuinfo;
+    struct LaneTestCpuinfo
+    {
+        const char* text;
+        // The processor the text names, the entry it must get (UINT64_MAX for none) and the processors it lists.
+        uint32_t processor;
+        uint64_t entry;
+        uint32_t listed;
+    };
+    static const LaneTestCpuinfo cases[] = {
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor: 3\nphysical id:1\t\ncore id   :  2 \n", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor\t: 003\nphysical id\t: 01\ncore id\t\t: 0002\n", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor\t: 1023\nphysical id\t: 4294967294\ncore id\t\t: 4294967294\n", 1023, UINT64_C(0xfffffffefffffffe), 1 },
+        { "processor\t: 1024\nphysical id\t: 0\ncore id\t\t: 0\n", 0, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 4294967295\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 4294967295\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 18446744073709551616\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 999999999999999999999999999999999999\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 99999999999999999999\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: -2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: +2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2x\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 0x2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: one\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3.5\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2 3\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t:\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: \n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore idx\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncpu core id\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\n core id\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\nCore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore  id\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processors\t: 3\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical ids\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t 3\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\nprocessor\t: x\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 2\nphysical id\t: 1\ncore id\t\t: 0\nprocessor\t: 3\ncore id\t\t: 2\n", 2, UINT64_C(1) << 32, 1 },
+        { "core id\t\t: 2\nprocessor\t: 3\nphysical id\t: 1\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2\nprocessor\t: 3\nphysical id\t: 0\ncore id\t\t: 0\n", 3, UINT64_C(1) << 32 | 2, 1 },
+    };
+    for (uint32_t i = 0; cores != 0 && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char buffer[256];
+        const size_t length = strlen(cases[i].text);
+        memcpy(buffer, cases[i].text, length);
+        FILE* file = fmemopen(buffer, length, "r");
+        const uint32_t listed = file != 0 ? lane_test_cpuinfo_read(file, cores) : UINT32_MAX;
+        bool right = listed == cases[i].listed;
+        for (uint32_t cpu = 0; cpu < BUSTER_LANE_CPU_MASK_WORDS * 64; cpu += 1)
+        {
+            right = right && cores[cpu] == (cpu == cases[i].processor ? cases[i].entry : UINT64_MAX);
+        }
+        if (!right)
+        {
+            fprintf(stderr, "cpuinfo: text %u read wrong (it listed %u)\n", i, listed);
+        }
+        failures += right ? 0 : 1;
+        if (file != 0)
+        {
+            fclose(file);
+        }
+    }
+    failures += cores != 0 ? 0 : 1;
+    free(cores);
+    printf("cpuinfo: four processors with 1,024 flags each and %u texts of one, %lu wrong\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)failures);
+    return failures;
+}
+
+// The cores of the CPUs this process may run on by /proc/cpuinfo (lane_test_cpuinfo), or 0 where it doesn't list every
+// one of them.
+static __attribute__((unused)) uint32_t lane_test_process_cores(void)
+{
+    uint64_t* cores = malloc(BUSTER_LANE_CPU_MASK_WORDS * 64 * sizeof(uint64_t));
+    uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const bool known = cores != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
+    uint32_t unlisted = 0;
+    const uint32_t distinct = known && lane_test_cpuinfo(cores) != 0 ? lane_test_cpuinfo_cores(cores, mask, &unlisted) : 0;
+    free(cores);
+    return unlisted == 0 ? distinct : 0;
+}
+
+// Among the CPUs this process may run on, by /proc/cpuinfo (lane_test_cpuinfo), which must list each: a core's two
+// siblings, into `siblings`, and the first of them with a CPU of another core, into `apart` (BUSTER_LANE_CPU_MASK_WORDS
+// words each). Returns whether it found both.
+static __attribute__((unused)) bool lane_test_sibling_masks(uint64_t* siblings, uint64_t* apart)
+{
+    uint64_t* ids = malloc(BUSTER_LANE_CPU_MASK_WORDS * 64 * sizeof(uint64_t));
+    uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const bool known = ids != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0 && lane_test_cpuinfo(ids) != 0;
+    uint32_t unlisted = 0;
+    const bool listed = known && lane_test_cpuinfo_cores(ids, allowed, &unlisted) != 0 && unlisted == 0;
+    uint32_t first = UINT32_MAX;
+    uint32_t sibling = UINT32_MAX;
+    uint32_t other = UINT32_MAX;
+    for (uint32_t a = 0; listed && first == UINT32_MAX && a < BUSTER_LANE_CPU_MASK_WORDS * 64; a += 1)
+    {
+        for (uint32_t b = a + 1; ((allowed[a / 64] >> (a % 64)) & 1) != 0 && first == UINT32_MAX && b < BUSTER_LANE_CPU_MASK_WORDS * 64; b += 1)
+        {
+            const bool both = ((allowed[b / 64] >> (b % 64)) & 1) != 0 && ids[a] == ids[b];
+            first = both ? a : first;
+            sibling = both ? b : sibling;
+        }
+    }
+    for (uint32_t c = 0; first != UINT32_MAX && other == UINT32_MAX && c < BUSTER_LANE_CPU_MASK_WORDS * 64; c += 1)
+    {
+        other = ((allowed[c / 64] >> (c % 64)) & 1) != 0 && ids[c] != ids[first] ? c : other;
+    }
+    const bool found = first != UINT32_MAX && other != UINT32_MAX;
+    memset(siblings, 0, BUSTER_LANE_CPU_MASK_WORDS * sizeof(uint64_t));
+    memset(apart, 0, BUSTER_LANE_CPU_MASK_WORDS * sizeof(uint64_t));
+    if (found)
+    {
+        siblings[first / 64] |= UINT64_C(1) << (first % 64);
+        siblings[sibling / 64] |= UINT64_C(1) << (sibling % 64);
+        apart[first / 64] |= UINT64_C(1) << (first % 64);
+        apart[other / 64] |= UINT64_C(1) << (other % 64);
+    }
+    free(ids);
+    return found;
+}
+
+// Writes CPU `cpu`'s sibling list, `length` bytes at `list`, in a test topology under `root`, where lane_cores reads it
+// in sysfs (cpuN/topology/core_cpus_list). Returns whether it could.
+static bool lane_test_topology_write(const char* root, uint32_t cpu, const char* list, uint64_t length)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/cpu%u", root, cpu);
+    bool written = mkdir(path, 0700) == 0 || errno == EEXIST;
+    snprintf(path, sizeof(path), "%s/cpu%u/topology", root, cpu);
+    written = written && (mkdir(path, 0700) == 0 || errno == EEXIST);
+    snprintf(path, sizeof(path), "%s/cpu%u/topology/core_cpus_list", root, cpu);
+    const int fd = written ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+    written = fd >= 0 && write(fd, list, length) == (ssize_t)length;
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    return written;
+}
+
+// Removes a test topology under `root`: its CPUs' lists and directories, below `cpus`, then the root.
+static void lane_test_topology_remove(const char* root, uint32_t cpus)
+{
+    char path[PATH_MAX];
+    for (uint32_t cpu = 0; cpu < cpus; cpu += 1)
+    {
+        snprintf(path, sizeof(path), "%s/cpu%u/topology/core_cpus_list", root, cpu);
+        unlink(path);
+        snprintf(path, sizeof(path), "%s/cpu%u/topology", root, cpu);
+        rmdir(path);
+        snprintf(path, sizeof(path), "%s/cpu%u", root, cpu);
+        rmdir(path);
+    }
+    rmdir(root);
+}
+
+// A new directory for a test topology, under $TMPDIR (or /tmp), into `root`. Returns whether it could make it.
+static bool lane_test_topology_root(char* root, uint64_t size)
+{
+    const char* temporary = getenv("TMPDIR");
+    snprintf(root, size, "%s/buster-test-lanes-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    return mkdtemp(root) != 0;
+}
+
+// A test topology under `root` of the CPUs in `allowed` (BUSTER_LANE_CPU_MASK_WORDS words): their siblings in groups of
+// `size`, in order, or with `size` 0 all of them one core. Returns its cores, or 0 if it couldn't write it, and in *end
+// the CPU past the last.
+static uint32_t lane_test_topology_process(const char* root, const uint64_t* allowed, uint32_t size, uint32_t* end)
+{
+    uint32_t cpus[BUSTER_LANE_CPU_MASK_WORDS * 64];
+    uint32_t count = 0;
+    for (uint32_t cpu = 0; cpu < BUSTER_LANE_CPU_MASK_WORDS * 64; cpu += 1)
+    {
+        if (((allowed[cpu / 64] >> (cpu % 64)) & 1) != 0)
+        {
+            cpus[count] = cpu;
+            count += 1;
+        }
+    }
+    *end = count != 0 ? cpus[count - 1] + 1 : 0;
+    bool written = count != 0;
+    char list[128];
+    for (uint32_t i = 0; written && i < count; i += 1)
+    {
+        int length = size == 0 ? snprintf(list, sizeof(list), "%u-%u", cpus[0], cpus[count - 1]) : 0;
+        const uint32_t first = size != 0 ? i - i % size : 0;
+        for (uint32_t sibling = first; size != 0 && sibling < first + size && sibling < count; sibling += 1)
+        {
+            length += snprintf(list + length, sizeof(list) - (uint64_t)length, sibling == first ? "%u" : ",%u", cpus[sibling]);
+        }
+        written = lane_test_topology_write(root, cpus[i], list, (uint64_t)length);
+    }
+    return written ? (size == 0 ? 1 : (count + size - 1) / size) : 0;
+}
+
+// lane_cores and lane_core_count (#905): see the file's comment.
+static uint64_t lane_test_cores(void)
+{
+    uint64_t failures = 0;
+    char root[PATH_MAX];
+    bool made = lane_test_topology_root(root, sizeof(root));
+    // The topology: SMT siblings n and n + 8 (as Linux numbers AMD's), adjacent pairs (as Intel's), single threads (as
+    // efficient cores), CPUs without a list, lists that don't parse or leave their CPU out, one longer than the read's
+    // buffer, one with a newline, one whose sibling's list doesn't parse and must be skipped, and siblings past a mask's
+    // first words.
+    char list[700];
+    for (uint32_t cpu = 0; made && cpu < 48; cpu += 1)
+    {
+        const int length = cpu < 16 ? snprintf(list, sizeof(list), "%u,%u", cpu % 8, cpu % 8 + 8) :
+                           cpu < 32 ? snprintf(list, sizeof(list), "%u-%u", cpu & ~1u, (cpu & ~1u) + 1) :
+                                      snprintf(list, sizeof(list), "%u", cpu);
+        made = lane_test_topology_write(root, cpu, list, (uint64_t)length);
+    }
+    typedef struct LaneTestCoresList LaneTestCoresList;
+    struct LaneTestCoresList
+    {
+        uint32_t cpu;
+        const char* list;
+    };
+    static const LaneTestCoresList lists[] = {
+        { 50, "50-" },
+        { 51, "x" },
+        { 52, "" },
+        { 53, "52-53,99999999999" },
+        { 60, "61" },
+        { 61, "60-61" },
+        { 62, "63-62" },
+        { 63, "62,63x" },
+        { 64, "64,65\n" },
+        { 65, "64-65\n" },
+        { 70, "70,71" },
+        { 71, "garbage" },
+        { 81, "81" },
+        { 130, "130,194" },
+        { 194, "130,194" },
+    };
+    for (uint32_t i = 0; made && i < BUSTER_ARRAY_LENGTH(lists); i += 1)
+    {
+        made = lane_test_topology_write(root, lists[i].cpu, lists[i].list, strlen(lists[i].list));
+    }
+    uint64_t used = 0;
+    while (used + 3 < 600)
+    {
+        memcpy(list + used, "80,", 3);
+        used += 3;
+    }
+    memcpy(list + used, "80", 2);
+    made = made && lane_test_topology_write(root, 80, list, used + 2);
+    failures += made ? 0 : 1;
+    typedef struct LaneTestCores LaneTestCores;
+    struct LaneTestCores
+    {
+        uint64_t mask[4];
+        uint32_t words;
+        uint32_t expected;
+    };
+    static const LaneTestCores cases[] = {
+        { { 0xffff }, 1, 8 },
+        { { 0xf }, 1, 4 },
+        { { 0x101 }, 1, 1 },
+        { { 0x100 }, 1, 1 },
+        { { 0x300 }, 1, 2 },
+        { { 0xf0f }, 1, 4 },
+        { { 0xffff0000 }, 1, 8 },
+        { { UINT64_C(1) << 17 }, 1, 1 },
+        { { UINT64_C(0xffffffffffff) }, 1, 32 },
+        { { UINT64_C(3) << 48 }, 1, 2 },
+        { { UINT64_C(7) << 50 }, 1, 3 },
+        { { UINT64_C(3) << 52 }, 1, 2 },
+        { { UINT64_C(1) << 53 }, 1, 1 },
+        { { UINT64_C(3) << 60 }, 1, 2 },
+        { { UINT64_C(3) << 62 }, 1, 2 },
+        { { 0, 3 }, 2, 1 },
+        { { 0, UINT64_C(3) << 6 }, 2, 1 },
+        { { 0, UINT64_C(1) << 7 }, 2, 1 },
+        { { 0, UINT64_C(3) << 16 }, 2, 2 },
+        { { 0, 0, UINT64_C(1) << 2, UINT64_C(1) << 2 }, 4, 1 },
+        { { 0, 0, UINT64_C(1) << 2 }, 3, 1 },
+        { { 0 }, 4, 1 },
+    };
+    for (uint32_t i = 0; made && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        const uint32_t cores = lane_cores(root, cases[i].mask, cases[i].words);
+        if (cores != cases[i].expected)
+        {
+            printf("  cores: case %u counted %u cores, %u expected\n", i, cores, cases[i].expected);
+            failures += 1;
+        }
+    }
+    // Without a topology, each CPU is a core of its own.
+    static const uint64_t four[1] = { 0xf };
+    failures += lane_cores("/nonexistent-buster-topology", four, 1) == 4 ? 0 : 1;
+    if (made)
+    {
+        lane_test_topology_remove(root, 195);
+    }
+    // This process's CPUs: sysfs' cores against /proc/cpuinfo's, which must list each of them; then a core's two siblings
+    // alone, one core, and with a CPU of another core, two, where the process has them.
+    const uint32_t expected = lane_test_process_cores();
+    const uint32_t counted = lane_core_count();
+    failures += expected != 0 && counted != expected ? 1 : 0;
+    uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    uint64_t siblings[BUSTER_LANE_CPU_MASK_WORDS];
+    uint64_t apart[BUSTER_LANE_CPU_MASK_WORDS];
+    const bool paired = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0 && lane_test_sibling_masks(siblings, apart);
+    if (paired)
+    {
+        failures += syscall(SYS_sched_setaffinity, 0, sizeof(siblings), siblings) == 0 && lane_core_count() == 1 ? 0 : 1;
+        failures += syscall(SYS_sched_setaffinity, 0, sizeof(apart), apart) == 0 && lane_core_count() == 2 ? 0 : 1;
+        failures += syscall(SYS_sched_setaffinity, 0, sizeof(allowed), allowed) == 0 ? 0 : 1;
+    }
+    const char* oracle = expected != 0 ? "/proc/cpuinfo's too" : "unchecked: /proc/cpuinfo doesn't list them";
+    const char* restricted = paired ? "a core's two siblings and two cores' CPUs" : "no core with two of its CPUs";
+    printf("cores: %u masks of a test topology, this process's %u cores (%s), %s, %lu wrong\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases) + 1, counted, oracle,
+           restricted, (unsigned long)failures);
+    return failures;
+}
+
+// What a session's lanes share (#905): the lanes it should run, what each lane saw and did, and the failures each
+// counted.
+typedef struct LaneSessionTest LaneSessionTest;
+struct LaneSessionTest
+{
+    pid_t caller;
+    uint32_t expected;
+    // The lanes the session asks for (lane_session_asked).
+    uint32_t asked;
+    uint32_t calls[BUSTER_LANE_TEST_MAX_LANES];
+    pid_t threads[BUSTER_LANE_TEST_MAX_LANES];
+    uint64_t failures[BUSTER_LANE_TEST_MAX_LANES];
+    // A flow of rounds (LaneFlow), lane 0's, which the others follow, and each lane's calls of each of its two kinds.
+    LaneFlow flow;
+    uint32_t round_calls[2][BUSTER_LANE_TEST_MAX_LANES];
+    uint32_t parts[BUSTER_LANE_TEST_SESSION_PARTS];
+    uint32_t forbidden_calls;
+    // Whether lane 0 forks a child in the flow.
+    bool forks;
+};
+
+// The thread that handled the sessions check's signal.
+static volatile sig_atomic_t lane_test_signalled;
+
+static void lane_test_session_signal(int signal_number)
+{
+    (void)signal_number;
+    lane_test_signalled = (sig_atomic_t)syscall(SYS_gettid);
+}
+
+static void lane_test_session_forbidden(void* argument)
+{
+    LaneSessionTest* test = argument;
+    __atomic_add_fetch(&test->forbidden_calls, 1, __ATOMIC_RELAXED);
+}
+
+// A flow or an operation that each of its lanes counts itself in.
+static void lane_test_session_count(void* argument)
+{
+    LaneSessionTest* test = argument;
+    if (lane_index() < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[lane_index()] += 1;
+    }
+}
+
+// An operation on a lane alone: it must run there, as lane 0 of 1.
+static void lane_test_session_alone(void* argument)
+{
+    uint32_t* calls = argument;
+    *calls += lane_count() == 1 && lane_index() == 0 ? 1 : 100;
+}
+
+// A flow's round of `kind` (1 or 2): each of its lanes counts itself, and they sync and broadcast in their own group; a
+// nested run of a round of several lanes is refused.
+static void lane_test_session_round(LaneSessionTest* test, uint32_t kind)
+{
+    const uint32_t index = lane_index();
+    test->round_calls[kind - 1][index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += 1;
+    lane_sync();
+    const uint32_t lanes = lane_count();
+    uint64_t failures = lane_broadcast(index + kind, lanes - 1) != lanes - 1 + kind ? 1 : 0;
+    failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    test->failures[index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += failures;
+}
+
+// A narrowing of every lane of the current group to `lanes` of them: the narrowed lanes sync, broadcast and take every
+// part once in their own group, and the others don't enter; then every lane has its lane back.
+static uint64_t lane_test_session_narrow(LaneSessionTest* test, uint32_t lanes)
+{
+    const Lane outer = thread_context.lane;
+    const uint32_t expected = lanes == 0 ? 1 : lanes < outer.count ? lanes : outer.count;
+    uint64_t failures = 0;
+    if (lane_narrow(lanes))
+    {
+        failures += lane_count() != expected || lane_index() != outer.index ? 1 : 0;
+        lane_sync();
+        failures += lane_broadcast(lane_index() * 3, expected - 1) != (expected - 1) * 3 ? 1 : 0;
+        for (uint64_t part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS); part < BUSTER_LANE_TEST_SESSION_PARTS; part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS))
+        {
+            __atomic_add_fetch(&test->parts[part], 1, __ATOMIC_RELAXED);
+        }
+    }
+    else
+    {
+        failures += outer.index < expected ? 1 : 0;
+    }
+    lane_widen();
+    failures += thread_context.lane.index != outer.index || thread_context.lane.count != outer.count || thread_context.lane.group != outer.group ? 1 : 0;
+    // The narrowed lanes took every part once: lane 0 checks once every lane is past them, and clears them before the
+    // next narrowing.
+    lane_park();
+    if (lane_index() == 0)
+    {
+        for (uint32_t part = 0; part < BUSTER_LANE_TEST_SESSION_PARTS; part += 1)
+        {
+            failures += test->parts[part] != 1 ? 1 : 0;
+            test->parts[part] = 0;
+        }
+    }
+    lane_park();
+    return failures;
+}
+
+// A lazy session's flow whose lane 0 begins a flow of rounds before it settles (lane_flow_begin keeps its group with the
+// capacity's count, as the C driver's lane 0 does): its rounds run on the lanes the session settled at, with one per
+// core fewer, each once, and lane 0 is a lane of them again at the flow's end (lane_flow_group).
+static void lane_test_session_early_flow(void* argument)
+{
+    LaneSessionTest* test = argument;
+    const uint32_t index = lane_index();
+    uint64_t failures = 0;
+    if (index == 0)
+    {
+        lane_flow_begin(&test->flow);
+        failures += lane_flow_lanes(&test->flow) != test->expected ? 1 : 0;
+        memset(test->round_calls, 0, sizeof(test->round_calls));
+        lane_flow_round_begin(&test->flow, 1, test, BUSTER_LANE_TEST_MAX_LANES + 9);
+        lane_test_session_round(test, 1);
+        lane_flow_round_end(&test->flow);
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += test->round_calls[0][lane] != (lane < test->expected ? 1u : 0u) ? 1 : 0;
+        }
+        lane_flow_end(&test->flow);
+    }
+    else
+    {
+        void* operation = NULL;
+        for (uint32_t kind = lane_flow_next(&test->flow, &operation); kind != 0; kind = lane_flow_next(&test->flow, &operation))
+        {
+            if (operation != NULL)
+            {
+                lane_test_session_round(operation, kind);
+            }
+            lane_widen();
+        }
+    }
+    failures += lane_count() != test->expected || lane_session_asked() != test->asked ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[index] += 1;
+        test->failures[index] += failures;
+    }
+}
+
+// A session's flow (see the file's comment), which every lane runs.
+static void lane_test_session_main(void* argument)
+{
+    LaneSessionTest* test = argument;
+    // A lazy session's lane 0 learns how its lanes started before it counts on them; the others exist only once they did.
+    lane_session_settle();
+    const uint32_t index = lane_index();
+    const uint32_t lanes = lane_count();
+    uint64_t failures = lanes != test->expected || index >= lanes || lane_session_current() == 0 || lane_session_asked() != test->asked ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[index] += 1;
+        test->threads[index] = (pid_t)syscall(SYS_gettid);
+        failures += (index == 0) != (test->threads[index] == test->caller) ? 1 : 0;
+    }
+    sigset_t mask;
+    failures += pthread_sigmask(SIG_SETMASK, 0, &mask) != 0 ? 1 : 0;
+    failures += index != 0 && (sigismember(&mask, SIGUSR1) != 1 || sigismember(&mask, SIGTERM) != 1 || sigismember(&mask, SIGSEGV) != 0) ? 1 : 0;
+    failures += index == 0 && sigismember(&mask, SIGUSR1) != 0 ? 1 : 0;
+    lane_park();
+    // A signal sent to the process, while the other lanes are parked: lane 0 alone takes it.
+    if (index == 0)
+    {
+        lane_test_signalled = 0;
+        failures += kill(getpid(), SIGUSR1) != 0 || lane_test_signalled != test->threads[0] ? 1 : 0;
+    }
+    lane_park();
+    for (uint32_t source = 0; source < lanes; source += 1)
+    {
+        failures += lane_park_broadcast(index * 11 + 5, source) != source * 11 + 5 ? 1 : 0;
+    }
+    static const uint32_t narrowings[] = { 1, 2, 3, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_MAX_LANES + 5, 0 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(narrowings); i += 1)
+    {
+        failures += lane_test_session_narrow(test, narrowings[i]);
+    }
+    if (lane_narrow(lanes))
+    {
+        failures += lane_test_session_narrow(test, 2);
+    }
+    lane_widen();
+    // lane_run from a group of several that serves nothing is refused; on a lane alone, it runs there. A team, a cold
+    // group of several and a session of its own would create threads: refused.
+    failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    const Lane group = lane_alone();
+    uint32_t alone_calls = 0;
+    failures += lane_run(4, lane_test_session_alone, &alone_calls, 0) && alone_calls == 1 ? 0 : 1;
+    LaneTeam team = { 0 };
+    failures += lane_team_start(&team, 2, 0) ? 1 : 0;
+    lane_team_stop(&team);
+    failures += lane_run_cold(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    LaneSession nested;
+    failures += lane_session_run(&nested, 2, 0, lane_test_session_forbidden, test, 0) != 0 ? 1 : 0;
+    lane_restore(group);
+    // A flow of rounds (LaneFlow): lane 0 runs rounds of 1, 3, every lane and more lanes than the session has, of each of
+    // two kinds, its part itself; the others run each by its kind on its lanes; each round's lanes run it once, and lane
+    // 0 is a lane of the session's group again at the end.
+    static const uint32_t rounds[] = { 1, 3, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_MAX_LANES + 9 };
+    if (index == 0)
+    {
+        lane_flow_begin(&test->flow);
+        failures += lane_count() != 1 || lane_flow_lanes(&test->flow) != lanes ? 1 : 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rounds); i += 1)
+        {
+            const uint32_t round_lanes = rounds[i] < lanes ? rounds[i] : lanes;
+            for (uint32_t kind = 1; kind <= 2; kind += 1)
+            {
+                memset(test->round_calls, 0, sizeof(test->round_calls));
+                lane_flow_round_begin(&test->flow, kind, test, rounds[i]);
+                lane_test_session_round(test, kind);
+                lane_flow_round_end(&test->flow);
+                for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+                {
+                    failures += test->round_calls[kind - 1][lane] != (lane < round_lanes ? 1u : 0u) || test->round_calls[2 - kind][lane] != 0 ? 1 : 0;
+                }
+                failures += lane_count() != 1 ? 1 : 0;
+            }
+        }
+        lane_flow_end(&test->flow);
+        failures += lane_count() != lanes || lane_index() != 0 ? 1 : 0;
+    }
+    else
+    {
+        void* argument = NULL;
+        for (uint32_t kind = lane_flow_next(&test->flow, &argument); kind != 0; kind = lane_flow_next(&test->flow, &argument))
+        {
+            if (argument != NULL)
+            {
+                lane_test_session_round(argument, kind);
+            }
+            lane_widen();
+        }
+        failures += lane_count() != lanes ? 1 : 0;
+    }
+    // A child forked from lane 0 while the others park: it forgets the session, is one lane, and may start a cold group
+    // of its own, which no session forbids there.
+    if (index == 0 && test->forks)
+    {
+        fflush(stdout);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+            const bool forgot = lane_session_current() == 0 && lane_count() == 1 && lane_index() == 0;
+#if __has_feature(thread_sanitizer)
+            // ThreadSanitizer kills a child that starts a thread after a fork from several, as this one was forked: its
+            // group is of one there.
+            const uint32_t own_lanes = 1;
+#else
+            const uint32_t own_lanes = 2;
+#endif
+            LaneSessionTest own = { 0 };
+            const bool ran = lane_run(own_lanes, lane_test_session_count, &own, 0) && own.calls[0] == 1 && own.calls[1] == own_lanes - 1;
+            _exit(forgot && ran ? 0 : 1);
+        }
+        int status = 0;
+        const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+        failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+    }
+    lane_park();
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->failures[index] += failures;
+    }
+}
+
+// Sessions (#905): see the file's comment.
+static uint64_t lane_test_sessions(void)
+{
+    lane_test_watch(BUSTER_ARRAY_LENGTH(lane_test_check_names) + 1, BUSTER_LANE_TEST_MAX_LANES, false);
+    alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+    struct sigaction action = { .sa_handler = lane_test_session_signal };
+    struct sigaction previous_action;
+    const bool handled = sigaction(SIGUSR1, &action, &previous_action) == 0;
+    uint64_t failures = handled ? 0 : 1;
+    const uint32_t threads_before = lane_test_thread_count();
+    const pid_t caller = (pid_t)syscall(SYS_gettid);
+    static LaneSession session;
+    // Each capacity eagerly, then lazily (lane 1 creating the lanes after it).
+    static const uint32_t capacities[] = { 1, 2, 3, BUSTER_LANE_TEST_MAX_LANES, 1, 3, BUSTER_LANE_TEST_MAX_LANES };
+    for (uint32_t i = 0; handled && i < BUSTER_ARRAY_LENGTH(capacities); i += 1)
+    {
+        LaneSessionTest test = {
+            .caller = caller,
+            .expected = capacities[i],
+            .asked = capacities[i],
+            .forks = i == 2,
+        };
+        const uint64_t created = lane_process.threads_created;
+        const uint32_t flags = i >= 4 ? BUSTER_LANE_SESSION_LAZY : 0;
+        const uint32_t ran = lane_session_run(&session, capacities[i], 0, lane_test_session_main, &test, flags);
+        failures += ran != capacities[i] || lane_process.threads_created != created + capacities[i] - 1 ? 1 : 0;
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += test.calls[lane] != (lane < capacities[i] ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+            for (uint32_t earlier = 0; lane < capacities[i] && earlier < lane; earlier += 1)
+            {
+                failures += test.threads[lane] == test.threads[earlier] ? 1 : 0;
+            }
+        }
+        failures += test.forbidden_calls != 0 || lane_session_current() != 0 ? 1 : 0;
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    }
+    // Sessions whose third lane fails to start, eagerly and lazily, and a lazy one whose lane 1 does: the lanes created are
+    // joined, and the flow runs on lane 0 alone.
+    static const uint32_t failing[] = { 3, 3, 1 };
+    for (uint32_t i = 0; handled && i < BUSTER_ARRAY_LENGTH(failing); i += 1)
+    {
+        LaneSessionTest failed = {
+            .caller = caller,
+            .expected = 1,
+            .asked = BUSTER_LANE_TEST_MAX_LANES,
+        };
+        const uint64_t created = lane_process.threads_created;
+        lane_process.fail_at = failing[i];
+        const uint32_t ran = lane_session_run(&session, BUSTER_LANE_TEST_MAX_LANES, 0, lane_test_session_main, &failed, i == 0 ? 0 : BUSTER_LANE_SESSION_LAZY);
+        lane_process.fail_at = UINT32_MAX;
+        failures += ran != 1 || lane_process.threads_created != created + failing[i] - 1 || failed.calls[0] != 1 || failed.failures[0] != 0 ? 1 : 0;
+        for (uint32_t lane = 1; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += failed.calls[lane] != 0 ? 1 : 0;
+        }
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    }
+    // Sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eager, lazy and lazy with a flow begun before
+    // lane 0 settles, of 2 and 8 lanes, on test topologies of this process's CPUs in pairs, in fours and all in one core:
+    // as many lanes as the capacity and the cores allow, asked for as many, and a lazy session's lane 1 created even
+    // where it runs on one.
+    uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0;
+    failures += known ? 0 : 1;
+    static const uint32_t sizes[] = { 2, 4, 0 };
+    for (uint32_t s = 0; handled && known && s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+    {
+        char root[PATH_MAX];
+        uint32_t end = 0;
+        const bool rooted = lane_test_topology_root(root, sizeof(root));
+        const uint32_t cores = rooted ? lane_test_topology_process(root, allowed, sizes[s], &end) : 0;
+        failures += cores != 0 ? 0 : 1;
+        lane_process.topology = root;
+        static const uint32_t per_core[] = { 2, BUSTER_LANE_TEST_MAX_LANES };
+        for (uint32_t i = 0; cores != 0 && i < 3 * BUSTER_ARRAY_LENGTH(per_core); i += 1)
+        {
+            const uint32_t capacity = per_core[i / 3];
+            const bool lazy = i % 3 != 0;
+            const bool early = i % 3 == 2;
+            const uint32_t expected = cores < capacity ? cores : capacity;
+            LaneSessionTest test = {
+                .caller = caller,
+                .expected = expected,
+                .asked = expected,
+            };
+            const uint64_t created = lane_process.threads_created;
+            const uint32_t flags = BUSTER_LANE_SESSION_PER_CORE | (lazy ? BUSTER_LANE_SESSION_LAZY : 0);
+            const uint32_t ran = lane_session_run(&session, capacity, 0, early ? lane_test_session_early_flow : lane_test_session_main, &test, flags);
+            const uint64_t threads = lazy && expected == 1 ? 1 : expected - 1;
+            failures += ran != expected || lane_process.threads_created != created + threads ? 1 : 0;
+            for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+            {
+                failures += test.calls[lane] != (lane < expected ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+            }
+            failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+        }
+        lane_process.topology = 0;
+        if (rooted)
+        {
+            lane_test_topology_remove(root, end);
+        }
+    }
+    // In a child, a session that leaves its lanes parked at its end, for the child's exit to end; a sanitizer build joins
+    // them.
+    fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+        static LaneSession parked;
+        LaneSessionTest test = { 0 };
+        const uint32_t before = lane_test_thread_count();
+        const uint32_t lanes = lane_session_run(&parked, 4, 0, lane_test_session_count, &test, BUSTER_LANE_SESSION_PARK_AT_END);
+        const bool joined = BUSTER_SANITIZER_RESOURCES != 0;
+        const bool kept = joined ? lane_test_threads_stopped(before) : lane_test_thread_count() == before + 3;
+        _exit(lanes == 4 && kept && test.calls[0] == 1 ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+    if (handled)
+    {
+        sigaction(SIGUSR1, &previous_action, 0);
+    }
+    failures += lane_test_unwatch() ? 0 : 1;
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies and one "
+           "parked at its end, %lu wrong\n",
+           BUSTER_LANE_TEST_MAX_LANES, (unsigned long)failures);
+    return failures;
+}
+
 static int run_lane_tests(int argc, char** argv)
 {
     uint64_t rounds = BUSTER_LANE_TEST_DEFAULT_ROUNDS;
@@ -1860,6 +2777,9 @@ static int run_lane_tests(int argc, char** argv)
         bool passed = lane_test_watchdog();
         passed = lane_test_arenas() && passed;
         passed = lane_test_teams() == 0 && passed;
+        passed = lane_test_cpuinfo_controls() == 0 && passed;
+        passed = lane_test_cores() == 0 && passed;
+        passed = lane_test_sessions() == 0 && passed;
         fflush(stdout);
 
         uint64_t state = seed * BUSTER_LANE_TEST_GOLDEN_RATIO + 1;

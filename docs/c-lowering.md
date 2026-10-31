@@ -124,9 +124,8 @@ states. There is no prepare-plus-scalar timing path, so the prepare result does
 not establish a whole-planner improvement over scalar selection.
 
 These measurements describe the planner, not backend lowering or a complete
-compiler. The required SQLite/libc/c-testsuite emission comparison and
-`main.c` counts and time saved require the source producer and downstream
-lowering path described above.
+compiler. The source path below compares emitted symbols on the fixtures and
+corpora, and measures `main.c`'s counts and time saved.
 
 [The qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
 retains the exact compiler revision, host and binary identities, raw test
@@ -294,10 +293,19 @@ none of its subset's programs makes a name twice in clang's objects.
   and `--symbols-minimum N` fails the run when fewer than N files' objects were
   compared. The 9700X job compares eight of the frozen musl `src` directories
   (`math`, `string`, `stdlib`, `fenv`, `legacy`, `process`, `signal` and
-  `multibyte`: 354 files the backend lowers, 351 before it lowered inline
-  assembly (#147), and every explained difference of musl's) with
-  `--symbols-minimum 354`; `sqlite3.c`, which the backend refuses, compares
-  none.
+  `multibyte`: 542 files the backend lowers, 354 before it took musl's
+  register variables, x87 operands and prefix statements, and 351 before it
+  lowered inline assembly at all (#147), with every explained difference of
+  musl's) with `--symbols-minimum 542`. `sqlite3.c`, which the backend once refused,
+  compares too: at `d12fd583`, with one difference, inlined.
+- **`main.c`**, the compiler's own unit, with `build.sh`'s flags for a plain
+  `-march=znver5` build, whatever the run's host, sanitizer and fuzzing: every
+  correctness run (`tools/ci/correctness.tests`) compiles it by `-c` and by
+  `--lower-all`, each with `--verify`, the scalar path's `--lower-all` object
+  byte for byte the vector path's, and compares its checking, by both paths,
+  and its `-c` object with clang's (`test-checker-corpus --symbols-minimum 1`).
+  At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
+  dropped and 164 inlined.
 
 On corpora, clang -O0 decides four things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
@@ -313,6 +321,18 @@ checked program, never from a name, and fails on any other:
 The model doesn't name string literals, which have no symbols, and a constant
 `if`'s dead arm drops the ones only it refers to too (c-testsuite's 00212, 00214
 and 00215): the corpora compare no strings.
+
+The harness finds the definitions that may explain a difference by binary
+searches (`check_corpus_symbol_index`): once per file it sorts the selections'
+symbols, data entries and bodies by the names they are compared by, then by the
+order in which a pass over the selection would meet them, which is the order in
+which the reasons take them. On the 9700X, a pass per difference made
+`main.c`'s comparison take 13.7 s, its 12,016 differences against a selection
+of 10,105 functions and 125,262 objects at `d12fd583`; with the index it takes
+8.8 s, and musl's eight directories take 6.3 s either way
+([the record](https://github.com/buster14a/buster-performance/tree/bcb44f9de7a071a502e4c81ebf9afe52d085c3b5/docs/measurements/main-c-ci-gates-129-2026-10-30)).
+Both give the same counts there, and on the Zen 4 laptop on `sqlite3.c` and
+c-testsuite too.
 
 Results on the Zen 4 laptop, with clang 23.1.3 (`--target`'s configuration of
 each corpus as `test-checker-corpus` runs it):
@@ -349,9 +369,13 @@ compare 348 files.
 ```
 
 checks each file as the driver does, outside the time, then times in turns the
-two selections and everything `-c` does after one (lowering, Tier 0, branch
-sizing, encoding, the static data's publication and the object's bytes),
-`--passes` (21) medians. It prints each file's functions and objects defined,
+two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
+the static data's publication, section/symbol preparation and building the
+object in memory. Unwind generation and verification are disabled in this
+benchmark; preprocessing, checking, program/static-data preparation, the outer
+per-file arena reservations and warm-up, and writing the object to disk are
+outside the time. Internal emitter allocations remain measured.
+It reports `--passes` (21) medians and each file's functions and objects defined,
 lowered and skipped, both medians and the time saved, then the totals over the
 files that lower both ways. A file the checker rejects is left out of the
 totals, and so is one refused by name, with the reason the report names: a
@@ -364,39 +388,64 @@ Any other failure leaves its file out and makes the command exit with status 1:
 a file that doesn't preprocess or that exhausts the checker's resources, a
 preparation or a warm-up that fails otherwise (the backend's, a resource's, an
 invalid input's), and a timed run that fails or lowers other than its warm-up
-did (the same counts and object bytes). So does a run that measures no file.
+did (the same counts and object size; it does not compare every output byte).
+So does a run that measures no file.
 `test-checker` checks each outcome, on fixtures of its own and on failures
 injected where the real ones arise, with the status each would have
 (`c_lowering_source_benchmark_test.c`).
 
-The issue's case is `main.c`'s unit, whose headers define 5,424 inline
-functions, the intrinsics among them, of which the compiler's own functions
-reach 358. It can't be measured yet. Since #543 the checker refuses the unit at
-its `#pragma clang section` lines, and `-c` its file-scope `asm`
-([#619](https://github.com/buster14a/buster/issues/619)). Without those lines,
-the lowering takes vector types and their operators
-([the checker guide](c-checker.md#backend-handoff)), and `-c` of the unit with
-`build.sh`'s flags for the 9700X (`-march=znver5`) selects 8,489 functions,
-lowers 7,966 and refuses 523, by their first refusal (2026-10-27,
-[the survey](https://github.com/buster14a/buster-performance/tree/b2e5db81/docs/measurements/main-c-lowering-survey-136-2026-10-27)):
+The unchanged `src/buster/compiler/main.c` now lowers both ways at
+[`20e01ceb`](https://github.com/buster14a/buster/commit/20e01cebc77a0142260f3e0a6b3e9c66228ef3bf).
+This includes its section pragmas and file-scope assembly (#619) and its
+header intrinsics, including instructions absent from `znver5`. On the locked
+Ryzen 7 9700X, with Clang 23.1.4's headers and `build.sh`'s captured
+`-march=znver5` flags, eleven separate benchmark processes each ran 21
+alternating paired passes on CPU 2:
 
-- 520 for vector, x86 and bit-cast builtins (#148);
-- 2 for inline assembly operands of vector types in their constraints'
-  registers (`shift_in_previous` and `encode_group`, #147);
-- 1 for a `_BitInt` (`cbuiltin_test_overflow`).
+| Definitions | Defined | Referenced only | All |
+| --- | --- | --- | --- |
+| Functions | 15,489 | 10,098 | 15,431 |
+| Objects | 161,056 | 124,950 | 161,056 |
 
-With `--lower-all`, 8,738 of the unit's 13,850 definitions lower; most of the
-others wait for the intrinsics' builtins (4,856), MMX's 8-byte vectors (174) or
-AVX512-FP16's `_Float16` (79).
+All 15,431 emit-capable functions lower in all-definition mode. The other 58
+definitions are inline-only external bodies, checked but excluded from
+out-of-line emission by the C/GNU inline-linkage policy even with `--lower-all`.
+Referenced selection omits 5,333 emit-capable functions and 36,106 objects;
+the object count includes pooled strings and compound literals.
 
-Where it works today, selection lets units compile that lowering everything
-can't: of musl's math files, the referenced definitions lower and all of them
-don't, refused by `long double` helpers in `libm.h` that nothing calls.
+| Warm post-checking work | Median across 11 processes |
+| --- | --- |
+| Referenced only | 278.939083 ms |
+| All definitions | 299.961666 ms |
+| Paired time saved | 20.882761 ms |
+| Paired fraction saved | 6.963378% |
 
-On the 9700X (the 9700X job's run of `benchmark-lowering-source` on
-c-testsuite's programs, 21 passes, run 40179359967), the 219 programs that lower
-both ways define 341 functions and 682 objects; the selection lowers 322 and 645
-and skips 19 and 37. The skipped functions are glibc's static inline helpers
+The saving is the median of the eleven paired process results, so it is not
+the difference of the two medians in the first rows. Its rank-2-to-rank-10
+interval is 20.764750–21.489129 ms (6.919437–7.150007% for the paired fraction),
+with nominal 98.828125% coverage under independent, identically distributed
+process samples. These are warm lowering-and-object-construction savings,
+with unwind generation disabled, rather than whole-compilation savings.
+
+Separate actual `-c --verify` and `-c --verify --lower-all` gates both succeed
+with unwind generation enabled. Strict Clang-O0 symbol comparison of `main.c`
+also succeeds, with zero unexplained differences, unsupported files or failures.
+Every correctness run repeats these gates since (the `main.c` item of "Against
+clang -O0's objects"). At `d12fd583` they pass with 15,496 functions defined,
+10,105 lowered by `-c` and 15,438 by `--lower-all`, and 161,406 objects, 125,262
+of them lowered by `-c`.
+Instruction/configuration oracles and native memory/ABI checks cover AMX,
+XOP, AVX512-BMM and AVX512-FP16; this does not claim execution of those
+instructions on the Ryzen host. The
+[measurement record](https://github.com/buster14a/buster-performance/tree/824a03c24f17805217e17065d2004eb541d12aa7/docs/measurements/rescued-126-main-lowering-2026-10-30)
+retains the exact source/binary identities, inputs, commands, raw results,
+qualification and statistical method. This supersedes the blocked 2026-10-27
+[`main.c` survey](https://github.com/buster14a/buster-performance/tree/b2e5db81/docs/measurements/main-c-lowering-survey-136-2026-10-27).
+
+In an earlier 9700X run (`benchmark-lowering-source` on
+c-testsuite's programs, 21 passes, run 40179359967), the 219 programs that lowered
+both ways defined 341 functions and 682 objects; the selection lowered 322 and 645
+and skipped 19 and 37. The skipped functions were glibc's static inline helpers
 that `<stdlib.h>` defines (`__bswap_16`, `__bswap_32`, `__bswap_64` and the three
 `__uint*_identity`), which lowering only what is referenced saves where a program
 includes it:
@@ -408,9 +457,9 @@ includes it:
 | 00182 | 11, 5 | 43.2 | 48.6 | 11.2% |
 | all 219 | 341, 322 | 1,676 | 1,696 | 1.2% |
 
-A program that skips nothing costs the same either way, so the selection's own
-work is in the noise. These are small units: the measurement that matters,
-`main.c`'s, waits on the items above.
+A program that skips nothing costs the same either way within this older
+run's noise. These small units and their historical source differ from the
+`main.c` measurement above.
 
 That comparison is within one tree. Against main, on the same work, a harness of
 `benchmark-lowering-source` reduced to the driver's selection

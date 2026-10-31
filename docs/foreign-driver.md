@@ -37,26 +37,39 @@ its objects and of the archives under `--whole-archive`
 (`BUSTER_FOREIGN_DRIVER_LANE_BYTES`), at most 8 (`BUSTER_FOREIGN_DRIVER_LANES`:
 on the 9700X the whole link of synth's shape is fastest on 7 or 8 lanes, one
 per core, and slower on their SMT siblings, [linker
-scaling](linker-scaling.md)'s "Complete foreign links") and one per CPU. The
-calling thread decides them before any lane runs: it opens the command line's
-inputs in link order, as one lane's open phase would (`foreign_open_first`),
-until their objects come to the bytes that pay for the most lanes, and the
-lanes open the rest, and the scripts' inputs. A link of a few objects so runs
-on one lane, opens each input once and starts no thread, as with `--lanes 1`.
-On more than one lane the command then starts its threads once, a team
-(`lane_team_start`, "The command owns the threads" in the linker's design); the
-three stages run on them in turn, the threads sleeping between them and keeping
-their scratch arenas from one to the next (`lane_team_keep_scratch`), and the
-release stops them (#501). A link of `--lanes` whose threads can't start fails
-before its resolution, and one that chose its lanes runs on one. On the 9700X,
-against the cold group per stage before it, the team took 6.8% to 17.7% off
-links on eight lanes of `benchmark-link`'s programs of 1, 2,000 and 102,400
-workers, dynamic and static, and nothing off one lane ([the
+scaling](linker-scaling.md)'s "Complete foreign links") and one per core of
+the CPUs the process may run on (#905, `BUSTER_LANE_SESSION_PER_CORE`). Lane
+0 decides them before any other lane works: it opens the command line's inputs
+in link order, as one lane's open phase would (`foreign_open_first`), until
+their objects come to the bytes that pay for the most lanes, and the lanes open
+the rest, and the scripts' inputs. A link of a few objects so runs on one lane
+and opens each input once, as with `--lanes 1`.
+
+The command's threads are its session's (#905, "The session owns the threads"
+in the linker's design): started once, right after its arguments and before any
+input is opened, as many as the link may take (`--lanes N`'s, at most one per
+CPU, or 8, at most one per core), none for one; lane 0 creates lane 1, which
+without `--lanes` counts the cores from sysfs' sibling lists, a read per core
+off lane 0's path (`lane_core_count`), creates the others
+(`BUSTER_LANE_SESSION_LAZY`), and lane 0 learns how they started before the
+link sets its lanes up. The three stages are rounds of the link's flow on them
+in turn (a `LaneFlow`, `lane.c`): lane 0 links alone and runs its part of each
+round itself, and the other lanes follow the rounds by their kinds
+(`ForeignFlowRound`: the resolution's, the conversion's and the write's),
+sleeping between them and keeping their scratch arenas from one to the next
+(#501); when
+the link is done they stay parked, and the process's exit ends them. A session
+whose threads can't start runs the link on one lane, `--lanes` or not, and no
+stage tries to start them again. On the 9700X, against the cold group per stage
+before it, the team that preceded the session took 6.8% to 17.7% off links on
+eight lanes of `benchmark-link`'s programs of 1, 2,000 and 102,400 workers,
+dynamic and static, and nothing off one lane ([the
 record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)).
 `--time` reports, on standard
-error after the link, each stage's wall time (the arguments, the interpreter's
-discovery, the first inputs' opening, with their objects' bytes when they chose
-the lanes, the team's start, the resolution with each of its phases on the
+error after the link, each stage's wall time (the arguments, the session's
+start, with its lanes against those asked for (`session 1 of 8` after a failed
+start), the interpreter's discovery, the first inputs' opening, with their
+objects' bytes when they chose the lanes, the resolution with each of its phases on the
 slowest lane, the conversion, the optional passes, the write with each of the
 writer's phases on lane 0, and the release), as wild's `--time` and mold's
 `--perf` report theirs. `--startup-applies-irelative` says that a static link's own startup
@@ -72,8 +85,9 @@ command is already are taken and change nothing: `--build-id`,
 and `-z now`, `-z relro`, `-z noexecstack` and `-z text` (the writer never
 writes a relocation in read-only memory). `-dynamic-linker` is
 `--dynamic-linker`. Any other `-m` or `-z` keyword is refused, naming it. So
-a driver's command line, as `gcc -###` prints it for GNU ld, links as it is:
-`-pie` for a PIE, `-static`, `-static -pie` and `-shared` for the others.
+a driver's command line for supported inputs can be passed directly: `-pie`
+for a PIE, `-static`, `-static -pie` and `-shared` for the others. GCC's
+LTO plugin options and plugin-dependent inputs are not supported.
 
 ## Input order and output boundary
 
@@ -83,8 +97,10 @@ controls. The static kinds (a static executable and a static PIE) start
 library search with archives only; a PIE and a shared library start with the
 resolver's ordinary DSO preference. Explicit ordered `-Bstatic`/`-Bdynamic`
 override that initial choice. An explicit `-static` also stays in the input
-stream, preserving its existing search effect. Static output that selects a
-needed DSO reports the incompatible input.
+stream, preserving its existing search effect. `--push-state` saves the
+as-needed, library-search and whole-archive settings; `--pop-state` restores
+them, and pairs can nest. A pop with no saved state is refused. Static output
+that selects a needed DSO reports the incompatible input.
 
 Every kind accepts explicit C runtime startup objects, the program objects,
 libraries and closing CRT objects in the caller's chosen order: `crt1.o`,

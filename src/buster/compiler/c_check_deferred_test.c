@@ -159,12 +159,28 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
     { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
     { "block-scope-prototype-adds-parameters", "int h();\nint f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    { "block-scope-alias-changes-definition-history", "int h(void);\nint f(void) { int h(void) __attribute__((alias(\"g\"))); return 0; }\n"
+      "int g(void) { return 0; }\n", false },
     // A naked prototype's later declarations inherit the attribute: a block's declaration that inherits it merges, and
     // one that adds it, which the later definition inherits in source order, is source order's.
     { "block-scope-declaration-inherits-naked", "__attribute__((naked)) void n(void);\nint f(void) { void n(void); n(); return 0; }\n"
       "void n(void) { __asm__(\"ret\"); }\n", true },
     { "block-scope-declaration-adds-naked", "void n(void);\nint f(void) { __attribute__((naked)) void n(void); return 0; }\n"
       "void n(void) { __asm__(\"ret\"); }\n", false },
+    // Late declaration attributes and earlier attribute state are resolved in source order; a lane leaves the unit
+    // to replay rather than accessing another body's mutable declarations.
+    { "block-scope-late-attribute", "static int h(void){return 1;}\nint f(void){int h(void) __attribute__((used)); return h();}\n"
+      "int g(void){return 2;}\n", false },
+    { "block-scope-late-alias-through-prototypes",
+      "int g(void){return 1;}\nint h(void) __attribute__((alias(\"g\")));\nint h(void);\nint h(void);\n"
+      "int first(void){int h(void) __attribute__((used));return h();}\nint second(void){return 2;}\n", false },
+    { "block-scope-late-body-through-prototype",
+      "int h(void){return 1;}\nint h(void);\nint first(void){int h(void) __attribute__((used));return h();}\n"
+      "int second(void){return 2;}\n", false },
+    { "block-scope-late-weak", "static int h(void){return 1;}\nint f(void){int h(void) __attribute__((weak)); return h();}\n"
+      "int g(void){return 2;}\n", false },
+    { "block-scope-prior-attribute", "int h(void);\nint f(void){int h(void) __attribute__((used)); return h();}\n"
+      "int h(void){return 1;}\nint g(void){return 2;}\n", false },
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },

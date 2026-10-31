@@ -6,14 +6,16 @@
 // truth, compound assignments (into destinations of other types too), increments, conditionals and statement values;
 // conversions to and from every integer and floating type, between _Float16 and the others, of constants and as bit
 // casts; calls passing and returning them alone, in structs and through va_arg, with members, arrays, globals and
-// unions of them, and past a return's cleanups; unary chains over signaling NaNs and subnormals; and floating-point
-// flags under FENV_ACCESS. Each program runs for five targets, each where the host has the features clang's code of it
-// may take and their saved state, and is compiled and linked elsewhere: x86-64 (libgcc's conversions), x86-64-v3
-// (F16C's), x86-64-v4 (AVX-512 without BF16), znver5 (AVX512-BF16's rounding) and sapphirerapids (AVX512-FP16's
-// arithmetic, which rounds each operation). Then what the lowering refuses by name. What clang 23 compiles wrong the
-// programs leave out (docs/c-checker.md, "Half-precision values"): conversions between __fp16 and __bf16, __bf16 under
-// FENV_ACCESS, and __bf16 parameters' subnormals and signaling NaNs. They leave out too what the lowering doesn't
-// follow: a unary + alone of a signaling NaN in a function with FENV_ACCESS. Include after c_check_program_fp16_test.c.
+// unions of them, and past a return's cleanups; their complex types' transport (the _Complex __bf16 that the usual
+// arithmetic conversions make too) and _Atomic ones' (#137); unary chains over signaling NaNs and subnormals; and
+// floating-point flags under FENV_ACCESS. Each program runs for five targets, each where the host has the features
+// clang's code of it may take and their saved state, and is compiled and linked elsewhere: x86-64 (libgcc's
+// conversions), x86-64-v3 (F16C's), x86-64-v4 (AVX-512 without BF16), znver5 (AVX512-BF16's rounding) and
+// sapphirerapids (AVX512-FP16's arithmetic, which rounds each operation). Then what the lowering refuses by name. What
+// clang 23 compiles wrong the programs leave out (docs/c-checker.md, "Half-precision values"): conversions between
+// __fp16 and __bf16, __bf16 under FENV_ACCESS, and __bf16 parameters' subnormals and signaling NaNs. They leave out too
+// what the lowering doesn't follow: a unary + alone of a signaling NaN in a function with FENV_ACCESS. Include after
+// c_check_program_fp16_test.c.
 
 // The programs' helpers: the hash, half-precision values from their bits, and bits of special values (zeros,
 // infinities, a quiet and a signaling NaN, subnormals, ones, the largest finite one, the smallest normal one, and
@@ -137,6 +139,168 @@ static const char* const check_test_half_programs[][2] = {
         "return (int)h;}",
     },
     {
+        // Each pair of binary16 special representations, including both zeros and NaN payloads, travels through
+        // copies and bit casts in both directions. Compare against the original integer bits, not floating equality.
+        "half-complex-transport",
+        "typedef _Float16 _Complex HC;typedef unsigned char V4 __attribute__((vector_size(4)));"
+        "static int calls;static __attribute__((noinline)) HC identity(HC z){calls++;HC copy=z;return copy;}"
+        "int tested(int n){unsigned h=2166136261u;calls=0;"
+        "for(int i=0;i<16;i++)for(int j=0;j<16;j++){unsigned bits=(unsigned)specials[i]|(unsigned)specials[j]<<16;HC a;__builtin_memcpy(&a,&bits,4);"
+        "HC b=identity(a),c=n&1?b:a;HC d=(a,b);HC e=({HC t=c;t;});HC same=__builtin_bit_cast(HC,a);"
+        "unsigned u=__builtin_bit_cast(unsigned,c),v=__builtin_bit_cast(unsigned,d),w=__builtin_bit_cast(unsigned,e),s=__builtin_bit_cast(unsigned,same);"
+        "volatile HC observed=a;HC restored=observed;unsigned ov=__builtin_bit_cast(unsigned,restored);if(u!=bits||v!=bits||w!=bits||s!=bits||ov!=bits)return 1;"
+        "float f=__builtin_bit_cast(float,identity(a));int k=__builtin_bit_cast(int,a);"
+        "HC rf=__builtin_bit_cast(HC,f),ri=__builtin_bit_cast(HC,k);unsigned uf=__builtin_bit_cast(unsigned,rf),ui=__builtin_bit_cast(unsigned,ri);"
+        "if(uf!=bits||ui!=bits)return 2;FOLD(u);FOLD(f);"
+        "\n#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
+        "V4 bytes=__builtin_bit_cast(V4,a);HC rv=__builtin_bit_cast(HC,bytes);unsigned uv=__builtin_bit_cast(unsigned,rv);if(uv!=bits)return 2;FOLD(bytes);"
+        "\n#endif\n"
+        "unsigned short re=__builtin_bit_cast(unsigned short,__real__ identity(a)),im=__builtin_bit_cast(unsigned short,__imag__ identity(a));"
+        "if(re!=specials[i]||im!=specials[j])return 3;}if(calls!=1024)return 4;return (int)h;}",
+    },
+    {
+        // Clang's helper functions call Buster's callbacks and Buster calls Clang's helpers. Ten complex arguments
+        // exercise the eight SSE registers and stack overflow; variadic calls exercise both register-save/overflow areas.
+        "half-complex-abi",
+        "typedef _Float16 _Complex HC;extern HC external_hc(HC,unsigned);extern unsigned external_hc_apply(HC(*)(HC,unsigned),unsigned);"
+        "extern unsigned external_hc_many(HC,HC,HC,HC,HC,HC,HC,HC,HC,HC);"
+        "extern unsigned external_hc_many_apply(unsigned(*)(HC,HC,HC,HC,HC,HC,HC,HC,HC,HC),unsigned);"
+        "extern unsigned external_hc_variadic(int,...);extern unsigned external_hc_variadic_apply(unsigned(*)(int,...),unsigned);"
+        "static __attribute__((noinline)) HC changed(HC z,unsigned m){return __builtin_bit_cast(HC,__builtin_bit_cast(unsigned,z)^m);}"
+        "static __attribute__((noinline)) unsigned many(HC a,HC b,HC c,HC d,HC e,HC f,HC g,HC h,HC i,HC j){HC z[]={a,b,c,d,e,f,g,h,i,j};"
+        "unsigned r=2166136261u;for(int k=0;k<10;k++)r=(r^__builtin_bit_cast(unsigned,z[k]))*16777619u;return r;}"
+        "static __attribute__((noinline)) unsigned variadic(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);unsigned h=2166136261u;"
+        "for(int i=0;i<count;i++){HC z=__builtin_va_arg(ap,HC);h=(h^__builtin_bit_cast(unsigned,z))*16777619u;}__builtin_va_end(ap);return h;}"
+        "int tested(int n){unsigned h=2166136261u;for(int i=0;i<16;i++){unsigned bits=(unsigned)specials[i]|(unsigned)specials[(i+5)&15]<<16;"
+        "HC a=__builtin_bit_cast(HC,bits),b=__builtin_bit_cast(HC,bits^0x80008000u);"
+        "HC c=external_hc(a,0x80000001u);unsigned r=__builtin_bit_cast(unsigned,c),s=external_hc_apply(changed,bits);"
+        "if(r!=(bits^0x80000001u)||s!=r)return 1;"
+        "unsigned want=2166136261u;for(int k=0;k<10;k++)want=(want^(bits^((k&1)?0x80008000u:0u)))*16777619u;"
+        "unsigned x=external_hc_many(a,b,a,b,a,b,a,b,a,b),y=external_hc_many_apply(many,bits);"
+        "unsigned v=external_hc_variadic(10,a,b,a,b,a,b,a,b,a,b),w=external_hc_variadic_apply(variadic,bits);"
+        "if(x!=want||y!=want||v!=want||w!=want)return 2;FOLD(r);FOLD(x);FOLD(v);}return (int)(h^(unsigned)n);}",
+    },
+    {
+        // Component conversions, constants, globals and lvalue/rvalue real and imaginary projections. Truth must
+        // compare values, so either signed zero is false, while a NaN in either part is true.
+        "half-complex-conversions",
+        "typedef _Float16 _Complex HC;static HC global=1.25f+2.5fi;"
+        "static __attribute__((noinline)) HC convert(_Complex double z){return z;}"
+        "static __attribute__((noinline)) HC scalar(double x){return x;}"
+        "int tested(int n){unsigned h=2166136261u;"
+        "HC z=scalar((double)n/3.0),constant=(_Complex _Float16)(-1.5f-0.0fi);FOLD(z);FOLD(constant);FOLD(global);"
+        "_Complex double d;__real__ d=(double)n/7.0;__imag__ d=(double)(n+1)/11.0;HC c=convert(d);FOLD(c);"
+        "_Complex float f=c;_Complex double e=c;_Complex long double l=c;HC back=e;"
+        "FOLD(f);FOLD(e);FOLDLD(__real__ l);FOLDLD(__imag__ l);FOLD(back);"
+        "double real=c;_Float16 half=c;int integer=c;FOLD(real);FOLD(half);FOLD(integer);"
+        "for(int i=0;i<16;i++)for(int j=0;j<16;j++){unsigned bits=(unsigned)specials[i]|(unsigned)specials[j]<<16;HC a;__builtin_memcpy(&a,&bits,4);"
+        "_Bool truth=a;int test=!a+2*(a?1:0)+4*(a&&a)+8*(a||a);"
+        "int expected=((specials[i]&0x7fff)!=0)||((specials[j]&0x7fff)!=0);if(truth!=expected||test!=(expected?14:1))return 1;FOLD(truth);FOLD(test);}"
+        "HC assigned;__real__ assigned=(_Float16)n;__imag__ assigned=(_Float16)(n+2);HC copied=assigned;FOLD(copied);return (int)h;}",
+    },
+    {
+        // The _Complex __bf16 that the usual arithmetic conversions make (#137), carried as complex binary16 is: each pair of
+        // bfloat16 special representations (zeros, infinities, quiet NaNs' payloads, the largest and smallest normal
+        // values) through copies, calls, ?:, the comma, statement values, a volatile object and bit casts both ways,
+        // compared as their bits. No signaling NaN or subnormal, which clang 23's code changes, as it does a __bf16
+        // parameter's: a <2 x bfloat> argument or result quiets a signaling NaN (0x7f81 comes back 0x7fc1), and with
+        // AVX512-BF16 a ?: of two flushes a subnormal to zero.
+        "half-complex-bf16-transport",
+        "typedef __typeof__((_Complex int)0+(__bf16)0) BC;typedef unsigned char V4 __attribute__((vector_size(4)));"
+        "static const unsigned short bf_specials[]={0x0000,0x8000,0x7f80,0xff80,0x7fc0,0xffc1,0x7fff,0x8080,0x3f80,0xbf80,0x7f7f,0x0080,0xff7f,0x3eab,0x4049,0xc2c8};"
+        "static int calls;static __attribute__((noinline)) BC identity(BC z){calls++;BC copy=z;return copy;}"
+        "int tested(int n){unsigned h=2166136261u;calls=0;"
+        "for(int i=0;i<16;i++)for(int j=0;j<16;j++){unsigned bits=(unsigned)bf_specials[i]|(unsigned)bf_specials[j]<<16;BC a;__builtin_memcpy(&a,&bits,4);"
+        "BC b=identity(a),c=n&1?b:a;BC d=(a,b);BC e=({BC t=c;t;});BC same=__builtin_bit_cast(BC,a);"
+        "unsigned u=__builtin_bit_cast(unsigned,c),v=__builtin_bit_cast(unsigned,d),w=__builtin_bit_cast(unsigned,e),s=__builtin_bit_cast(unsigned,same);"
+        "volatile BC observed=a;BC restored=observed;unsigned ov=__builtin_bit_cast(unsigned,restored);if(u!=bits||v!=bits||w!=bits||s!=bits||ov!=bits)return 1;"
+        "float f=__builtin_bit_cast(float,identity(a));int k=__builtin_bit_cast(int,a);"
+        "BC rf=__builtin_bit_cast(BC,f),ri=__builtin_bit_cast(BC,k);unsigned uf=__builtin_bit_cast(unsigned,rf),ui=__builtin_bit_cast(unsigned,ri);"
+        "if(uf!=bits||ui!=bits)return 2;FOLD(u);FOLD(f);"
+        "\n#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
+        "V4 bytes=__builtin_bit_cast(V4,a);BC rv=__builtin_bit_cast(BC,bytes);unsigned uv=__builtin_bit_cast(unsigned,rv);if(uv!=bits)return 2;FOLD(bytes);"
+        "\n#endif\n"
+        "unsigned short re=__builtin_bit_cast(unsigned short,__real__ identity(a)),im=__builtin_bit_cast(unsigned short,__imag__ identity(a));"
+        "if(re!=bf_specials[i]||im!=bf_specials[j])return 3;}if(calls!=1024)return 4;return (int)h;}",
+    },
+    {
+        // _Complex __bf16 between Buster's code and Clang's, both ways (#137): ten of them, past the eight SSE registers onto
+        // the stack, and through va_arg, from the save area and the overflow area; masks that flip signs alone, which
+        // make no signaling NaN that clang's code would quiet.
+        "half-complex-bf16-abi",
+        "typedef __typeof__((_Complex int)0+(__bf16)0) BC;extern BC external_hb(BC,unsigned);extern unsigned external_hb_apply(BC(*)(BC,unsigned),unsigned);"
+        "extern unsigned external_hb_many(BC,BC,BC,BC,BC,BC,BC,BC,BC,BC);extern unsigned external_hb_many_apply(unsigned(*)(BC,BC,BC,BC,BC,BC,BC,BC,BC,BC),unsigned);"
+        "extern unsigned external_hb_variadic(int,...);extern unsigned external_hb_variadic_apply(unsigned(*)(int,...),unsigned);"
+        "static const unsigned short bf_specials[]={0x0000,0x8000,0x7f80,0xff80,0x7fc0,0xffc1,0x0001,0x8001,0x3f80,0xbf80,0x7f7f,0x0080,0x007f,0x3eab,0x4049,0xc2c8};"
+        "static __attribute__((noinline)) BC changed(BC z,unsigned m){return __builtin_bit_cast(BC,__builtin_bit_cast(unsigned,z)^m);}"
+        "static __attribute__((noinline)) unsigned many(BC a,BC b,BC c,BC d,BC e,BC f,BC g,BC h,BC i,BC j){BC z[]={a,b,c,d,e,f,g,h,i,j};"
+        "unsigned r=2166136261u;for(int k=0;k<10;k++)r=(r^__builtin_bit_cast(unsigned,z[k]))*16777619u;return r;}"
+        "static __attribute__((noinline)) unsigned variadic(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);unsigned h=2166136261u;"
+        "for(int i=0;i<count;i++){BC z=__builtin_va_arg(ap,BC);h=(h^__builtin_bit_cast(unsigned,z))*16777619u;}__builtin_va_end(ap);return h;}"
+        "int tested(int n){unsigned h=2166136261u;for(int i=0;i<16;i++){unsigned bits=(unsigned)bf_specials[i]|(unsigned)bf_specials[(i+5)&15]<<16;"
+        "BC a=__builtin_bit_cast(BC,bits),b=__builtin_bit_cast(BC,bits^0x80008000u);"
+        "BC c=external_hb(a,0x80008000u);unsigned r=__builtin_bit_cast(unsigned,c),s=external_hb_apply(changed,bits);"
+        "if(r!=(bits^0x80008000u)||s!=r)return 1;"
+        "unsigned want=2166136261u;for(int k=0;k<10;k++)want=(want^(bits^((k&1)?0x80008000u:0u)))*16777619u;"
+        "unsigned x=external_hb_many(a,b,a,b,a,b,a,b,a,b),y=external_hb_many_apply(many,bits);"
+        "unsigned v=external_hb_variadic(10,a,b,a,b,a,b,a,b,a,b),w=external_hb_variadic_apply(variadic,bits);"
+        "if(x!=want||y!=want||v!=want||w!=want)return 2;FOLD(r);FOLD(x);FOLD(v);}return (int)(h^(unsigned)n);}",
+    },
+    {
+        // _Complex __bf16's conversions to and from the other complex and real types (#137), its constants, a global's
+        // static value, the real and imaginary parts as lvalues and values, and truth, which compares the parts' values:
+        // either signed zero is false, and a NaN in either part true.
+        "half-complex-bf16-conversions",
+        "typedef __typeof__((_Complex int)0+(__bf16)0) BC;static BC global=1.25f+2.5fi;"
+        "static const unsigned short bf_specials[]={0x0000,0x8000,0x7f80,0xff80,0x7fc0,0x7f81,0x0001,0x8001,0x3f80,0xbf80,0x7f7f,0x0080,0x007f,0x3eab,0x4049,0xc2c8};"
+        "static __attribute__((noinline)) BC convert(_Complex double z){return z;}"
+        "static __attribute__((noinline)) BC scalar(double x){return x;}"
+        "int tested(int n){unsigned h=2166136261u;"
+        "BC z=scalar((double)n/3.0),constant=(BC)(-1.5f-0.0fi);FOLD(z);FOLD(constant);FOLD(global);"
+        "_Complex double d;__real__ d=(double)n/7.0;__imag__ d=(double)(n+1)/11.0;BC c=convert(d);FOLD(c);"
+        "_Complex float f=c;_Complex double e=c;_Complex long double l=c;BC back=e;_Complex _Float16 half=c;BC again=half;"
+        "FOLD(f);FOLD(e);FOLDLD(__real__ l);FOLDLD(__imag__ l);FOLD(back);FOLD(half);FOLD(again);"
+        "double real=c;__bf16 part=c;int integer=c;FOLD(real);FOLD(part);FOLD(integer);"
+        "for(int i=0;i<16;i++)for(int j=0;j<16;j++){unsigned bits=(unsigned)bf_specials[i]|(unsigned)bf_specials[j]<<16;BC a;__builtin_memcpy(&a,&bits,4);"
+        "_Bool truth=a;int test=!a+2*(a?1:0)+4*(a&&a)+8*(a||a);"
+        "int expected=((bf_specials[i]&0x7fff)!=0)||((bf_specials[j]&0x7fff)!=0);if(truth!=expected||test!=(expected?14:1))return 1;FOLD(truth);FOLD(test);}"
+        "BC assigned;__real__ assigned=(__bf16)n;__imag__ assigned=(__bf16)(n+2);BC copied=assigned;FOLD(copied);return (int)h;}",
+    },
+    {
+        // _Atomic _Float16 and _Atomic __bf16 (#137): parameters and results in an XMM register's low 16 bits, locals and
+        // globals loaded and stored atomically through their buffers' 16 bits, exchanges and compare-exchanges, values
+        // computed from their loads, and calls both ways with clang's code, past the eight XMM registers onto the stack.
+        // __bf16's values are normal ones and zeros, infinities and quiet NaNs: clang 23's code of a __bf16 parameter
+        // quiets signaling NaNs and flushes subnormals (docs/c-checker.md, "Half-precision values").
+        "half-atomic",
+        "typedef _Atomic(_Float16) AH;typedef _Atomic(__bf16) AB;"
+        "AH external_ah(AH,unsigned);AB external_ab(AB,unsigned);unsigned external_ah_apply(AH(*)(AH,unsigned),unsigned);"
+        "unsigned external_ab_apply(AB(*)(AB,unsigned),unsigned);unsigned external_ahb_many(AH,AB,double,AH,AB,float,AH,AB,AH,AB,AH,AB);"
+        "unsigned external_ahb_many_apply(unsigned(*)(AH,AB,double,AH,AB,float,AH,AB,AH,AB,AH,AB),unsigned);"
+        "static const unsigned short bf_values[]={0x0000,0x8000,0x7f80,0xff80,0x7fc0,0x7fc5,0x3f80,0xbf80,0x7f7f,0x0080,0x8080,0x3eab,0x4049,0xc2c8,0x4000,0xc000};"
+        "static unsigned short ahb(AH*p){_Float16 v=*p;unsigned short b;__builtin_memcpy(&b,&v,2);return b;}"
+        "static unsigned short abb(AB*p){__bf16 v=*p;unsigned short b;__builtin_memcpy(&b,&v,2);return b;}"
+        "static __attribute__((noinline)) AH changed_h(AH x,unsigned m){unsigned short b=(unsigned short)(ahb(&x)^m);return hb(b);}"
+        "static __attribute__((noinline)) AB changed_b(AB x,unsigned m){unsigned short b=(unsigned short)(abb(&x)^m);__bf16 r;bb(&r,b);return r;}"
+        "static __attribute__((noinline)) unsigned many(AH a,AB b,double c,AH d,AB e,float f,AH g,AB h,AH i,AB j,AH k,AB l){"
+        "unsigned long cb;unsigned fb;__builtin_memcpy(&cb,&c,8);__builtin_memcpy(&fb,&f,4);unsigned r=((unsigned)cb^(unsigned)(cb>>32))*16777619u^fb;"
+        "AH*hs[]={&a,&d,&g,&i,&k};AB*bs[]={&b,&e,&h,&j,&l};for(int m=0;m<5;m++)r=(r^ahb(hs[m])^((unsigned)abb(bs[m])<<16))*16777619u;return r;}"
+        "static AH global_h;static AB global_b;"
+        "int tested(int n){unsigned h=2166136261u;"
+        "for(int i=0;i<16;i++){unsigned short hbits=specials[i],bbits=bf_values[i];_Float16 hv=hb(hbits);__bf16 bv;bb(&bv,bbits);"
+        "AH x=hv;AB y=bv;unsigned short xs=ahb(&x),ys=abb(&y);if(xs!=hbits||ys!=bbits)return 1;"
+        "AH rx=external_ah(x,0x8001u);AB ry=external_ab(y,0x8000u);unsigned short rxs=ahb(&rx),rys=abb(&ry);FOLD(rxs);FOLD(rys);"
+        "unsigned ax=external_ah_apply(changed_h,hbits),ay=external_ab_apply(changed_b,bbits);FOLD(ax);FOLD(ay);"
+        "unsigned m1=external_ahb_many(x,y,1.25,x,y,-2.5f,x,y,x,y,x,y),m2=external_ahb_many_apply(many,hbits|(unsigned)bbits<<16);"
+        "unsigned m3=many(x,y,1.25,x,y,-2.5f,x,y,x,y,x,y);if(m1!=m3)return 2;FOLD(m1);FOLD(m2);"
+        "global_h=x;global_b=y;_Float16 old=__c11_atomic_exchange(&global_h,(_Float16)n,5);__bf16 oldb=__c11_atomic_exchange(&global_b,(__bf16)n,5);"
+        "FOLD(old);FOLD(oldb);_Float16 expected=(_Float16)n;int ok=__c11_atomic_compare_exchange_strong(&global_h,&expected,hv,5,5);"
+        "unsigned short gh=ahb(&global_h);FOLD(ok);FOLD(gh);__bf16 expectedb=(__bf16)(n+1);ok=__c11_atomic_compare_exchange_strong(&global_b,&expectedb,bv,5,5);"
+        "unsigned short gb=abb(&global_b);FOLD(ok);FOLD(expectedb);FOLD(gb);"
+        "_Float16 sum=x+global_h;float wide=y*(__bf16)2;FOLD(sum);FOLD(wide);}"
+        "return (int)h;}",
+    },
+    {
         // Under FENV_ACCESS: a chain's flags (overflow and underflow in its rounding alone, inexact, division by zero),
         // a negation's round trip (which quiets a signaling NaN and raises FE_INVALID), a conversion's, a compare's and a
         // compound assignment's, and an integer constant's conversion, at run time. A unary + alone, whose round trip
@@ -231,11 +395,11 @@ static const char* const check_test_half_programs[][2] = {
      BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BF16))
 
 // What the lowering refuses by name: __bf16's arithmetic where the unit's target has AVX10.2's (which rounds each
-// operation in bfloat16, and Tier 0 doesn't emit), complex _Float16, a conversion to __bf16 where AVX512-BF16 has no VL
-// to round one float with, an _Atomic integer's update by a half-precision value (whose computation clang's code
-// doesn't take from the usual arithmetic conversions: it adds the operand converted to an unsigned integer, and
-// multiplies the old value converted as an unsigned one), and a _BitInt's past 128 bits, whose conversions to and from
-// the half-precision types aren't lowered.
+// operation in bfloat16, and Tier 0 doesn't emit), complex _Float16 and __bf16 arithmetic, a conversion to __bf16 where
+// AVX512-BF16 has no VL to round one float with, an _Atomic integer's update by a half-precision value (whose
+// computation clang's code doesn't take from the usual arithmetic conversions: it adds the operand converted to an
+// unsigned integer, and multiplies the old value converted as an unsigned one) and an _Atomic half-precision value's
+// own update, and a _BitInt's past 128 bits, whose conversions to and from the half-precision types aren't lowered.
 static void check_test_program_half_refusals(CheckTest* test)
 {
     X86Target v4 = { 0 };
@@ -250,12 +414,29 @@ static void check_test_program_half_refusals(CheckTest* test)
         without_vl.features = (without_vl.features & ~BUSTER_X86_FEATURE(AVX512VL)) | BUSTER_X86_FEATURE(AVX512BF16);
         check_test_program_boundary_target(test, "int tested(int n){__bf16 a=(__bf16)n,b=a+(__bf16)1;return (int)b;}", "bf16-native-arithmetic", true, false,
                                            0, 2, "__bf16 arithmetic where the unit's target has AVX10.2", &avx10);
-        check_test_program_boundary_target(test, "int tested(int n){_Complex _Float16 z=(_Float16)n;return (int)__real__ z;}", "complex-float16", true, false, 0, 1,
-                                           "complex types other than _Complex float, double, long double and __float128", &avx10);
+        static const char* const complex_operations[] = { "a+b", "a-b", "a*b", "a/b", "-a", "~a", "a==b", "a!=b", "a+=b", "a*=b" };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(complex_operations); i += 1)
+        {
+            char source[160];
+            snprintf(source, sizeof(source), "void tested(_Complex _Float16 a,_Complex _Float16 b){(void)(%s);}", complex_operations[i]);
+            check_test_program_boundary_target(test, source, "complex-float16-arithmetic", true, false, 0, 0,
+                                               "arithmetic and comparisons of _Complex _Float16 values", &avx10);
+            snprintf(source, sizeof(source), "typedef __typeof__((_Complex int)0+(__bf16)0) BC;void tested(BC a,BC b){(void)(%s);}", complex_operations[i]);
+            check_test_program_boundary_target(test, source, "complex-bf16-arithmetic", true, false, 0, 0,
+                                               "arithmetic and comparisons of _Complex __bf16 values", &v4);
+        }
+        check_test_program_boundary_target(test, "_Complex _Float16 tested(_Complex __float128 z){return z;}", "complex-float16-from-float128", true, false, 0, 0,
+                                           "conversions between __float128 and this type", &avx10);
+        check_test_program_boundary_target(test, "_Complex __float128 tested(_Complex _Float16 z){return z;}", "complex-float16-to-float128", true, false, 0, 0,
+                                           "conversions between __float128 and this type", &avx10);
         check_test_program_boundary_target(test, "int tested(int n){__bf16 b=(float)n;return b==1;}", "bf16-without-vl", true, false, 0, 1,
                                            "conversions to __bf16 with AVX512-BF16 but not AVX-512VL", &without_vl);
         check_test_program_boundary_target(test, "int tested(int n){_Atomic int a=n;a+=(_Float16)n;return a;}", "atomic-half-update", true, false, 0, 1,
                                            "this operation on half-precision values", &v4);
+        check_test_program_boundary_target(test, "int tested(int n){_Atomic _Float16 a=(_Float16)n;a+=(_Float16)1;return (int)(_Float16)a;}",
+                                           "atomic-float16-update", true, false, 0, 1, "this operation on half-precision values", &v4);
+        check_test_program_boundary_target(test, "int tested(int n){_Atomic __bf16 a=(__bf16)n;a*=(__bf16)2;return (int)(__bf16)a;}", "atomic-bf16-update",
+                                           true, false, 0, 1, "this operation on half-precision values", &v4);
         check_test_program_boundary_target(test, "int tested(int n){_BitInt(256) x=n;x+=(_Float16)n;return (int)x;}", "bit-int-half-update", true, false, 0, 1,
                                            "conversions from _BitInt past 128 bits to this type", &v4);
     }

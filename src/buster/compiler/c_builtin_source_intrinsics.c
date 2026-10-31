@@ -26,36 +26,60 @@ static const CBuiltinSourceName cbuiltin_source_rows[] = {
 
 #define BUSTER_CBUILTIN_SOURCE_LEAF(name, ...) { name, sizeof(name) - 1 },
 #define BUSTER_CBUILTIN_X86_LEAF(id, ...) BUSTER_CBUILTIN_SOURCE_LEAF(__VA_ARGS__)
+#define BUSTER_CBUILTIN_AMX(id, builtin, ...) { "__builtin_ia32_" builtin "_internal", sizeof("__builtin_ia32_" builtin "_internal") - 1 },
 static const CBuiltinSourceName cbuiltin_source_leaves[] = {
 #include "c_builtin_x86_leaves.inc"
+#include "c_builtin_amx_leaves.inc"
 };
+#undef BUSTER_CBUILTIN_AMX
 #undef BUSTER_CBUILTIN_X86_LEAF
 #undef BUSTER_CBUILTIN_SOURCE_LEAF
 
-// The source checker deliberately accepts only this frozen workload's intrinsic declarations. A lowering row
-// outside it is not a callable source builtin. Reuse its exact sorted name inventory, without importing its types.
-#define BUSTER_BUILTIN_METADATA(n, t, a, f, h, l, s, line, ordinal, custom, evaluable, kind, constraints) { n, sizeof(n) - 1 },
-static const CBuiltinSourceName cbuiltin_source_intrinsic_scope[] = {
+// A name of the source scopes below, with what clang 23.1.1's metadata requires of a unit for the name to be a builtin
+// there (#148): its language modes' token (ALL_LANGUAGES, C23_LANG, ...) and its target features' expression
+// (BuiltinTargetFeatures.h's grammar: ',' and, '|' or, parentheses), which the preprocessor's __has_builtin evaluates
+// against the unit's target, as clang's does.
+typedef struct CBuiltinSourceScope CBuiltinSourceScope;
+struct CBuiltinSourceScope
+{
+    const char* name;
+    uint32_t length;
+    const char* features;
+    const char* languages;
+};
+
+// The source checker accepts this frozen workload's intrinsic declarations and separately attested additions below.
+// A lowering row outside those scopes is not a callable source builtin. Reuse the sorted inventory, without its types.
+#define BUSTER_BUILTIN_METADATA(n, t, a, f, h, l, s, line, ordinal, custom, evaluable, kind, constraints) { n, sizeof(n) - 1, f, l },
+static const CBuiltinSourceScope cbuiltin_source_intrinsic_scope[] = {
 #include "generated/clang_builtin_own_main_23_1_1.inc"
 };
 #undef BUSTER_BUILTIN_METADATA
 
-static __attribute__((unused)) bool cbuiltin_source_intrinsic(const uint8_t* name, uint32_t length)
+// The supplementary scope's names past the inventory (c_builtin_supplementary_scope.inc), sorted too, each of every
+// language mode.
+#define BUSTER_CBUILTIN_SUPPLEMENTARY_NAME(n, f) { n, sizeof(n) - 1, f, "ALL_LANGUAGES" },
+static const CBuiltinSourceScope cbuiltin_source_supplementary_scope[] = {
+#include "c_builtin_supplementary_scope.inc"
+};
+#undef BUSTER_CBUILTIN_SUPPLEMENTARY_NAME
+
+// A sorted scope's row of a name, or null, by a binary search of the bounded slice's bytes.
+static const CBuiltinSourceScope* cbuiltin_source_scope_search(const CBuiltinSourceScope* rows, uint32_t count, const uint8_t* name, uint32_t length)
 {
-    bool scoped = false;
-    bool result = false;
+    const CBuiltinSourceScope* result = NULL;
     uint32_t low = 0;
-    uint32_t high = sizeof(cbuiltin_source_intrinsic_scope) / sizeof(cbuiltin_source_intrinsic_scope[0]);
+    uint32_t high = count;
     while (name != NULL && length != 0 && length < 128 && low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        const CBuiltinSourceName* entry = cbuiltin_source_intrinsic_scope + middle;
+        const CBuiltinSourceScope* entry = rows + middle;
         const uint32_t common = length < entry->length ? length : entry->length;
         const int bytes = memcmp(name, entry->name, common);
         const int compared = bytes != 0 ? bytes : (length > entry->length) - (length < entry->length);
         if (compared == 0)
         {
-            scoped = true;
+            result = entry;
             low = high;
         }
         else if (compared < 0)
@@ -67,6 +91,25 @@ static __attribute__((unused)) bool cbuiltin_source_intrinsic(const uint8_t* nam
             low = middle + 1;
         }
     }
+    return result;
+}
+
+// The scopes' row of a name, or null: the inventory's, else the supplementary scope's.
+static __attribute__((unused)) const CBuiltinSourceScope* cbuiltin_source_scope(const uint8_t* name, uint32_t length)
+{
+    const CBuiltinSourceScope* inventory =
+        cbuiltin_source_scope_search(cbuiltin_source_intrinsic_scope, sizeof(cbuiltin_source_intrinsic_scope) / sizeof(cbuiltin_source_intrinsic_scope[0]), name, length);
+    const CBuiltinSourceScope* result =
+        inventory != NULL ? inventory :
+                            cbuiltin_source_scope_search(cbuiltin_source_supplementary_scope,
+                                                         sizeof(cbuiltin_source_supplementary_scope) / sizeof(cbuiltin_source_supplementary_scope[0]), name, length);
+    return result;
+}
+
+static __attribute__((unused)) bool cbuiltin_source_intrinsic(const uint8_t* name, uint32_t length)
+{
+    const bool scoped = cbuiltin_source_scope(name, length) != NULL;
+    bool result = false;
     for (uint32_t i = 0; scoped && !result && i < sizeof(cbuiltin_source_rows) / sizeof(cbuiltin_source_rows[0]); i += 1)
     {
         const CBuiltinSourceName* entry = cbuiltin_source_rows + i;

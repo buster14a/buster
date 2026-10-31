@@ -79,6 +79,12 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CLEANUP_TYPE: result = "'cleanup' function parameter has incompatible type"; break;
         case CHECK_INPUT_CLEANUP_ARGUMENTS: result = "'cleanup' attribute takes one argument"; break;
         case CHECK_INPUT_WEAK_LINKAGE: result = "weak declaration cannot have internal linkage"; break;
+        case CHECK_INPUT_ALIAS_DEFINITION: result = "definition cannot also be an alias"; break;
+        case CHECK_INPUT_IFUNC_DEFINITION: result = "definition cannot also be an ifunc"; break;
+        case CHECK_INPUT_WEAKREF_LINKAGE: result = "weakref declaration must have internal linkage"; break;
+        case CHECK_INPUT_WEAKREF_CONTEXT: result = "weakref declaration must be in a global context"; break;
+        case CHECK_INPUT_WEAKREF_ALIAS: result = "weakref declaration must also have an alias attribute"; break;
+        case CHECK_INPUT_WEAKREF_SUBJECT: result = "'weakref' attribute only applies to variables and functions"; break;
         case CHECK_INPUT_LABEL_UNDECLARED: result = "use of undeclared label"; break;
         case CHECK_INPUT_LABEL_REDEFINITION: result = "redefinition of label"; break;
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
@@ -90,8 +96,58 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
+        case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
+        case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
+        case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
     }
     return result;
+}
+
+// clang's musttail attribute (#147) as clang's messages spell it, from its first token (`token`: GNU's name, or the
+// scope's of clang::musttail): 'musttail' or 'clang::musttail', or as it is `written`, its name's own spelling
+// (__musttail__ too), which clang's reading of an attribute's arguments says. Into `text`, `capacity` bytes.
+static void check_driver_musttail_spelling(const Parser* parser, const Preprocessor* pp, uint32_t token, bool written, char* text, uint32_t capacity)
+{
+    const bool scoped = token + 3 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
+    const uint32_t name = token < parser->tokens.count ? parser->tokens.names[scoped ? token + 3 : token] : 0;
+    const bool spelled = written && name != 0;
+    snprintf(text, capacity, "%s%.*s", scoped ? "clang::" : "", spelled ? (int)intern_length(pp->table, name) : 8,
+             spelled ? (const char*)intern_bytes(pp->table, name) : "musttail");
+}
+
+// The message of a musttail return's error (c_check_musttail.c), clang's, in `arena`: the attribute spelled as clang's
+// messages spell it, and the callee's name where the message names one. Null where the arena is full.
+static const char* check_driver_musttail_message(const Parser* parser, const Preprocessor* pp, const CheckInput* input,
+                                                 const CheckMusttailDiagnostic* diagnostic, Arena* arena)
+{
+    char spelling[96];
+    check_driver_musttail_spelling(parser, pp, input->musttails[diagnostic->musttail].name, false, spelling, sizeof(spelling));
+    const uint32_t name = diagnostic->callee < parser->tokens.count ? parser->tokens.names[diagnostic->callee] : 0;
+    const int name_length = name != 0 ? (int)intern_length(pp->table, name) : 0;
+    const char* name_bytes = name != 0 ? (const char*)intern_bytes(pp->table, name) : "";
+    const uint64_t capacity = 192 + (uint64_t)name_length;
+    char* text = arena_push(arena, capacity, 1);
+    if (text != NULL)
+    {
+        switch (diagnostic->error)
+        {
+            case CHECK_MUSTTAIL_CALL: snprintf(text, capacity, "'%s' attribute requires that the return value is the result of a function call", spelling); break;
+            case CHECK_MUSTTAIL_BUILTIN: snprintf(text, capacity, "construct is not yet supported by the type checker"); break;
+            case CHECK_MUSTTAIL_PROTOTYPE: snprintf(text, capacity, "'%s' attribute requires that both caller and callee functions have a prototype", spelling); break;
+            case CHECK_MUSTTAIL_CONVENTION:
+                snprintf(text, capacity, "cannot perform a tail call to function%s%.*s%s because it uses an incompatible calling convention", name != 0 ? " '" : "",
+                         name_length, name_bytes, name != 0 ? "'" : "");
+                break;
+            case CHECK_MUSTTAIL_VARIADIC: snprintf(text, capacity, "'%s' attribute may not be used with variadic functions", spelling); break;
+            case CHECK_MUSTTAIL_NORETURN: snprintf(text, capacity, "'%s' attribute may not be used with no-return-attribute functions", spelling); break;
+            case CHECK_MUSTTAIL_SIGNATURE:
+                snprintf(text, capacity, "cannot perform a tail call to function%s%.*s%s because its signature is incompatible with the calling function",
+                         name != 0 ? " '" : "", name_length, name_bytes, name != 0 ? "'" : "");
+                break;
+            case CHECK_MUSTTAIL_SCOPE: snprintf(text, capacity, "cannot perform a tail call from this return statement"); break;
+        }
+    }
+    return text;
 }
 
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
@@ -151,6 +207,9 @@ struct CheckDriverDiagnostic
     const char* message;
     uint32_t position;
     uint32_t completion;
+    // An error clang reports again at its place, where the reports' walk keeps every one rather than a token's first: a
+    // musttail return's for each cleanup scope it leaves (#147).
+    bool repeated;
 };
 
 // The warnings a token has, as check_driver_reports sorts and walks them: a key whose high half is the token, then the
@@ -607,7 +666,9 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
         {
-            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32))
+            const uint32_t extra_index = (uint32_t)firsts[i] - input->report_count - stream_reports;
+            const bool repeated = (uint32_t)firsts[i] >= input->report_count + stream_reports && extra_index < extra_count && extra[extra_index].repeated;
+            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated)
             {
                 firsts[first_count++] = firsts[i];
             }
@@ -765,7 +826,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 }
                 packed += 1;
             }
-            if (walking && !pp->fatal && reports && (firsts[report] >> 32) == token)
+            while (walking && !pp->fatal && reports && (firsts[report] >> 32) == token)
             {
                 const uint32_t sequence = (uint32_t)firsts[report];
                 const uint32_t offset = input->report_count + stream_reports + extra_count;
@@ -784,7 +845,15 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                    severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
-                    if (input->implicit_function_c99)
+                    const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
+                    if (library)
+                    {
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
+                            "implicit declaration of library function '%.*s'%s [-Wimplicit-function-declaration]",
+                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
+                            input->implicit_function_c99 ? "; ISO C99 and later do not support implicit function declarations" : "");
+                    }
+                    else if (input->implicit_function_c99)
                     {
                         pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
                             "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
@@ -817,7 +886,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         // The input's reports whose messages name their token's identifier.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
                         const bool named = phase == 0 && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
-                        if (kind == CHECK_INPUT_UNDECLARED && named)
+                        if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
+                        {
+                            // clang's musttail attribute where it doesn't go (#147), spelled as clang spells it there.
+                            char spelling[96];
+                            check_driver_musttail_spelling(parser, pp, token, kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS, spelling, sizeof(spelling));
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' attribute %s", spelling,
+                                                 kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
+                                                 kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
+                        }
+                        else if (kind == CHECK_INPUT_UNDECLARED && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
@@ -832,6 +910,26 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_CLEANUP_FUNCTION ? "argument" : "function", (int)intern_length(pp->table, name),
                                                  intern_bytes(pp->table, name), kind == CHECK_INPUT_CLEANUP_FUNCTION ? "is not a function" :
                                                  kind == CHECK_INPUT_CLEANUP_PARAMETERS ? "must take 1 parameter" : "parameter has incompatible type");
+                        }
+                        else if (phase == 0 && input->reports[index].subject != 0 && input->reports[index].subject - 1 < count &&
+                                 (kind == CHECK_INPUT_ALIAS_DEFINITION || kind == CHECK_INPUT_IFUNC_DEFINITION || kind == CHECK_INPUT_WEAKREF_CONTEXT ||
+                                  kind == CHECK_INPUT_WEAKREF_ALIAS))
+                        {
+                            // GNU's alias, ifunc and weakref attributes' errors at the attribute, naming the declaration
+                            // (#147), as clang's do.
+                            const uint32_t name = parser->tokens.names[input->reports[index].subject - 1];
+                            const int length = (int)intern_length(pp->table, name);
+                            const char* spelling = (const char*)intern_bytes(pp->table, name);
+                            if (kind == CHECK_INPUT_ALIAS_DEFINITION || kind == CHECK_INPUT_IFUNC_DEFINITION)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "definition '%.*s' cannot also be an %s", length, spelling,
+                                                     kind == CHECK_INPUT_IFUNC_DEFINITION ? "ifunc" : "alias");
+                            }
+                            else
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "weakref declaration of '%.*s' must %s", length, spelling,
+                                                     kind == CHECK_INPUT_WEAKREF_CONTEXT ? "be in a global context" : "also have an alias attribute");
+                            }
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
@@ -1092,6 +1190,149 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
     return valid && count == 0;
 }
 
+// The name clang gives an overloadable function's symbol where no asm label renames it, its mangled one
+// (check_mangle_name), in `output`: an empty one for an object that isn't an overloadable function's, or whose signature
+// the mangling refuses.
+static String8 check_driver_overload_name(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, uint32_t object, Arena* output)
+{
+    const CheckGraph* graph = &program->input->graph;
+    String8 spelling = { 0 };
+    for (uint32_t i = 0; spelling.length == 0 && i < graph->overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object == object)
+        {
+            CheckMangleSource mangling = {
+                .input = program->input,
+                .parser = parser,
+                .identifiers = identifiers,
+                .types = program->types,
+                .output = output,
+                .scalar = parser->options.scalar,
+                .internal = program->input->linkage[candidate->declaration] == 1,
+            };
+            Scratch work = scratch_begin(output);
+            check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);
+            scratch_end(work);
+        }
+    }
+    return spelling;
+}
+
+// Code generation's check of GNU's aliases and ifuncs (#147, CheckProgram.aliases): clang's errors, at -c and when it
+// links but not at -fsyntax-only, as CodeGenModule::checkAliases reports them at the unit's end, at each one's attribute,
+// in the order clang emits them (by their first declarations with the attribute), with clang's notes. A shape the
+// emission refuses by name (CHECK_PROGRAM_ALIAS_THREAD_LOCAL, CHECK_PROGRAM_ALIAS_DEFINED) is the emission's to report.
+// But an alias or ifunc that names itself stops clang's code generation at its first declaration with the attribute
+// (EmitAliasDefinition and emitIFuncDefinition report its cycle at once, after which no later declaration is emitted
+// and checkAliases doesn't run): the first such one's error is then the unit's only one. Returns false after an error.
+static bool check_driver_aliases(const CheckProgram* program, const Parser* parser, Preprocessor* pp, bool scalar, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint64_t* keys = program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)program->alias_count * 2) : 0;
+    bool valid = program->alias_count == 0 || keys != 0;
+    // The first alias or ifunc that names itself, by its first declaration with the attribute, or none.
+    uint32_t itself = BUSTER_CHECK_NONE;
+    uint32_t itself_token = BUSTER_CHECK_NONE;
+    for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + k;
+        const bool named = alias->kind != CHECK_PROGRAM_WEAKREF && alias->target_object != 0 && alias->target_object == alias->object;
+        itself = named && alias->token < itself_token ? k : itself;
+        itself_token = named && alias->token < itself_token ? alias->token : itself_token;
+    }
+    uint32_t count = 0;
+    for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + k;
+        const bool unemitted = (program->alias_states[k] & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0;
+        const bool refused = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL || alias->error == CHECK_PROGRAM_ALIAS_DEFINED;
+        const bool reported = itself != BUSTER_CHECK_NONE ? k == itself :
+                                                            alias->kind != CHECK_PROGRAM_WEAKREF && ((alias->error != CHECK_PROGRAM_ALIAS_OK && !refused) || unemitted);
+        if (reported)
+        {
+            keys[count++] = (uint64_t)alias->token << 32 | k;
+        }
+    }
+    const uint64_t* sorted = count > 1 ? c_bindings_sort(keys, keys + program->alias_count, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + (uint32_t)sorted[i];
+        const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
+        const CheckProgramAliasError error = itself != BUSTER_CHECK_NONE ? CHECK_PROGRAM_ALIAS_CYCLE :
+                                             alias->error != CHECK_PROGRAM_ALIAS_OK ? (CheckProgramAliasError)alias->error : CHECK_PROGRAM_ALIAS_UNDEFINED;
+        const char* message = error == CHECK_PROGRAM_ALIAS_CYCLE ? (ifunc ? "ifunc definition is part of a cycle" : "alias definition is part of a cycle") :
+                              error == CHECK_PROGRAM_ALIAS_TO_VARIABLE ? "cannot alias a variable with a function" :
+                              error == CHECK_PROGRAM_ALIAS_TO_FUNCTION ? "cannot alias a function with a variable" :
+                              error == CHECK_PROGRAM_ALIAS_RESOLVER ? "ifunc resolver function must return a pointer" :
+                              ifunc ? "ifunc must point to a defined function" : "alias must point to a defined variable or function";
+        const uint32_t at = alias->attribute < parser->tokens.count ? alias->attribute : 0;
+        const uint32_t aliasee = alias->definition < parser->tokens.count ? alias->definition : 0;
+        // An undefined one's notes: that the name must be the mangled one, and for each object whose identifier its
+        // aliasee's name spells and that clang gives a name (MangledDeclNames' alternatives: the program's symbols, the
+        // definitions and referenced declarations, and the aliasee where the selection leaves out its definition, an
+        // inline one's), that name: another where an asm label renames it, or the same. Their messages are in `scratch`.
+        const bool undefined = error == CHECK_PROGRAM_ALIAS_UNDEFINED;
+        const String8 named = alias->aliasee_name;
+        const IdentId spelled = undefined && named.length != 0 && named.length < UINT32_MAX ? intern_find(pp->table, (const uint8_t*)named.pointer, (uint32_t)named.length) : 0;
+        const bool unselected = spelled != 0 && alias->aliasee != 0 && program->object_symbols[alias->aliasee] == 0 && alias->definition != BUSTER_CHECK_NONE;
+        uint32_t alternatives = unselected ? 1 : 0;
+        for (uint32_t s = 0; spelled != 0 && s < program->symbol_count; s += 1)
+        {
+            const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+            alternatives += declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled;
+        }
+        PPOutputDiagnosticNote* notes = BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, (uint64_t)alternatives + 1);
+        valid = notes != 0;
+        uint32_t note_count = 0;
+        if (valid && (undefined || error == CHECK_PROGRAM_ALIAS_TO_VARIABLE || error == CHECK_PROGRAM_ALIAS_TO_FUNCTION))
+        {
+            notes[note_count++] = (PPOutputDiagnosticNote){
+                .token = parser->tokens.sources[undefined ? at : aliasee],
+                .message = undefined ? (ifunc ? "the function specified in an ifunc must refer to its mangled name" :
+                                                "the function or variable specified in an alias must refer to its mangled name") :
+                                       "aliasee is declared here",
+            };
+        }
+        for (uint32_t s = 0; valid && alternatives != 0 && s < program->symbol_count; s += 1)
+        {
+            const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+            if (declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled)
+            {
+                const String8 label = check_program_alias_label(program->input, declaration);
+                const String8 mangled = label.length == 0 ? check_driver_overload_name(program, parser, pp->table, program->symbol_objects[s], scratch) : (String8){ 0 };
+                const String8 name = label.length != 0   ? label :
+                                     mangled.length != 0 ? mangled :
+                                                           (String8){ .pointer = (char*)intern_bytes(pp->table, spelled), .length = intern_length(pp->table, spelled) };
+                char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, name.length + 64);
+                valid = text != 0;
+                if (valid)
+                {
+                    snprintf(text, name.length + 64, "function by that name is mangled as \"%.*s\"", (int)name.length, name.pointer);
+                    notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[at], .message = text };
+                }
+            }
+        }
+        char* unselected_text = valid && unselected ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, named.length + 64) : 0;
+        valid = valid && (!unselected || unselected_text != 0);
+        if (valid && unselected)
+        {
+            snprintf(unselected_text, named.length + 64, "function by that name is mangled as \"%.*s\"", (int)named.length, named.pointer);
+            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[at], .message = unselected_text };
+        }
+        if (valid)
+        {
+            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[at], pp->output.count + 1u, notes, note_count, "%s", message);
+        }
+    }
+    if (!valid)
+    {
+        check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
+    }
+    arena_pop_to(scratch, mark);
+    return valid && count == 0;
+}
+
 // Why check_program_emit failed, at its token: an unsupported construct names the feature it needs (#145), and the
 // others are the compiler's own failures, with what the backend reported.
 static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp, const CheckProgramCode* code)
@@ -1275,6 +1516,37 @@ struct CheckDriverWrite
     bool succeeded;
 };
 
+// A command of several units' flow (#905, c_checker_units.c), a LaneFlow of its session's lanes: lane 0 runs the units'
+// driver alone (check_driver_units), and each of its wide parts is a round of a CheckUnitsRound kind: the units' run, the
+// link's merge, the link's check and the executable's write. Lane 0 calls its round's operation itself, between
+// lane_flow_round_begin and lane_flow_round_end; the others follow the rounds (check_units_follow), calling each by its
+// kind, until lane 0 ends the flow (check_units_flow_end). A unit's compile reaches the driver's link through the
+// one-unit driver, so lane 0 calling the operations by kind would close a cycle that the call graph check refuses. A
+// round's lanes are those the worker budget gives of those it wants, taken before its setup and given back after it,
+// before any serial work (check_units_slots, check_units_slots_back).
+typedef struct CheckUnitsFlow CheckUnitsFlow;
+typedef enum CheckUnitsRound
+{
+    CHECK_UNITS_ROUND_END,
+    CHECK_UNITS_ROUND_UNITS,
+    CHECK_UNITS_ROUND_MERGE,
+    CHECK_UNITS_ROUND_CHECK,
+    CHECK_UNITS_ROUND_WRITE,
+} CheckUnitsRound;
+struct CheckUnitsFlow
+{
+    LaneFlow rounds;
+    // Whether a round's slots failed to go back to the worker budget, which fails the command.
+    bool slots_lost;
+};
+static void check_units_flow_begin(CheckUnitsFlow* flow);
+static void check_units_flow_end(CheckUnitsFlow* flow);
+static void check_units_follow(CheckUnitsFlow* flow);
+// A round's lanes: `wanted` of them as `budget` gives (all of them without one), in `lease`, which
+// check_units_slots_back gives back, a failure to which `flow` (if any) records.
+static uint32_t check_units_slots(WorkerBudget* budget, uint32_t wanted, WorkerBudgetLease* lease);
+static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* lease);
+
 // link_check_lanes's run on a group of lanes (several units' link, #778), whose lane 0 says what it found.
 typedef struct CheckDriverCheck CheckDriverCheck;
 struct CheckDriverCheck
@@ -1293,13 +1565,25 @@ static void check_driver_check_main(void* argument)
     }
 }
 
-// The bound link's link_check: on `lanes` lanes (link_check_lanes, the same answer), or on the calling thread when there
-// is one, or the lanes can't start.
-static LinkError check_driver_link_check(Link* link, uint32_t lanes)
+// The bound link's link_check: on `wanted` lanes, a round of several units' flow (#905) on those the worker budget gives
+// (link_check_lanes, the same answer), or on the calling thread when there is one.
+static LinkError check_driver_link_check(Link* link, CheckProgramLanes* lanes, uint32_t wanted)
 {
     CheckDriverCheck check = { .link = link, .result = LINK_ERROR_NONE };
-    const bool ran = lanes > 1 && lane_run(lanes, check_driver_check_main, &check, 0);
-    return ran ? check.result : link_check(link);
+    WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+    const uint32_t granted = wanted > 1 && lanes->units_flow != NULL ? check_units_slots(lanes->budget, wanted, &lease) : 1;
+    if (granted > 1)
+    {
+        lane_flow_round_begin(&lanes->units_flow->rounds, CHECK_UNITS_ROUND_CHECK, &check, granted);
+        check_driver_check_main(&check);
+        lane_flow_round_end(&lanes->units_flow->rounds);
+    }
+    else
+    {
+        check.result = link_check(link);
+    }
+    check_units_slots_back(lanes->units_flow, &lease);
+    return check.result;
 }
 
 _Static_assert(EXECUTABLE_PHASES == BUSTER_CHECK_CLOCK_WRITE_PHASES, "--time-stages names every phase of executable_write");
@@ -1527,7 +1811,7 @@ typedef struct CheckUnitsUnit CheckUnitsUnit;
 static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
                               Arena* bytes, Arena* scratch);
 static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
-                                    Arena* bytes, Arena* scratch, uint32_t lanes);
+                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow, WorkerBudgetLease* lease);
 static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t count, const Link* link, NameId name);
 
 // Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
@@ -1594,13 +1878,17 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
         // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
-        // vector path (#778), and by its twin on one lane or the scalar path.
-        const bool merged_on_lanes = units != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar);
-        const bool emitted = !valid || (merged_on_lanes ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
-                                                                                  scratch, lanes->lanes) :
-                                        units != NULL   ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
-                                                        check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
-                                                                                 &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+        // vector path (#778), a round of their flow on those the worker budget gives (#905), and by its twin on one lane
+        // or the scalar path.
+        WorkerBudgetLease merge_lease = { .control = -1, .reply = -1, .child = -1 };
+        const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar) ?
+                                         check_units_slots(lanes->budget, lanes->lanes, &merge_lease) : 1;
+        const bool emitted = !valid || (merge_lanes > 1   ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
+                                                                                    scratch, merge_lanes, lanes->units_flow, &merge_lease) :
+                                        units != NULL     ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
+                                                            check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
+                                                                                     &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+        check_units_slots_back(lanes->units_flow, &merge_lease);
         if (units != NULL)
         {
             check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
@@ -1707,7 +1995,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         if (valid)
         {
             // Several units' bound link is checked on their lanes (#778).
-            const LinkError checked = check_driver_link_check(&code.link, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
+            const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
             valid = checked == LINK_ERROR_NONE && dynamic_inputs(&dynamic, &runtime, &bind, &arena);
             // An import the code reaches other than through the GOT, by a call or from data, which a shared library's
             // data needs without copy relocations, which the direct path makes none of (#84). Tier 0 reaches every symbol
@@ -1765,9 +2053,23 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .exact = BUSTER_SCALAR_PATH(scalar),
                 },
             };
-            // Several units' executable is written on their lanes (`lanes`' count), one unit's by its calling thread.
-            const uint32_t write_lanes = units != NULL && lanes->lanes > 1 ? lanes->lanes : 1;
-            valid = lane_run(write_lanes, check_driver_write_main, &write, 0) && write.succeeded;
+            // Several units' executable is written on their lanes (`lanes`' count), a round of their flow on those the
+            // worker budget gives (#905); one unit's by its calling thread.
+            WorkerBudgetLease write_lease = { .control = -1, .reply = -1, .child = -1 };
+            const uint32_t write_lanes = units != NULL && lanes->lanes > 1 && lanes->units_flow != NULL ? check_units_slots(lanes->budget, lanes->lanes, &write_lease) : 1;
+            bool wrote = true;
+            if (write_lanes > 1)
+            {
+                lane_flow_round_begin(&lanes->units_flow->rounds, CHECK_UNITS_ROUND_WRITE, &write, write_lanes);
+                check_driver_write_main(&write);
+                lane_flow_round_end(&lanes->units_flow->rounds);
+            }
+            else
+            {
+                wrote = lane_run(1, check_driver_write_main, &write, 0);
+            }
+            check_units_slots_back(lanes->units_flow, &write_lease);
+            valid = wrote && write.succeeded;
             // The write's phases, for --time-stages (#778): each from its start or the phase before it.
             uint64_t phase_begin = write.result.start_time;
             for (uint32_t phase = 0; stage_clock != NULL && valid && phase < EXECUTABLE_PHASES; phase += 1)
@@ -1805,8 +2107,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
     return valid;
 }
 
-// How many CPUs the process may run on (sched_getaffinity's), at most the lanes an emission runs: the functions' lanes'
-// default, of which the bodies' tokens then decide how many pay (check_program_emit_lanes).
+// How many CPUs the process may run on (sched_getaffinity's), at most the lanes a command takes: the functions' lanes'
+// default, which the command's session bounds by those CPUs' cores (BUSTER_LANE_SESSION_PER_CORE), and of which the
+// bodies' tokens then decide how many pay (check_program_emit_lanes).
 static uint32_t check_driver_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -2075,13 +2378,29 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
                 if (ready)
                 {
-                    CheckDriverDiagnostic additional[3] = { 0 };
+                    // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
+                    CheckMusttails musttails = { 0 };
+                    const bool expression_valid = input_valid && stream.report_count == 0;
+                    const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
+                    CheckDriverDiagnostic fallback[4] = { 0 };
+                    CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);
+                    CheckDriverDiagnostic* additional = pushed != NULL ? pushed : fallback;
                     uint32_t additional_count = 0;
+                    if (pushed == NULL || !musttails_checked)
+                    {
+                        additional[additional_count++] = (CheckDriverDiagnostic){ 0, "musttail checking capacity exhausted", 0 };
+                    }
+                    for (uint32_t m = 0; pushed != NULL && m < musttails.count; m += 1)
+                    {
+                        const CheckMusttailDiagnostic* musttail = musttails.diagnostics + m;
+                        const char* message = check_driver_musttail_message(checking, pp, &input, musttail, output_arena);
+                        additional[additional_count++] = (CheckDriverDiagnostic){ musttail->token, message != NULL ? message : "musttail checking capacity exhausted",
+                                                                                 musttail->position, musttail->completion, musttail->error == CHECK_MUSTTAIL_SCOPE };
+                    }
                     const uint32_t* excess_tokens = NULL;
                     uint32_t excess_count = 0;
                     CheckAsms asms = { 0 };
                     CheckInitializers initializers = { 0 };
-                    const bool expression_valid = input_valid && stream.report_count == 0;
                     if (expression_valid && !repairing)
                     {
                         if (!check_asms_run(&asms, &input, &stream, &types, output_arena, scratch))
@@ -2245,6 +2564,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if (selection)
                         {
                             result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)
                         {
@@ -2268,6 +2588,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if (selection)
                         {
                             result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)
                         {
@@ -2335,6 +2656,152 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     return result;
 }
 
+// A command of the semantic driver as its flow runs it (#905): what check_driver_command made of its options, the flow's
+// rounds (a unit's emission's, and several units' wide parts', LaneFlows), and the command's exit status, lane 0's.
+typedef struct CheckDriverRun CheckDriverRun;
+struct CheckDriverRun
+{
+    const CheckDriverCommand* command;
+    char** inputs;
+    uint32_t input_count;
+    const char* path;
+    CheckProgramLanes* lanes;
+    CheckClock* stage_clock;
+    uint64_t* pp_ticks;
+    Arena* arena;
+    Arena* scratch;
+    Arena* output_arena;
+    bool release;
+    LaneFlow flow;
+    CheckUnitsFlow units_flow;
+    // The lanes the command asks for (check_driver_run), which --time-stages reports with those its flow ran on.
+    uint32_t capacity;
+    int result;
+};
+
+// One source file's command, on lane 0: the unit's intern table, preprocessor and parser, which the process's commands
+// take in turn, initialized for it (and with `release`, released after it).
+static int check_driver_one_unit(const CheckDriverRun* run)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const bool interned = intern_initialize(&identifiers);
+    const int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+                                         run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release);
+    if (run->release)
+    {
+        intern_release(&identifiers);
+    }
+    return result;
+}
+
+// The command's flow, which every lane of its session runs (#905). One source file: lane 0 runs the unit's stages alone,
+// and every lane runs each round of its emission (check_program_emit_round), the bodies' parts on as many lanes as the
+// bodies' tokens and the worker budget pay for. Several (#152): lane 0 runs their driver alone, and every lane runs each
+// of its rounds (CheckUnitsFlow): the units' run, the merge, the link's check and the write. The command's lanes are the
+// session's at most: one after a failed start.
+static void check_driver_flow(void* argument)
+{
+    CheckDriverRun* run = argument;
+    if (lane_index() == 0)
+    {
+        check_clock_mark(run->stage_clock, CHECK_STAGE_LANES_START);
+        run->lanes->lanes = run->lanes->lanes < lane_count() ? run->lanes->lanes : lane_count();
+    }
+    if (run->input_count > 1)
+    {
+        // Lane 0 runs the units' driver alone, its wide parts rounds of the flow (CheckUnitsFlow), the lanes' start having
+        // gone on until the first.
+        if (lane_index() == 0)
+        {
+            run->lanes->units_flow = &run->units_flow;
+            check_units_flow_begin(&run->units_flow);
+            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
+            check_units_flow_end(&run->units_flow);
+            run->lanes->units_flow = NULL;
+        }
+        else
+        {
+            check_units_follow(&run->units_flow);
+        }
+    }
+    else if (lane_index() == 0)
+    {
+        run->lanes->flow = &run->flow;
+        lane_flow_begin(&run->flow);
+        run->result = check_driver_one_unit(run);
+        lane_flow_end(&run->flow);
+        run->lanes->flow = NULL;
+    }
+    else
+    {
+        check_program_emit_follow(&run->flow);
+    }
+    // The lanes the session asked for, by default one per core of the capacity's CPUs, and those the flow ran on, whose
+    // group lane 0 is a lane of again at its end: one after a failed start.
+    if (lane_index() == 0)
+    {
+        const uint32_t asked = lane_session_current() != NULL ? lane_session_asked() : run->capacity;
+        check_clock_lanes(run->stage_clock, asked < run->capacity ? asked : run->capacity, lane_count());
+    }
+}
+
+// Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
+// (at most its allowed CPUs, --lanes N and --worker-budget N), by default at most one per core of those CPUs, which lane
+// 1 counts while lane 0 starts the command (BUSTER_LANE_SESSION_PER_CORE), but one for one source file without code to
+// emit (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`)
+// leaves its lanes parked for the process's exit. In a session, the flow is a collective call's, which every lane makes
+// (run_check_command_mode), whose other lanes lane 0 tells of the flow (`*announced`), or a lane's alone. Returns the
+// command's exit status.
+static int check_driver_run(CheckDriverRun* run, bool* announced)
+{
+    const CheckDriverCommand* command = run->command;
+    const uint32_t cap = run->lanes->budget != NULL && run->lanes->budget->maximum != 0 ? run->lanes->budget->maximum : UINT32_MAX;
+    uint32_t capacity = run->lanes->lanes < cap ? run->lanes->lanes : cap;
+    const uint32_t cpus = check_driver_cpus();
+    capacity = capacity < cpus ? capacity : cpus;
+    capacity = capacity == 0 || (run->input_count <= 1 && !command->emit_object && !command->link) ? 1 : capacity;
+    run->capacity = capacity;
+    // The options are the setup's; the session's start, or the flow's dispatch, is lanes-start's (check_driver_flow).
+    check_clock_mark(run->stage_clock, CHECK_STAGE_SETUP);
+    if (lane_session_current() == NULL)
+    {
+        // The session in a mapping of its own, in base pages: past the command's arena's first pages, which the options
+        // take some of, or in .bss, its first touch could clear a huge page. A terminal command leaves it to the
+        // process's exit, its lanes parked on it, and a reusable one releases it once the lanes have joined.
+        Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
+        LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
+        // Lane 1 creates the other lanes while lane 0 starts the command (BUSTER_LANE_SESSION_LAZY), by default no more
+        // than the cores, which it counts first: two lanes on one core's SMT siblings compiled sqlite3.c slower, in 18%
+        // more user time and 44 MB more peak memory, on the 9700X.
+        const uint32_t per_core = run->lanes->every_lane ? 0 : BUSTER_LANE_SESSION_PER_CORE;
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | per_core | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END);
+        if (session == NULL || lane_session_run(session, capacity, NULL, check_driver_flow, run, flags) == 0)
+        {
+            // A thread already in a team's or a cold group's operation, which a session can't nest in: alone.
+            const Lane group = lane_alone();
+            check_driver_flow(run);
+            lane_restore(group);
+        }
+        if (run->release)
+        {
+            arena_release(&memory);
+        }
+    }
+    else if (lane_count() > 1)
+    {
+        lane_park_broadcast((uint64_t)(uintptr_t)run, 0);
+        *announced = true;
+        check_driver_flow(run);
+    }
+    else
+    {
+        check_driver_flow(run);
+    }
+    return run->result;
+}
+
 // These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
 // still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
 // differently instrumented object. Negative/default forms that do not request those behaviors are left alone.
@@ -2366,7 +2833,7 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
 // one executable of them all.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
-static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
+static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
 {
     WorkerBudget worker_budget;
     // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
@@ -2430,9 +2897,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* unsupported_codegen = NULL;
     const char* unsupported_stack_protector = NULL;
     const char* unsupported_cf_protection = NULL;
-    // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
-    // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them. With several
-    // source files, the lanes their units compile on, one unit at a time each (check_driver_units).
+    // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per core of the CPUs the
+    // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
+    // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
+    // (check_driver_units).
     CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
@@ -2720,22 +3188,25 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
-    else if (input_count > 1)
-    {
-        result = check_driver_units(&command, inputs, input_count, &lanes, stage_clock);
-    }
     else
     {
-        static InternTable identifiers;
-        static Preprocessor pp;
-        static Parser parser;
-        const bool interned = intern_initialize(&identifiers);
-        result = check_driver_unit(&command, &command.options, path, interned ? &identifiers : NULL, &pp, &parser, &arena, &scratch, &output_arena, &lanes,
-                                   stage_clock, pp_ticks, stderr, NULL, release);
-        if (release)
-        {
-            intern_release(&identifiers);
-        }
+        // The command runs on its session's lanes (#905), which start here, after its options and before any source is
+        // read (check_driver_run).
+        CheckDriverRun run = {
+            .command = &command,
+            .inputs = inputs,
+            .input_count = input_count,
+            .path = path,
+            .lanes = &lanes,
+            .stage_clock = stage_clock,
+            .pp_ticks = pp_ticks,
+            .arena = &arena,
+            .scratch = &scratch,
+            .output_arena = &output_arena,
+            .release = release,
+            .result = 1,
+        };
+        result = check_driver_run(&run, announced);
     }
     if (release)
     {
@@ -2756,6 +3227,40 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         }
     }
     worker_budget_close(&worker_budget);
+    return result;
+}
+
+// The semantic driver's command (check_driver_command), run by the calling thread, or collectively by every lane of a
+// session's group (#905): lane 0 runs the command, and tells the other lanes of its flow, which they run with it, and of
+// its exit status, which they return too.
+static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
+{
+    int result = 1;
+    // A lazy session's lane 0 learns how its lanes started before it meets them: on a failed start it is alone.
+    lane_session_settle();
+    const bool collective = lane_session_current() != NULL && lane_count() > 1;
+    if (collective && lane_index() != 0)
+    {
+        CheckDriverRun* run = (CheckDriverRun*)(uintptr_t)lane_park_broadcast(0, 0);
+        if (run != NULL)
+        {
+            check_driver_flow(run);
+        }
+        result = (int)lane_park_broadcast(0, 0);
+    }
+    else
+    {
+        bool announced = false;
+        result = check_driver_command(count, arguments, executable, release, &announced);
+        if (collective && !announced)
+        {
+            lane_park_broadcast(0, 0);
+        }
+        if (collective)
+        {
+            lane_park_broadcast((uint64_t)(uint32_t)result, 0);
+        }
+    }
     return result;
 }
 

@@ -515,12 +515,15 @@ static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, 
     return guarded ? base + pages - bytes : 0;
 }
 
+#include "c_check_runtime_scan_test.c"
+
 // #442's kernels, each path against the test's own reading of its contract, every column (and output) ending at a
 // PROT_NONE page: the declaring tokens, without and with the initializers' nodes, for every count to 200 and larger
 // ones, the declarations with initializers (#592's check_init_declarations), and the needed objects' count and
 // numbering (object 0 never a symbol), at every density.
 static void check_test_program_declaring(CheckTest* test)
 {
+    check_test_runtime_scan(test);
     static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
     uint64_t checked = 0;
     bool all = true;
@@ -807,6 +810,58 @@ static const char check_test_program_harness[] =
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
     "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
     "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+    // Complex binary16's two parts share one SSE eightbyte. Transport their bits in both directions, including the
+    // ninth and tenth arguments on the stack and va_arg's, without an arithmetic conversion quieting a NaN.
+    "typedef _Float16 _Complex ExternalHC;"
+    "static unsigned external_hc_bits(ExternalHC z){unsigned b;__builtin_memcpy(&b,&z,4);return b;}"
+    "static ExternalHC external_hc_value(unsigned b){ExternalHC z;__builtin_memcpy(&z,&b,4);return z;}"
+    "ExternalHC external_hc(ExternalHC z,unsigned mask){return external_hc_value(external_hc_bits(z)^mask);}"
+    "unsigned external_hc_apply(ExternalHC(*f)(ExternalHC,unsigned),unsigned bits){return external_hc_bits(f(external_hc_value(bits),0x80000001u));}"
+    "unsigned external_hc_many(ExternalHC a,ExternalHC b,ExternalHC c,ExternalHC d,ExternalHC e,ExternalHC f,ExternalHC g,ExternalHC h,ExternalHC i,ExternalHC j){"
+    "ExternalHC z[]={a,b,c,d,e,f,g,h,i,j};unsigned r=2166136261u;for(int k=0;k<10;k++)r=(r^external_hc_bits(z[k]))*16777619u;return r;}"
+    "unsigned external_hc_many_apply(unsigned(*f)(ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC),"
+    "unsigned bits){ExternalHC a=external_hc_value(bits),b=external_hc_value(bits^0x80008000u);return f(a,b,a,b,a,b,a,b,a,b);}"
+    "unsigned external_hc_variadic(int count,...){va_list ap;va_start(ap,count);unsigned h=2166136261u;"
+    "for(int i=0;i<count;i++){ExternalHC z=va_arg(ap,ExternalHC);h=(h^external_hc_bits(z))*16777619u;}va_end(ap);return h;}"
+    "unsigned external_hc_variadic_apply(unsigned(*f)(int,...),unsigned bits){ExternalHC a=external_hc_value(bits),b=external_hc_value(bits^0x80008000u);"
+    "return f(10,a,b,a,b,a,b,a,b,a,b);}\n"
+    // The _Complex __bf16 that the usual arithmetic conversions make (C can't spell it) passes as a <2 x bfloat>, its two
+    // parts in one SSE eightbyte as complex binary16's do (#137): the same transport of their bits, both ways, but its
+    // masks flip signs alone, which make no signaling NaN of an infinity: clang 23's code of a <2 x bfloat> argument or
+    // result quiets one, as it does a __bf16 parameter's.
+    "typedef __typeof__((_Complex int)0+(__bf16)0) ExternalHB;"
+    "static unsigned external_hb_bits(ExternalHB z){unsigned b;__builtin_memcpy(&b,&z,4);return b;}"
+    "static ExternalHB external_hb_value(unsigned b){ExternalHB z;__builtin_memcpy(&z,&b,4);return z;}"
+    "ExternalHB external_hb(ExternalHB z,unsigned mask){return external_hb_value(external_hb_bits(z)^mask);}"
+    "unsigned external_hb_apply(ExternalHB(*f)(ExternalHB,unsigned),unsigned bits){return external_hb_bits(f(external_hb_value(bits),0x80008000u));}"
+    "unsigned external_hb_many(ExternalHB a,ExternalHB b,ExternalHB c,ExternalHB d,ExternalHB e,ExternalHB f,ExternalHB g,ExternalHB h,ExternalHB i,ExternalHB j){"
+    "ExternalHB z[]={a,b,c,d,e,f,g,h,i,j};unsigned r=2166136261u;for(int k=0;k<10;k++)r=(r^external_hb_bits(z[k]))*16777619u;return r;}"
+    "unsigned external_hb_many_apply(unsigned(*f)(ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB),"
+    "unsigned bits){ExternalHB a=external_hb_value(bits),b=external_hb_value(bits^0x80008000u);return f(a,b,a,b,a,b,a,b,a,b);}"
+    "unsigned external_hb_variadic(int count,...){va_list ap;va_start(ap,count);unsigned h=2166136261u;"
+    "for(int i=0;i<count;i++){ExternalHB z=va_arg(ap,ExternalHB);h=(h^external_hb_bits(z))*16777619u;}va_end(ap);return h;}"
+    "unsigned external_hb_variadic_apply(unsigned(*f)(int,...),unsigned bits){ExternalHB a=external_hb_value(bits),b=external_hb_value(bits^0x80008000u);"
+    "return f(10,a,b,a,b,a,b,a,b,a,b);}\n"
+    // _Atomic _Float16 and _Atomic __bf16 pass as their values in an XMM register's low 16 bits, which clang's count of
+    // registers leaves out (an _Atomic is MEMORY to its classification, #137): their bits both ways, each loaded and
+    // stored atomically, past eight XMM registers onto the stack, with a double and a float among them. __bf16's mask
+    // flips its sign alone, as _Complex __bf16's do.
+    "typedef _Atomic(_Float16) ExternalAH;typedef _Atomic(__bf16) ExternalAB;"
+    "static unsigned short external_ah_bits(ExternalAH*p){_Float16 v=*p;unsigned short b;__builtin_memcpy(&b,&v,2);return b;}"
+    "static unsigned short external_ab_bits(ExternalAB*p){__bf16 v=*p;unsigned short b;__builtin_memcpy(&b,&v,2);return b;}"
+    "static _Float16 external_ah_value(unsigned b){unsigned short s=(unsigned short)b;_Float16 v;__builtin_memcpy(&v,&s,2);return v;}"
+    "static __bf16 external_ab_value(unsigned b){unsigned short s=(unsigned short)b;__bf16 v;__builtin_memcpy(&v,&s,2);return v;}"
+    "ExternalAH external_ah(ExternalAH x,unsigned mask){return external_ah_value(external_ah_bits(&x)^mask);}"
+    "ExternalAB external_ab(ExternalAB x,unsigned mask){return external_ab_value(external_ab_bits(&x)^mask);}"
+    "unsigned external_ah_apply(ExternalAH(*f)(ExternalAH,unsigned),unsigned bits){ExternalAH r=f(external_ah_value(bits),0x8001u);return external_ah_bits(&r);}"
+    "unsigned external_ab_apply(ExternalAB(*f)(ExternalAB,unsigned),unsigned bits){ExternalAB r=f(external_ab_value(bits),0x8000u);return external_ab_bits(&r);}"
+    "unsigned external_ahb_many(ExternalAH a,ExternalAB b,double c,ExternalAH d,ExternalAB e,float f,ExternalAH g,ExternalAB h,ExternalAH i,ExternalAB j,"
+    "ExternalAH k,ExternalAB l){unsigned long cb;unsigned fb;__builtin_memcpy(&cb,&c,8);__builtin_memcpy(&fb,&f,4);"
+    "unsigned r=((unsigned)cb^(unsigned)(cb>>32))*16777619u^fb;ExternalAH*hs[]={&a,&d,&g,&i,&k};ExternalAB*bs[]={&b,&e,&h,&j,&l};"
+    "for(int m=0;m<5;m++)r=(r^external_ah_bits(hs[m])^((unsigned)external_ab_bits(bs[m])<<16))*16777619u;return r;}"
+    "unsigned external_ahb_many_apply(unsigned(*f)(ExternalAH,ExternalAB,double,ExternalAH,ExternalAB,float,ExternalAH,ExternalAB,ExternalAH,ExternalAB,ExternalAH,"
+    "ExternalAB),unsigned bits){_Float16 a=external_ah_value(bits);__bf16 b=external_ab_value(bits>>16);"
+    "return f(a,b,1.25,a,b,-2.5f,a,b,a,b,a,b);}\n"
     // Mixed Clang/Buster atomic-vector calls use the declared atomic ABI, with underlying vector value bytes.
     "#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
     "typedef int ExternalAtomic4 __attribute__((vector_size(16)));"
@@ -821,6 +876,16 @@ static const char check_test_program_harness[] =
     "_Atomic(ExternalAtomic16) external_atomic16(_Atomic(ExternalAtomic16) x){ExternalAtomic16 v=x;return v+3;}"
     "int external_apply_atomic16(_Atomic(ExternalAtomic16)(*f)(_Atomic(ExternalAtomic16)),int n){ExternalAtomic16 v={0};"
     "for(int i=0;i<16;i++)v[i]=n+i;_Atomic(ExternalAtomic16) out=f(v);ExternalAtomic16 r=out;int h=0;for(int i=0;i<16;i++)h+=r[i]*(i+1);return h;}\n"
+    // Atomic vectors of 8 and 4 bytes (#137), which LLVM passes and returns as their values in XMM registers, as it does
+    // a <2 x i16>, which an integer of 4 bytes passes otherwise when it isn't _Atomic.
+    "typedef signed char ExternalAtomicQ8 __attribute__((vector_size(8)));"
+    "_Atomic(ExternalAtomicQ8) external_atomic_q8(_Atomic(ExternalAtomicQ8) x,int k){ExternalAtomicQ8 v=x;return v+(signed char)k;}"
+    "int external_apply_atomic_q8(_Atomic(ExternalAtomicQ8)(*f)(_Atomic(ExternalAtomicQ8),int),int n){ExternalAtomicQ8 v={0};"
+    "for(int i=0;i<8;i++)v[i]=(signed char)(n*3+i);_Atomic(ExternalAtomicQ8) out=f(v,5);ExternalAtomicQ8 r=out;int h=0;for(int i=0;i<8;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef short ExternalAtomicH2 __attribute__((vector_size(4)));"
+    "_Atomic(ExternalAtomicH2) external_atomic_h2(_Atomic(ExternalAtomicH2) x,int k){ExternalAtomicH2 v=x;return v*(short)k;}"
+    "int external_apply_atomic_h2(_Atomic(ExternalAtomicH2)(*f)(_Atomic(ExternalAtomicH2),int),int n){ExternalAtomicH2 v={(short)n,(short)(-7*n)};"
+    "_Atomic(ExternalAtomicH2) out=f(v,3);ExternalAtomicH2 r=out;return r[0]*5+r[1];}\n"
     "#endif\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
@@ -1393,7 +1458,8 @@ static int check_test_program_key_order(const void* a, const void* b)
 // The passes #592 made sparse, on a checked program, against what they did before: check_data_prepare (`data`, of
 // this program's unit) against the dense oracle above, record for record, with check_data_latest of every object, on
 // both paths, check_program_token_body of every token against the column of every body's tokens the selection filled,
-// and the objects check_program_object_access finds the unit defines, by both paths, against a walk of every token.
+// and the objects check_program_object_access finds the unit defines, by both paths, against a walk of every token and
+// the aliases and ifuncs (#147).
 static bool check_test_program_sparse(const CheckProgram* program, const CheckDataPrepared* data, const CheckInput* input, const CheckStream* stream,
                                       const CheckInitializers* initializers, TypeTable* types, bool scalar, Arena* output, Arena* scratch)
 {
@@ -1480,6 +1546,11 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
                 expected[object] = 1;
             }
         }
+        // GNU's aliases and ifuncs, which the unit defines at their definitions' places (#147); a weakref defines nothing.
+        for (uint32_t k = 0; k < program->alias_count; k += 1)
+        {
+            expected[program->aliases[k].object] |= program->aliases[k].kind != CHECK_PROGRAM_WEAKREF;
+        }
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
@@ -1540,23 +1611,26 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
+    PredefinesOptions predefines = check_test_program_predefines();
+    predefines.char_unsigned = char_unsigned;
     const PPOptions pp_options = {
         .language = { .standard = 2017, .gnu = true },
         .no_standard_includes = !check_test_program_includes,
-        .predefines.char_unsigned = char_unsigned,
+        .predefines = predefines,
         .target = target != NULL ? *target : (X86Target){ 0 },
     };
-    const PredefinesOptions predefines = check_test_program_predefines();
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "executable source preprocessing");
     for (uint32_t path = 0; preprocessed && path < 2; path += 1)
     {
         CheckTestTypes types = { 0 };
-        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
-        Arena output = arena_reserve(UINT64_C(1) << 26);
+        // The complete immintrin.h before selection needs more checked-node storage than header-free fixtures.
+        const uint64_t plan_room = UINT64_C(1) << (check_test_program_includes ? 28 : 26);
+        Arena input_arena = arena_reserve(plan_room);
+        Arena output = arena_reserve(plan_room);
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
-        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(plan_room);
         const ParseOptions parse_options = { .scalar = path == 0 };
         const CheckOptions options = { .scalar = path == 0 };
         bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
@@ -1613,8 +1687,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (!ready)
         {
-            fprintf(stderr, "test-checker: program source input=%u stream=%u init=%u data=%u program=%u token=%u\n",
-                    input.report_count, stream.report_count, initializers.status, data.status, program.status, program.token);
+            fprintf(stderr, "test-checker: program source parser=%u input=%u resource=%u stream=%u init=%u data=%u program=%u token=%u\n",
+                    parser.errors, input.report_count, input.resource, stream.report_count, initializers.status, data.status, program.status, program.token);
         }
         CheckProgramLowered lower[2] = { 0 };
         bool lowered = ready && check_program_lower(lower, &program, true, &output, &scratch) && check_program_lower(lower + 1, &program, false, &output, &scratch);
@@ -1670,8 +1744,10 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
+        // Every atom in place, the aliases' and ifuncs' symbols at their definitions (#147; -c's check_program_sections).
         const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, false, true) &&
-                             check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
+                             check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission) &&
+                             check_program_define_aliases(&code, &program);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
         if (lowered && !emitted)
@@ -2133,7 +2209,10 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_folds_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
+#include "c_check_program_x86_rest_test.c"
+#include "c_check_program_amx_test.c"
 #include "c_check_program_transparent_test.c"
+#include "c_check_program_alias_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
 #include "c_check_program_bf16_test.c"
@@ -2898,7 +2977,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_diagnostics(test, clang);
     check_test_program_vectors(test, clang);
     check_test_program_x86(test, clang);
+    check_test_program_x86_rest(test, clang);
+    check_test_program_amx(test, clang);
     check_test_program_transparent(test, clang);
+    check_test_program_aliases(test, clang);
     check_test_program_vector_builtins(test, clang);
     check_test_program_fp16(test, clang);
     check_test_program_bf16(test, clang);
@@ -4440,8 +4522,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
     // GNU's complex integer types of __int128 and the complex _BitInts, which the usual arithmetic conversions make, and
-    // _Complex __float128 (#137) are lowered; the complex types check_lower_complex doesn't take are refused by what they
-    // need: complex types of the floating types other than float, double, long double and __float128 (clang 23 has no
+    // _Complex __float128 (#137) are lowered; complex _Float16's storage and conversions are lowered too. The complex
+    // types check_lower_complex doesn't take are refused by what they need (clang 23 has no
     // _Float128 in C; __float128 is its spelling).
     check_test_program_boundary(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex int z=n;__int128 w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-int128", true, true, 0, 3);
@@ -4463,8 +4545,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary_reason(test, "int tested(int n){__float128 x=n;x++;return x>1;}", "float128-increment", true, false, 0, 1,
                                        "increments of __float128 values");
     check_test_program_boundary(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, true, 0, 1);
-    check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
-                                       "complex types other than _Complex float, double, long double and __float128");
+    check_test_program_boundary(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, true, 0, 1);
     // The 128-bit integers, _BitInt(65) to _BitInt(128) and those past 128 bits (in memory, #137): lowered, but the overflow
     // builtins of a _BitInt of 65 to 127 bits, and a bit-field of them spread over more than 8 bytes, or past 128 bits.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);

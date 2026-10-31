@@ -7123,7 +7123,7 @@ static bool pp_test_implemented_features(const char* directory)
         "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 0 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
         "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\n",
     };
@@ -7268,13 +7268,13 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_STRLEN, "__builtin_strlen", false, true, false },
         { CBUILTIN_ALLOCA, "__builtin_alloca", false, true, false },
         { CBUILTIN_UMULL_OVERFLOW, "__builtin_umull_overflow", false, true, false },
-        { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false, false, false },
+        { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false, true, false },
         { CBUILTIN_ATOMIC_LOAD_N, "__atomic_load_n", false, true, false },
-        { CBUILTIN_ATOMIC_STORE, "__atomic_store", false, false, false },
+        { CBUILTIN_ATOMIC_STORE, "__atomic_store", false, true, false },
         { CBUILTIN_ATOMIC_STORE_N, "__atomic_store_n", false, true, false },
-        { CBUILTIN_ATOMIC_EXCHANGE, "__atomic_exchange", false, false, false },
+        { CBUILTIN_ATOMIC_EXCHANGE, "__atomic_exchange", false, true, false },
         { CBUILTIN_ATOMIC_EXCHANGE_N, "__atomic_exchange_n", false, true, false },
-        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE, "__atomic_compare_exchange", false, false, false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE, "__atomic_compare_exchange", false, true, false },
         { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, "__atomic_compare_exchange_n", false, true, false },
         { CBUILTIN_ATOMIC_FETCH_ADD, "__atomic_fetch_add", false, true, false },
         { CBUILTIN_ATOMIC_FETCH_SUB, "__atomic_fetch_sub", false, true, false },
@@ -7288,16 +7288,18 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ATOMIC_XOR_FETCH, "__atomic_xor_fetch", false, true, false },
         { CBUILTIN_ATOMIC_OR_FETCH, "__atomic_or_fetch", false, true, false },
         { CBUILTIN_ATOMIC_NAND_FETCH, "__atomic_nand_fetch", false, true, false },
-        { CBUILTIN_ATOMIC_TEST_AND_SET, "__atomic_test_and_set", false, false, false },
-        { CBUILTIN_ATOMIC_CLEAR, "__atomic_clear", false, false, false },
+        { CBUILTIN_ATOMIC_TEST_AND_SET, "__atomic_test_and_set", false, true, false },
+        { CBUILTIN_ATOMIC_CLEAR, "__atomic_clear", false, true, false },
         { CBUILTIN_ATOMIC_THREAD_FENCE, "__atomic_thread_fence", false, true, false },
         { CBUILTIN_ATOMIC_SIGNAL_FENCE, "__atomic_signal_fence", false, true, false },
-        { CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, "__atomic_always_lock_free", false, false, false },
-        { CBUILTIN_ATOMIC_IS_LOCK_FREE, "__atomic_is_lock_free", false, false, false },
+        { CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, "__atomic_always_lock_free", false, true, true },
+        { CBUILTIN_ATOMIC_IS_LOCK_FREE, "__atomic_is_lock_free", false, true, true },
         { CBUILTIN_ATOMIC_FETCH_MIN, "__atomic_fetch_min", false, true, false },
         { CBUILTIN_ATOMIC_FETCH_MAX, "__atomic_fetch_max", false, true, false },
         { CBUILTIN_ATOMIC_MIN_FETCH, "__atomic_min_fetch", false, true, false },
         { CBUILTIN_ATOMIC_MAX_FETCH, "__atomic_max_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_UINC, "__atomic_fetch_uinc", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_UDEC, "__atomic_fetch_udec", false, true, false },
         { CBUILTIN_C11_ATOMIC_INIT, "__c11_atomic_init", false, true, false },
         { CBUILTIN_C11_ATOMIC_LOAD, "__c11_atomic_load", false, true, false },
         { CBUILTIN_C11_ATOMIC_STORE, "__c11_atomic_store", false, true, false },
@@ -7314,7 +7316,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_C11_ATOMIC_FETCH_MAX, "__c11_atomic_fetch_max", false, true, false },
         { CBUILTIN_C11_ATOMIC_THREAD_FENCE, "__c11_atomic_thread_fence", false, true, false },
         { CBUILTIN_C11_ATOMIC_SIGNAL_FENCE, "__c11_atomic_signal_fence", false, true, false },
-        { CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, "__c11_atomic_is_lock_free", false, true, false },
+        { CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, "__c11_atomic_is_lock_free", false, true, true },
         { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add", false, true, false },
         { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub", false, true, false },
         { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or", false, true, false },
@@ -7332,13 +7334,18 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_SYNC_SYNCHRONIZE, "__sync_synchronize", false, true, false },
         { CBUILTIN_SYNC_LOCK_TEST_AND_SET, "__sync_lock_test_and_set", false, true, false },
         { CBUILTIN_SYNC_LOCK_RELEASE, "__sync_lock_release", false, true, false },
+        { CBUILTIN_SYNC_SWAP, "__sync_swap", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_MIN, "__sync_fetch_and_min", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_MAX, "__sync_fetch_and_max", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_UMIN, "__sync_fetch_and_umin", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_UMAX, "__sync_fetch_and_umax", false, true, false },
         { CBUILTIN_FRAME_ADDRESS, "__builtin_frame_address", false, true, false },
         { CBUILTIN_RETURN_ADDRESS, "__builtin_return_address", false, true, false },
         { CBUILTIN_EXTRACT_RETURN_ADDR, "__builtin_extract_return_addr", false, true, false },
         { CBUILTIN_FROB_RETURN_ADDR, "__builtin_frob_return_addr", false, true, false },
         { CBUILTIN_ELEMENTWISE_ABS, "__builtin_elementwise_abs", false, true, false },
         { CBUILTIN_ELEMENTWISE_ADD_SAT, "__builtin_elementwise_add_sat", false, true, false },
-        { CBUILTIN_ELEMENTWISE_BITREVERSE, "__builtin_elementwise_bitreverse", false, false, false },
+        { CBUILTIN_ELEMENTWISE_BITREVERSE, "__builtin_elementwise_bitreverse", false, true, false },
         { CBUILTIN_ELEMENTWISE_CLZG, "__builtin_elementwise_clzg", false, true, false },
         { CBUILTIN_ELEMENTWISE_FMA, "__builtin_elementwise_fma", false, true, false },
         { CBUILTIN_ELEMENTWISE_FSHL, "__builtin_elementwise_fshl", false, true, false },
@@ -7360,6 +7367,118 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_NONTEMPORAL_LOAD, "__builtin_nontemporal_load", false, true, false },
         { CBUILTIN_NONTEMPORAL_STORE, "__builtin_nontemporal_store", false, true, false },
         { CBUILTIN_BIT_CAST, "__builtin_bit_cast", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ACOS, "__builtin_elementwise_acos", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ASIN, "__builtin_elementwise_asin", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ATAN, "__builtin_elementwise_atan", false, true, false },
+        { CBUILTIN_ELEMENTWISE_COS, "__builtin_elementwise_cos", false, true, false },
+        { CBUILTIN_ELEMENTWISE_COSH, "__builtin_elementwise_cosh", false, true, false },
+        { CBUILTIN_ELEMENTWISE_EXP, "__builtin_elementwise_exp", false, true, false },
+        { CBUILTIN_ELEMENTWISE_EXP10, "__builtin_elementwise_exp10", false, true, false },
+        { CBUILTIN_ELEMENTWISE_EXP2, "__builtin_elementwise_exp2", false, true, false },
+        { CBUILTIN_ELEMENTWISE_LOG, "__builtin_elementwise_log", false, true, false },
+        { CBUILTIN_ELEMENTWISE_LOG10, "__builtin_elementwise_log10", false, true, false },
+        { CBUILTIN_ELEMENTWISE_LOG2, "__builtin_elementwise_log2", false, true, false },
+        { CBUILTIN_ELEMENTWISE_SIN, "__builtin_elementwise_sin", false, true, false },
+        { CBUILTIN_ELEMENTWISE_SINH, "__builtin_elementwise_sinh", false, true, false },
+        { CBUILTIN_ELEMENTWISE_TAN, "__builtin_elementwise_tan", false, true, false },
+        { CBUILTIN_ELEMENTWISE_TANH, "__builtin_elementwise_tanh", false, true, false },
+        { CBUILTIN_ELEMENTWISE_CEIL, "__builtin_elementwise_ceil", false, true, false },
+        { CBUILTIN_ELEMENTWISE_FLOOR, "__builtin_elementwise_floor", false, true, false },
+        { CBUILTIN_ELEMENTWISE_TRUNC, "__builtin_elementwise_trunc", false, true, false },
+        { CBUILTIN_ELEMENTWISE_RINT, "__builtin_elementwise_rint", false, true, false },
+        { CBUILTIN_ELEMENTWISE_NEARBYINT, "__builtin_elementwise_nearbyint", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ROUNDEVEN, "__builtin_elementwise_roundeven", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ROUND, "__builtin_elementwise_round", false, true, false },
+        { CBUILTIN_ELEMENTWISE_CANONICALIZE, "__builtin_elementwise_canonicalize", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ATAN2, "__builtin_elementwise_atan2", false, true, false },
+        { CBUILTIN_ELEMENTWISE_FMOD, "__builtin_elementwise_fmod", false, true, false },
+        { CBUILTIN_ELEMENTWISE_POW, "__builtin_elementwise_pow", false, true, false },
+        { CBUILTIN_ELEMENTWISE_COPYSIGN, "__builtin_elementwise_copysign", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MAXIMUM, "__builtin_elementwise_maximum", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MINIMUM, "__builtin_elementwise_minimum", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MAXNUM, "__builtin_elementwise_maxnum", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MINNUM, "__builtin_elementwise_minnum", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MAXIMUMNUM, "__builtin_elementwise_maximumnum", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MINIMUMNUM, "__builtin_elementwise_minimumnum", false, true, false },
+        { CBUILTIN_ELEMENTWISE_LDEXP, "__builtin_elementwise_ldexp", false, true, false },
+        { CBUILTIN_ELEMENTWISE_CTZG, "__builtin_elementwise_ctzg", false, true, false },
+        { CBUILTIN_ELEMENTWISE_CLMUL, "__builtin_elementwise_clmul", false, false, false },
+        { CBUILTIN_ELEMENTWISE_PDEP, "__builtin_elementwise_pdep", false, true, false },
+        { CBUILTIN_ELEMENTWISE_PEXT, "__builtin_elementwise_pext", false, true, false },
+        { CBUILTIN_REDUCE_XOR, "__builtin_reduce_xor", false, true, false },
+        { CBUILTIN_REDUCE_MAXIMUM, "__builtin_reduce_maximum", false, true, false },
+        { CBUILTIN_REDUCE_MINIMUM, "__builtin_reduce_minimum", false, true, false },
+        { CBUILTIN_REDUCE_ASSOC_FADD, "__builtin_reduce_assoc_fadd", false, true, false },
+        { CBUILTIN_REDUCE_IN_ORDER_FADD, "__builtin_reduce_in_order_fadd", false, true, false },
+        { CBUILTIN_MASKED_LOAD, "__builtin_masked_load", false, false, false },
+        { CBUILTIN_MASKED_STORE, "__builtin_masked_store", false, false, false },
+        { CBUILTIN_MASKED_EXPAND_LOAD, "__builtin_masked_expand_load", false, false, false },
+        { CBUILTIN_MASKED_COMPRESS_STORE, "__builtin_masked_compress_store", false, false, false },
+        { CBUILTIN_MASKED_GATHER, "__builtin_masked_gather", false, false, false },
+        { CBUILTIN_MASKED_SCATTER, "__builtin_masked_scatter", false, false, false },
+        { CBUILTIN_MATRIX_TRANSPOSE, "__builtin_matrix_transpose", false, false, false },
+        { CBUILTIN_MATRIX_COLUMN_MAJOR_LOAD, "__builtin_matrix_column_major_load", false, false, false },
+        { CBUILTIN_MATRIX_COLUMN_MAJOR_STORE, "__builtin_matrix_column_major_store", false, false, false },
+        { CBUILTIN_ATOMIC_FETCH_FMAXIMUM, "__atomic_fetch_fmaximum", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM, "__atomic_fetch_fmaximum_num", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_FMINIMUM, "__atomic_fetch_fminimum", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM, "__atomic_fetch_fminimum_num", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_ADD_FETCH, "__scoped_atomic_add_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_AND_FETCH, "__scoped_atomic_and_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_COMPARE_EXCHANGE, "__scoped_atomic_compare_exchange", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_COMPARE_EXCHANGE_N, "__scoped_atomic_compare_exchange_n", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_EXCHANGE, "__scoped_atomic_exchange", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_EXCHANGE_N, "__scoped_atomic_exchange_n", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_ADD, "__scoped_atomic_fetch_add", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_AND, "__scoped_atomic_fetch_and", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_FMAXIMUM, "__scoped_atomic_fetch_fmaximum", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_FMAXIMUM_NUM, "__scoped_atomic_fetch_fmaximum_num", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_FMINIMUM, "__scoped_atomic_fetch_fminimum", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_FMINIMUM_NUM, "__scoped_atomic_fetch_fminimum_num", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_MAX, "__scoped_atomic_fetch_max", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_MIN, "__scoped_atomic_fetch_min", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_NAND, "__scoped_atomic_fetch_nand", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_OR, "__scoped_atomic_fetch_or", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_SUB, "__scoped_atomic_fetch_sub", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_UDEC, "__scoped_atomic_fetch_udec", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_UINC, "__scoped_atomic_fetch_uinc", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_XOR, "__scoped_atomic_fetch_xor", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_LOAD, "__scoped_atomic_load", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_LOAD_N, "__scoped_atomic_load_n", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_MAX_FETCH, "__scoped_atomic_max_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_MIN_FETCH, "__scoped_atomic_min_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_NAND_FETCH, "__scoped_atomic_nand_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_OR_FETCH, "__scoped_atomic_or_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_STORE, "__scoped_atomic_store", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_STORE_N, "__scoped_atomic_store_n", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_SUB_FETCH, "__scoped_atomic_sub_fetch", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_THREAD_FENCE, "__scoped_atomic_thread_fence", false, true, false },
+        { CBUILTIN_SCOPED_ATOMIC_XOR_FETCH, "__scoped_atomic_xor_fetch", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_COMPARE_EXCHANGE_STRONG, "__hip_atomic_compare_exchange_strong", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_COMPARE_EXCHANGE_WEAK, "__hip_atomic_compare_exchange_weak", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_EXCHANGE, "__hip_atomic_exchange", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_ADD, "__hip_atomic_fetch_add", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_AND, "__hip_atomic_fetch_and", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_MAX, "__hip_atomic_fetch_max", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_MIN, "__hip_atomic_fetch_min", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_OR, "__hip_atomic_fetch_or", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_SUB, "__hip_atomic_fetch_sub", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_FETCH_XOR, "__hip_atomic_fetch_xor", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_LOAD, "__hip_atomic_load", false, true, false },
+        { CBUILTIN_HIP_ATOMIC_STORE, "__hip_atomic_store", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_COMPARE_EXCHANGE_STRONG, "__opencl_atomic_compare_exchange_strong", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_COMPARE_EXCHANGE_WEAK, "__opencl_atomic_compare_exchange_weak", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_EXCHANGE, "__opencl_atomic_exchange", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_ADD, "__opencl_atomic_fetch_add", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_AND, "__opencl_atomic_fetch_and", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_MAX, "__opencl_atomic_fetch_max", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_MIN, "__opencl_atomic_fetch_min", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_OR, "__opencl_atomic_fetch_or", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_SUB, "__opencl_atomic_fetch_sub", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_FETCH_XOR, "__opencl_atomic_fetch_xor", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_INIT, "__opencl_atomic_init", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_LOAD, "__opencl_atomic_load", false, true, false },
+        { CBUILTIN_OPENCL_ATOMIC_STORE, "__opencl_atomic_store", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
@@ -7392,8 +7511,10 @@ static bool pp_test_implemented_features(const char* directory)
         for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
         {
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == inventory[i].source;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == inventory[i].constant;
+            // clang makes __builtin_c23_va_start a builtin in C23 alone (#148).
+            const bool language = inventory[i].id != CBUILTIN_C23_VA_START || standards[mode] >= 2023;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == (inventory[i].source && language);
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == (inventory[i].constant && language);
         }
     }
     static const char* const own[] =
@@ -7437,6 +7558,65 @@ static bool pp_test_implemented_features(const char* directory)
         result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)unknown[i], length) == 0;
         result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)unknown[i], length) == 0;
     }
+    // clang's sized legacy forms (#148): each of the 17 families' names with _1, _2, _4, _8 and _16 is its family's builtin,
+    // with its capabilities; another suffix, and a family clang's table has no sized forms of, none.
+    static const struct
+    {
+        CBuiltinId id;
+        const char* name;
+    } sized[] = {
+        { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add" },
+        { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub" },
+        { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or" },
+        { CBUILTIN_SYNC_FETCH_AND_AND, "__sync_fetch_and_and" },
+        { CBUILTIN_SYNC_FETCH_AND_XOR, "__sync_fetch_and_xor" },
+        { CBUILTIN_SYNC_FETCH_AND_NAND, "__sync_fetch_and_nand" },
+        { CBUILTIN_SYNC_ADD_AND_FETCH, "__sync_add_and_fetch" },
+        { CBUILTIN_SYNC_SUB_AND_FETCH, "__sync_sub_and_fetch" },
+        { CBUILTIN_SYNC_OR_AND_FETCH, "__sync_or_and_fetch" },
+        { CBUILTIN_SYNC_AND_AND_FETCH, "__sync_and_and_fetch" },
+        { CBUILTIN_SYNC_XOR_AND_FETCH, "__sync_xor_and_fetch" },
+        { CBUILTIN_SYNC_NAND_AND_FETCH, "__sync_nand_and_fetch" },
+        { CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, "__sync_bool_compare_and_swap" },
+        { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, "__sync_val_compare_and_swap" },
+        { CBUILTIN_SYNC_LOCK_TEST_AND_SET, "__sync_lock_test_and_set" },
+        { CBUILTIN_SYNC_LOCK_RELEASE, "__sync_lock_release" },
+        { CBUILTIN_SYNC_SWAP, "__sync_swap" },
+    };
+    static const char* const suffixes[] = { "_1", "_2", "_4", "_8", "_16" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sized); i += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(suffixes); s += 1)
+        {
+            char name[64];
+            const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "%s%s", sized[i].name, suffixes[s]);
+            result &= cbuiltin_resolve(name, length) == sized[i].id;
+            result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+            result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == 1;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == 0;
+        }
+    }
+    static const char* const unsized[] = {
+        "__sync_fetch_and_add_3",
+        "__sync_fetch_and_add_32",
+        "__sync_fetch_and_add_",
+        "__sync_fetch_and_add_04",
+        "__sync_synchronize_4",
+        "__sync_fetch_and_max_4",
+        "__sync_fetch_and_umin_8",
+        "__sync_swap_1x",
+        "__sync_swa_1",
+        "__atomic_fetch_add_4",
+        "__atomic_exchange_n_8",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unsized); i += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(unsized[i]);
+        result &= cbuiltin_resolve(unsized[i], length) == CBUILTIN_NONE;
+        result &= !cbuiltin_has_capability((const uint8_t*)unsized[i], length, BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)unsized[i], length) == 0;
+    }
     // Every name ends immediately before an unreadable page, with no terminator or padding. Zero/oversized
     // lengths at the unreadable boundary must return without inspecting it.
     const long page_size = sysconf(_SC_PAGESIZE);
@@ -7467,11 +7647,30 @@ static bool pp_test_implemented_features(const char* directory)
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) == inventory[i].source;
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == inventory[i].source;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == inventory[i].constant;
+                // In gnu17, where __builtin_c23_va_start is no builtin (#148).
+                const bool language = inventory[i].id != CBUILTIN_C23_VA_START;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == (inventory[i].source && language);
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == (inventory[i].constant && language);
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;
                 result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD);
+            }
+            // The sized forms' suffixes are read from the name's end, and their families' names before them.
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sized); i += 1)
+            {
+                for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(suffixes); s += 1)
+                {
+                    char spelled[64];
+                    const uint32_t length = (uint32_t)snprintf(spelled, sizeof(spelled), "%s%s", sized[i].name, suffixes[s]);
+                    uint8_t* name = end - length;
+                    memcpy(name, spelled, length);
+                    result &= cbuiltin_resolve((const char*)name, length) == sized[i].id;
+                    result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+                    // The name less its last byte, at the page: _1 of _16 a sized form too, an underscore alone none.
+                    memcpy(end - (length - 1), spelled, length - 1);
+                    const CBuiltinId cut = cbuiltin_resolve((const char*)end - (length - 1), length - 1);
+                    result &= cut == (s == 4 ? sized[i].id : CBUILTIN_NONE);
+                }
             }
         }
         munmap(mapping, (size_t)page_size * 2);
@@ -7878,6 +8077,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
             passed_all &= pp_test_option_features(directory);
+            passed_all &= pp_test_builtin_targets(directory);
         }
         if (fuzz.count != 0)
         {

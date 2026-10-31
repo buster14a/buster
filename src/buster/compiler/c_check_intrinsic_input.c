@@ -295,7 +295,8 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
         {
             info = output->intrinsic_declarations[cached - 1].info;
         }
-        if (info != 0)
+        // Plain library names belong to C's declaration path, including disabled or language-ineligible ones.
+        if (info != 0 && memchr(info->attributes, 'f', info->attributes_length) == NULL)
         {
             status = CHECK_INPUT_INTRINSIC_FAILED;
             const uint32_t index = fresh ? output->intrinsic_declaration_count : cached - 1;

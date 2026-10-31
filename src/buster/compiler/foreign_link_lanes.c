@@ -434,13 +434,21 @@ static void foreign_link_lane(void* argument)
     }
 }
 
-// The conversion on `lanes` lanes (see the file's comment), into build->result.
+// The conversion on `lanes` lanes (see the file's comment), into build->result: in link-foreign's flow (#905), a round
+// of it, which every lane runs.
 static void foreign_link_build_lanes(ForeignLinkBuild* build, uint32_t lanes)
 {
     ForeignLinkLanes state;
     memset(&state, 0, sizeof(state));
     state.build = build;
-    if (!lane_run(lanes, foreign_link_lane, &state, 0))
+    LaneFlow* flow = build->foreign->flow;
+    if (flow != 0)
+    {
+        lane_flow_round_begin(flow, FOREIGN_FLOW_CONVERT, &state, lanes);
+        foreign_link_lane(&state);
+        lane_flow_round_end(flow);
+    }
+    else if (!lane_run(lanes, foreign_link_lane, &state, 0))
     {
         build->result = (ForeignLinkResult){ .error = FOREIGN_LINK_ERROR_MEMORY };
     }

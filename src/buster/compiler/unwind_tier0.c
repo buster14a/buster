@@ -355,7 +355,12 @@ static bool unwind_tier0_release(const X86Instruction* record, uint32_t pushes)
 // lets an unwinder from its trap reach its caller. UNWIND_ERROR_INVALID for code or a frame its records can't be,
 // UNWIND_ERROR_UNSUPPORTED for a prologue or epilogue that isn't the frame's and UNWIND_ERROR_LIMIT past the format's
 // limits, each leaving the descriptor alone.
-static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
+//
+// A function with tail calls (Tier0Code.tail_records, #147's musttail) has, before each one's jump, tier0_emit_teardown's
+// release and pops, the epilogue's, which are its transitions: their ends and the jump's go into `tails`, which has
+// unwind_tier0_tail_room's room and which the descriptor then points at (UnwindFunction.tails), each record checked as
+// the epilogue's are and the jump a direct jmp's or r11's. Without `tails`, such a function is UNWIND_ERROR_INVALID.
+static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output, uint32_t* tails)
 {
     UnwindError error = UNWIND_OK;
     const uint32_t saved = code != 0 ? code->frame_saved : 0;
@@ -462,11 +467,87 @@ static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* fin
         previous = end;
     }
     built.event_count = (uint8_t)count;
+    // The tail calls' teardowns and jumps, in order between the prologue's records and the epilogue's, each after the one
+    // before; their transitions' ends between the prologue's last and the epilogue's first (or the size).
+    const uint32_t tail_count = code != 0 && error == UNWIND_OK ? code->tail_count : 0;
+    error = tail_count != 0 && (tails == 0 || code->tail_records == 0) ? UNWIND_ERROR_INVALID : error;
+    const uint32_t teardown = epilogue - 1;
+    const uint32_t opening = pointer ? 2 + pushes : pushes + (reserved ? 1 : 0);
+    previous = opening != 0 && error == UNWIND_OK ? built.offsets[opening - 1] : 0;
+    const uint32_t bound = count > opening ? built.offsets[opening] : size;
+    uint32_t next = prologue;
+    uint32_t written = 0;
+    for (uint32_t tail = 0; error == UNWIND_OK && tail < tail_count; tail += 1)
+    {
+        const uint32_t jump = code->tail_records[tail];
+        error = jump >= next && jump - next >= teardown && jump < code->count - epilogue ? UNWIND_OK : UNWIND_ERROR_INVALID;
+        uint32_t record = error == UNWIND_OK ? jump - teardown : 0;
+        uint32_t ends[BUSTER_UNWIND_EVENTS];
+        uint32_t ended = 0;
+        if (error == UNWIND_OK && (pointer || reserved))
+        {
+            uint32_t amount = 0;
+            error = pointer ? (unwind_tier0_release(&records[record], pushes) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
+                            : (unwind_tier0_adjustment(&records[record], false, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED);
+            if (reserved)
+            {
+                ends[ended++] = record;
+            }
+            record += 1;
+        }
+        for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); error == UNWIND_OK && r > 0; r -= 1)
+        {
+            if ((saved & (1u << (r - 1))) != 0)
+            {
+                error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, unwind_tier0_saved_registers[r - 1]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+                ends[ended++] = record;
+                record += 1;
+            }
+        }
+        if (error == UNWIND_OK && pointer)
+        {
+            error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, X86_REGISTER_RBP) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            ends[ended++] = record;
+            record += 1;
+        }
+        // The jump: tier0_emit_tail's direct one, whose fixup is a call's, or through r11.
+        const X86Instruction* jumping = error == UNWIND_OK ? &records[jump] : 0;
+        error = jumping != 0 && (jumping->form == (X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP) ||
+                                 (jumping->form == X86_FORM_JMP_RM64 && jumping->mode == BUSTER_X86_REGISTER_DIRECT && jumping->rm == X86_REGISTER_R11)) ? UNWIND_OK :
+                error == UNWIND_OK ? UNWIND_ERROR_UNSUPPORTED : error;
+        ends[ended++] = jump;
+        for (uint32_t event = 0; error == UNWIND_OK && event < ended; event += 1)
+        {
+            const uint32_t end = final_offsets[ends[event] + 1];
+            error = end > previous && end < bound ? UNWIND_OK : UNWIND_ERROR_INVALID;
+            tails[written] = end;
+            written += 1;
+            previous = end;
+        }
+        next = jump + 1;
+    }
+    built.tail_count = error == UNWIND_OK ? tail_count : 0;
+    built.tails = error == UNWIND_OK && tail_count != 0 ? tails : 0;
     if (error == UNWIND_OK)
     {
         *output = built;
     }
     return error;
+}
+
+// The room unwind_tier0_frame_tails's `tails` needs for `code`: each tail call's transitions (the epilogue's) and its
+// jump's end.
+static uint64_t unwind_tier0_tail_room(const Tier0Code* code)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t per = (code->frame_pointer ? pushes + 1 : pushes + (code->frame_size != 0 ? 1 : 0)) + 1;
+    return (uint64_t)code->tail_count * per;
+}
+
+// unwind_tier0_frame_tails of a function without tail calls, as every reader but the C driver's emission has them.
+static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
+{
+    return unwind_tier0_frame_tails(code, final_offsets, size, output, 0);
 }
 
 static UnwindError unwind_tier0_scalar(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)

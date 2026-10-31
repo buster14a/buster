@@ -73,6 +73,9 @@
 #define BUSTER_CHECK_UNITS_TEST_FUNCTIONS 4
 // The large unit's functions in the test of a few large units (#777): enough tokens for 8 function lanes.
 #define BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS 800
+// Enough for the serial duplicate-name merge, but not its four-lane counts (at least 8192 bytes alone).
+#define BUSTER_CHECK_UNITS_TEST_MERGE_SCRATCH 4096
+#define BUSTER_CHECK_UNITS_TEST_MERGE_PATTERN 0xa5
 
 typedef struct CheckUnitsTestTally CheckUnitsTestTally;
 struct CheckUnitsTestTally
@@ -1352,6 +1355,152 @@ static __attribute__((unused)) void check_units_test_limits(CheckUnitsTestTally*
            runs, setups, fallbacks);
 }
 
+// A broker on the actual release control/reply protocol observes the allocation-failure fallback's ordering. While
+// lane 0 is blocked awaiting worker_budget_release's acknowledgement, scratch must still contain only its pattern:
+// failed parallel reservation writes no workspace, but the serial duplicate-name merge does. Thus returning after
+// serial work, or leaving return to the caller, fails this independent observation. No production callback is added.
+static void check_units_test_merge_lease(CheckUnitsTestTally* tally)
+{
+    typedef struct CheckUnitsLeaseProbe CheckUnitsLeaseProbe;
+    struct CheckUnitsLeaseProbe
+    {
+        uint8_t scratch[BUSTER_CHECK_UNITS_TEST_MERGE_SCRATCH];
+        uint8_t before_serial;
+    };
+    Arena fixture = arena_reserve(1u << 20);
+    CheckUnitsUnit units[2] = { { .path = "first.c" }, { .path = "second.c" } };
+    const LinkCapacity capacity = { .names = 1, .symbols = 1 };
+    bool prepared = fixture.base != NULL;
+    for (uint32_t u = 0; prepared && u < 2; u += 1)
+    {
+        Link* link = &units[u].kept.link;
+        prepared = link_initialize(link, &fixture, &fixture, capacity);
+        const NameId name = prepared ? link_add_name(link, (const uint8_t*)"fallback_duplicate", 18) : 0;
+        prepared = prepared && name != 0 && link_add_symbol(link, name, 0, u + 1, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT,
+                                                          BUSTER_LINK_SOURCE_ABSOLUTE) != 0;
+    }
+    check_units_test_expect(tally, prepared, "prepare the merge fallback's duplicate-name links", NULL);
+    for (uint32_t failure = 0; prepared && failure < 2; failure += 1)
+    {
+        CheckUnitsLeaseProbe* probe = mmap(NULL, sizeof(*probe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        int control[2] = { -1, -1 };
+        int reply[2] = { -1, -1 };
+        FILE* capture = tmpfile();
+        const int saved_errors = dup(2);
+        bool ready = probe != MAP_FAILED && capture != NULL && saved_errors >= 0 && pipe(control) == 0 && pipe(reply) == 0;
+        if (ready)
+        {
+            memset(probe, 0, sizeof(*probe));
+            memset(probe->scratch, BUSTER_CHECK_UNITS_TEST_MERGE_PATTERN, sizeof(probe->scratch));
+        }
+        fflush(stdout);
+        fflush(stderr);
+        const pid_t child = ready ? fork() : -1;
+        if (child == 0)
+        {
+            close(control[1]);
+            close(reply[0]);
+            alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+            uint8_t byte = 0;
+            ssize_t got;
+            do
+            {
+                got = read(control[0], &byte, 1);
+            }
+            while (got < 0 && errno == EINTR);
+            bool before = got == 0;
+            // The parent cannot enter the serial merge while waiting for this acknowledgement. On the late-return
+            // mutant, serial work has already ended instead, so these reads never race writes to the shared bytes.
+            for (uint32_t i = 0; before && i < sizeof(probe->scratch); i += 1)
+            {
+                before = probe->scratch[i] == BUSTER_CHECK_UNITS_TEST_MERGE_PATTERN;
+            }
+            probe->before_serial = before;
+            const uint8_t acknowledged = before && failure == 0 ? 1 : 0;
+            ssize_t sent;
+            do
+            {
+                sent = write(reply[1], &acknowledged, 1);
+            }
+            while (sent < 0 && errno == EINTR);
+            close(control[0]);
+            close(reply[1]);
+            _exit(sent == 1 ? 0 : 1);
+        }
+        ready = ready && child > 0;
+        WorkerBudget budget = { .read_fd = -1, .write_fd = -1 };
+        CheckUnitsFlow flow = { 0 };
+        WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+        if (child > 0)
+        {
+            close(control[0]);
+            close(reply[1]);
+            control[0] = -1;
+            reply[1] = -1;
+            lease = (WorkerBudgetLease){ .control = control[1], .reply = reply[0], .child = child, .owner = &budget };
+            control[1] = -1;
+            reply[0] = -1;
+        }
+        ready = ready && dup2(fileno(capture), 2) == 2;
+        Arena scratch = { .base = ready ? probe->scratch : NULL, .capacity = BUSTER_CHECK_UNITS_TEST_MERGE_SCRATCH };
+        Arena output = { 0 };
+        Arena bytes = { 0 };
+        CheckProgramBinding binding = { 0 };
+        Link merged = { 0 };
+        const bool result = ready && check_units_merge_lanes(&merged, units, 2, &binding, NULL, &output, &bytes, &scratch, 4, &flow, &lease);
+        const bool returned = lease.child == -1 && lease.control == -1 && lease.reply == -1;
+        const bool lost_before_cleanup = flow.slots_lost;
+        // This is the caller's unconditional final cleanup too. A missing early return still gets its broker reaped,
+        // but its ordering observation and `returned` assertion fail instead of leaving a waiting child behind.
+        check_units_slots_back(&flow, &lease);
+        bool changed = false;
+        for (uint32_t i = 0; ready && !changed && i < sizeof(probe->scratch); i += 1)
+        {
+            changed = probe->scratch[i] != BUSTER_CHECK_UNITS_TEST_MERGE_PATTERN;
+        }
+        fflush(stderr);
+        char text[256] = { 0 };
+        if (capture != NULL)
+        {
+            rewind(capture);
+            const size_t got = fread(text, 1, sizeof(text) - 1, capture);
+            text[got] = 0;
+        }
+        const bool restored = saved_errors >= 0 && dup2(saved_errors, 2) == 2;
+        check_units_test_expect(tally, ready && restored && !result && changed && strstr(text, "multiple definition of 'fallback_duplicate'") != NULL,
+                                "the forced parallel-reservation fallback executes its serial twin's duplicate check", text);
+        check_units_test_expect(tally, ready && returned && probe->before_serial == 1,
+                                "the merge lease returns before serial fallback touches scratch", NULL);
+        check_units_test_expect(tally, ready && lost_before_cleanup == (failure != 0) && flow.slots_lost == (failure != 0) &&
+                                         budget.return_failed == (failure != 0) && lease.child == -1,
+                                "failed early slot return remains sticky through idempotent final cleanup", NULL);
+        if (saved_errors >= 0)
+        {
+            close(saved_errors);
+        }
+        if (capture != NULL)
+        {
+            fclose(capture);
+        }
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            if (control[i] >= 0)
+            {
+                close(control[i]);
+            }
+            if (reply[i] >= 0)
+            {
+                close(reply[i]);
+            }
+        }
+        if (probe != MAP_FAILED)
+        {
+            munmap(probe, sizeof(*probe));
+        }
+    }
+    arena_release(&fixture);
+}
+
 // The jobserver's tokens while the link writes (see the file's comment), in a directory of its own under `directory`.
 static void check_units_test_jobserver(CheckUnitsTestTally* tally, const char* executable, const char* directory)
 {
@@ -1759,6 +1908,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
+        check_units_test_merge_lease(&tally);
         check_units_test_shared(&tally, executable, directory);
 #if __has_feature(thread_sanitizer)
         // ThreadSanitizer maps shadow for each mapping a run makes and keeps it, so a run neither returns the address space

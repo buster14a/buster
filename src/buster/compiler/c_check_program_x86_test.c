@@ -1679,6 +1679,19 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
                                   "__m128 m[]={_mm_shuffle_ps(f,g,_MM_SHUFFLE(0,1,2,3)),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);"
                                   "int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);"
                                   "return (int)h;}");
+    // #799: independent Clang execution compares every byte, including lane boundaries and both operand orders.
+    check_test_program_x86_source(test, clang, target, run_native, "x86-immediate-sse-avx2-intrinsics",
+                                  "int tested(int n){unsigned h=2166136261u;v2df a,b;v8hi p,q;v8si x,y;v4di u,v;v32qi c,d;"
+                                  "fill(&a,16,n);fill(&b,16,n+1);fill(&p,16,n+2);fill(&q,16,n+3);fill(&x,32,n+4);fill(&y,32,n+5);"
+                                  "fill(&u,32,n+6);fill(&v,32,n+7);fill(&c,32,n+8);fill(&d,32,n+9);"
+                                  "v2df f[]={__builtin_ia32_shufpd(a,b,0),__builtin_ia32_shufpd(a,b,3),__builtin_ia32_shufpd(b,a,1)};FOLD(f);"
+                                  "v8hi w[]={__builtin_ia32_pblendw128(p,q,0),__builtin_ia32_pblendw128(p,q,255),__builtin_ia32_pblendw128(q,p,0xa5)};FOLD(w);"
+                                  "v8si z[]={__builtin_ia32_pshufd256(x,0),__builtin_ia32_pshufd256(x,255),__builtin_ia32_pshufd256(y,0x4e)};FOLD(z);"
+                                  "v4di k[]={__builtin_ia32_permdi256(u,0),__builtin_ia32_permdi256(u,255),__builtin_ia32_permdi256(v,0x1b)};FOLD(k);"
+                                  "v32qi l[]={__builtin_ia32_palignr256(c,d,0),__builtin_ia32_palignr256(c,d,15),__builtin_ia32_palignr256(c,d,16),"
+                                  "__builtin_ia32_palignr256(d,c,17),__builtin_ia32_palignr256(c,d,32),__builtin_ia32_palignr256(c,d,255)};FOLD(l);"
+                                  "v8si deep=x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(__builtin_ia32_pshufd256(y,0x4e))))))))))))))))));"
+                                  "FOLD(deep);return (int)h;}");
     check_test_program_includes = false;
 }
 
@@ -1705,6 +1718,12 @@ static void check_test_program_x86_refusals(CheckTest* test)
         check_test_program_boundary_target(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n,1,2,3};"
                                                  "v4si b=__builtin_ia32_pshufd(a,0x1b);return b[0];}",
                                            "sse-builtin-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
+        check_test_program_boundary_target(test, "typedef double v2df __attribute__((vector_size(16)));int tested(int n){v2df a={n,1};"
+                                                 "v2df b=__builtin_ia32_shufpd(a,a,3);return (int)b[0];}",
+                                           "sse-shufpd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
+        check_test_program_boundary_target(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
+                                                 "v8si b=__builtin_ia32_pshufd256(a,0x1b);return b[0];}",
+                                           "avx2-pshufd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
     }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);
@@ -1737,6 +1756,57 @@ static void check_test_program_intrinsic_features(CheckTest* test)
     check_test_expect(test, advertised > 100, "native intrinsic capabilities are not an empty or helper-only list");
 }
 
+// Constrained packed compares keep all five predicate bits, operand order and the explicit SAE form. These expected
+// forms are independent of the rules' round_form cells, including FP16 where native execution isn't available.
+static void check_test_program_x86_float_predicates(CheckTest* test)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    static const uint64_t rounds[] = { 4, 8, 12 };
+    uint32_t rules = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool packed = rule->fixed == CHECK_X86_PREDICATE_FCMP &&
+                            (rule->family == CHECK_X86_LOWER_COMPARE || rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE);
+        if (packed)
+        {
+            rules += 1;
+            const bool masked = rule->family == CHECK_X86_LOWER_COMPARE;
+            const uint32_t record = masked ? 1 : 0;
+            const uint32_t controls = rule->rounding == CHECK_X86_ROUND_NONE ? 1 : BUSTER_ARRAY_LENGTH(rounds);
+            for (uint32_t c = 0; c < controls; c += 1)
+            {
+                const bool sae = rounds[c] != 4;
+                const uint16_t form = !sae ? rule->form : rule->element == 2 ? X86_FORM_VCMPPH_K_Z_Z_SAE_IMM8 :
+                                                        rule->element == 4 ? X86_FORM_VCMPPS_K_Z_Z_SAE_IMM8 : X86_FORM_VCMPPD_K_Z_Z_SAE_IMM8;
+                for (uint32_t predicate = 0; predicate < 32; predicate += 1)
+                {
+                    Tier0Operation row;
+                    const bool made = check_x86_lower_row_of(&every, rule, predicate, rounds[c], 0, true, &row) == NULL;
+                    for (uint32_t j = 0; made && j < row.operand_count; j += 1)
+                    {
+                        row.operand_classes[j] = row.operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR ? row.operand_classes[j] :
+                                                                                                        check_lower_x86_operand_class(row.operand_classes[j]);
+                    }
+                    check_test_expect(test, made && row.records[record].immediate == predicate && row.records[record].form == form &&
+                                           row.records[record].vvvv == BUSTER_TIER0_ROLE_VECTOR(0) &&
+                                           row.records[record].rm == BUSTER_TIER0_ROLE_VECTOR(1) && tier0_operation_valid(&row),
+                                      "strict packed compare retains its predicate, order and SAE in a valid Tier 0 row");
+                }
+                Tier0Operation ordinary;
+                check_test_expect(test, check_x86_lower_row_of(&every, rule, 16, rounds[c], 0, false, &ordinary) == NULL &&
+                                       ordinary.records[record].immediate == 0 && ordinary.records[record].form == rule->form,
+                                  "unconstrained packed compare retains its quiet canonical predicate and ignores SAE");
+                check_test_expect(test, check_x86_lower_row_of(&every, rule, 9, rounds[c], 0, false, &ordinary) == NULL &&
+                                       ordinary.records[record].immediate == 6 && ordinary.records[record].vvvv == BUSTER_TIER0_ROLE_VECTOR(1) &&
+                                       ordinary.records[record].rm == BUSTER_TIER0_ROLE_VECTOR(0),
+                                  "unconstrained packed greater-than retains its canonical predicate and swapped operands");
+            }
+        }
+    }
+    check_test_expect(test, rules == 13, "all four vector and nine masked packed float-compare rules have strict controls");
+}
+
 // Every rule's row, with every feature and at immediates around its fields' edges, is one Tier 0 places and emits
 // (tier0_operation_valid: each field's role of its register's kind, and the record placed one x86_validate takes), the
 // rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
@@ -1750,6 +1820,7 @@ static void check_test_program_x86_rows(CheckTest* test)
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
     // tier0_operation_valid asks the effects tables (#760).
     check_test_expect(test, x86_encoder_initialize() && tier0_initialize(), "the encoder's, the effects' and Tier 0's tables");
+    check_test_program_x86_float_predicates(test);
     uint32_t rows = 0;
     uint32_t invalid = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
@@ -1763,7 +1834,7 @@ static void check_test_program_x86_rows(CheckTest* test)
             const uint64_t mask = k >= BUSTER_ARRAY_LENGTH(immediates) * BUSTER_ARRAY_LENGTH(rounds) ? UINT64_MAX : 0;
             Tier0Operation row;
             if ((round == 4 || rule->rounding != CHECK_X86_ROUND_NONE) && (mask == 0 || masks) &&
-                check_x86_lower_row_of(&every, rule, immediate, round, mask, &row) == NULL)
+                check_x86_lower_row_of(&every, rule, immediate, round, mask, false, &row) == NULL)
             {
                 for (uint32_t j = 0; j < row.operand_count; j += 1)
                 {
@@ -1793,6 +1864,23 @@ static void check_test_program_x86_rows(CheckTest* test)
     char description[128];
     snprintf(description, sizeof(description), "every x86 rule's row is one Tier 0 takes (%u rows, %u not)", rows, invalid);
     check_test_expect(test, rows != 0 && invalid == 0, description);
+    static const struct { const char* name; uint64_t feature; } immediate_features[] = {
+        { "__builtin_ia32_shufpd", BUSTER_X86_FEATURE(AVX) },
+        { "__builtin_ia32_pblendw128", BUSTER_X86_FEATURE(AVX) },
+        { "__builtin_ia32_pshufd256", BUSTER_X86_FEATURE(AVX2) },
+        { "__builtin_ia32_permdi256", BUSTER_X86_FEATURE(AVX2) },
+        { "__builtin_ia32_palignr256", BUSTER_X86_FEATURE(AVX2) },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(immediate_features); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rule(immediate_features[i].name, strlen(immediate_features[i].name));
+        X86Target without = every;
+        without.features &= ~immediate_features[i].feature;
+        Tier0Operation row;
+        check_test_expect(test, rule != NULL && check_x86_lower_row_of(&every, rule, 1, 4, 0, false, &row) == NULL &&
+                                check_x86_lower_row_of(&without, rule, 1, 4, 0, false, &row) != NULL,
+                          "immediate rule requires its VEX instruction's target feature");
+    }
 }
 
 // A function's target attribute (#180, check_program_targets): in a baseline unit, functions of BMI, BMI2 and CRC32

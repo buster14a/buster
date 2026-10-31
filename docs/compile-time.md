@@ -757,13 +757,23 @@ report, on standard error after the command, a row per stage.
   independent validation remain open.
   Elapsed timings and minor fault counts are separate measurements.
 - **Lanes.** The driver compiles the functions on lanes (#151), by default as
-  many as their tokens pay for, up to one per CPU it may run on. On one lane, the
+  many as their tokens pay for, up to one per core of the CPUs it may run on
+  (#905). On one lane, the
   calling thread takes the per-function laps above. On several, a thread's laps
   wouldn't add up across threads, so the lanes' whole run is one stage, `lanes`,
   and the stages from `lower` to `unwind` keep only the calling thread's passes
   around it. The 9700X step pins every compile to CPU 2, so its functions take
   one lane. This document's figures were measured before the lanes merged, on
   the calling thread alone, which a pinned compile still is.
+- **The session's start.** `lanes-start` (#905) runs from the options' end to
+  the command's flow's start on lane 0: the session's start, which, the session
+  being lazy, takes lane 1's creation alone, lane 1 creating the other lanes
+  while lane 0 goes on; for a command run on a session already, its flow's
+  dispatch. Two `time-process` lines give the session's lanes: `lanes-asked`,
+  the lanes the command asked for (one per core of the CPUs it may run on, which
+  lane 1 counts, or `--lanes N`, at most one per CPU; at most `--worker-budget
+  N`, and one for a source without code to emit), and `lanes`, those its flow
+  ran on, one after a failed start.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked

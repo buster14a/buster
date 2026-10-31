@@ -337,6 +337,8 @@ static __attribute__((unused)) CBuiltinMathHelper cbuiltin_math_helper(CBuiltinI
                 {
                     result.code.records = (X86Instruction*)storage;
                     result.code.count = recipe.count;
+                    // Sqrt and rounding reserve 16 bytes until their common epilogue; copysign has no frame.
+                    result.code.frame_size = operation == 1 ? 0 : 16;
                     memcpy(result.code.records, recipe.records, (size_t)record_bytes);
                     result.code.branches = (uint32_t*)(storage + record_bytes);
                     result.code.targets = (uint32_t*)(storage + record_bytes + branch_bytes);

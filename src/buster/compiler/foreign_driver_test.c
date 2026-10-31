@@ -15,6 +15,7 @@ typedef enum ForeignDriverTestFixture
     FOREIGN_DRIVER_TEST_ENTRY,
     FOREIGN_DRIVER_TEST_DEAD,
     FOREIGN_DRIVER_TEST_CALL,
+    FOREIGN_DRIVER_TEST_SCOPED_CALL,
     FOREIGN_DRIVER_TEST_FIRST,
     FOREIGN_DRIVER_TEST_SECOND,
     FOREIGN_DRIVER_TEST_POISON,
@@ -69,6 +70,14 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
         .name = "fdriver_call",
         .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
                 ".cfi_startproc\ncall driver_pick@PLT\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.cfi_endproc\n.size _start,.-_start\n"
+                ".section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // Both calls must resolve: pick comes from the scoped archive, unused from its DSO with no archive substitute.
+    [FOREIGN_DRIVER_TEST_SCOPED_CALL] = {
+        .name = "fdriver_scoped_call",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_pick@PLT\nmov %eax,%ebx\ncall driver_unused@PLT\nadd %ebx,%eax\n"
+                "mov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
                 ".section .note.GNU-stack,\"\",@progbits\n",
     },
     [FOREIGN_DRIVER_TEST_FIRST] = {
@@ -1440,6 +1449,39 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
         const bool second = mode != 1 || (found > 1 && needed[1] != 0 && strcmp(needed[1], "libfdriver_unused.so") == 0);
         foreign_test_expect(tally, image.valid && found == expected && first && second, "driver preserves library search mode and as-needed scope", name);
     }
+    {
+        char* arguments[] = {
+            (char*)"-pie", (char*)"-dynamic-linker", interpreter.pointer, files->objects[FOREIGN_DRIVER_TEST_CALL],
+            (char*)"-L", (char*)directory, (char*)"--as-needed", (char*)"-Bdynamic", (char*)"--push-state",
+            (char*)"-Bstatic", (char*)"--no-as-needed", (char*)"--push-state", (char*)"-Bdynamic",
+            (char*)"--pop-state", (char*)"-lfdriver_pick", (char*)"--pop-state", (char*)"-lfdriver_unused",
+        };
+        const String8 bytes = foreign_driver_test_invoke(tally, directory, "nested_state", "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 42, arena);
+        const DynamicTestImage image = dynamic_test_image(bytes);
+        const char* needed[2] = { 0 };
+        foreign_test_expect(tally, image.valid && dynamic_test_needed(&image, needed, BUSTER_ARRAY_LENGTH(needed)) == 0,
+                            "nested state restores static library selection and as-needed", 0);
+    }
+    ForeignTestPath no_archive;
+    snprintf(no_archive, sizeof(no_archive), "%s/libfdriver_unused.a", directory);
+    foreign_test_expect(tally, access(no_archive, F_OK) != 0 && errno == ENOENT, "scoped-static fixture has no DSO archive fallback", no_archive);
+    for (uint32_t alias = 0; alias < 2; alias += 1)
+    {
+        const char* name = alias == 0 ? "scoped_static_restores_dso" : "scoped_bstatic_restores_dso";
+        char* arguments[] = {
+            (char*)"-pie", (char*)"-dynamic-linker", interpreter.pointer, files->objects[FOREIGN_DRIVER_TEST_SCOPED_CALL],
+            (char*)"-L", (char*)directory, (char*)"--as-needed", (char*)"--push-state",
+            (char*)(alias == 0 ? "-static" : "-Bstatic"), (char*)"--push-state", (char*)"-Bdynamic", (char*)"--pop-state",
+            (char*)"-lfdriver_pick", (char*)"--pop-state", (char*)"-lfdriver_unused",
+        };
+        const String8 bytes = foreign_driver_test_invoke(tally, directory, name, "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 49, arena);
+        foreign_driver_test_structure(tally, bytes, ET_DYN, interpreter, name);
+        const DynamicTestImage image = dynamic_test_image(bytes);
+        const char* needed[2] = { 0 };
+        const uint32_t found = dynamic_test_needed(&image, needed, BUSTER_ARRAY_LENGTH(needed));
+        foreign_test_expect(tally, image.valid && found == 1 && needed[0] != 0 && strcmp(needed[0], "libfdriver_unused.so") == 0,
+                            "scoped static archive is required and pop restores the required DSO", name);
+    }
     foreign_test_expect(tally, system->found, "find explicit system CRT inputs", 0);
     if (system->found)
     {
@@ -1458,14 +1500,16 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
             arguments[count++] = system->directories[i];
         }
         arguments[count++] = (char*)"-lgcc";
+        arguments[count++] = (char*)"--push-state";
         arguments[count++] = (char*)"--as-needed";
         arguments[count++] = (char*)"-lgcc_s";
-        arguments[count++] = (char*)"--no-as-needed";
+        arguments[count++] = (char*)"--pop-state";
         arguments[count++] = (char*)"-lc";
         arguments[count++] = (char*)"-lgcc";
+        arguments[count++] = (char*)"--push-state";
         arguments[count++] = (char*)"--as-needed";
         arguments[count++] = (char*)"-lgcc_s";
-        arguments[count++] = (char*)"--no-as-needed";
+        arguments[count++] = (char*)"--pop-state";
         for (uint32_t i = RUNTIME_OBJECT_END; i < RUNTIME_OBJECTS; i += 1)
         {
             arguments[count++] = system->objects[i];
@@ -1626,21 +1670,12 @@ static bool foreign_driver_test_large(ForeignTestTally* tally, const char* direc
     return made;
 }
 
-// The lanes link-foreign takes by default for an object of `path` alone: those its bytes pay for, at most
-// BUSTER_FOREIGN_DRIVER_LANES and one per CPU.
-static uint32_t foreign_driver_test_default_lanes(const char* path)
-{
-    struct stat status;
-    const uint64_t bytes = stat(path, &status) == 0 ? (uint64_t)status.st_size : 0;
-    const uint32_t cpus = foreign_driver_cpus();
-    return foreign_driver_lanes(bytes, BUSTER_FOREIGN_DRIVER_LANES < cpus ? BUSTER_FOREIGN_DRIVER_LANES : cpus);
-}
-
-// --time: a link reports every stage (the first inputs' opening and the team's start among them) and the phases of the
-// resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by default, and still writes the
-// program; a link that fails reports no stages, only its diagnostic; one of 8 lanes started on one CPU runs on one lane,
-// the most the command takes (foreign_driver_cpus); and by default, a link of one small object runs on one lane, and
-// its opening reports the objects' bytes that chose it.
+// --time: a link reports every stage (the first inputs' opening and the session's start among them, with the session's
+// lanes) and the phases of the resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by
+// default, and still writes the program; a link that fails reports no stages, only its diagnostic; one of 8 lanes
+// started on one CPU runs on one lane, the most the command takes (foreign_driver_cpus), on a session of one; and by
+// default, a link of one small object runs on one lane of a session of the most its objects may pay for, at most one per
+// core (#905), and its opening reports the objects' bytes that chose it.
 static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     static const char* const expected[] = {
@@ -1714,6 +1749,15 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         snprintf(opened, sizeof(opened), " objects %llu bytes\n", sized ? (unsigned long long)object.st_size : 0ull);
         const bool counted = report.pointer != 0 && memmem(report.pointer, report.length, " objects ", strlen(" objects ")) != 0;
         complete = complete && (chosen ? sized && memmem(report.pointer, report.length, opened, strlen(opened)) != 0 : !counted);
+        // The session's lanes (#905): as many as the link may take, the most its objects may pay for by default, at most
+        // one per core (by /proc/cpuinfo, or sysfs where it doesn't list them), though it runs on fewer.
+        const uint32_t most = cpus < BUSTER_FOREIGN_DRIVER_LANES ? cpus : BUSTER_FOREIGN_DRIVER_LANES;
+        const uint32_t listed = chosen ? lane_test_process_cores() : 0;
+        const uint32_t cores = listed != 0 ? listed : lane_core_count();
+        const uint32_t session = way == 1 ? lanes : chosen ? (cores < most ? cores : most) : 1;
+        char sessioned[64];
+        snprintf(sessioned, sizeof(sessioned), " session %u of %u\n", session, session);
+        complete = complete && (fails || memmem(report.pointer, report.length, sessioned, strlen(sessioned)) != 0);
         bool none = report.pointer != 0;
         for (uint32_t i = 0; report.pointer != 0 && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
         {
@@ -1733,11 +1777,11 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
     }
 }
 
-// A link whose threads can't start (#501): in a child limited to the processes it has, link-foreign on 3 lanes must
-// fail before its resolution, say why and leave the output as it was, and on one lane, which starts no thread, link;
-// and by default (#594), the large object, whose bytes pay for lanes, link on one lane, and a small one, which takes
-// one, link. RLIMIT_NPROC doesn't limit root, and with one CPU the command takes one lane. An alarm, which execve keeps,
-// ends a child that hangs.
+// A link whose threads can't start (#501, #905): in a child limited to the processes it has, link-foreign on 3 lanes
+// must run on one lane (its session's fallback, which no later stage retries) and link, as on one lane, which starts no
+// thread; and by default (#594), the large object, whose bytes pay for lanes, link on one lane, and a small one, which
+// takes one, link. RLIMIT_NPROC doesn't limit root, and with one CPU the command takes one lane. An alarm, which execve
+// keeps, ends a child that hangs.
 static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, bool large)
 {
     static const char sentinel[] = "existing driver output\000must survive failed link\377";
@@ -1795,18 +1839,11 @@ static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* d
         int status = 0;
         const bool waited = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status);
         const int exited = waited ? WEXITSTATUS(status) : -1;
-        const String8 bytes = foreign_test_read(arena, executable);
         if (laned)
         {
-            const String8 expected = {
-                .pointer = (char*)sentinel,
-                .length = sizeof(sentinel),
-            };
             const String8 diagnostic = foreign_test_read(arena, errors);
-            const char message[] = "link-foreign: cannot start linker workers\n";
-            const bool said = diagnostic.pointer != 0 && diagnostic.length == strlen(message) && memcmp(diagnostic.pointer, message, diagnostic.length) == 0;
-            foreign_test_expect(tally, exited == 1 && said && foreign_driver_test_same(bytes, expected), "a link whose threads can't start fails before resolving, says so and leaves the output",
-                                errors);
+            foreign_test_expect(tally, exited == 0 && diagnostic.length == 0 && foreign_driver_test_run(directory, executable, output, errors, arena) == 42,
+                                "a link of --lanes whose threads can't start runs on one lane", errors);
         }
         else if (way == 2 && !skipped)
         {
@@ -1820,12 +1857,13 @@ static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* d
     }
 }
 
-// The command's threads (#501): a library preloaded into link-foreign counts its calls of pthread_create, which it
-// makes once for the whole command, one per lane past the first: none on one lane, and on 3 (or the CPUs') as many as
-// the lanes past the first, for a static executable, a PIE, and with section GC, unwind deduplication and string
-// merging after the conversion; and by default (#594) none for a small object, and for the large one a thread per lane
-// its bytes pay for past the first (foreign_driver_lanes), into the bytes of its link on one lane, which starts none.
-// Each program must still run.
+// The command's threads (#501, #905): a library preloaded into link-foreign counts its calls of pthread_create, which
+// its session makes once for the whole command, before any input is opened, one per lane past the first: none on one
+// lane, and on 3 (or the CPUs') as many as the lanes past the first, for a static executable, a PIE, and with section
+// GC, unwind deduplication and string merging after the conversion; and by default, whatever lanes its objects' bytes
+// then pay for (#594), the most the command takes (BUSTER_FOREIGN_DRIVER_LANES, at most the CPUs' cores, #905, and its
+// lane 1, which counts them, where one core leaves it no other), for a small object and for the large one, whose link on
+// the lanes its bytes pay for writes the bytes of its link on one lane, which starts none. Each program must still run.
 static void foreign_driver_test_threads(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, String8 interpreter, bool large)
 {
     static const char counter[] = "#define _GNU_SOURCE\n"
@@ -1879,7 +1917,14 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         const uint64_t saved = arena->length;
         const bool chosen = way == 4 || way == 5;
         const bool on_large = way == 5 || way == 6;
-        const uint32_t lanes = way == 0 || way == 4 || way == 6 ? 1 : way == 5 ? foreign_driver_test_default_lanes(files->large) : cpus < 3 ? cpus : 3;
+        const uint32_t most = BUSTER_FOREIGN_DRIVER_LANES < cpus ? BUSTER_FOREIGN_DRIVER_LANES : cpus;
+        // By default one lane per core of the most it takes (by /proc/cpuinfo, or sysfs where it doesn't list them): its
+        // session's lane 1, created from 2 lanes on, counts them, and runs alone where they leave it no other lane.
+        const uint32_t listed = chosen ? lane_test_process_cores() : 0;
+        const uint32_t cores = listed != 0 ? listed : lane_core_count();
+        const uint32_t per_core = cores < most ? cores : most;
+        const uint32_t lanes = way == 0 || way == 6 ? 1 : chosen ? per_core : cpus < 3 ? cpus : 3;
+        const uint32_t threads = chosen && most > 1 && per_core < 2 ? 1 : lanes - 1;
         ForeignTestPath executable;
         ForeignTestPath counted;
         char preload[BUSTER_FOREIGN_TEST_PATH_BYTES + 16];
@@ -1951,11 +1996,11 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         char expected[32];
 #if __has_feature(thread_sanitizer)
         // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
-        const uint32_t detector = lanes > 1 ? 1 : 0;
+        const uint32_t detector = threads > 0 ? 1 : 0;
 #else
         const uint32_t detector = 0;
 #endif
-        snprintf(expected, sizeof(expected), "%u\n", lanes - 1 + detector);
+        snprintf(expected, sizeof(expected), "%u\n", threads + detector);
         const bool started = text.pointer != 0 && text.length == strlen(expected) && memcmp(text.pointer, expected, text.length) == 0;
         char detail[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
         snprintf(detail, sizeof(detail), "%s: %.*s thread(s) for %u lane(s)", executable, text.pointer != 0 ? (int)strcspn(text.pointer, "\n") : 0, text.pointer != 0 ? text.pointer : "",
