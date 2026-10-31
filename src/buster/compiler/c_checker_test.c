@@ -5590,6 +5590,11 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_warning_deferred_test.c"
 #include "c_check_warning_policy_test.c"
 #include "c_check_warning_render_test.c"
+#include "c_check_warning_reader_test.c"
+#include "c_check_literal_warning_test.c"
+#include "c_check_warning_graph_test.c"
+#include "c_check_warning_initializer_test.c"
+#include "c_check_warning_undefined_test.c"
 #include "c_check_lazy_test.c"
 #include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
@@ -5825,8 +5830,13 @@ static int run_checker_tests(int argc, char** argv)
             check_test_warning_events(&test);
             check_test_const_values(&test);
             check_test_warning_deferred(&test);
+            check_test_warning_set(&test);
             check_test_warning_policy(&test);
             check_test_warning_render(&test);
+            check_test_warning_reader(&test);
+            check_test_warning_graph(&test);
+            check_test_warning_initializers(&test);
+            check_test_warning_undefined(&test);
             check_test_const_sources(&test, clang);
             check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
@@ -5834,6 +5844,7 @@ static int run_checker_tests(int argc, char** argv)
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
             check_test_literals(&test, &scratch);
+            check_test_literal_warnings(&test, &scratch);
             check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_recorded(&test, &types.table, &storage, &output, &scratch);
