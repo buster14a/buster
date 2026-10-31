@@ -124,7 +124,25 @@ struct Tier1SelectRecords
     uint8_t request;
     uint8_t destination;
     bool requested;
+    // A rule's sequence longer than a node's room: its records past the room weren't written, and every consumer refuses
+    // the node (tier1_select_append).
+    bool overflowed;
 };
+
+// A node's next record, where its room (BUSTER_TIER1_SELECT_RECORDS_PER_NODE) has one. A rule whose sequence is longer
+// writes nothing past the room and marks the node's records overflowed, which every consumer refuses, so that the
+// function fails rather than its expansion overwriting its own fields (#977's review: the signed power-of-two
+// remainder's six records are the room's whole).
+static void tier1_select_append(Tier1SelectRecords* result, X86Instruction record)
+{
+    const bool room = result->count < BUSTER_TIER1_SELECT_RECORDS_PER_NODE;
+    if (room)
+    {
+        result->records[result->count] = record;
+        result->count += 1;
+    }
+    result->overflowed |= !room;
+}
 
 // A record whose operation, on the destination register, has an immediate, as a request. The semantics module owns sign
 // extension, zero idioms, immediate widths and the flags proof for each alternate form. An operation without a row
@@ -133,7 +151,7 @@ struct Tier1SelectRecords
 static void tier1_select_request(Tier1SelectRecords* result, X86Operation operation, uint32_t width, uint8_t destination, int64_t value, uint8_t live_flags)
 {
     const uint32_t row = x86_choice_row(operation, width);
-    if (row != BUSTER_X86_CHOICE_NO_ROW)
+    if (row != BUSTER_X86_CHOICE_NO_ROW && result->count < BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
     {
         result->requested = true;
         result->request = result->count;
@@ -142,7 +160,7 @@ static void tier1_select_request(Tier1SelectRecords* result, X86Operation operat
         result->value = value;
         result->context = (uint16_t)(BUSTER_X86_CONTEXT_REGISTER | (destination == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0) | live_flags);
     }
-    result->records[result->count++] = (X86Instruction){0};
+    tier1_select_append(result, (X86Instruction){0});
 }
 
 // A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
@@ -320,7 +338,7 @@ static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHo
     }
     else
     {
-        result->records[result->count++] = tier1_select_register_record(holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right);
+        tier1_select_append(result, tier1_select_register_record(holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right));
     }
 }
 
@@ -340,7 +358,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_COPY:
         if (destination != holes->left || width == 4)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
         break;
     case TIER1_RULE_TRUNCATE:
@@ -348,30 +366,30 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         const uint32_t source_width = holes->rule == TIER1_RULE_TRUNCATE ? width : holes->source_width;
         const uint16_t form = source_width == 1 ? X86_FORM_MOVZX_R32_RM8 : source_width == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
-        result.records[result.count++] = tier1_select_register_record(form, destination, holes->left);
+        tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
         break;
     }
     case TIER1_RULE_SIGN_EXTEND:
     {
         const uint16_t form = holes->source_width == 4 ? X86_FORM_MOVSXD_R64_RM32 : holes->source_width == 2 ? (width == 8 ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVSX_R32_RM16) : (width == 8 ? X86_FORM_MOVSX_R64_RM8 : X86_FORM_MOVSX_R32_RM8);
-        result.records[result.count++] = tier1_select_register_record(form, destination, holes->left);
+        tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
         if (width == 2)
         {
             // I8 -> I16 has sixteen significant bits. Clear the rest of its canonical 32-bit storage value.
-            result.records[result.count++] = tier1_select_register_record(X86_FORM_MOVZX_R32_RM16, destination, destination);
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM16, destination, destination));
         }
         break;
     }
     case TIER1_RULE_UNARY:
         if (destination != holes->left)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
-        result.records[result.count++] = (X86Instruction)
+        tier1_select_append(&result, (X86Instruction)
         {
             .rm = destination,
             .form = holes->operation == X86_OPERATION_NEG ? (width == 8 ? X86_FORM_NEG_RM64 : X86_FORM_NEG_RM32) : (width == 8 ? X86_FORM_NOT_RM64 : X86_FORM_NOT_RM32),
-        };
+        });
         break;
     case TIER1_RULE_REGISTER:
     {
@@ -386,15 +404,15 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             }
             else
             {
-                result.records[result.count++] = tier1_select_move(width, BUSTER_TIER1_SELECT_SCRATCH, right);
+                tier1_select_append(&result, tier1_select_move(width, BUSTER_TIER1_SELECT_SCRATCH, right));
                 right = BUSTER_TIER1_SELECT_SCRATCH;
             }
         }
         if (destination != left)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, left);
+            tier1_select_append(&result, tier1_select_move(width, destination, left));
         }
-        result.records[result.count++] = tier1_select_register_record(tier1_select_binary_form(holes->operation, width), destination, right);
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_binary_form(holes->operation, width), destination, right));
         break;
     }
     case TIER1_RULE_IMMEDIATE:
@@ -406,13 +424,13 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const uint16_t form = width == 8 ? (small ? X86_FORM_IMUL_R64_RM64_IMM8 : X86_FORM_IMUL_R64_RM64_IMM32) : (small ? X86_FORM_IMUL_R32_RM32_IMM8 : X86_FORM_IMUL_R32_RM32_IMM32);
             X86Instruction record = tier1_select_register_record(form, destination, holes->left);
             record.immediate = small ? (int8_t)holes->immediate : (int32_t)holes->immediate;
-            result.records[result.count++] = record;
+            tier1_select_append(&result, record);
         }
         else
         {
             if (destination != holes->left)
             {
-                result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+                tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
             }
             const bool multiply_shift = holes->rule == TIER1_RULE_MULTIPLY_SHIFT;
             const int64_t immediate = multiply_shift ? (int64_t)holes->scale : (int64_t)holes->immediate;
@@ -429,7 +447,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = destination;
         record.form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M;
-        result.records[result.count++] = record;
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_LOAD:
@@ -438,7 +456,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = destination;
         record.form = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
-        result.records[result.count++] = record;
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_LOAD_OPERAND:
@@ -449,17 +467,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const bool aliases_index = (memory.mode & BUSTER_X86_MODE_INDEX) != 0 && memory.index == destination;
         if (destination != holes->left && (aliases_base || aliases_index))
         {
-            result.records[result.count++] = tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, destination);
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, destination));
             memory.rm = aliases_base ? BUSTER_TIER1_SELECT_SCRATCH : memory.rm;
             memory.index = aliases_index ? BUSTER_TIER1_SELECT_SCRATCH : memory.index;
         }
         if (destination != holes->left)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
         memory.reg = destination;
         memory.form = tier1_select_binary_form(holes->operation, width);
-        result.records[result.count++] = memory;
+        tier1_select_append(&result, memory);
         break;
     }
     case TIER1_RULE_STORE:
@@ -468,59 +486,59 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = holes->right;
         record.form = width == 1 ? X86_FORM_MOV_RM8_R8 : width == 2 ? X86_FORM_MOV_RM16_R16 : width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
-        result.records[result.count++] = record;
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_COMPARE:
     case TIER1_RULE_COMPARE_IMMEDIATE:
         tier1_select_compare(&result, holes);
-        result.records[result.count++] = (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] };
-        result.records[result.count++] = tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination);
+        tier1_select_append(&result, (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] });
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
         break;
     case TIER1_RULE_BRANCH_COMPARE:
         tier1_select_compare(&result, holes);
-        result.records[result.count++] = (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] };
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+        tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
     case TIER1_RULE_BRANCH:
-        result.records[result.count++] = tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left);
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JNE_REL8 };
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left));
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JNE_REL8 });
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
     case TIER1_RULE_SELECT:
     {
-        result.records[result.count++] = tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left);
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left));
         const bool inverse = destination == holes->right;
         const uint8_t initial = inverse ? holes->right : holes->third;
         const uint8_t alternate = inverse ? holes->third : holes->right;
         if (destination != initial)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, initial);
+            tier1_select_append(&result, tier1_select_move(width, destination, initial));
         }
         const uint16_t form = width == 8 ? (inverse ? X86_FORM_CMOVE_R64_RM64 : X86_FORM_CMOVNE_R64_RM64) : (inverse ? X86_FORM_CMOVE_R32_RM32 : X86_FORM_CMOVNE_R32_RM32);
-        result.records[result.count++] = tier1_select_register_record(form, destination, alternate);
+        tier1_select_append(&result, tier1_select_register_record(form, destination, alternate));
         break;
     }
     case TIER1_RULE_JUMP:
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
     case TIER1_RULE_RETURN:
         if (width != 0 && holes->left != X86_REGISTER_RAX)
         {
-            result.records[result.count++] = tier1_select_move(width, X86_REGISTER_RAX, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, X86_REGISTER_RAX, holes->left));
         }
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_RET };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_RET });
         break;
     case TIER1_RULE_UNREACHABLE:
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_UD2 };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
         break;
     case TIER1_RULE_PHI:
         break;
     case TIER1_RULE_STACK_ADDRESS:
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = destination, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = destination, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE });
         break;
     case TIER1_RULE_SYMBOL_ADDRESS:
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP, .reg = destination, .mode = BUSTER_X86_MEMORY_RIP };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP, .reg = destination, .mode = BUSTER_X86_MEMORY_RIP });
         break;
     case TIER1_RULE_DIVIDE_POWER:
     {
@@ -529,28 +547,28 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint8_t bias = BUSTER_TIER1_SELECT_SCRATCH;
         const uint32_t bits = width * 8;
         const uint32_t shift = holes->scale;
-        result.records[result.count++] = tier1_select_move(width, bias, holes->left);
+        tier1_select_append(&result, tier1_select_move(width, bias, holes->left));
         if (shift > 1)
         {
-            result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - 1) };
+            tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - 1) });
         }
-        result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - shift) };
-        result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M, .reg = destination, .rm = holes->left, .index = bias, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) };
+        tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - shift) });
+        tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M, .reg = destination, .rm = holes->left, .index = bias, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) });
         if ((holes->immediate & 2) != 0)
         {
             const int32_t mask = (int32_t)((UINT64_C(1) << shift) - 1);
             const uint16_t form = mask <= 127 ? (width == 8 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM32_IMM8) : (width == 8 ? X86_FORM_AND_RM64_IMM32 : X86_FORM_AND_RM32_IMM32);
-            result.records[result.count++] = (X86Instruction){ .form = form, .rm = destination, .immediate = mask };
-            result.records[result.count++] = tier1_select_register_record(width == 8 ? X86_FORM_SUB_R64_RM64 : X86_FORM_SUB_R32_RM32, destination, bias);
+            tier1_select_append(&result, (X86Instruction){ .form = form, .rm = destination, .immediate = mask });
+            tier1_select_append(&result, tier1_select_register_record(width == 8 ? X86_FORM_SUB_R64_RM64 : X86_FORM_SUB_R32_RM32, destination, bias));
         }
         else
         {
-            result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = destination, .immediate = (int32_t)shift };
+            tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = destination, .immediate = (int32_t)shift });
         }
         break;
     }
     default:
-        result.records[result.count++] = (X86Instruction){0};
+        tier1_select_append(&result, (X86Instruction){0});
         break;
     }
     return result;
@@ -890,6 +908,36 @@ struct Tier1SelectAddress
     uint8_t folds;
 };
 
+// An address's index without the constants added to it: through 64-bit additions of a constant (on either side) and
+// subtractions of one that only `root`'s pattern uses, at most BUSTER_TIER1_SELECT_WALK of them, each constant times
+// `scale` joining `*displacement` while it fits 32 bits, each node passed counted in `*folds` (#977's review: `&p[100 + i]`
+// had its addition's lea). A 32-bit index's addition stays where a sign extension follows it: (i + c) * s isn't
+// i * s + c * s when i + c overflows, which the IR doesn't rule out (and -fwrapv defines).
+static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t root, uint32_t index, int64_t scale, int64_t* displacement, uint8_t* folds)
+{
+    const IrFunction* function = forest->function;
+    bool walking = true;
+    for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
+    {
+        const uint32_t op = function->op[index];
+        uint64_t constant = 0;
+        const bool right = (op == IR_ADD || op == IR_SUB) && tier1_select_constant(function, function->b[index], &constant);
+        const bool left = op == IR_ADD && !right && tier1_select_constant(function, function->a[index], &constant);
+        int64_t term = 0;
+        int64_t sum = 0;
+        walking = (right || left) && function->type[index] == IR_I64 && tier1_select_tree_child(forest, root, index) && !__builtin_mul_overflow((int64_t)constant, scale, &term) &&
+                  (op == IR_SUB ? !__builtin_sub_overflow(*displacement, term, &sum) : !__builtin_add_overflow(*displacement, term, &sum)) && sum == (int64_t)(int32_t)sum;
+        if (walking)
+        {
+            const uint32_t constant_node = right ? function->b[index] : function->a[index];
+            *folds = (uint8_t)(*folds + 1 + (tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
+            *displacement = sum;
+            index = right ? function->a[index] : function->b[index];
+        }
+    }
+    return index;
+}
+
 // The address continued from `address.base` through the nodes that only `root`'s pattern uses, at most
 // BUSTER_TIER1_SELECT_WALK of them: the conversions between a pointer and its 64 bits that the typed stream's integers
 // put around every address (`inttoptr`, `ptrtoint`), a 64-bit addition of a constant, and addresses, each taken whole
@@ -909,16 +957,18 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         Tier1SelectAddress next = address;
         uint64_t constant = 0;
         uint32_t constant_node = BUSTER_IR_NONE;
+        uint8_t peeled = 0;
         bool taken = tier1_select_tree_child(forest, root, node);
         if (taken && op == IR_ADDRESS)
         {
             const IrAddress operand = function->addresses[function->c[node]];
             const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+            const bool indexed = b != BUSTER_IR_NONE && !constant_index;
             int64_t offset = 0;
-            taken = (b == BUSTER_IR_NONE || constant_index || address.index == BUSTER_IR_NONE) && !__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &offset) &&
+            taken = (!indexed || address.index == BUSTER_IR_NONE) && !__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &offset) &&
                     !__builtin_add_overflow(offset, operand.offset, &offset) && !__builtin_add_overflow(address.displacement, offset, &next.displacement);
-            next.index = b != BUSTER_IR_NONE && !constant_index ? b : address.index;
-            next.scale = b != BUSTER_IR_NONE && !constant_index ? (uint8_t)tier1_select_log2(operand.scale) : address.scale;
+            next.index = indexed && taken ? tier1_select_index(forest, root, b, operand.scale, &next.displacement, &peeled) : address.index;
+            next.scale = indexed ? (uint8_t)tier1_select_log2(operand.scale) : address.scale;
             next.base = a;
             constant_node = constant_index ? b : BUSTER_IR_NONE;
         }
@@ -938,7 +988,7 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         walking = taken && next.displacement == (int64_t)(int32_t)next.displacement;
         if (walking)
         {
-            next.folds = (uint8_t)(address.folds + 1 + (constant_node != BUSTER_IR_NONE && tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
+            next.folds = (uint8_t)(address.folds + 1 + peeled + (constant_node != BUSTER_IR_NONE && tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
             address = next;
         }
     }
@@ -1232,12 +1282,13 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         if (!__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
             displacement == (int64_t)(int32_t)displacement)
         {
-            const Tier1SelectAddress start = {
+            Tier1SelectAddress start = {
                 .displacement = displacement,
                 .base = a,
                 .index = constant_index ? BUSTER_IR_NONE : b,
                 .scale = constant_index ? 0 : (uint8_t)tier1_select_log2(operand.scale),
             };
+            start.index = start.index != BUSTER_IR_NONE ? tier1_select_index(forest, node, b, operand.scale, &start.displacement, &start.folds) : start.index;
             const Tier1SelectAddress address = tier1_select_address(forest, node, start);
             base.rule = TIER1_RULE_ADDRESS;
             base.values[0] = address.base;
@@ -1878,7 +1929,12 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
                 memcpy(code.records + code.count, selected.records, selected.count * sizeof(X86Instruction));
                 tier1_select_requests_add(&requests, &selected, code.count, code.records);
                 code.count += selected.count;
-                if (function->op[node] == IR_BR)
+                if (selected.overflowed)
+                {
+                    error = TIER1_SELECT_ERROR_INVALID;
+                    failed_node = node;
+                }
+                else if (function->op[node] == IR_BR)
                 {
                     code.branches[code.branch_count] = code.count - 1;
                     code.targets[code.branch_count++] = function->block_offsets[function->a[node]];

@@ -203,6 +203,7 @@ static Tier1SelectRecords tier1_select_test_expand(Tier1SelectTest* test, const 
         tier1_select_requests_flush(&requests, chosen[path].records);
     }
     tier1_select_test_expect(test, memcmp(chosen[0].records, chosen[1].records, chosen[0].count * sizeof(X86Instruction)) == 0, "both paths choose an immediate's form alike");
+    tier1_select_test_expect(test, !chosen[0].overflowed && chosen[0].count <= BUSTER_TIER1_SELECT_RECORDS_PER_NODE, "a rule's sequence fits a node's room");
     return chosen[0];
 }
 
@@ -2323,6 +2324,162 @@ static void tier1_select_test_division_walk(Tier1SelectTest* test, uint8_t op, u
     arena_pop_to(input, 0);
 }
 
+// #977's review: a node's room. Records appended past it write nothing there and mark the node's records overflowed,
+// leaving the fields after the array as they were; the longest sequences, the signed power-of-two remainder's, fit
+// the room at both widths and every shift that takes the immediate's forms.
+static void tier1_select_test_room(Tier1SelectTest* test)
+{
+    Tier1SelectRecords records = { .value = 0x5a5a5a5a5a5a5a5a, .row = 0x1234, .context = 0x4321, .request = 3, .destination = 7, .requested = true };
+    bool kept = true;
+    for (uint32_t r = 0; r < BUSTER_TIER1_SELECT_RECORDS_PER_NODE + 3; r += 1)
+    {
+        tier1_select_append(&records, (X86Instruction){ .form = X86_FORM_RET, .immediate = (int32_t)r });
+        kept &= records.count == (r < BUSTER_TIER1_SELECT_RECORDS_PER_NODE ? r + 1 : BUSTER_TIER1_SELECT_RECORDS_PER_NODE) && records.overflowed == (r >= BUSTER_TIER1_SELECT_RECORDS_PER_NODE);
+    }
+    for (uint32_t r = 0; r < BUSTER_TIER1_SELECT_RECORDS_PER_NODE; r += 1)
+    {
+        kept &= records.records[r].immediate == (int32_t)r;
+    }
+    tier1_select_test_expect(test, kept && records.value == 0x5a5a5a5a5a5a5a5a && records.row == 0x1234 && records.context == 0x4321 && records.request == 3 && records.destination == 7 && records.requested,
+                             "records past a node's room write nothing there and mark it overflowed");
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        for (uint32_t shift = 1; shift <= 31; shift += 1)
+        {
+            for (uint32_t remainder = 0; remainder < 2; remainder += 1)
+            {
+                const Tier1SelectHoles holes =
+                {
+                    .rule = TIER1_RULE_DIVIDE_POWER,
+                    .width = (uint8_t)width,
+                    .destination = X86_REGISTER_RAX,
+                    .left = X86_REGISTER_RDI,
+                    .scale = (uint8_t)shift,
+                    .immediate = 1 | (remainder != 0 ? 2 : 0),
+                };
+                const Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
+                const uint32_t expected = (shift > 1 ? 1u : 0u) + 3 + (remainder != 0 ? 2u : 1u);
+                tier1_select_test_expect(test, selected.count == expected && !selected.overflowed, "the signed power-of-two sequence fits a node's room");
+            }
+        }
+    }
+}
+
+// #977's review: constants added to an index. `p + (i + c) * s + k` of a 64-bit i is one memory operand,
+// p + i * s + (k + c * s): c on either side of an addition, or subtracted, for loads, stores and pointers. A 32-bit
+// index added before its sign extension keeps its addition, as does a scaled constant past 32 bits; both run as the
+// IR says.
+static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, uint32_t shape, uint32_t scale, Arena* input, Arena* output, Arena* scratch, uint64_t* random)
+{
+    // form 0: add i, c; 1: add c, i; 2: sub i, c; 3: add.i32 (trunc i), c, then sext; 4: add i, 2^31 (past 32 bits).
+    const bool narrow = form == 3;
+    const uint32_t index = narrow ? 6 : 4;
+    const uint32_t address = index + 1;
+    const uint32_t count = shape == 1 ? address + 4 : address + 3;
+    const int64_t constant = form == 4 ? INT64_C(1) << 31 : 3;
+    const int64_t offset = 8;
+    const IrSizes sizes =
+    {
+        .instruction_count = count,
+        .block_count = 1,
+        .constant_count = 1,
+        .address_count = 1,
+        .parameter_count = 2,
+    };
+    IrFunction function;
+    const bool created = ir_create(input, &sizes, &function) == IR_OK;
+    tier1_select_test_expect(test, created, "create index fixture");
+    Tier1SelectPlan plans[2];
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.block_offsets[1] = count;
+        function.parameter_types[0] = IR_I64;
+        function.parameter_types[1] = IR_I64;
+        function.constants[0].low = narrow ? (uint32_t)constant : (uint64_t)constant;
+        function.addresses[0] = (IrAddress){ .offset = offset, .scale = (uint8_t)scale };
+        tier1_select_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_INTTOPTR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        if (narrow)
+        {
+            tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, IR_TRUNC, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 5, IR_ADD, IR_I32, 4, 3, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else
+        {
+            tier1_select_test_node(&function, 3, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, form == 2 ? IR_SUB : IR_ADD, IR_I64, form == 1 ? 3 : 1, form == 1 ? 1 : 3, BUSTER_IR_NONE);
+        }
+        tier1_select_test_node(&function, address, IR_ADDRESS, IR_PTR, 2, index, 0);
+        if (shape == 0)
+        {
+            tier1_select_test_node(&function, address + 1, IR_LOAD, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, address + 2, IR_RET, IR_VOID, address + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else if (shape == 1)
+        {
+            tier1_select_test_node(&function, address + 1, IR_COPY, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, address + 2, IR_STORE, IR_VOID, address, address + 1, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, address + 3, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else
+        {
+            tier1_select_test_node(&function, address + 1, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, address + 2, IR_RET, IR_VOID, address + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+    }
+    const uint32_t root = shape == 1 ? address + 2 : address + 1;
+    if (created && tier1_select_test_walk_plans(test, &function, root, output, scratch, plans, "index fixture selects") == 2)
+    {
+        const Tier1SelectPattern* pattern = &plans[0].patterns[root];
+        const bool folded = form <= 2;
+        const int64_t displacement = folded ? offset + (form == 2 ? -constant : constant) * (int64_t)scale : offset;
+        const uint8_t rule = shape == 0 ? TIER1_RULE_LOAD_ADDRESS : shape == 1 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_ADDRESS;
+        tier1_select_test_expect(test, pattern->rule == rule && pattern->values[0] == 0 && pattern->values[1] == (folded ? 1u : index) && pattern->displacement == displacement &&
+                                           pattern->scale == tier1_select_log2(scale) && plans[0].covered[2] && plans[0].covered[address] && plans[0].covered[4] == folded,
+                                 "a 64-bit index's added constants join the displacement, scaled; a 32-bit addition before its extension and a scaled constant past 32 bits stay");
+        // The scaled constant past 32 bits makes an address no memory holds: its plan is the check.
+        uint8_t registers[16];
+        memset(registers, X86_REGISTER_RAX, sizeof(registers));
+        registers[0] = X86_REGISTER_RDI;
+        registers[1] = X86_REGISTER_RSI;
+        registers[index] = X86_REGISTER_R8;
+        registers[5] = narrow ? X86_REGISTER_R9 : registers[5];
+        registers[4] = narrow ? X86_REGISTER_R10 : registers[4];
+        registers[address + 1] = shape == 1 ? X86_REGISTER_RCX : X86_REGISTER_RAX;
+        for (uint32_t path = 0; form != 4 && path < 2; path += 1)
+        {
+            const uint64_t mark = output->length;
+            if (tier1_select_test_walk_load(test, &plans[path], registers, output))
+            {
+                for (uint64_t i = 0; i < 4; i += 1)
+                {
+                    uint64_t memory[64];
+                    uint64_t expected_memory[64];
+                    for (uint32_t word = 0; word < BUSTER_ARRAY_LENGTH(memory); word += 1)
+                    {
+                        memory[word] = tier1_select_test_random(random);
+                    }
+                    memcpy(expected_memory, memory, sizeof(memory));
+                    // p in the middle of the memory, so that a subtracted constant stays inside it.
+                    const uint64_t p = (uintptr_t)(memory + 32);
+                    const uint64_t expected_p = (uintptr_t)(expected_memory + 32);
+                    const uint64_t expected = tier1_select_test_interpret(&function, expected_p, i, 0);
+                    const uint64_t actual = tier1_select_test_call(test, p, i, 0);
+                    const bool same = shape == 0 ? actual == expected : actual - p == expected - expected_p;
+                    tier1_select_test_expect(test, same && (shape != 1 || memcmp(memory, expected_memory, sizeof(memory)) == 0), "an index's folded constants access the original address");
+                }
+            }
+            arena_pop_to(output, mark);
+        }
+    }
+    arena_pop_to(output, 0);
+    arena_pop_to(input, 0);
+}
+
 // #140's selection (#141's items): C's truth values through their zero extensions and `icmp ne/eq ..., 0` links back to
 // the comparison they test, as the extension's setcc and the branch's jcc; loads, stores and pointers through the typed
 // stream's conversions, nested addresses, constant indices and additions of constants, in one memory operand or lea; and
@@ -2357,6 +2514,16 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
             for (uint32_t width = 4; width <= 8; width += 4)
             {
                 tier1_select_test_address_walk(test, variant, shape >= 3, shape % 3, width, &input, &output, &scratch, &random);
+            }
+        }
+    }
+    for (uint32_t form = 0; form < 5; form += 1)
+    {
+        for (uint32_t shape = 0; shape < 3; shape += 1)
+        {
+            for (uint32_t scale = 1; scale <= 8; scale *= 2)
+            {
+                tier1_select_test_index_walk(test, form, shape, scale, &input, &output, &scratch, &random);
             }
         }
     }
@@ -2425,6 +2592,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_narrow_refusals(&test);
             tier1_select_test_unreachable(&test);
             tier1_select_test_walks(&test);
+            tier1_select_test_room(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);

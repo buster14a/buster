@@ -1043,7 +1043,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     // with its immediate's request.
                     const Tier1SelectRecords selected_records = tier1_select_expand(&holes);
                     const uint32_t compares = selected_records.count >= 2 ? selected_records.count - 2u : 0;
-                    error = selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
+                    error = !selected_records.overflowed && selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
                     const uint32_t compare_first = buffer.count;
                     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < compares; r += 1)
                     {
@@ -1063,6 +1063,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             else if (error == TIER1_EMIT_OK && selected)
             {
                 Tier1SelectRecords selected_records = tier1_select_expand(&holes);
+                error = selected_records.overflowed ? TIER1_EMIT_INVALID : error;
                 // A frame object's address, from the frame's base at the object's offset.
                 int32_t object_offset = 0;
                 if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
