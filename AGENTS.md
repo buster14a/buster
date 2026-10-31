@@ -303,7 +303,13 @@ designs and the compilers already built this way.
   `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
   `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
   of vectors and pointers both, and its encryptions' with a branch that branch
-  sizing sizes.
+  sizing sizes. The library builtins (`c_builtin_library.c`) are calls of their
+  C library functions by name, with their rows' prototypes, folded where clang
+  folds them (`c_check_builtin_library.c`), and the plain names (`sin`,
+  `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
+  `-ffreestanding` say, declared implicitly with their prototypes as clang
+  declares them; `test-checker --program-library` and `test-checker-driver`
+  check them against clang (the guide's "Library builtins").
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -1100,7 +1106,7 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -1112,6 +1118,8 @@ designs and the compilers already built this way.
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
   Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
+  `--program-library` selects the library builtins' tables, constant folds and programs alone
+  (`c_check_program_library_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.

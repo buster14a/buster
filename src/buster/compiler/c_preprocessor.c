@@ -93,6 +93,7 @@
 #include "host_isa.h"
 #include "c_builtin_catalog.c"
 #include "c_builtin_fortify.c"
+#include "c_builtin_library.c"
 #include "c_builtin_source_intrinsics.c"
 #include "c_builtin_intrinsic_features.c"
 #include "buster/compiler/x86_target.c"
@@ -16865,10 +16866,28 @@ static bool pp_builtin_features(const PPOptions* options, const char* features)
     return result;
 }
 
+// Whether clang makes a plain library name that buster implements (c_builtin_library.c's plain list: sin, strlen,
+// printf) a builtin of the unit (#148): unless -fno-builtin or -ffreestanding says otherwise (Builtin::Context's
+// builtinIsSupported) or -fno-builtin-NAME names it (its NoBuiltinFuncs), and one of ALL_GNU_LANGUAGES in GNU's modes
+// alone. The checker's implicit library declarations decide the same from the catalog (check_input_library_enabled).
+static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, uint32_t length)
+{
+    const CBuiltinLibraryPlain* plain = cbuiltin_library_plain((const char*)name, length);
+    bool result = plain != NULL && !options->no_builtin && !options->freestanding && (!plain->gnu || options->language.gnu);
+    for (uint32_t i = 0; result && i < options->no_builtin_function_count; i += 1)
+    {
+        const char* excluded = options->no_builtin_functions[i];
+        result = strlen(excluded) != length || memcmp(excluded, name, length) != 0;
+    }
+    return result;
+}
+
 // buster's __has_builtin of a name (#806, #148): 1 for a builtin it implements, its source checking and Tier 0 lowering
-// shipped (the catalog's source capability, the x86 intrinsics' rows and leaves, the fortified builtins and its own
-// queries), that clang makes a builtin of the unit by its language modes and whose required target features hold
-// there, as clang answers (pp_builtin_language, pp_builtin_features).
+// shipped (the catalog's source capability, the x86 intrinsics' rows and leaves, the fortified builtins, the library
+// builtins compiled as calls of their functions and its own queries), that clang makes a builtin of the unit by its
+// language modes and whose required target features hold there, as clang answers (pp_builtin_language,
+// pp_builtin_features). Every __builtin_ library builtin is one of all of clang's languages without features, and a plain
+// one is a builtin where pp_library_builtin says so.
 static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     const CBuiltinSourceScope* scope = cbuiltin_source_scope(name, length);
@@ -16877,7 +16896,22 @@ static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uin
         cbuiltin_source_intrinsic(name, length) && pp_builtin_language(options, scope->languages) && pp_builtin_features(options, scope->features);
     const uint32_t result =
         pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, options->language.standard) | catalog |
-        intrinsic | cbuiltin_fortify_source(name, length);
+        intrinsic | cbuiltin_fortify_source(name, length) | cbuiltin_library_source(name, length) | pp_library_builtin(options, name, length);
+    return result;
+}
+
+// buster's __has_constexpr_builtin of a name: 1 for a builtin it folds as clang's constant evaluator does, where it is a
+// builtin of the unit (pp_implemented_builtin_query's conditions): the catalog's constant capability, and the library
+// builtins' folds (#148, c_builtin_library.c: cbuiltin_library_fold's and the plain ones', where pp_library_builtin says
+// the name is a builtin).
+static uint32_t pp_implemented_constexpr_query(const PPOptions* options, const uint8_t* name, uint32_t length)
+{
+    bool wide = false;
+    const CBuiltinLibraryId library = cbuiltin_library_id((const char*)name, length);
+    const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) && pp_builtin_language(options, cbuiltin_languages(name, length));
+    const bool folded = library != CBUILTIN_LIBRARY_COUNT && cbuiltin_library_fold(library, &wide) != CBUILTIN_LIBRARY_FOLD_NONE;
+    const bool plain = cbuiltin_library_plain_fold((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && pp_library_builtin(options, name, length);
+    const uint32_t result = catalog | folded | plain;
     return result;
 }
 
@@ -16906,8 +16940,7 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
             break;
         case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard)
-                           : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) &&
-                                 pp_builtin_language(options, cbuiltin_languages(name, length));
+                           : pp_implemented_constexpr_query(options, name, length);
             break;
         case PP_BUILTIN_HAS_FEATURE:
             result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer
