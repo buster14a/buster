@@ -91,7 +91,7 @@ inherit its portability layers, build system, or performance-acceptance machiner
 ## Stable pointer-accessed values
 
 Honor the host build's `-fno-strict-aliasing`: do not rely on different pointee
- types to prove that stores cannot affect other loads. Clang documents the
+types to prove that stores cannot affect other loads. Clang documents the
 optimization contract in [Strict Aliasing](https://clang.llvm.org/docs/UsersManual.html#strict-aliasing).
 In new or modified code, **cache repeatedly used pointer-accessed values that
 are proved unchanged over the relevant region into named locals**, especially
