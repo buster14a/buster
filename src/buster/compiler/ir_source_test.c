@@ -598,7 +598,7 @@ static int run_ir_source_tests(int count, char** arguments)
     Arena scratch = arena_reserve(UINT64_C(1) << 34);
     valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && text_output.base != 0 && scratch.base != 0;
     IrSourceTotals totals = { 0 };
-    const bool dataflow_oracle = valid && ir_dataflow_tests(&arena, &text_output, &scratch);
+    const bool dataflow_oracle = valid && (!dataflow_self_test || ir_dataflow_tests(&arena, &text_output, &scratch));
     const bool text_oracle = valid && (dataflow_self_test || ir_source_text_tests(&arena, &output, &twin_output, &text_output, &scratch));
     const bool exhausted = valid && (dataflow_self_test || ir_source_exhausted(files[0], options, option_count, &lowered, &arena));
     if (valid && !dataflow_self_test)

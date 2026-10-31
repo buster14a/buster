@@ -110,7 +110,10 @@ written opcode-based checker reconstructs dense membership, ordinary uses,
 edge-specific phi uses, reverse-instruction transfer equations, and zero padding.
 It does not use the adapter's operand-mask tables or phi CSR for those checks.
 
-The self-tests additionally compare against a byte-per-original-value fixpoint
+The raw fixtures run only under `--dataflow-self-test`; ordinary source
+invocations run the per-function checks above and do not repeat them, so a
+corpus run pays for its own functions alone. The self-tests additionally compare
+against a byte-per-original-value fixpoint
 with reverse numeric block order, not the implementation's dense bitsets or
 postorder. Fixtures cover critical edges, parallel phi swaps, random CFGs,
 loop chains, nested loops, unreachable regions, duplicate successors, indirect
