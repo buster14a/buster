@@ -2244,7 +2244,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             if (valid)
             {
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                input->values[index] = (CheckValue)
+                // A constexpr object's value is the constant its initializer's finish read (#793): an integer or a
+                // floating constant, or a null pointer, as an lvalue whose object is still the declaration's.
+                const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
+                    check_input_constexpr_find(reader, declaration) : 0;
+                input->values[index] = constant != 0 ? constant->value : (CheckValue)
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
@@ -2255,6 +2259,16 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .object = reader->objects[declaration],
                     .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                 };
+                if (constant != 0)
+                {
+                    input->values[index].type = type;
+                    input->values[index].category = CHECK_LVALUE;
+                    input->values[index].flags |= BUSTER_CHECK_ICE;
+                    input->values[index].object = reader->objects[declaration];
+                    input->values[index].offset = 0;
+                    input->values[index].fault = CHECK_FAULT_NONE;
+                    input->values[index].overload_head = 0;
+                }
                 valid = check_constant_designator(input, &input->values[index]);
                 input->abi_origins[index] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
                 produced = true;
