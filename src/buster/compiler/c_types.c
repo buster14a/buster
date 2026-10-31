@@ -2433,7 +2433,7 @@ static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 }
 
 // The batch: eight requests at a time, their bases' qualifiers hoisted and their keys hashed in vectors, their
-// buckets prefetched, then each looked up with type_index_find_vector. The requests it can't settle that way (a miss,
+// then each looked up with type_index_find_vector. The requests it can't settle that way (a miss,
 // a wide extent, a builtin complex type, a kind it doesn't hash, and an ALIGNED one that is its base) go to type_derive
 // in request order before the next eight are hashed, so every request gets what the one-at-a-time path would give it
 // at that point: lookups don't change the table, and each miss is added (or found, if an earlier one added it) in
@@ -2482,11 +2482,6 @@ static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, T
         _mm512_storeu_si512(hashes, hash);
         _mm512_storeu_si512(normal, bases);
         _mm512_storeu_si512(hoisted, qualifiers);
-        const uint32_t mask = table->index.bucket_count - 1;
-        for (uint32_t lane = 0; lane < batch; lane += 1)
-        {
-            _mm_prefetch((const char*)(table->index.slots + (uint64_t)((uint32_t)hashes[lane] & mask) * BUSTER_TYPE_BUCKET_SLOTS), _MM_HINT_T0);
-        }
         for (uint32_t lane = 0; lane < batch; lane += 1)
         {
             const uint32_t i = first + lane;
