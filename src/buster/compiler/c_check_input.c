@@ -259,6 +259,8 @@ struct CheckInputNakedDiagnostic
 // its callers pass and its parameters convert from.
 #define CHECK_INPUT_FUNCTION_KR 0x08u
 #define CHECK_INPUT_FUNCTION_IMPLICIT 0x10u
+// An implicit declaration of a library function (#927, #148), whose type is its catalog row's prototype and whose
+// diagnostic names that and its header (check_input_implicit_function, check_driver_implicit_library).
 #define CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY 0x20u
 struct CheckInputVla
 {
@@ -759,6 +761,12 @@ struct CheckInputReader
     uint32_t cached_constant_count;
     uint16_t* builtin_names;
     uint32_t* intrinsic_names;
+    // The identifiers of the plain library builtins that clang folds (cbuiltin_library_plain_folds), 0 for one the unit never
+    // spells, looked up at the first call that asks (`library_names_known`, check_input_library_names), and a bit of
+    // `library_names_mask` for each spelled one's low 6 bits, which most calls' callees miss.
+    IdentId library_names[BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS];
+    uint64_t library_names_mask;
+    bool library_names_known;
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
     CheckOverloadIndex overload_index;
@@ -2390,6 +2398,8 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 #include "c_check_builtin_evidence.c"
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
+// The plain library builtins' calls that clang folds (#148), defined after the implicit declarations below.
+static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use);
 
 // A constexpr object's value (#793), if its initializer's finish has read it: an integer, floating or null pointer
 // constant, which the constant evaluator and the expression walk use in place of the object's read. The list is short:
@@ -4691,6 +4701,63 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
 
 #include "c_check_implicit_input.c"
 
+// The plain library builtins' folds' identifiers in the unit, and their mask (CheckInputReader.library_names).
+static __attribute__((noinline)) void check_input_library_names(CheckInputReader* reader)
+{
+    const InternTable* table = reader->pp->table;
+    uint64_t mask = 0;
+    for (uint32_t i = 0; i < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS; i += 1)
+    {
+        const uint8_t* name = (const uint8_t*)cbuiltin_library_plain_folds[i].name;
+        const uint32_t length = (uint32_t)strlen(cbuiltin_library_plain_folds[i].name);
+        const IdentId identifier = intern_find_hashed(table, name, length, intern_hash_bytes(name, length));
+        reader->library_names[i] = identifier;
+        mask |= identifier != 0 ? UINT64_C(1) << (identifier & 63) : 0;
+    }
+    reader->library_names_mask = mask;
+    reader->library_names_known = true;
+}
+
+// The mark of a call of `declaration`, a function with external linkage whose name, `name`, shares its low 6 bits with a
+// fold's (check_input_library_call): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
+// declaration the builtin, else 0.
+static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputReader* reader, uint32_t declaration, IdentId name)
+{
+    const InternTable* table = reader->pp->table;
+    uint32_t index = BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    for (uint32_t i = 0; i < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS; i += 1)
+    {
+        index = reader->library_names[i] == name ? i : index;
+    }
+    const bool library = index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
+                         pp_library_builtin(&reader->pp->options, intern_bytes(table, name), intern_length(table, name)) &&
+                         check_library_plain_prototype(reader->types, reader->declared_types[declaration], index);
+    return library ? BUSTER_CHECK_LIBRARY_CALL | index : 0;
+}
+
+// The member that marks a call whose designator, at `use`, names the unit's declaration of a plain library builtin that
+// clang folds (#148, cbuiltin_library_plain_folds): BUSTER_CHECK_LIBRARY_CALL and the builtin's index where clang makes that
+// declaration the builtin (Sema's BuiltinAttr: its name a builtin of the unit by pp_library_builtin, a function with
+// external linkage, of the row's prototype), else 0. The checker folds a marked call as __builtin_X's
+// (check_builtin_library_fold_plain). Every call through a name asks, so the test of the mask and the linkage is inlined,
+// and a static function's call, or one of a name no fold's identifier shares 6 bits with, goes no further.
+static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use)
+{
+    const Parser* parser = reader->parser;
+    if (!reader->library_names_known)
+    {
+        check_input_library_names(reader);
+    }
+    // The use's own spelling is its declaration's name, which the mask tests before anything else is read.
+    const IdentId spelled = use < parser->tokens.count ? parser->tokens.names[use] : 0;
+    const bool masked = ((reader->library_names_mask >> (spelled & 63)) & 1) != 0 && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
+    const uint32_t declaration = masked ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
+    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && reader->linkage[declaration] == 2 &&
+                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    return candidate ? check_input_library_match(reader, declaration, name) : 0;
+}
+
 #include "c_check_literal_table_input.c"
 // C23 auto's deduction (#793), as clang deduces a placeholder through the declarator's shape: the initializer's type
 // is lvalue-converted and decayed at the top, then each pointer, array, function and aligned level matches its own
@@ -6296,6 +6363,14 @@ static void check_input_expressions(CheckInputReader* reader)
                         graph->types[node] = reader->declared_types[declaration];
                         graph->members[node] = use + 1;
                     }
+                }
+                if (op == CHECK_OP_CALL && a < node && (graph->ops[a] == CHECK_OP_VALUE || graph->ops[a] == CHECK_OP_ADDRESS))
+                {
+                    // A call of a plain library builtin's declaration that clang folds (#148), marked for the checker.
+                    const uint32_t callee = graph->ops[a] == CHECK_OP_ADDRESS ? graph->operand0[a] : a;
+                    const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+                    const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                    graph->members[node] = library != 0 ? library : graph->members[node];
                 }
                 if (reader->builtins[token] != 0)
                 {
