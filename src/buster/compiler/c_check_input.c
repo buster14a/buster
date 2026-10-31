@@ -4591,14 +4591,17 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->registers[name] = storage == C_NAME_REGISTER;
                 reader->output->thread_local[name] = thread_local;
                 reader->output->attributes[name] = attributes;
-                reader->output->function_flags[name] = function ? (is_inline ? CHECK_INPUT_FUNCTION_INLINE : 0) |
+                if (reader->output->function_flags != NULL)
+                {
+                    reader->output->function_flags[name] = function ? (is_inline ? CHECK_INPUT_FUNCTION_INLINE : 0) |
                                                       (storage == C_NAME_EXTERN ? CHECK_INPUT_FUNCTION_EXTERN : 0) |
                                                       (kr_definition ? CHECK_INPUT_FUNCTION_KR : 0) |
                                                       (file && (!is_inline || storage == C_NAME_EXTERN) ? CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION : 0) : 0;
-                if (function && !is_typedef && check_input_naked_attribute(attributes) != NULL)
-                {
-                    reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
-                    reader->naked_functions = true;
+                    if (function && !is_typedef && check_input_naked_attribute(attributes) != NULL)
+                    {
+                        reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
+                        reader->naked_functions = true;
+                    }
                 }
                 // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793).
                 reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2;
@@ -4936,7 +4939,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
         reader->linked_types[name] = composite;
-        if (!reader->lane && reader->late_attribute_masks != NULL && reader->objects[token] != 0)
+        if (!reader->lane && reader->late_attribute_masks != NULL && reader->objects[token] != 0 && reader->output->function_flags != NULL)
         {
             reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(reader->output->attributes[token], reader->output->function_flags[token]);
         }
@@ -6560,7 +6563,8 @@ static void check_input_expressions(CheckInputReader* reader)
                     }
                     const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
                     const uint32_t declaration = use < parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
-                    if (declaration < parser->tokens.count && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
+                    if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
+                        (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
                     {
                         // CALL's type is the known promoted signature, member its designator's source token plus one.
                         graph->types[node] = reader->declared_types[declaration];
