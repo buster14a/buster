@@ -8,7 +8,8 @@
 // must be clang's and the fixture's own record of them. Each is checked as the corpus check checks a file
 // (check_corpus_file: preprocessing, the parse, the checker and the program's control flow, as the driver checks it, by
 // both paths alike). Where clang takes a violation, an extension of GNU's or a later standard's or a rule it doesn't
-// diagnose, the fixture records that it warns or doesn't (both take it). A directive's (6.10), whose preprocessing errors
+// diagnose, the fixture records that it warns or doesn't (both take it), and a warning's line where #705's producers
+// give it. A directive's (6.10), whose preprocessing errors
 // the corpus check gives no place for, runs through the preprocessor's two kernels. A difference from clang the checker
 // keeps is marked with the line it rejects at, its reason in docs/c-checker.md ("The constraint catalogue"). Original fixtures,
 // written from the standard's text and probed with clang 23; none is imported. Include after c_check_corpus.c, as
@@ -18,7 +19,7 @@ typedef enum CheckConstraintOutcome
 {
     // clang rejects the violation.
     CHECK_CONSTRAINT_ERROR,
-    // clang takes it with a warning it gives by default.
+    // clang takes it with a warning it gives by default, whose line the fixture records.
     CHECK_CONSTRAINT_WARNING,
     // clang takes it without one (a warning under -pedantic at most).
     CHECK_CONSTRAINT_ACCEPT,
