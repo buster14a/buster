@@ -168,6 +168,8 @@ static void codec_tests(void)
     problem_fixture(&f);
     f.units[1] = 0;
     round_trip(&f.problem, bytes, sizeof(bytes)); // Aliases must survive serialization.
+    problem_fixture_vector(&f);
+    round_trip(&f.problem, bytes, sizeof(bytes));
 
     problem_fixture(&f);
     f.problem.metadata[0].size = 39;
@@ -205,6 +207,9 @@ static void codec_tests(void)
     problem_fixture(&f);
     f.registers[2][6] = BUSTER_TP_SCRATCH;
     rejection(&f.problem, TIER1_PROBLEM_CONSTRAINT, "scratch is not secretly an extra register");
+    problem_fixture(&f);
+    f.classes[0][2] = 0;
+    rejection(&f.problem, TIER1_PROBLEM_CONSTRAINT, "class width cannot be zero");
 
     Tier1ProblemTally tally = { 0 };
     for (uint32_t r = 0; r < TIER1_PROBLEM_REASON_COUNT; r += 1)
@@ -263,6 +268,11 @@ static void mutation_tests(void)
                     const Tier1ProblemReason reason = tier1_problem_decode(tail, n, &p);
                     expect((reason == TIER1_PROBLEM_OK) == (n == size), "unpadded page-edge input");
                 }
+                uint8_t* tail = memory + page - size;
+                size_t out = 0;
+                expect(tier1_problem_encode(&f.problem, tail, size, &out) == TIER1_PROBLEM_OK && out == size, "unpadded page-edge destination");
+                out = 777;
+                expect(tier1_problem_encode(&f.problem, tail + 1, size - 1, &out) == TIER1_PROBLEM_CAPACITY && out == 777, "page-edge short destination writes nothing");
             }
             munmap(memory, (size_t)page * 2);
         }
@@ -333,6 +343,29 @@ static void integration_tests(void)
         expect(tier1_problem_intervals(&decoded, &arena, &input, &stats) == TIER1_PROBLEM_CAPACITY, "every insufficient arena capacity");
         expect(arena.length == 17 && memcmp(&input, &old, sizeof(input)) == 0 && memcmp(&stats, &old_stats, sizeof(stats)) == 0, "capacity rollback");
     }
+    const long page = sysconf(_SC_PAGESIZE);
+    expect(page > 0 && required_capacity < (uint64_t)page, "adapter guard-page setup");
+    if (page > 0 && required_capacity < (uint64_t)page)
+    {
+        const uint64_t guarded_capacity = (required_capacity + 3) & ~UINT64_C(3);
+        uint8_t* guarded = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        expect(guarded != MAP_FAILED, "adapter guard-page mapping");
+        if (guarded != MAP_FAILED)
+        {
+            const int protected = mprotect(guarded + page, (size_t)page, PROT_NONE);
+            expect(protected == 0, "adapter guard page");
+            if (protected == 0)
+            {
+                Arena tail_arena = { .base = guarded + page - guarded_capacity, .length = 17, .capacity = guarded_capacity };
+                Tier1AllocationInput tail_input;
+                Tier1ProblemAdapterStats tail_stats;
+                memset(&tail_input, 0x5a, sizeof(tail_input));
+                memset(&tail_stats, 0x5a, sizeof(tail_stats));
+                expect(tier1_problem_intervals(&decoded, &tail_arena, &tail_input, &tail_stats) == TIER1_PROBLEM_OK, "unpadded page-edge adapter arena");
+            }
+            munmap(guarded, (size_t)page * 2);
+        }
+    }
     arena.length = 17;
     arena.capacity = sizeof(memory);
     expect(tier1_problem_intervals(&f.problem, &arena, &input, (Tier1ProblemAdapterStats*)(void*)&input) == TIER1_PROBLEM_ARGUMENT, "overlapping output descriptors");
@@ -353,6 +386,33 @@ static void integration_tests(void)
     problem_fixture(&f);
     f.units[2] = 0;
     adapter_rejection(&f, TIER1_PROBLEM_ALIAS, "reserved alias is not available");
+    problem_fixture(&f);
+    f.problem.tables[BUSTER_TP_REGISTER].count = 4;
+    f.problem.tables[BUSTER_TP_MEMBER].count = 4;
+    f.problem.tables[BUSTER_TP_UNIT].count = 4;
+    f.problem.unit_count = 4;
+    f.registers[3][0] = 103;
+    f.registers[3][2] = 2;
+    f.registers[3][3] = 64;
+    f.registers[3][4] = 3;
+    f.registers[3][5] = 1;
+    f.classes[0][4] = 4;
+    f.members[3] = 3;
+    f.units[3] = 3;
+    adapter_rejection(&f, TIER1_PROBLEM_ALIAS, "reserved encoding cannot re-enter through a second register row");
+    problem_fixture(&f);
+    f.problem.tables[BUSTER_TP_REGISTER].count = 4;
+    f.problem.tables[BUSTER_TP_MEMBER].count = 4;
+    f.problem.tables[BUSTER_TP_UNIT].count = 4;
+    f.problem.unit_count = 4;
+    f.registers[3][0] = 103;
+    f.registers[3][3] = 64;
+    f.registers[3][4] = 3;
+    f.registers[3][5] = 1;
+    f.classes[0][4] = 4;
+    f.members[3] = 3;
+    f.units[3] = 3;
+    adapter_rejection(&f, TIER1_PROBLEM_ALIAS, "duplicate active register encoding");
     problem_fixture(&f);
     f.operands[1][5] = 2;
     f.operands[2][5] = 1;
@@ -390,8 +450,30 @@ static void integration_tests(void)
     f.classes[0][1] = 2;
     adapter_rejection(&f, TIER1_PROBLEM_CLASS, "unsupported register bank");
     problem_fixture(&f);
+    f.classes[0][2] = 0;
+    adapter_rejection(&f, TIER1_PROBLEM_CONSTRAINT, "zero-width class is refused by validation");
+    problem_fixture(&f);
     f.registers[0][2] = 4;
     adapter_rejection(&f, TIER1_PROBLEM_CLASS, "RSP is never allocatable");
+    problem_fixture_vector(&f);
+    arena.length = 17;
+    arena.capacity = sizeof(memory);
+    const Tier1ProblemReason vector = tier1_problem_intervals(&f.problem, &arena, &input, &stats);
+    expect(vector == TIER1_PROBLEM_OK && input.registers[0] == 3 && input.registers[1] == (1u << 31), "bank-1 128-bit class with encoding 31 adapts");
+    if (vector == TIER1_PROBLEM_OK)
+    {
+        Tier1Allocation allocation = { 0 };
+        expect(tier1_allocate(&input, &arena, &allocation) == TIER1_ALLOCATION_OK, "allocator accepts a mixed-register-file import");
+    }
+    problem_fixture_vector(&f);
+    f.registers[3][2] = 32;
+    adapter_rejection(&f, TIER1_PROBLEM_CLASS, "vector encoding 32 is out of range");
+    problem_fixture_vector(&f);
+    f.registers[3][3] = 64;
+    adapter_rejection(&f, TIER1_PROBLEM_CLASS, "vector class member with a 64-bit width");
+    problem_fixture_vector(&f);
+    f.registers[3][1] = 0;
+    adapter_rejection(&f, TIER1_PROBLEM_CLASS, "vector class member in the GPR bank");
     problem_fixture(&f);
     f.problem.metadata[8].data = (const uint8_t*)"win64";
     f.problem.metadata[8].size = 5;

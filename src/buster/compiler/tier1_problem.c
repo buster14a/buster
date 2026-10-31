@@ -357,6 +357,10 @@ static Tier1ProblemReason tier1_problem_validate(const Tier1Problem* p)
         {
             result = TIER1_PROBLEM_LAYOUT;
         }
+        else if (tier1_problem_word(p, BUSTER_TP_CLASS, c, 2) == 0)
+        {
+            result = TIER1_PROBLEM_CONSTRAINT;
+        }
         uint32_t previous = 0;
         for (uint32_t m = begin; result == TIER1_PROBLEM_OK && m < begin + count; m += 1)
         {

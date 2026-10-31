@@ -104,7 +104,8 @@ also describe a call-clobber mask, with its members explicitly listing the
 clobbered registers (not LLVM's complementary preserved-mask interpretation).
 An empty member list is representable. Register alias lists are nonempty.
 Members and each register's alias-unit list are sorted and unique; two
-registers may intentionally share alias units.
+registers may intentionally share alias units. Register, value and class
+widths are nonzero.
 
 Operand kinds are virtual register=0, physical register=1, clobber mask=2 and
 opaque=3. Their IDs address the value, register, class, or external MIR payload
@@ -137,9 +138,10 @@ in both directions. There is no silent function or constraint filtering.
 `tier1_problem_intervals` accepts one block with no edges, phis or alternative
 forms, under exactly `x86_64-unknown-linux-gnu` and `sysv-x86_64`. It supports
 64-bit GPR and 128-bit vector classes whose allocatable physical members have
-disjoint alias units, valid encodings, and the exact class width. Reserved and
-scratch registers are excluded; an active register aliasing any reserved
-register refuses. RSP is never allocatable. Target classes, not host AVX-512,
+disjoint alias units, unique valid encodings, and the exact class width.
+Reserved and scratch registers are excluded; an active register sharing a
+reserved register's alias units or bank/encoding refuses, even when its own
+alias-unit list is disjoint. RSP is never allocatable. Target classes, not host AVX-512,
 determine the available register masks.
 
 Each value must have exactly one definition. Only explicit virtual-register
@@ -208,8 +210,9 @@ runs both baseline/native builds, ASan/UBSan, and seeded libFuzzer tests. These
 are separate from the repository's required full qualification.
 
 Fixtures cover native/wire round trips, canonical byte identity, all truncated
-prefixes, every input alignment modulo 64, guard pages, deterministic mutations,
-CSR/reference errors, phase/tie/alias/mask retention, refusals by reason,
+prefixes, every input alignment modulo 64, guard pages on input, destination
+and arena tails, deterministic mutations, CSR/reference errors, GPR and vector
+class membership, phase/tie/alias/mask retention, refusals by reason,
 capacity rollback, unchanged publication and the current allocator bridge.
 The allocator smoke checks occupancy only; it is not #939 acceptance.
 `seed.c` emits explicitly synthetic straight/CFG/form seeds; `fuzz.c` verifies

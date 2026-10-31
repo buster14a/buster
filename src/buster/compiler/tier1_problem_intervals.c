@@ -142,7 +142,9 @@ static Tier1ProblemReason tier1_problem_intervals(const Tier1Problem* source, Ar
             units[u] = BUSTER_TP_NONE;
         }
         // Reserving a register also reserves all its aliases. Scratch never
-        // silently becomes an additional allocatable physical register.
+        // silently becomes an additional allocatable physical register. A
+        // reserved row also claims its encoding, so a second, unreserved row
+        // cannot reintroduce the same bank/number under disjoint alias units.
         for (uint32_t r = 0; result == TIER1_PROBLEM_OK && r < register_count; r += 1)
         {
             if ((tier1_problem_word(&p, BUSTER_TP_REGISTER, r, 6) & BUSTER_TP_RESERVED) != 0)
@@ -152,6 +154,12 @@ static Tier1ProblemReason tier1_problem_intervals(const Tier1Problem* source, Ar
                 for (uint32_t u = begin; u < begin + count; u += 1)
                 {
                     units[tier1_problem_word(&p, BUSTER_TP_UNIT, u, 0)] = 64;
+                }
+                const uint32_t bank = tier1_problem_word(&p, BUSTER_TP_REGISTER, r, 1);
+                const uint32_t number = tier1_problem_word(&p, BUSTER_TP_REGISTER, r, 2);
+                if (bank <= 1 && number < 32)
+                {
+                    physical[bank * 32 + number] = r;
                 }
             }
         }

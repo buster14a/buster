@@ -10,7 +10,7 @@ struct ProblemFixture
     uint32_t instructions[4][8];
     uint32_t values[3][4];
     uint32_t operands[10][10];
-    uint32_t registers[3][8];
+    uint32_t registers[4][8];
     uint32_t classes[2][5];
     uint32_t members[6];
     uint32_t units[4];
@@ -102,6 +102,30 @@ static void problem_fixture(ProblemFixture* f)
         f->operands[o][5] = BUSTER_TP_NONE;
         f->operands[o][6] = 64;
     }
+}
+
+// Adds a second class: bank-1 128-bit vectors, one member encoded number 31.
+static void problem_fixture_vector(ProblemFixture* f)
+{
+    problem_fixture(f);
+    f->problem.tables[BUSTER_TP_REGISTER].count = 4;
+    f->problem.tables[BUSTER_TP_CLASS].count = 2;
+    f->problem.tables[BUSTER_TP_MEMBER].count = 4;
+    f->problem.tables[BUSTER_TP_UNIT].count = 4;
+    f->problem.unit_count = 4;
+    f->registers[3][0] = 103;
+    f->registers[3][1] = 1;
+    f->registers[3][2] = 31;
+    f->registers[3][3] = 128;
+    f->registers[3][4] = 3;
+    f->registers[3][5] = 1;
+    f->classes[1][0] = 301;
+    f->classes[1][1] = 1;
+    f->classes[1][2] = 128;
+    f->classes[1][3] = 3;
+    f->classes[1][4] = 1;
+    f->members[3] = 3;
+    f->units[3] = 3;
 }
 
 static void problem_fixture_cfg(ProblemFixture* f)
