@@ -178,10 +178,15 @@ designs and the compilers already built this way.
   records. Bounded direct scalar calls preserve live caller registers and
   publish symbolic CALL references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. General CFG/phis and indirect/variadic/wide-ABI calls still refuse
-  explicitly. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
-  and `test-tier1-pipeline --cross-check` for bounded typed-stream/native
-  validation. `test-tier1-model` checks the emitted-case measurement reader;
+  self-loops. Every other function, general CFGs with loops and phis, goes
+  through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
+  move values, before a jump, at a successor's start or in a split critical
+  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. Run
+  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit` and
+  `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
+  pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
+  not programs; under the 9700X's lock, CPU 2). `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
@@ -246,6 +251,17 @@ designs and the compilers already built this way.
   constraints and pending CFG/corpus emission. Use the shared 9700X lock per
   build/test/measurement and CPU 2 for timing.
 
+- `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
+  liveness with phi operands on their edges, hinted (`hint_values`) to keep one
+  register, then each edge's parallel move, placed at a block's end or start or
+  on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
+  is its independent checker, which simulates each block and edge.
+  `test-tier1-cfg` runs fixtures and random SSA over random CFGs with mutants;
+  `test-tier1-cfg-source` adapts every function `-c` compiles of real C, lowered
+  and promoted, through a machine model (`tier1_cfg_ir.c`) and checks both paths'
+  allocations. The allocation guide's "Allocation over a CFG (#140)" has the
+  contract and what is pending.
+
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
   #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
@@ -287,7 +303,13 @@ designs and the compilers already built this way.
   `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
   `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
   of vectors and pointers both, and its encryptions' with a branch that branch
-  sizing sizes.
+  sizing sizes. The library builtins (`c_builtin_library.c`) are calls of their
+  C library functions by name, with their rows' prototypes, folded where clang
+  folds them (`c_check_builtin_library.c`), and the plain names (`sin`,
+  `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
+  `-ffreestanding` say, declared implicitly with their prototypes as clang
+  declares them; `test-checker --program-library` and `test-checker-driver`
+  check them against clang (the guide's "Library builtins").
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -307,8 +329,9 @@ designs and the compilers already built this way.
   `docs/x86-target.md` records the API, current catalogue coverage and the
   selector/corpus acceptance still pending for #180. Its "A function's target
   attribute" has #772's per-function features and code generation's check of
-  them, which `-c` and the direct path make after selection as clang does
-  (`c_check_target_feature.c`, #775; `test-checker-driver` against clang `-c`).
+  them, and of x86 builtins' required features (#148), which `-c` and the
+  direct path make after selection as clang does (`c_check_target_feature.c`,
+  #775; `test-checker-driver` against clang `-c`).
 
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
   AVX-512 and scalar paths and shared form matching in `x86_match.c`, whose
@@ -1078,7 +1101,7 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -1090,6 +1113,8 @@ designs and the compilers already built this way.
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
   Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
+  `--program-library` selects the library builtins' tables, constant folds and programs alone
+  (`c_check_program_library_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
@@ -1407,8 +1432,9 @@ builds on CPUs without the complete vector feature set use the scalar fallback.
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
-compiler's own `main.c` self-check in the TSan and MSan rows, whose measured
-memory (docs/ci.md) exceeds a hosted runner's. ASan combines UBSan, bounds,
+compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
+measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
+in a separate step after the suite. ASan combines UBSan, bounds,
 leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
@@ -1809,9 +1835,13 @@ processes under it that were waited for: over its time, the CPUs it kept busy),
 then its output, in the list's order as soon as it and every command before it
 have ended; with `--github`, between `::group::` and `::endgroup::`, and an
 `::error::` annotation for each that failed. Then come a summary line, with the
-commands' CPU time, and a line naming each command that failed. The exit status
-is 1 if a command failed or couldn't start, a signal stopped the run, or the
-report was lost. The report never holds up the run (#276's review):
+commands' CPU time and their passed, failed, skipped and not-started counts, and
+a line naming each command that failed. A command that exits with status 77
+(Automake's skip code) is reported as skipped and counted apart, and a test
+that leaves a check to another stage says so in its output and exits 77. The
+exit status is 1 if a command failed or couldn't start, a signal stopped the
+run, or the report was lost; a skipped command doesn't fail it. The report never
+holds up the run (#276's review):
 a command's output is read into memory when it ends and its capture closed, so
 that only running commands hold one, and the report goes out only as fast as its
 reader takes it, at most `PIPE_BUF` bytes at a time into a pipe or a terminal
@@ -1900,7 +1930,8 @@ as expected with its times and CPU times written as `*`:
   the shell's): standard input reads nothing though the runner's is a file
   with a line in it, and no other than the three is open (an external `true`
   redirected to each from 3 to 63), though the runner has one open without
-  `FD_CLOEXEC`;
+  `FD_CLOEXEC`; a command that prints its reason and exits 77 is skipped,
+  counted apart, and doesn't fail the run;
 - at once: three commands that each wait for the other two pass with 3 jobs;
   with one job, four commands' starts and ends in a log come in turn; and eight
   with 3 jobs are never more than 3 at once, by the runner's times;

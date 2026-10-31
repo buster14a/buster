@@ -543,52 +543,53 @@ static bool tier1_terminal_refusal_fixture(Tier1EmitTest* test, uint32_t shape, 
     return ready;
 }
 
-static void tier1_terminal_refusals(Tier1EmitTest* test)
+static void tier1_terminal_general(Tier1EmitTest* test)
 {
     for (uint32_t shape = 0; shape < 4; shape += 1)
     {
         IrFunction function;
         const bool ready = tier1_terminal_refusal_fixture(test, shape, &function);
-        tier1_emit_test_expect(test, ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi refusal fixture is valid semantic IR");
+        tier1_emit_test_expect(test, ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi fixture is valid semantic IR");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             IrDominance dominance;
             const bool derived = tier1_terminal_dominance(test, &function, vector != 0, &dominance);
-            tier1_emit_test_expect(test, derived, "terminal refusal derives real dominance before testing the unsupported boundary");
+            tier1_emit_test_expect(test, derived, "a general terminal shape derives real dominance before selection");
             Tier1SelectPlan plan;
-            memset(&plan, 0xa5, sizeof(plan));
-            const Tier1SelectPlan before = plan;
             uint32_t node = BUSTER_IR_NONE;
-            const uint64_t output_mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
             const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
-            if (shape == 3)
+            tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "valid nonempty loops, conditionals and phis select");
+            if (selected != TIER1_SELECT_OK)
             {
-                tier1_emit_test_expect(test, selected == TIER1_SELECT_ERROR_UNSUPPORTED, "phi still refuses at selection");
-                tier1_emit_test_expect(test, test->output.length == output_mark && test->scratch.length == scratch_mark && memcmp(&plan, &before, sizeof(plan)) == 0, "phi refusal restores arenas and preserves the prior result");
+                fprintf(stderr, "  terminal general shape=%u vector=%u frame=n/a selection=%u node=%u\n", shape, vector, selected, node);
             }
-            else
+            for (uint32_t frame = 0; selected == TIER1_SELECT_OK && frame < 2; frame += 1)
             {
-                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "valid nonempty loops and conditionals select before the bounded native boundary");
-                if (selected != TIER1_SELECT_OK)
+                // The CFG consumer takes them: a self-loop keeps its jump back and its call, a conditional its branch, and
+                // none becomes a trap.
+                const Tier1EmitOptions options = {
+                    .register_mask = tier1_liveness_register_mask(),
+                    .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+                    .vector = vector != 0,
+                };
+                Tier1EmitResult result;
+                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &result, &node);
+                tier1_emit_test_expect(test, error == TIER1_EMIT_OK && result.general, "nonempty self-loops, general conditional flow and phis go through the CFG consumer");
+                bool back = false;
+                bool conditional = false;
+                bool trap = false;
+                for (uint32_t branch = 0; error == TIER1_EMIT_OK && branch < result.code.branch_count; branch += 1)
                 {
-                    fprintf(stderr, "  terminal refusal shape=%u vector=%u frame=n/a selection=%u node=%u\n", shape, vector, selected, node);
+                    back |= result.code.targets[branch] <= result.code.branches[branch];
+                    conditional |= result.code.records[result.code.branches[branch]].form != X86_FORM_JMP_REL8;
                 }
-                for (uint32_t frame = 0; selected == TIER1_SELECT_OK && frame < 2; frame += 1)
+                for (uint32_t r = 0; error == TIER1_EMIT_OK && r < result.code.count; r += 1)
                 {
-                    const Tier1EmitOptions options = {
-                        .register_mask = tier1_liveness_register_mask(),
-                        .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
-                        .vector = vector != 0,
-                    };
-                    Tier1EmitResult result;
-                    memset(&result, 0xa5, sizeof(result));
-                    const Tier1EmitResult saved = result;
-                    const uint64_t mark = test->output.length;
-                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &result, &node);
-                    tier1_emit_test_expect(test, error == TIER1_EMIT_UNSUPPORTED, "nonempty self-loops and general conditional flow remain unsupported, never rewritten to traps");
-                    tier1_emit_test_expect(test, test->output.length == mark && test->scratch.length == scratch_mark && memcmp(&result, &saved, sizeof(result)) == 0, "unsupported terminal topology preserves arenas and the published result");
+                    trap |= result.code.records[r].form == X86_FORM_UD2;
                 }
+                tier1_emit_test_expect(test, error != TIER1_EMIT_OK || ((shape >= 2 || (back && result.reference_count == 1)) && (shape != 2 || conditional) && !trap), "a self-loop keeps its call and its jump back, a conditional its branch, and nothing becomes a trap");
+                tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "the CFG consumer returns scratch");
             }
             arena_pop_to(&test->output, 0);
         }
@@ -605,6 +606,6 @@ static void tier1_terminal_tests(Tier1EmitTest* test)
     test->width = 8;
     test->selects = false;
     tier1_terminal_supported(test);
-    tier1_terminal_refusals(test);
+    tier1_terminal_general(test);
     tier1_emit_test_expect(test, test->input.length == 0 && test->output.length == 0 && test->scratch.length == 0, "terminal suite returns all arenas to their entry lengths");
 }

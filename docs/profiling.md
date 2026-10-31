@@ -355,3 +355,43 @@ and `benchmark-lexer`'s variants), `remote.sh`, `rounds.sh`, `trees/run_round.sh
 `x86-opt/hot.sh` and `hot2.sh` (`hot-loops`), `spills.sh` (`label-spills` and `spill-report`) and `lbr_remote.sh`
 (`branch-misses`). They are C, in the one executable, with tests, as the repository's rules ask; the scripts stay on the
 host for the measurements recorded with them.
+
+## Qualifying derived perf metrics (#875)
+
+A successful `perf stat` exit, a finite printed value and 100% counter duty are necessary observations, not proof that
+a derived metric has the advertised meaning. Admit a metric only after qualifying its formula and every operand.
+
+Preserve the formula's intended collection domain. Ordinary user-process core metrics may use user-only collection;
+a formula that explicitly separates user, kernel, hypervisor, host or guest events must retain those distinctions.
+Do not apply a blanket `--all-user` override to it. Retain the effective event attributes from the same invocation's
+`perf stat record` data (`perf evlist -v`), not just event labels or a separate probe. Verify privilege flags,
+descendant inheritance and consistent operand scope. Unsupported system or uncore domains remain unsupported rather
+than becoming process-core measurements by assumption.
+
+Every required operand must be present, unambiguous, supported, finite and nonnegative, with verified units and at
+least 99% scheduling duty. Denominators must be positive, including the denominator of a guarded `d_ratio`: a
+fallback zero on division by zero is not a measured zero. In particular, a missing or zero `duration_time` invalidates
+a time-based rate. Python wrapper wall time, which includes orchestration, must not replace it. A separate
+fresh-process monotonic timing control can reject an implausible positive duration, but cannot repair the denominator.
+
+Recompute accepted values from the retained raw operands and pinned formula inventory with sufficient precision.
+Evaluate dependent formulas before their display scaling, and apply the outer scale exactly once. Keep perf's rounded
+printed value only as a diagnostic. Distinguish `valid`, `genuine-zero`, `rounded-to-zero`, `unavailable`, `failed`,
+`underscheduled`, `semantically-invalid` and `unsupported`; rejected records must not expose a usable numeric value.
+Unknown grammar, prerequisites, units or scope fail closed, not through a guessed formula.
+
+The [qualification addendum and per-formula table](https://github.com/buster14a/buster-performance/tree/5530780f2bca3e62a9544ded9fbb5e099118cba4/docs/measurements/microarchitecture-2026-10-29/qualification-875)
+audit the exact 2026-10-29 capture without rewriting it: 198 of 441 metric records qualify; 96 are semantically invalid,
+75 unsupported by the reader, three unavailable and 69 failed. All 39 top-down records were audited independently and
+qualify under the retained user-process scope. The old 50/50 privilege split and doubled cycle total do not qualify.
+The compile branch-misprediction display `0.0` instead represents `3590833 / 211482428`, about 1.69793443%.
+Historical effective attributes were not retained; the addendum explicitly limits historical scope evidence to the
+exact input blobs and collector revision. These are offline qualifications, not new hardware measurements.
+
+Before closing #875, recollect only the affected supported formula families and explicit controls on the locked
+9700X. Keep CPU 2 affinity, governor and SMT state, compiler/source/corpus identities, perf/kernel versions, the
+formula inventory, command, raw records, effective attributes and data hashes. Compare privilege-domain totals with
+an independent raw control over matching domains, and duration rates with positive duration plus an independent
+workload-time control. Take the shared lock per invocation, including controls; do not recursively acquire it in CI
+jobs whose runner hooks already hold it. Permission or PMU failures stay unavailable/unsupported. Save new records
+beside the old evidence; neither overwrite it nor invalidate unrelated counters or top-down formulas wholesale.

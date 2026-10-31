@@ -159,6 +159,8 @@ int run_dominator_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_allocate.c"
 #include "buster/compiler/tier1_rematerialize.c"
 #include "buster/compiler/tier1_allocate_test.c"
+#include "buster/compiler/tier1_cfg.c"
+#include "buster/compiler/tier1_cfg_test.c"
 int run_tier1_allocate_benchmark(int argc, char** argv);
 
 // The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
@@ -370,6 +372,7 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text"
 #include "buster/compiler/c_check_builtin_bit_cast.c"
 #include "buster/compiler/c_check_builtin_float.c"
 #include "buster/compiler/c_check_builtin_math.c"
+#include "buster/compiler/c_check_builtin_library.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
 #include "buster/compiler/c_check_builtin_atomic_rmw.c"
 #include "buster/compiler/c_check_builtin_atomic_c11.c"
@@ -541,7 +544,9 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 #include "buster/compiler/ir_source_test.c"
-#include "buster/compiler/ir_source_benchmark.c"
+#include "buster/compiler/tier1_cfg_ir.c"
+#include "buster/compiler/tier1_cfg_source_test.c"
+#include "buster/compiler/tier1_cfg_source_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -561,6 +566,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_licm_test.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
+// #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
+#include "buster/compiler/ir_source_benchmark.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
 #include "buster/compiler/ir_metamorphic.c"
 
@@ -572,6 +579,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit.c"
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+#include "buster/compiler/tier1_pipeline_benchmark.c"
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
@@ -942,6 +950,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_tier1_allocate_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-cfg") == 0)
+    {
+        result = run_tier1_cfg_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-schedule") == 0)
     {
         result = run_tier1_schedule_tests(argc - 2, argv + 2);
@@ -1266,6 +1278,14 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_ir_source_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-cfg-source") == 0)
+    {
+        result = run_tier1_cfg_source_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-cfg-source") == 0)
+    {
+        result = run_tier1_cfg_source_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-source") == 0)
     {
         result = run_ssa_source_tests(argc - 2, argv + 2);
@@ -1481,6 +1501,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-pipeline") == 0)
     {
         result = run_tier1_pipeline_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-pipeline") == 0)
+    {
+        result = run_tier1_pipeline_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select") == 0)
     {

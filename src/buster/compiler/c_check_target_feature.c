@@ -10,6 +10,12 @@
 //   such feature: its attribute's own features first, in the attribute's order, then the rest of its features;
 // - otherwise, where the caller's applies, each such feature, an error each.
 //
+// And a call of an x86 builtin whose required features (clang's expression of them, BuiltinIntrinsicInfo.features)
+// the function's don't satisfy is one (#148, err_builtin_needs_feature), whatever either function's attributes, where
+// clang emits the call (check_target_feature_emitted); before it, SSE's compares of a predicate past 7 in a function
+// without AVX (check_target_feature_predicate). Clang checks a builtin's call before it emits its arguments, so its
+// errors come before its arguments' calls': it is ordered by its beginning, a function's call by its end.
+//
 // A function's features are predefines_apply's for its attribute, or the unit's without one (ASTContext::
 // getFunctionFeatureMap), and its attributes those of its declarations before the call (the callee's) or up to its
 // definition (the caller's), as a declaration's inherited attributes are. The calls are those clang emits: the walk
@@ -45,9 +51,10 @@
 // on; and a call that doesn't return through a pointer, or of one of the C library's functions that clang knows as such
 // (exit, abort) declared without the attribute, goes on (docs/x86-target.md).
 //
-// The pass is cold and scalar: it runs in a unit with a target attribute alone (CheckProgram.attribute_keys), and walks
-// only a body that refers to a callee that may fail, whose call sites it then finds (clang's headers give every intrinsic
-// one, but a unit compiled for the features its intrinsics need, the usual one, refers to none that fails).
+// The pass is cold and scalar: it runs in a unit with a target attribute (CheckProgram.attribute_keys) or an x86
+// builtin's call, and walks only a body that refers to a callee that may fail or calls a builtin that fails, whose call
+// sites it then finds (clang's headers give every intrinsic one, but a unit compiled for the features its intrinsics
+// need, the usual one, refers to none that fails).
 
 typedef struct CheckTargetFeatureError CheckTargetFeatureError;
 struct CheckTargetFeatureError
@@ -62,6 +69,11 @@ struct CheckTargetFeatureError
     bool flatten;
     // Whether clang defers the caller, emitting it after the unit's end (a static or inline function), where its errors go.
     bool deferred;
+    // An x86 builtin's call whose required features the caller lacks (#148, err_builtin_needs_feature: the builtin's
+    // name and clang's expression of its features), or null for a call of a function.
+    const BuiltinIntrinsicInfo* builtin;
+    // The builtin's error is an SSE compare's predicate past 7 (check_target_feature_predicate), whose expression is avx.
+    bool predicate;
 };
 
 // A function's attributes that the check reads, from its declarations before a token.
@@ -106,7 +118,31 @@ struct CheckTargetFeatureCallee
     bool fails;
 };
 
-// The functions' feature maps: the unit's, and those of the attribute strings resolved so far; and the filter's answers.
+// The x86 builtins' required features (#148): clang's expression of each builtin's (BuiltinIntrinsicInfo.features),
+// evaluated against a function's map as checkTargetFeatures evaluates it (Builtin::evaluateRequiredTargetFeatures), by a
+// table of predefines_features' names whose availabilities are the map's, made again when the map changes, and the
+// answers for that map by the expression's address: a unit's builtins share a few expressions, and its functions a few
+// maps.
+#define BUSTER_CHECK_TARGET_FEATURE_ANSWERS 64
+
+typedef struct CheckTargetFeatureAnswer CheckTargetFeatureAnswer;
+struct CheckTargetFeatureAnswer
+{
+    const char* features;
+    bool fails;
+};
+
+typedef struct CheckTargetFeatureBuiltins CheckTargetFeatureBuiltins;
+struct CheckTargetFeatureBuiltins
+{
+    CBuiltinIntrinsicFeature table[BUSTER_ARRAY_LENGTH(predefines_features)];
+    PredefinesFeatures map;
+    bool ready;
+    CheckTargetFeatureAnswer answers[BUSTER_CHECK_TARGET_FEATURE_ANSWERS];
+};
+
+// The functions' feature maps: the unit's, and those of the attribute strings resolved so far; the filter's answers; and
+// the builtins' table.
 typedef struct CheckTargetFeatureMaps CheckTargetFeatureMaps;
 struct CheckTargetFeatureMaps
 {
@@ -115,6 +151,7 @@ struct CheckTargetFeatureMaps
     PredefinesFeatures unit;
     CheckTargetFeatureCached cache[BUSTER_CHECK_TARGET_FEATURE_CACHE];
     CheckTargetFeatureCallee callees[BUSTER_CHECK_TARGET_FEATURE_CALLEES];
+    CheckTargetFeatureBuiltins builtins;
 };
 
 // `object`'s attributes from its declarations before token `limit` (CheckProgram.attribute_keys: each object's target
@@ -282,6 +319,107 @@ static uint32_t check_target_feature_callee(const CheckProgram* program, uint32_
         object = value.object;
     }
     return object < program->object_count ? object : 0;
+}
+
+// Whether builtin expression `features` (`length` bytes, clang's grammar) fails in a function of features `map`: any
+// answer but available, as clang's map has no other names than predefines_features', which test-checker checks of every
+// x86 builtin's expression (check_test_target_feature_builtins), as it checks the table's names.
+static bool check_target_feature_expression_fails(CheckTargetFeatureBuiltins* builtins, PredefinesFeatures map, const char* features, uint32_t length)
+{
+    if (!builtins->ready || memcmp(&builtins->map, &map, sizeof(map)) != 0)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_features); i += 1)
+        {
+            builtins->table[i] = (CBuiltinIntrinsicFeature){
+                .name = predefines_features[i].name,
+                .name_length = (uint32_t)strlen(predefines_features[i].name),
+                .available = predefines_has(map, i),
+            };
+        }
+        builtins->map = map;
+        builtins->ready = true;
+        memset(builtins->answers, 0, sizeof(builtins->answers));
+    }
+    CheckTargetFeatureAnswer* answer = builtins->answers + ((uintptr_t)features >> 3) % BUSTER_CHECK_TARGET_FEATURE_ANSWERS;
+    if (answer->features != features)
+    {
+        CBuiltinIntrinsicFeatureFrame frames[8];
+        const CBuiltinIntrinsicFeatureStatus status =
+            c_builtin_intrinsic_features_evaluate_valid(features, length, builtins->table, BUSTER_ARRAY_LENGTH(builtins->table), frames, BUSTER_ARRAY_LENGTH(frames));
+        answer->features = features;
+        answer->fails = status != CBUILTIN_INTRINSIC_FEATURE_AVAILABLE;
+    }
+    return answer->fails;
+}
+
+// The x86 builtin of call `node` (CHECK_OP_BUILTIN_X86) where clang emits the call, or null. Clang checks a builtin's
+// features where it emits the call (CodeGenFunction::EmitBuiltinExpr's checkTargetFeatures), which it doesn't where it
+// folds the call first: a builtin it may evaluate (its metadata's E attribute) whose result is an integer or a floating
+// value and whose arguments are constants (EvaluateAsRValue, whose result is then an integer's or a floating value's),
+// or a call in a constant context (CheckX86Call.constant_evaluated_context), which it evaluates and never emits. An
+// argument's constant counts where clang's evaluation of it has no side effect (!hasSideEffects(): not `(f(), 5)`'s)
+// and no floating work under FENV_ACCESS (BUSTER_CHECK_FP_ENVIRONMENT), whose inexact operations clang doesn't fold
+// (checkFloatingPointResult). A fault clang's evaluation stops at (a division by zero) leaves the argument no constant,
+// and one it notes and goes past (a signed overflow, a shift's count) the constant GNU's extension gives it. Where
+// clang folds such a call and the checker doesn't, the lowering refuses it by name.
+static const BuiltinIntrinsicInfo* check_target_feature_emitted(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t effect = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
+    const uint32_t call = check_program_builtin_index(graph->x86_calls, graph->x86_count, sizeof(CheckX86Call), node);
+    const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
+    const uint8_t kind = info != NULL ? check_action_kind(program->types, stream->values[node].type) : BUSTER_TYPE_KIND_NONE;
+    bool folded = info != NULL && info->constant_evaluable_attribute && (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING);
+    for (uint32_t i = 0; folded && i < graph->argument_counts[node]; i += 1)
+    {
+        const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+        const CheckValue* value = argument < graph->count ? stream->values + argument : NULL;
+        const CheckConstantKind constant = value != NULL ? value->constant_kind : CHECK_CONSTANT_NONE;
+        folded = (constant == CHECK_CONSTANT_INTEGER || constant == CHECK_CONSTANT_FLOATING) &&
+                 (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+    }
+    const bool constant = call != BUSTER_CHECK_NONE && graph->x86_calls[call].constant_evaluated_context;
+    return info != NULL && !folded && !constant ? info : NULL;
+}
+
+// The x86 builtin of call `node` whose required features a function of features `map` lacks where clang emits the call
+// (check_target_feature_emitted), or null.
+static const BuiltinIntrinsicInfo* check_target_feature_builtin(const CheckProgram* program, CheckTargetFeatureMaps* maps, PredefinesFeatures map, uint32_t node)
+{
+    const BuiltinIntrinsicInfo* info = check_target_feature_emitted(program, node);
+    const bool fails = info != NULL && check_target_feature_expression_fails(&maps->builtins, map, info->features, info->features_length);
+    return fails ? info : NULL;
+}
+
+// SSE's compares, __builtin_ia32_cmpps, cmpss, cmppd and cmpsd, take AVX's 32 predicates too, and clang's code
+// generation checks one past SSE's 8 before the builtin's own features, where it emits the call: in a function without
+// AVX, "needs target feature avx" (CodeGenFunction::checkTargetFeatures, at the call's beginning). The builtin of call
+// `node` where it is such a compare of a predicate past 7 in a function of features `map` without AVX, or null; Sema has
+// checked that the predicate is a constant from 0 to 31.
+static const BuiltinIntrinsicInfo* check_target_feature_predicate(const CheckProgram* program, PredefinesFeatures map, uint32_t node)
+{
+    static const char* const compares[] = { "__builtin_ia32_cmpps", "__builtin_ia32_cmpss", "__builtin_ia32_cmppd", "__builtin_ia32_cmpsd" };
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const BuiltinIntrinsicInfo* info = check_target_feature_emitted(program, node);
+    bool compare = false;
+    for (uint32_t i = 0; info != NULL && i < BUSTER_ARRAY_LENGTH(compares); i += 1)
+    {
+        compare |= info->name_length == strlen(compares[i]) && memcmp(info->name, compares[i], info->name_length) == 0;
+    }
+    const uint32_t predicate = compare && graph->argument_counts[node] == 3 ? graph->argument_nodes[graph->argument_offsets[node] + 2] : BUSTER_CHECK_NONE;
+    const bool past = predicate < graph->count && stream->values[predicate].constant_kind == CHECK_CONSTANT_INTEGER && stream->values[predicate].integer > 7;
+    const int32_t avx = past ? predefines_feature_index("avx", 3) : -1;
+    return avx >= 0 && !predefines_has(map, (uint32_t)avx) ? info : NULL;
+}
+
+// Where clang reports x86 builtin call `node`'s error: the call's beginning, its name (CheckInputIntrinsicCall.keyword).
+static uint32_t check_target_feature_builtin_token(const CheckInput* input, uint32_t node)
+{
+    const uint32_t closing = input->graph.tokens[node];
+    const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+    return id != 0 && id <= input->intrinsic_call_count ? input->intrinsic_calls[id - 1].keyword : closing;
 }
 
 // Where clang reports cleanup `record`'s call (CallCleanupFunction::Emit, at its attribute's location): the applied
@@ -597,11 +735,14 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
     {
         const uint32_t node = (uint32_t)calls[c];
         const bool cleanup = (calls[c] >> 32) != 0;
+        // An x86 builtin's call: its own features against the caller's (#148), whatever either function's attributes.
+        const bool builtin = !cleanup && graph->ops[node] == CHECK_OP_BUILTIN_X86;
         // A cleanup's function, by its declarations before the attribute's argument, where the argument looks it up.
         const CheckInputCleanup* record = cleanup ? input->cleanups + program->controls[program->bodies[b].first + node].target : 0;
         const uint32_t function = cleanup && record->function < input->token_count ? input->objects[record->function] : 0;
-        const uint32_t object = cleanup ? (function < program->object_count ? function : 0) : check_target_feature_callee(program, node);
-        const uint32_t token = cleanup ? check_target_feature_cleanup_token(input, record) : graph->tokens[graph->operand0[node]];
+        const uint32_t object = cleanup ? (function < program->object_count ? function : 0) : builtin ? 0 : check_target_feature_callee(program, node);
+        const uint32_t token = cleanup ? check_target_feature_cleanup_token(input, record) :
+                               builtin ? check_target_feature_builtin_token(input, node) : graph->tokens[graph->operand0[node]];
         const uint32_t limit = cleanup ? record->argument : token;
         const CheckTargetFeatureAttributes callee = object != 0 ? check_target_feature_attributes(program, object, limit) : (CheckTargetFeatureAttributes){ 0 };
         const CheckTargetFeatureError base = {
@@ -611,7 +752,23 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
             .flatten = !callee.always_inline,
             .deferred = deferred,
         };
-        if (object != 0 && check_target_feature_checked(caller, &callee) && callee.targeted && !callee.versions)
+        // An SSE compare's predicate past 7 first, then the builtin's own features, as clang checks them.
+        const BuiltinIntrinsicInfo* predicate = builtin ? check_target_feature_predicate(program, caller_map, node) : NULL;
+        if (predicate != NULL)
+        {
+            CheckTargetFeatureError error = base;
+            error.builtin = predicate;
+            error.predicate = true;
+            valid = check_target_feature_report(output, errors, error_count, error);
+        }
+        const BuiltinIntrinsicInfo* lacked = builtin ? check_target_feature_builtin(program, maps, caller_map, node) : NULL;
+        if (builtin)
+        {
+            CheckTargetFeatureError error = base;
+            error.builtin = lacked;
+            valid = valid && (lacked == NULL || check_target_feature_report(output, errors, error_count, error));
+        }
+        else if (object != 0 && check_target_feature_checked(caller, &callee) && callee.targeted && !callee.versions)
         {
             const int32_t feature = check_target_feature_required(callee.version, check_target_feature_map(maps, &callee), caller_map);
             CheckTargetFeatureError error = base;
@@ -643,7 +800,9 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
     *errors = 0;
     *count = 0;
     bool valid = true;
-    if (program->attribute_keys != 0 && options != NULL)
+    // A unit with a target attribute (attribute_keys), or with an x86 builtin's call (#148), whose features its function
+    // may lack.
+    if ((program->attribute_keys != 0 || program->stream->x86_count != 0) && options != NULL)
     {
         const CheckInput* input = program->input;
         const uint64_t mark = scratch->length;
@@ -666,6 +825,48 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                 attributed[object / 64] |= object < object_count ? 1ull << (object % 64) : 0;
             }
         }
+        // The bodies with an x86 builtin's call whose features their functions' maps lack (#148), a byte each: each call's
+        // body is the one its record names (CheckInputIntrinsicCall.function_body, the body's opening brace), and its
+        // function's map its attributes', by the declarations up to its definition, as the walk's caller's below.
+        uint8_t* lacking = valid && program->stream->x86_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
+        valid = valid && (program->stream->x86_count == 0 || lacking != 0);
+        if (lacking != 0)
+        {
+            memset(lacking, 0, (uint64_t)program->body_count + 1);
+            uint32_t last = UINT32_MAX;
+            PredefinesFeatures last_map = maps.unit;
+            for (uint32_t i = 0; i < program->stream->x86_count; i += 1)
+            {
+                const uint32_t node = program->stream->x86[i].node;
+                const uint32_t closing = node < input->graph.count ? input->graph.tokens[node] : UINT32_MAX;
+                const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+                const uint32_t opening = id != 0 && id <= input->intrinsic_call_count ? input->intrinsic_calls[id - 1].function_body : BUSTER_CHECK_NONE;
+                // The bodies are in source order: the last whose opening brace isn't past the call's body's.
+                uint32_t low = 0;
+                uint32_t high = program->body_count;
+                while (low < high)
+                {
+                    const uint32_t middle = low + (high - low) / 2;
+                    low = program->bodies[middle].opening <= opening ? middle + 1 : low;
+                    high = program->bodies[middle].opening <= opening ? high : middle;
+                }
+                const uint32_t b = low != 0 && program->bodies[low - 1].opening == opening ? low - 1 : UINT32_MAX;
+                if (b != UINT32_MAX && b != last)
+                {
+                    const CheckProgramBody* body = program->bodies + b;
+                    const bool keyed = body->object < program->object_count && ((attributed[body->object / 64] >> (body->object % 64)) & 1) != 0;
+                    const CheckTargetFeatureAttributes caller =
+                        keyed ? check_target_feature_attributes(program, body->object, body->declaration + 1) : (CheckTargetFeatureAttributes){ 0 };
+                    last_map = check_target_feature_map(&maps, &caller);
+                    last = b;
+                }
+                if (b != UINT32_MAX && lacking[b] == 0)
+                {
+                    lacking[b] = check_target_feature_builtin(program, &maps, last_map, node) != NULL ||
+                                 check_target_feature_predicate(program, last_map, node) != NULL;
+                }
+            }
+        }
         const uint64_t items = (uint64_t)input->graph.count + program->control_count;
         CheckX86DiagnosticWalk walk = { .program = program, .calls = scratch };
         CheckTargetFeatureEmission emission = { 0 };
@@ -686,8 +887,10 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     const bool keyed_caller = body->object < program->object_count && ((attributed[body->object / 64] >> (body->object % 64)) & 1) != 0;
                     caller = keyed_caller ? check_target_feature_attributes(program, body->object, body->declaration + 1) : (CheckTargetFeatureAttributes){ 0 };
                     caller_map = check_target_feature_map(&maps, &caller);
-                    // A callee without an attribute of its own fails a flatten caller whose attribute lacks a unit's feature.
-                    candidate = caller.flatten && caller.targeted && !caller.versions && check_target_feature_lacked(maps.unit, caller_map, 0) >= 0;
+                    // A callee without an attribute of its own fails a flatten caller whose attribute lacks a unit's feature, and
+                    // an x86 builtin's call one whose features the caller lacks.
+                    candidate = (caller.flatten && caller.targeted && !caller.versions && check_target_feature_lacked(maps.unit, caller_map, 0) >= 0) ||
+                                (lacking != 0 && lacking[b] != 0);
                     const bool plain = !caller.targeted && !caller.flatten;
                     for (uint32_t r = 0; !candidate && r < body->reference_count; r += 1)
                     {
@@ -802,8 +1005,12 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                         uint32_t varying = 0;
                         for (uint32_t c = 0; c < item_count; c += 1)
                         {
+                            // A builtin's call by its beginning, not its end: clang checks its features before it emits its
+                            // arguments (CodeGenFunction::EmitBuiltinExpr), so before their calls' errors.
                             const uint32_t value = (uint32_t)calls[c];
-                            const uint32_t end = c < call_count ? input->graph.tokens[value] : program->controls[body->first + value].token;
+                            const bool builtin = c < call_count && input->graph.ops[value] == CHECK_OP_BUILTIN_X86;
+                            const uint32_t end = builtin ? check_target_feature_builtin_token(input, value) :
+                                                 c < call_count ? input->graph.tokens[value] : program->controls[body->first + value].token;
                             keys[c] = ((uint64_t)end << 32) | c;
                             varying |= end ^ (uint32_t)(keys[0] >> 32);
                         }

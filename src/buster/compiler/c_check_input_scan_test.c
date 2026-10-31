@@ -98,6 +98,7 @@ static CheckInput check_test_output_none_columns(uint32_t* const* columns, uint3
         .case_ranges = columns[10],
         .string_ids = columns[11],
         .parameters = columns[12],
+        .evaluation_nodes = columns[13],
         .token_count = count,
     };
 }
@@ -105,7 +106,7 @@ static CheckInput check_test_output_none_columns(uint32_t* const* columns, uint3
 static void check_test_output_none(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mappings[13];
+    uint8_t* mappings[14];
     bool ready = true;
     for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
     {
@@ -155,7 +156,7 @@ static void check_test_output_none(CheckTest* test)
         memset(owned.base, 0x63, owned.capacity);
         owned.length = 37;
         Arena borrowed = owned;
-        uint32_t* columns[13];
+        uint32_t* columns[14];
         bool exact = true;
         for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
         {
