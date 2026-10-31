@@ -555,6 +555,12 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
     {
+        // #179's measure-mask-spills: its programs (the encoder's records), the Zen 5 harness's counters and the
+        // host's features.
+        .name = "mask-spills",
+        .sources = "mask_spill[a-z0-9_]*|x86_64_encoder|x86_zen5_measure|x86_target",
+    },
+    {
         .name = "object-writer",
         .unit = "object_writer_benchmark.c",
     },

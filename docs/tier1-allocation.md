@@ -378,6 +378,20 @@ stored before it and reloaded after. Every use of a mask in the model needs a
 register: the opmask instructions have no memory operand but `kmov`'s, and a
 write mask is a register.
 
+Whether a spilled mask goes to memory or to a free general register is #179's
+measured choice. `measure-mask-spills [--passes N] [--iterations N]
+[--any-cpu]` (`mask_spill_measure.c`) times generated loops of 84 steps, each a
+`kadd` of one to a mask after spilling and reloading it: by `kmov` of the
+mask's width to its stack slot and back, to a general register and back, or not
+at all (the control). It runs every width, one chain (a round trip's latency)
+and seven independent ones (throughput, as masks saved around a call are), each
+with and without four chains of `vpaddd` beside them, since `kmov k, r` takes a
+vector pipe. It reports core cycles per step, the median of interleaved passes,
+and requires the approved 9700X unless `--any-cpu`. `test-mask-spills` checks
+every program: both encoders' bytes, its loop's instructions, and each mask's
+final value against the chains' arithmetic where the host runs AVX-512. The
+9700X job runs the measurement where its sources change.
+
 VP2INTERSECT's pair of masks, the first even, is no constraint the allocator
 takes: the IR has no operation that writes one, and Tier 0's X86 rows keep it
 inside a row (docs/tier0.md's "Vectors"). A form that needs one would come

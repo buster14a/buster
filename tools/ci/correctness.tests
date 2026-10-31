@@ -344,6 +344,8 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 # #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
 # interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
 ./build/compiler test-tier1-masks
+# #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
+./build/compiler test-mask-spills
 ./build/compiler test-tier1-model
 ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
 == Test shared IR local promotion and typed-stream semantics

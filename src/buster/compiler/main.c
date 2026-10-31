@@ -583,6 +583,9 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_pipeline_test.c"
 // #179: hand-written IR of AVX-512's masks through Tier 1, natively against the shared IR's interpreter.
 #include "buster/compiler/tier1_masks_test.c"
+// #179: what a mask's spill costs, to memory against to a general register, and the programs' checks.
+#include "buster/compiler/mask_spill_measure.c"
+#include "buster/compiler/mask_spill_measure_test.c"
 #include "buster/compiler/tier1_pipeline_benchmark.c"
 // The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
 #pragma clang section text = ".text.buster_checker"
@@ -784,7 +787,7 @@ static int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
     *found = true;
-    if (!BUSTER_HOST_VECTOR && argc >= 2 && (strncmp(argv[1], "benchmark-", 10) == 0 || strcmp(argv[1], "measure-x86-zen5") == 0))
+    if (!BUSTER_HOST_VECTOR && argc >= 2 && (strncmp(argv[1], "benchmark-", 10) == 0 || strcmp(argv[1], "measure-x86-zen5") == 0 || strcmp(argv[1], "measure-mask-spills") == 0))
     {
         fprintf(stderr, "benchmarks require an AVX-512 host build; run tests with this scalar build\n");
         result = 1;
@@ -913,6 +916,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
     {
         result = run_x86_zen5_measure(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-mask-spills") == 0)
+    {
+        result = run_mask_spill_tests();
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-mask-spills") == 0)
+    {
+        result = run_mask_spill_measure(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
