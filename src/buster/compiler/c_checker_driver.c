@@ -541,6 +541,41 @@ static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const
     }
 }
 
+// An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
+// C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
+// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t, and then its spelling without it), and
+// a note naming the header that declares it, where its row has one.
+static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity, uint32_t source, uint32_t publication, const uint8_t* name, uint32_t length,
+                                          bool c99)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
+    char sugared[256];
+    char plain[256];
+    bool sized = false;
+    const bool spelled = info != NULL && cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, c99,
+                                                                 sugared, sizeof(sugared), &sized) &&
+                         cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, plain,
+                                                sizeof(plain), &sized);
+    char type[560];
+    snprintf(type, sizeof(type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "int ()", plain);
+    const char* header = info != NULL ? cbuiltin_library_header(info->header_token) : NULL;
+    char note[192];
+    snprintf(note, sizeof(note), "include the header <%s> or explicitly provide a declaration for '%.*s'", header != NULL ? header : "", (int)length, name);
+    const PPOutputDiagnosticNote notes[1] = { { .token = source, .message = note } };
+    if (c99)
+    {
+        pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
+                                    "call to undeclared library function '%.*s' with type %s; ISO C99 and later do not support implicit function declarations "
+                                    "[-Wimplicit-function-declaration]",
+                                    (int)length, name, type);
+    }
+    else
+    {
+        pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
+                                    "implicitly declaring library function '%.*s' with type %s [-Wimplicit-function-declaration]", (int)length, name, type);
+    }
+}
+
 // The unit's diagnostics in token order: at each token, its floating-point pragmas, its warnings by flag, the addresses
 // of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
 // tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
@@ -848,10 +883,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
-                            "implicit declaration of library function '%.*s'%s [-Wimplicit-function-declaration]",
-                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
-                            input->implicit_function_c99 ? "; ISO C99 and later do not support implicit function declarations" : "");
+                        check_driver_implicit_library(pp, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
+                                                      intern_length(pp->table, name), input->implicit_function_c99);
                     }
                     else if (input->implicit_function_c99)
                     {
