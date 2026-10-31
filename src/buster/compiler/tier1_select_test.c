@@ -1051,11 +1051,22 @@ static void tier1_select_test_errors(Tier1SelectTest* test)
             memset(&plan, 0xa5, sizeof(plan));
             const Tier1SelectPlan before = plan;
             uint32_t node;
-            function.op[2] = IR_UDIV;
+            // A narrow multiplication, which the selector doesn't take.
+            for (uint32_t value = 0; value < 3; value += 1)
+            {
+                function.type[value] = IR_I16;
+            }
+            function.parameter_types[0] = IR_I16;
+            function.result_type = IR_I16;
             Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && node == 2, "unsupported division stays explicit");
+            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && node == 2, "unsupported narrow multiplication stays explicit");
             tier1_select_test_expect(test, output.length == 0 && scratch.length == 0 && memcmp(&plan, &before, sizeof(plan)) == 0, "failed planning is transactional");
-            function.op[2] = IR_MUL;
+            for (uint32_t value = 0; value < 3; value += 1)
+            {
+                function.type[value] = IR_I64;
+            }
+            function.parameter_types[0] = IR_I64;
+            function.result_type = IR_I64;
             function.a[2] = 2;
             error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
             tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_INVALID && node == 2, "semantic invalidity is not an unsupported-pattern fallback");
@@ -1346,9 +1357,13 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 const uint64_t mark = output.length;
                                 uint32_t failed = 0;
                                 const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &rejected, &failed);
-                                const Tier1SelectError expected = refusal < 5 ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
-                                tier1_select_test_expect(test, error == expected && (refusal >= 5 || failed == 6), "unsupported call ABI and invalid IR remain distinct");
-                                tier1_select_test_expect(test, output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0, "call refusal preserves result and arena lengths");
+                                // A variadic call of integer arguments (its AL zero) and a call through a pointer are taken
+                                // (tier1_call_test.c runs both).
+                                const bool taken = refusal == 0 || refusal == 2;
+                                const Tier1SelectError expected = taken ? TIER1_SELECT_OK : refusal < 5 ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
+                                tier1_select_test_expect(test, error == expected && (taken || refusal >= 5 || failed == 6), "unsupported call ABI and invalid IR remain distinct");
+                                tier1_select_test_expect(test, error == TIER1_SELECT_OK || (output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0), "call refusal preserves result and arena lengths");
+                                arena_pop_to(&output, mark);
                             }
                             function.calls[0] = saved;
                             function.op[6] = IR_CALL;
@@ -1864,8 +1879,12 @@ static void tier1_select_test_narrow_refusals(Tier1SelectTest* test)
                     const uint64_t mark = output.length;
                     uint32_t failed;
                     const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &plan, &failed);
-                    tier1_select_test_expect(test, error == (variant == 11 ? TIER1_SELECT_ERROR_INVALID : TIER1_SELECT_ERROR_UNSUPPORTED), "narrow storage does not admit unsupported arithmetic, ABI, I1 memory or invalid widening bitcast");
-                    tier1_select_test_expect(test, output.length == mark && scratch.length == 0 && memcmp(&plan, &before, sizeof(plan)) == 0, "narrow refusal preserves result and arenas");
+                    // A narrow parameter is taken, which the CFG consumer zero-extends at the entry (tier1_call_test.c runs it),
+                    // and so is a narrow return, its canonical storage.
+                    const Tier1SelectError expected = variant == 11 ? TIER1_SELECT_ERROR_INVALID : variant == 4 || variant == 5 ? TIER1_SELECT_OK : TIER1_SELECT_ERROR_UNSUPPORTED;
+                    tier1_select_test_expect(test, error == expected, "narrow storage admits parameters and returns but not unsupported arithmetic, ABI, I1 memory or invalid widening bitcast");
+                    tier1_select_test_expect(test, error == TIER1_SELECT_OK || (output.length == mark && scratch.length == 0 && memcmp(&plan, &before, sizeof(plan)) == 0), "narrow refusal preserves result and arenas");
+                    arena_pop_to(&output, mark);
                 }
             }
             else
