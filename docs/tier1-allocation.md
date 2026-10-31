@@ -430,8 +430,11 @@ not an alternate value representation. The scalar and vector mark producers
 accept only:
 
 - Integer constants of width 4 or 8, with width-4 payloads normalized to u32.
-- Symbol addresses explicitly certified stable for the function. TLS and
-  dynamic binding recipes are not implicitly treated as ordinary addresses.
+- Symbol addresses explicitly certified stable for the function: computed from
+  rip, or with `BUSTER_TIER1_REMAT_GOT` read from the symbol's GOT slot, which a
+  consumer certifies where it reaches the symbol so (the loader writes the slot
+  before the program runs, and nothing changes it after). TLS recipes and other
+  loads are not treated as addresses.
 - Final signed-i32 frame displacements from a frame base explicitly certified
   stable at every copy position. A changing RSP is not stable merely because
   the original operation names a stack slot.
@@ -440,15 +443,130 @@ An operation-table lookup classifies 64 candidate bytes at a time. Sparse
 payload checks confirm width, stability, displacement range and optional
 comparable measured costs. Unknown costs prefer recomputation. Known
 rematerialization costs greater than the reload cost suppress the mark.
-The current Zen 5 model does not automatically populate these optional costs.
+`tier1_rematerialization_model_costs` fills those columns from the Zen 5 model
+(`x86_zen5.c`, #181), classifying 64 operations at a time as the marks do, its
+scalar twin a plain loop: each copy's GPR latency as `tier1_rematerialize`
+emits it, against the model's L1-hit load (`mov r64, [base]`), the cheapest any
+reload of a slot can be, so that a copy no costlier than it is no costlier than
+the reload it saves. The model has measured no copy's latency yet (its
+`mov r32, imm32` and zeroing `xor` cases have throughputs alone, and it has no
+case for a lea from rip or at a displacement), so every candidate is
+recomputed; both consumers fill the columns, which follow the model as #181
+measures more.
 
 `tier1_rematerialize` emits one baseline x86 record. Zero uses `xor r32,r32`
 only when the caller reports no live flags; otherwise it uses `mov r32,0`.
 Other constants use a u32 move, sign-extended imm32 move, or imm64 move as
-needed. Stack addresses use LEA from the final stable base. Each symbolic LEA
-has its own encoder fixup mark plus returned symbol and addend; the consumer
-must publish a PC32 fixup for every copy through `link_add_code_fixups`.
-This module does not silently drop fixups or reuse the original copy's offset.
+needed. Stack addresses use LEA from the final stable base. Each symbolic copy
+(a LEA from rip, or a GOT slot's load) has its own encoder fixup mark plus
+returned symbol and addend; the consumer must publish a PC32 fixup for a LEA,
+and a LOAD_GOT one for a GOT slot's load (`Tier1Rematerialized.got`), for every
+copy through `link_add_code_fixups`. This module does not silently drop fixups
+or reuse the original copy's offset.
+
+### In Tier 1's consumers (#178)
+
+Both consumers emit copies through `tier1_emit_copy`, which publishes a
+symbol's reference with its record. No flag is live where a copy goes, between
+two nodes' records or on an edge (`BUSTER_TIER1_EMIT_BOUNDARY_FLAGS`):
+selection keeps each flag's producer and its readers in one node's records (a
+compare and its setcc, conditional jump or cmov), as its constants' immediate
+requests already assume, so a recomputed zero is a zeroing xor. Before #178
+both consumers took every flag as live, and moved zeros in. The straight-line
+consumer recomputes constants alone.
+
+The CFG consumer (`tier1_emit_cfg_recipes`), which compiles the C driver's
+`--tier1` functions, recomputes every value whose definition no store can
+change:
+
+- a constant;
+- a symbol's address, from rip, or from its GOT slot where the emission's
+  access column reaches it so;
+- a frame object's address, a lea from rsp at the offset the frame's layout
+  gives the object, which `tier1_emit_cfg_frame` fills in after the layout:
+  selection refuses the dynamic stack, so nothing moves rsp between the
+  prologue and the epilogues;
+- a copy of one of them: the C driver's typed streams carry pointers as 64-bit
+  integers, so every address the front end keeps in a variable reaches its uses
+  through a `ptrtoint` and an `inttoptr`, the selector's `TIER1_RULE_COPY`, with
+  its operand's bits (chains of up to `BUSTER_TIER1_EMIT_CFG_RECIPE_DEPTH`);
+- a symbol's or a frame object's address plus a constant (a member's, a
+  constant index's: `TIER1_RULE_ADDRESS` without an index), one lea at the sum,
+  a symbol's the addend of its reference. A GOT slot's address takes none.
+
+A symbol's copy is one more reference, whose room the records count from the
+allocation's fragments and the edges' moves before they are emitted. A
+recomputed value's definition whose first register fragment no use reads
+before a recomputation takes over, or that only definitions left out read, is
+left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
+the C front end's address chains define each link right before the allocator
+evicts it, a write nothing read.
+
+Recomputing a value live across a call instead of saving its register around
+it wouldn't pay: in speedtest1's scalar-path build every one of the 9,887
+values the CFG consumer saved around calls had no recipe; those with one live
+across a call are recomputed after it or in callee-saved registers there.
+
+`--tier1-no-rematerialize` compiles without any of it; `--tier1-report` counts
+the recomputations, the definitions left out, the spill slots and the frames'
+bytes (`Tier1Frame.maximum_stack_bytes`, what a frame takes below the return
+address).
+
+### Measured (#178)
+
+On the 9700X, the vector path's `--tier1 -c` of each corpus, its units'
+reports summed, at `4851f99d` with and without rematerialization and at main
+`a28f29f`, which recomputed constants alone (and reports neither slots nor
+frames); speedtest1 is the program (`speedtest1-unity.c`), as the run times'
+build compiles it ([the record](https://github.com/buster14a/buster-performance/tree/90fdefc4db8c95dec72be54fe87750c18213613b/docs/measurements/tier1-rematerialization-178-2026-10-31)):
+
+| Corpus | Build | Stores | Reloads | Slots | Frame bytes | Recomputed | Left out |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| c-testsuite's subset (350 functions by Tier 1) | none | 22 | 22 | 12 | 16,812 | 0 | 0 |
+| | main | 22 | 22 | | | 0 | |
+| | #178 | 0 | 0 | 0 | 16,716 | 22 | 11 |
+| `sqlite3.c` (2,153) | none | 3,583 | 4,246 | 1,318 | 185,290 | 0 | 0 |
+| | main | 3,410 | 4,042 | | | 203 | |
+| | #178 | 2,367 | 2,681 | 918 | 182,706 | 1,564 | 140 |
+| musl (2,023) | none | 2,127 | 2,590 | 784 | 235,720 | 0 | 0 |
+| | main | 2,021 | 2,451 | | | 136 | |
+| | #178 | 1,375 | 1,567 | 527 | 233,992 | 1,020 | 85 |
+| speedtest1 (2,210) | none | 3,620 | 4,245 | 1,324 | 192,218 | 0 | 0 |
+| | main | 3,432 | 4,028 | | | 216 | |
+| | #178 | 2,377 | 2,674 | 921 | 189,618 | 1,570 | 143 |
+
+Against none, rematerialization takes a third of the stores, 37% to 40% of
+the reloads and 30% to 33% of the spill slots on the large corpora, and every
+spill on c-testsuite's; the frames shrink by 0.6% to 1.4% only, their bytes
+mostly the call-save rows, frame objects and alignment. The scalar path's
+counts are within 1% of these (its allocator's choices differ), and the same
+on the 9700X as locally.
+
+speedtest1 (its usual `--size 5` mix, pinned to CPU 2, 11 rounds in an order
+that rotates by round, each run one hold of the lock, every build the same
+`--verify` hash) runs alike with it and without:
+
+| Build | Median | Range | Instructions | Cycles |
+| --- | ---: | --- | ---: | ---: |
+| Tier 0 | 256.4 ms | 255.6–256.9 | 5,694.2M | 1,331.8M |
+| Tier 1, main | 228.1 ms | 227.7–229.7 | 4,589.3M | 1,169.1M |
+| Tier 1, none | 227.8 ms | 227.2–229.1 | 4,588.3M | 1,167.7M |
+| Tier 1, #178 | 228.4 ms | 227.3–229.6 | 4,581.0M | 1,168.9M |
+| Tier 1, #178, scalar path | 227.9 ms | 227.5–228.8 | 4,594.6M | 1,164.6M |
+| Tier 1, none, scalar path | 228.8 ms | 228.2–229.3 | 4,600.7M | 1,166.1M |
+
+It retires 7.3 million fewer instructions (0.16%) in the same cycles: the
+spills it removes aren't on speedtest1's hot paths, whose hottest function,
+`sqlite3VdbeExec`, is Tier 0's (its switch). Of c-testsuite's subset, one
+program's code differs with it and without (`00216`, the one with the spills),
+and runs in 287 us either way.
+
+#142's campaigns, 40 programs per generator (seeds 17800 to 17839), Tier 1's
+build rematerializing: 61 ran at clang `-O0` and `-O2` and at both tiers and
+printed the same, and 2 more at both tiers where clang's warnings passed the
+harness's capture; the other 17 failed in clang's own steps (12 YARPGen
+programs whose arrays overflow clang `-O0`'s link, 5 Csmith ones that ran past
+the limit at every build). No case's builds disagreed.
 
 ## Memory and failure contract
 
@@ -512,6 +630,21 @@ byte-by-byte capacity sweep checks rollback, prior arena contents and retained
 output length. Scratch collisions, duplicate destinations, excessive counts
 and absent columns fail transactionally.
 
+`test-checker-driver`'s Tier 1 fixture (`c_check_tier1_driver_test.c`) keeps
+every recipe's kind live across a loop under pressure: statics' addresses, a
+static array's member's, extern variables' through their GOT slots, frame
+objects' and a member's of one, and constants of each encoding, a zero among
+them. It compiles the fixture by `--tier1` with and without
+rematerialization by both paths. Each executable, and each `-c` object linked
+by `cc`, must print clang's build's output; the report must have fewer spill
+stores, reloads, slots and frame bytes with it, and count recomputations and
+definitions left out only with it. In each object's code, decoded by
+`x86_64_disassembler.c`, every zeroing xor must leave no flag live (a backward
+fixpoint over `x86_semantics.c`'s effects, following the decoded branches),
+every instruction that addresses from rip must have a relocation of its own
+at its displacement (a PC32 for a lea, a GOT one for a load), and the loop
+must recompute addresses with rematerialization and none without.
+
 Original native straight-line reductions execute the assigned register/spill
 plans through the existing encoder with rematerialization enabled and disabled,
 using both allocation paths. Results must match an independent integer sum.
@@ -540,8 +673,6 @@ exact output checks and native/guard/rollback qualification. Indexed scratch add
 4*F bytes; all tiny samples, including slower ones, are retained in the record.
 These are allocator API measurements; the current native producer supplies F=0.
 
-Both issues remain open until source-corpus interval production and native
-spill/reload/phi/call lowering are integrated and qualified. Required remaining
-evidence includes SQLite and the slice's tests, #142, per-function assignment
-validity on those corpora, spill/frame counts with and without rematerialization,
-and controlled 9700X compile/runtime comparisons against Tier 0 and Clang -O2.
+#178's evidence is above ("Measured (#178)"): the corpora's spills and frames
+with and without rematerialization, speedtest1's run times, and #142's
+campaigns. #140's own remaining work is in its issue.

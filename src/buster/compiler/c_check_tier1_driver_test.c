@@ -168,8 +168,8 @@ static void check_test_tier1_flags(const X86Decoded* records, uint32_t count, ui
 static bool check_test_tier1_zeroing(const X86Instruction* instruction)
 {
     const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-    const bool xor = form == X86_FORM_XOR_RM32_R32 || form == X86_FORM_XOR_R32_RM32 || form == X86_FORM_XOR_RM64_R64 || form == X86_FORM_XOR_R64_RM64;
-    return xor && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg == instruction->rm;
+    const bool exclusive = form == X86_FORM_XOR_RM32_R32 || form == X86_FORM_XOR_R32_RM32 || form == X86_FORM_XOR_RM64_R64 || form == X86_FORM_XOR_R64_RM64;
+    return exclusive && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg == instruction->rm;
 }
 
 // What one build of the fixture by the driver did: its report's fields.
