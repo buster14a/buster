@@ -1983,13 +1983,13 @@ static void tier1_select_test_unreachable(Tier1SelectTest* test)
 
 // Both paths' plans of `function` in `plans`, which must agree on `root`'s pattern and on what they cover. Returns how
 // many planned.
-static uint32_t tier1_select_test_walk_plans(Tier1SelectTest* test, const IrFunction* function, uint32_t root, Arena* output, Arena* scratch, Tier1SelectPlan* plans, const char* label)
+static uint32_t tier1_select_test_walk_plans(Tier1SelectTest* test, const IrFunction* function, const IrDominance* dominance, uint32_t root, Arena* output, Arena* scratch, Tier1SelectPlan* plans, const char* label)
 {
     uint32_t planned = 0;
     for (uint32_t path = 0; path < 2; path += 1)
     {
         uint32_t failed = 0;
-        const Tier1SelectError error = tier1_select_plan(function, 0, output, scratch, path == 0, &plans[path], &failed);
+        const Tier1SelectError error = tier1_select_plan(function, dominance, output, scratch, path == 0, &plans[path], &failed);
         tier1_select_test_expect(test, error == TIER1_SELECT_OK && scratch->length == 0, label);
         planned += error == TIER1_SELECT_OK ? 1 : 0;
     }
@@ -2084,7 +2084,7 @@ static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, 
             tier1_select_test_node(&function, root + 1, IR_RET, IR_VOID, root, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
     }
-    if (created && tier1_select_test_walk_plans(test, &function, root, output, scratch, plans, "truth fixture selects") == 2)
+    if (created && tier1_select_test_walk_plans(test, &function, 0, root, output, scratch, plans, "truth fixture selects") == 2)
     {
         const bool odd = (__builtin_popcount(negations) & 1) != 0;
         const uint8_t condition = odd ? tier1_select_negations[predicate] : (uint8_t)predicate;
@@ -2198,7 +2198,7 @@ static void tier1_select_test_address_walk(Tier1SelectTest* test, uint32_t varia
             tier1_select_test_node(&function, access + 1, IR_RET, IR_VOID, access, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
     }
-    if (created && tier1_select_test_walk_plans(test, &function, access, output, scratch, plans, "address fixture selects") == 2)
+    if (created && tier1_select_test_walk_plans(test, &function, 0, access, output, scratch, plans, "address fixture selects") == 2)
     {
         const Tier1SelectPattern* pattern = &plans[0].patterns[access];
         // Where both addresses have an index, or their offsets together pass 32 bits, the walk stops at A.
@@ -2252,7 +2252,9 @@ static void tier1_select_test_address_walk(Tier1SelectTest* test, uint32_t varia
 // A frame object's address in its users' memory operands: object 0 (8 bytes) and object 1 (200 bytes), each reached
 // directly (variant 0), through a 64-bit addition of 16 (1) or -8 after the typed stream's conversions (2), or of
 // 0x7fffffff (3, which folds) or 0x80000000 (4, past 32 bits, whose address keeps its lea). Variant 5 uses the address
-// twice, so both accesses share its lea, and variant 6 takes a call-save slot's address, which no pattern takes. The
+// twice, so both accesses share its lea, and variant 6 takes an over-aligned slot's address, which no pattern takes.
+// Variant 7 repeats variant 1 with the object in the entry block past the walk's block, as the producer's preheader
+// does. The
 // shape's access is a load returned (0), a store of the second parameter (1), or the pointer itself returned (2). A
 // folded access's pattern reads no base value: its stack_object is the object at the walked displacement, and the
 // object is covered. The legacy emitter takes no frame layout, so these fixtures stop at the plan; tier1_emit_test.c
@@ -2261,14 +2263,20 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
 {
     const uint8_t type = width == 4 ? IR_I32 : IR_I64;
     const uint32_t object = variant == 6 ? 2 : variant % 2;
-    const uint32_t chain = variant == 0 ? 2 : variant == 1 || variant == 3 || variant == 4 ? 6 : variant == 2 ? 8 : 3;
+    const uint32_t chain = variant == 0 ? 2 : variant == 1 || variant == 3 || variant == 4 ? 6 : variant == 2 ? 8 : variant == 7 ? 7 : 3;
     const uint32_t root = variant == 5 || variant == 6 ? 3 : chain + 1;
     const uint32_t count = variant == 5 ? 7 : variant == 6 ? 5 : chain + 3;
-    const bool constants = variant == 1 || variant == 2 || variant == 3 || variant == 4;
+    const bool constants = variant == 1 || variant == 2 || variant == 3 || variant == 4 || variant == 7;
+    // Variant 7 keeps the object in the entry block past the walk's block, as the producer's preheader does: the entry
+    // dominates the use, with hand-rolled intervals for the two blocks.
+    uint32_t dominance_enter[2] = {0, 1};
+    uint32_t dominance_leave[2] = {2, 2};
+    const IrDominance preheader = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 2 };
+    const IrDominance* dominance = variant == 7 ? &preheader : 0;
     const IrSizes sizes =
     {
         .instruction_count = count,
-        .block_count = 1,
+        .block_count = variant == 7 ? 2 : 1,
         .constant_count = constants ? 1 : 0,
         .slot_count = 3,
         .parameter_count = 2,
@@ -2280,7 +2288,11 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
     if (created)
     {
         function.result_type = shape == 0 ? type : IR_I64;
-        function.block_offsets[1] = count;
+        function.block_offsets[1] = variant == 7 ? 4 : count;
+        if (variant == 7)
+        {
+            function.block_offsets[2] = count;
+        }
         function.parameter_types[0] = IR_I64;
         function.parameter_types[1] = IR_I64;
         function.slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
@@ -2288,7 +2300,7 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
         function.slots[2] = (IrSlot){ .size = 8, .alignment = 8192, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
         if (constants)
         {
-            function.constants[0].low = variant == 1 ? 16 : variant == 2 ? UINT64_C(0xfffffffffffffff8) : variant == 3 ? UINT64_C(0x7fffffff) : UINT64_C(0x80000000);
+            function.constants[0].low = variant == 1 || variant == 7 ? 16 : variant == 2 ? UINT64_C(0xfffffffffffffff8) : variant == 3 ? UINT64_C(0x7fffffff) : UINT64_C(0x80000000);
         }
         tier1_select_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -2299,6 +2311,14 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
             tier1_select_test_node(&function, 4, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 5, IR_ADD, IR_I64, 3, 4, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 6, IR_INTTOPTR, IR_PTR, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else if (variant == 7)
+        {
+            tier1_select_test_node(&function, 3, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, IR_PTRTOINT, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 5, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_ADD, IR_I64, 4, 5, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 7, IR_INTTOPTR, IR_PTR, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
         else if (variant == 2)
         {
@@ -2379,14 +2399,14 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
     {
         char where[128];
         snprintf(where, sizeof(where), "stack fixture selects (shape=%u variant=%u width=%u)", shape, variant, width);
-        planned = tier1_select_test_walk_plans(test, &function, root, output, scratch, plans, where);
+        planned = tier1_select_test_walk_plans(test, &function, dominance, root, output, scratch, plans, where);
     }
     if (planned == 2)
     {
         char where[160];
         snprintf(where, sizeof(where), "a walk to a frame object is its users' memory operand, or the shared lea past its edges (shape=%u variant=%u width=%u)", shape, variant, width);
         const Tier1SelectPattern* pattern = &plans[0].patterns[root];
-        const int32_t walked = variant == 1 ? 16 : variant == 2 ? -8 : variant == 3 ? INT32_MAX : 0;
+        const int32_t walked = variant == 1 || variant == 7 ? 16 : variant == 2 ? -8 : variant == 3 ? INT32_MAX : 0;
         const uint8_t rule = shape == 0 ? (variant == 5 ? TIER1_RULE_LOAD : TIER1_RULE_LOAD_ADDRESS) : shape == 1 ? (variant == 5 ? TIER1_RULE_STORE : TIER1_RULE_STORE_ADDRESS)
                                                                                                                                : (variant == 4 || variant == 5 ? TIER1_RULE_COPY : TIER1_RULE_ADDRESS);
         const uint32_t folded = variant == 4 || variant == 5 ? 0 : 1;
@@ -2395,8 +2415,8 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
         for (uint32_t node = 2; node < root; node += 1)
         {
             // Past 32 bits the access keeps the address's lea, folding only its conversions; used twice, both accesses
-            // share it.
-            covered &= plans[0].covered[node] == (variant == 4 ? (node == 2 || node == chain ? 1 : 0) : variant == 5 ? 0 : 1);
+            // share it; the entry block's branch is a terminator either way.
+            covered &= plans[0].covered[node] == (variant == 4 ? (node == 2 || node == chain ? 1 : 0) : variant == 5 ? 0 : variant == 7 && node == 3 ? 0 : 1);
         }
         const uint32_t first = plans[0].effective_use_offsets[root];
         const uint32_t uses = plans[0].effective_use_offsets[root + 1] - first;
@@ -2458,7 +2478,7 @@ static void tier1_select_test_division_walk(Tier1SelectTest* test, uint8_t op, u
         tier1_select_test_node(&function, 2, op, type, 0, 1, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
     }
-    if (created && tier1_select_test_walk_plans(test, &function, 2, output, scratch, plans, "division fixture selects") == 2)
+    if (created && tier1_select_test_walk_plans(test, &function, 0, 2, output, scratch, plans, "division fixture selects") == 2)
     {
         const Tier1SelectPattern* pattern = &plans[0].patterns[2];
         tier1_select_test_expect(test, pattern->rule == rule && (rule == TIER1_RULE_DIVIDE || (plans[0].covered[1] && pattern->values[1] == BUSTER_IR_NONE)),
@@ -2528,7 +2548,7 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
     }
     for (uint32_t shape = 0; shape < 3; shape += 1)
     {
-        for (uint32_t variant = 0; variant < 7; variant += 1)
+        for (uint32_t variant = 0; variant < 8; variant += 1)
         {
             for (uint32_t width = 4; width <= 8; width += 4)
             {

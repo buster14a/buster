@@ -911,8 +911,9 @@ struct Tier1SelectAddress
 // put around every address (`inttoptr`, `ptrtoint`), a 64-bit addition of a constant, and addresses, each taken whole
 // while the operand has room for its index, a constant index joining the displacement, and while the displacement fits
 // 32 bits. A frame object's address ends the walk: its offset joins the displacement at emission, from the frame's
-// layout, with the frame's base register, so no value is read for it. No narrowed address or speculative load is
-// introduced: the walk stops at the base, the first node it can't take.
+// layout, with the frame's base register, so no value is read for it. The object may live in the entry block past the
+// walk's block: the producer materializes every slot address there, which dominates every use. No narrowed address or
+// speculative load is introduced: the walk stops at the base, the first node it can't take.
 static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address)
 {
     const IrFunction* function = forest->function;
@@ -951,6 +952,15 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         {
             next.object = a;
             next.base = BUSTER_IR_NONE;
+        }
+        else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a) && forest->blocks[node] == 0 && forest->uses[node] == 1 && node < root)
+        {
+            // The same past its block: the producer materializes every slot address in the entry block, which dominates
+            // every use, and the address is pure with a function-global offset, so no value is read for it anywhere.
+            // Longer cross-block chains stay unfolded.
+            next.object = a;
+            next.base = BUSTER_IR_NONE;
+            taken = true;
         }
         else
         {
@@ -1026,11 +1036,16 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_COPY;
         base.values[0] = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
         // A pointer's 64 bits, or the pointer of 64 bits, from an address: the address's lea, or the copy of what the
         // conversions around it convert.
         const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE })
                                                                                   : (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE };
+        // Through a frame object the walked address stands alone: its base would tie it where the object is past the
+        // walk's block (a cross-block read costs nothing), and the paths would cover the object apart.
+        if (address.folds == 0 || address.object == BUSTER_IR_NONE)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
         if (address.folds != 0)
         {
             Tier1SelectPattern walked = base;
@@ -1290,9 +1305,14 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.values[2] = store ? b : BUSTER_IR_NONE;
         base.width = (uint8_t)tier1_select_memory_width(store ? function->type[b] : type);
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
         Tier1SelectPattern folded = base;
-        if (tier1_select_memory(forest, node, a, &folded, 0))
+        const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
+        // Through a frame object the folded address stands alone, as above.
+        if (!walked || folded.stack_object == BUSTER_IR_NONE)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        if (walked)
         {
             folded.rule = store ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS;
             tier1_select_add_candidate(forest, node, &candidates, folded);

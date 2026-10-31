@@ -371,8 +371,9 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 // the object's lea's is. Shape 0 keeps two objects (8 and 256 bytes) with accesses at offsets on both sides of the
 // 8-bit displacement's edge, through stores, loads and an addition fused into a memory operand; shape 1 reaches one
 // object through an indexed address the accesses fold whole; shape 2 reads an over-aligned object, which realigns the
-// frame; shape 3 keeps an address value the stores share. Every access must execute natively to its oracle's value,
-// with no object address keeping its lea.
+// frame; shape 3 keeps an address value the stores share; shape 4 reaches one object from the entry block past the
+// walk's block (a store and a load through two single-use addresses, verified as a round trip). Every access must
+// execute natively to its oracle's value, with no object address keeping its lea.
 static uint64_t tier1_emit_test_object_oracle(uint32_t shape, uint64_t a, uint64_t b)
 {
     uint64_t result = 0;
@@ -402,9 +403,13 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
     {
         sizes = (IrSizes){ .instruction_count = 8, .block_count = 1, .slot_count = 1, .parameter_count = 2 };
     }
-    else
+    else if (shape == 3)
     {
         sizes = (IrSizes){ .instruction_count = 10, .block_count = 1, .slot_count = 2, .address_count = 1, .parameter_count = 2 };
+    }
+    else
+    {
+        sizes = (IrSizes){ .instruction_count = 9, .block_count = 2, .slot_count = 1, .parameter_count = 2 };
     }
     bool ok = ir_create(&test->input, &sizes, function) == IR_OK;
     if (ok)
@@ -478,7 +483,7 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
             tier1_emit_test_node(function, 6, IR_ADD, IR_I64, 5, 0);
             tier1_emit_test_node(function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE);
         }
-        else
+        else if (shape == 3)
         {
             function->slots[0] = (IrSlot){ .size = 16, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
             function->slots[1] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
@@ -492,6 +497,21 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
             tier1_emit_test_node(function, 7, IR_LOAD, IR_I64, 3, BUSTER_IR_NONE);
             tier1_emit_test_node(function, 8, IR_ADD, IR_I64, 7, 0);
             tier1_emit_test_node(function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE);
+        }
+        else
+        {
+            // The object in the entry block past the walk's block, as the producer's preheader does: one store and one
+            // load through two single-use addresses of the same object, both folded, verified as a round trip.
+            function->slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            function->block_offsets[1] = 5;
+            function->block_offsets[2] = sizes.instruction_count;
+            tier1_emit_test_node(function, 2, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 3, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 5, IR_STORE, IR_VOID, 2, 1);
+            tier1_emit_test_node(function, 6, IR_LOAD, IR_I64, 3, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 7, IR_ADD, IR_I64, 6, 0);
+            tier1_emit_test_node(function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE);
         }
     }
     return ok;
@@ -542,7 +562,7 @@ static void tier1_emit_test_execute_object(Tier1EmitTest* test, uint32_t shape, 
 // object's offset plus the walked displacement, with no lea left but the address values the stores keep.
 static void tier1_emit_test_objects(Tier1EmitTest* test)
 {
-    for (uint32_t shape = 0; shape < 4; shape += 1)
+    for (uint32_t shape = 0; shape < 5; shape += 1)
     {
         for (uint32_t vector = 0; vector < 2; vector += 1)
         {
@@ -554,7 +574,10 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                 tier1_emit_test_expect(test, created, "construct original object IR");
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+                uint32_t dominance_enter[2] = {0, 1};
+                uint32_t dominance_leave[2] = {2, 2};
+                const IrDominance preheader = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 2 };
+                const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 4 ? &preheader : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
                 if (selected == TIER1_SELECT_OK)
                 {
