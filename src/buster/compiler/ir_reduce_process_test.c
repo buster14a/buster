@@ -70,6 +70,28 @@ static IrReduceObservation ir_reduce_test_process_candidate(const IrFunction* fu
 
 static void ir_reduce_test_process(IrReduceTest* test)
 {
+    const IrReduceObservationStatus executions[] = {
+        [INTERPRETER_OK] = IR_REDUCE_OBSERVED,
+        [INTERPRETER_INVALID] = IR_REDUCE_UNSUPPORTED,
+        [INTERPRETER_RESOURCE] = IR_REDUCE_PREDICATE_LIMIT,
+        [INTERPRETER_STEP_LIMIT] = IR_REDUCE_PREDICATE_LIMIT,
+        [INTERPRETER_FRAME_LIMIT] = IR_REDUCE_PREDICATE_LIMIT,
+        [INTERPRETER_VALUE_LIMIT] = IR_REDUCE_PREDICATE_LIMIT,
+        [INTERPRETER_UNDEFINED] = IR_REDUCE_OBSERVED,
+        [INTERPRETER_MEMORY] = IR_REDUCE_OBSERVED,
+        [INTERPRETER_ARITHMETIC] = IR_REDUCE_OBSERVED,
+        [INTERPRETER_SYMBOL] = IR_REDUCE_UNSUPPORTED,
+        [INTERPRETER_NATIVE] = IR_REDUCE_UNSUPPORTED,
+        [INTERPRETER_UNSUPPORTED] = IR_REDUCE_UNSUPPORTED,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(executions); i += 1)
+    {
+        ir_reduce_test_expect(test, ir_reduce_execution_observation((InterpreterStatus)i) == executions[i],
+                              "optimized execution separates semantic outcomes, resource limits and unavailable interpreter support");
+    }
+    ir_reduce_test_expect(test, ir_reduce_execution_observation((InterpreterStatus)-1) == IR_REDUCE_UNSUPPORTED &&
+                          ir_reduce_execution_observation((InterpreterStatus)BUSTER_ARRAY_LENGTH(executions)) == IR_REDUCE_UNSUPPORTED,
+                          "unknown execution statuses cannot establish a matching failure");
     const IrReduceObservationStatus expected[] = {
         IR_REDUCE_OBSERVED,
         IR_REDUCE_PREDICATE_FAULT,
