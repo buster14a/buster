@@ -55,7 +55,10 @@ are rejected rather than treated as proofs.
 An assertion names at most one location per value. Different equal-width names
 may share the same byte span, provided the ABI or every incoming edge proves
 each name. Partial overlapping assertions are refused. Within a block, copies
-may establish any number of register and stack homes.
+may establish any number of register and stack homes. The exit requirements
+share the same assertion discipline; they are proved on every zero-edge
+(sink) block, and a program with exit requirements but no sink block is
+invalid.
 
 Each byte carries a value identity, byte lane and width. A definition gives its
 source name a fresh identity. Old homes therefore stop matching without a
@@ -99,6 +102,19 @@ is available. It never gives a register contents. A register-required use
 needs a checked materializing instruction first. Frame-address recipes also
 require the correct currently available base value and the source's justified
 stability premise.
+
+That base value is an incarnation, not just the name. A frame recipe binds the
+base incarnation current when the dependent value's incarnation was
+established: at an entry or block-entry assertion, at the dependent's own
+definition, or at its first materialization. Every `FRAME_ADDRESS` edit for
+that incarnation must name a base location still holding the recorded
+incarnation; a later definition of the base cannot retarget the recipe, while
+a location that preserves the recorded incarnation still proves the edit.
+`stable` remains the producer's premise that the recipe is justified for that
+incarnation; it does not make the recipe content-stable across later
+definitions of the base. The oracle erases a value globally on redefinition,
+so it accepts only while the recorded base is still the base's current
+incarnation, a strict subset of the fast checker's surviving-base cases.
 
 ## Slow oracle
 
@@ -146,7 +162,7 @@ claim that all input storage is just the assertion array. The slow report also
 counts fixpoint rounds and cumulative work.
 
 Fast scratch is bounded by
-`24*units + 16*values + 5*blocks + 96` bytes with the current record layouts.
+`24*units + 24*values + 5*blocks + 96` bytes with the current record layouts.
 Checking costs linear work in the bounded declarations, source instructions/
 operands, rewritten edits, certificate assertions, edge/rename obligations and
 byte-unit updates. Width is bounded by 64 bytes. There are no per-store scans
@@ -156,7 +172,11 @@ The fragment adapter includes `tier1_allocate.c`'s input contract and independen
 sweeps start/end events. Ends precede starts at a position. Fixed reservations
 are reference-counted, allowing overlapping fixed intervals without allowing
 an allocated register to overlap them. Required uses are checked with a
-monotonic fragment cursor. Its cost is
+monotonic fragment cursor. The adapter also requires every interval of one
+value to carry the same class, a rule `tier1_allocation_input_valid` and
+`tier1_allocation_verify` do not impose; the sweep indexes register occupancy
+per value, so mixed-class values fail closed rather than being misattributed.
+Its cost is
 `O(positions + intervals + fragments + uses + fixed-register updates)`;
 numeric position buckets are explicit in its report and are not called
 machine instructions. `Tier1IntervalReport` separately reports existing
@@ -183,9 +203,11 @@ the normalized-stream checker/oracle and fragment mutation suites. The stream
 fixtures cover ABI entry, initialized/uninitialized cycles, critical edges,
 phi cycles, sibling-edge isolation, forged homes, partial writes, omitted
 uses, tied-source copies, call clobbers/restricted masks, callee-saved exits,
-stack reuse, stale definition incarnations, legal exchanges, damaged XORs and
-missing materializations. There are 1,000 generated valid move sequences and
-1,000 independently checked mutations, plus structural/capacity tests.
+exit-assertion shape and sink requirements, stack reuse, stale definition
+incarnations, frame-recipe base redefinitions, legal exchanges, damaged XORs
+and missing materializations. There are 1,000 generated valid move sequences
+and 1,000 independently checked mutations, plus structural/capacity tests and
+a guard-page pass that copies every borrowed array so it ends at `PROT_NONE`.
 
 The stream suite can also run without the compiler's unity build:
 
@@ -197,9 +219,9 @@ clang -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=addr
 clang -std=c17 -O3 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -DBUSTER_CERTIFICATE_STANDALONE src/buster/compiler/tier1_certificate_test.c -o /tmp/buster-certificate-test && /tmp/buster-certificate-test
 ```
 
-Initial local standalone qualification: **2,064 stream checks, zero failures**
-in both optimized and address/undefined-sanitized builds. The 16 fragment
-mutations also passed both builds in an isolated shim using the fetched
+Standalone qualification: **2,072 stream checks, zero failures** in an
+address/undefined-sanitized build, including the guard-page pass. The fragment
+mutations also passed earlier builds in an isolated shim using the fetched
 allocator input contract and original quadratic oracle. That shim result is
 not a full compiler build or an approved-host measurement. The PR's CI is the
 integration qualification.

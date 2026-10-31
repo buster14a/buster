@@ -170,6 +170,7 @@ static int run_tier1_certificate_interval_tests(void)
         .fragment_offsets = &zero,
     };
     tier1_cert_interval_expect(&empty, &empty_output, true, &checks, &failures, "empty fragment output");
+    tier1_cert_interval_expect(0, 0, false, &checks, &failures, "null fragment inputs rejected");
     printf("test-tier1-certificate-interval: %" PRIu64 " checks, %" PRIu64 " failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

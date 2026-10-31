@@ -10,9 +10,12 @@
 // One location per value is certified at a block entry. Equal-width aliases at
 // the same location are supported, as are arbitrary copies after entry. Each
 // byte carries an identity and lane. Definitions change the value's identity,
-// not every old home. Blocks use epochs; edges use a stamped sparse overlay.
-// Scratch is caller-owned and must not overlap any input or the report.
-// See docs/tier1-certificate.md for the trust boundary and unsupported inputs.
+// not every old home. A frame recipe binds the base incarnation current when
+// its value's incarnation was established, so a later base definition cannot
+// retarget a rematerialization. Blocks use epochs; edges use a stamped sparse
+// overlay. Scratch is caller-owned and must not overlap any input or the
+// report. See docs/tier1-certificate.md for the trust boundary and unsupported
+// inputs.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -384,9 +387,11 @@ static bool tier1_cert_valid(const Tier1CertProgram* program)
     {
         valid = tier1_cert_fact_valid(program, program->exit[i]);
     }
+    bool sink = false;
     for (uint32_t b = 0; valid && b < program->block_count; b += 1)
     {
         const Tier1CertBlock block = program->blocks[b];
+        sink = sink || block.edge_count == 0;
         total += block.source_count + (uint64_t)block.code_count + block.certificate_count + block.edge_count;
         valid = total <= BUSTER_CERT_MAX_TOTAL && tier1_cert_slice(block.source, block.source_count) && tier1_cert_slice(block.certificate, block.certificate_count) && tier1_cert_slice(block.edges, block.edge_count);
         valid = valid && tier1_cert_code_valid(program, block.code, block.code_count, false);
@@ -445,6 +450,8 @@ static bool tier1_cert_valid(const Tier1CertProgram* program)
             }
         }
     }
+    // Exit requirements must be provable on at least one sink block.
+    valid = valid && (program->exit_count == 0 || sink);
     return valid;
 }
 
@@ -573,6 +580,9 @@ struct Tier1CertName
 {
     uint32_t token;
     uint32_t stamp;
+    // The base incarnation a frame recipe was bound to when this name's
+    // incarnation was established; zero means no binding was recorded.
+    uint32_t base;
 };
 
 typedef struct Tier1CertState Tier1CertState;
@@ -640,17 +650,22 @@ static void tier1_cert_kill(Tier1CertState* state, uint32_t location)
     }
 }
 
-static bool tier1_cert_match(Tier1CertState* state, uint32_t value, uint32_t location)
+static bool tier1_cert_match_token(Tier1CertState* state, uint32_t location, uint32_t token)
 {
     const Tier1CertLocation l = state->program->locations[location];
-    const uint32_t token = tier1_cert_token(state, value);
-    bool valid = token != 0 && l.width == state->program->values[value].width;
+    bool valid = token != 0;
     for (uint32_t lane = 0; valid && lane < l.width; lane += 1)
     {
         const Tier1CertCell cell = tier1_cert_read(state, l.unit + lane);
         valid = cell.token == token && cell.lane == lane && cell.width == l.width;
     }
     return valid;
+}
+
+static bool tier1_cert_match(Tier1CertState* state, uint32_t value, uint32_t location)
+{
+    const uint32_t token = tier1_cert_token(state, value);
+    return token != 0 && state->program->locations[location].width == state->program->values[value].width && tier1_cert_match_token(state, location, token);
 }
 
 static void tier1_cert_put(Tier1CertState* state, uint32_t location, uint32_t token)
@@ -706,6 +721,17 @@ static bool tier1_cert_seed(Tier1CertState* state, const Tier1CertFact* facts, u
             .stamp = state->epoch,
         };
     }
+    // A frame recipe binds the base incarnation current when the dependent
+    // value's incarnation was established, not a later redefinition. Record
+    // it only after every fact's name is set so assertion order cannot matter.
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const Tier1CertValue value = state->program->values[facts[i].value];
+        if (value.recipe == TIER1_CERT_FRAME_RECIPE)
+        {
+            state->names[facts[i].value].base = tier1_cert_token(state, value.dependency);
+        }
+    }
     return valid;
 }
 
@@ -729,6 +755,49 @@ static bool tier1_cert_prove(Tier1CertState* state, const Tier1CertFact* facts, 
             valid = tier1_cert_recipe(state->program, fact.value);
         }
         state->report->facts += 1;
+    }
+    return valid;
+}
+
+// Exit requirements are assertions like any other: at most one location per
+// value, equal-span aliases allowed, partial overlap refused. Entry and
+// block-entry certificates get the same discipline from the seed writes; the
+// exit list only meets the prover, so its shape is checked explicitly. The
+// edge overlay and rename scratch are free outside edge processing.
+static bool tier1_cert_exit_shape(Tier1CertState* state)
+{
+    const Tier1CertProgram* program = state->program;
+    state->edge_epoch += 1;
+    const uint32_t mark = state->edge_epoch;
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < program->exit_count; i += 1)
+    {
+        const Tier1CertFact fact = program->exit[i];
+        valid = state->renames[fact.value].stamp != mark;
+        state->renames[fact.value] = (Tier1CertName){
+            .token = i,
+            .stamp = mark,
+        };
+        if (valid && fact.location != BUSTER_CERT_NONE)
+        {
+            const Tier1CertLocation l = program->locations[fact.location];
+            for (uint32_t lane = 0; valid && lane < l.width; lane += 1)
+            {
+                Tier1CertCell* const cell = state->overlay + l.unit + lane;
+                if (cell->stamp == mark)
+                {
+                    const Tier1CertLocation other = program->locations[program->exit[cell->token].location];
+                    valid = other.unit == l.unit && other.width == l.width;
+                }
+                else
+                {
+                    *cell = (Tier1CertCell){
+                        .token = i,
+                        .stamp = mark,
+                    };
+                }
+            }
+        }
     }
     return valid;
 }
@@ -794,9 +863,11 @@ static bool tier1_cert_original(Tier1CertState* state, const Tier1CertSource* so
     {
         const uint32_t value = source->operands[i].value;
         const uint32_t token = source->copy ? copy_token : state->next_token++;
+        const Tier1CertValue defined = state->program->values[value];
         state->names[value] = (Tier1CertName){
             .token = token,
             .stamp = state->epoch,
+            .base = defined.recipe == TIER1_CERT_FRAME_RECIPE ? tier1_cert_token(state, defined.dependency) : 0,
         };
         tier1_cert_put(state, in.locations[i], token);
     }
@@ -864,7 +935,20 @@ static bool tier1_cert_stream(Tier1CertState* state, const Tier1CertSource* sour
                 const Tier1CertValue v = state->program->values[in.value];
                 if (in.op == TIER1_CERT_FRAME_ADDRESS)
                 {
-                    valid = tier1_cert_match(state, v.dependency, in.b);
+                    Tier1CertName name = state->names[in.value];
+                    if (name.stamp != state->epoch)
+                    {
+                        // The recipe incarnation this edit establishes binds
+                        // the base incarnation it is materialized from, so a
+                        // later definition of the base cannot retarget it.
+                        name = (Tier1CertName){
+                            .token = in.value + 1,
+                            .stamp = state->epoch,
+                            .base = tier1_cert_token(state, v.dependency),
+                        };
+                        state->names[in.value] = name;
+                    }
+                    valid = tier1_cert_match_token(state, in.b, name.base);
                 }
                 if (valid)
                 {
@@ -973,7 +1057,8 @@ static Tier1CertError tier1_certificate_check(const Tier1CertProgram* program, v
             valid = valid && tier1_cert_stream(&state, block.source, block.source_count, block.code, block.code_count);
             if (valid && block.edge_count == 0)
             {
-                valid = tier1_cert_prove(&state, program->exit, program->exit_count, false);
+                valid = tier1_cert_exit_shape(&state);
+                valid = valid && tier1_cert_prove(&state, program->exit, program->exit_count, false);
                 result.error = TIER1_CERT_VALUE;
             }
             for (uint32_t e = 0; valid && e < block.edge_count; e += 1)

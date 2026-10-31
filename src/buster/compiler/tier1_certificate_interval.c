@@ -35,9 +35,14 @@ struct Tier1IntervalEvent
 
 static size_t tier1_interval_scratch_size(const Tier1AllocationInput* input, const Tier1Allocation* allocation)
 {
-    const uint64_t events = 2 * ((uint64_t)input->count + allocation->fragment_count + input->fixed.count);
-    const uint64_t size = 8 * ((uint64_t)input->position_count + 1) + events * sizeof(Tier1IntervalEvent) + (uint64_t)allocation->fragment_count * 4 + (uint64_t)input->value_count * 5 + 128;
-    return size <= SIZE_MAX ? (size_t)size : 0;
+    size_t result = 0;
+    if (input != 0 && allocation != 0)
+    {
+        const uint64_t events = 2 * ((uint64_t)input->count + allocation->fragment_count + input->fixed.count);
+        const uint64_t size = 8 * ((uint64_t)input->position_count + 1) + events * sizeof(Tier1IntervalEvent) + (uint64_t)allocation->fragment_count * 4 + (uint64_t)input->value_count * 5 + 128;
+        result = size <= SIZE_MAX ? (size_t)size : 0;
+    }
+    return result;
 }
 
 static Tier1CertError tier1_allocation_certificate_check(const Tier1AllocationInput* input, const Tier1Allocation* allocation, void* scratch, size_t capacity, Tier1IntervalReport* report)
@@ -89,6 +94,10 @@ static Tier1CertError tier1_allocation_certificate_check(const Tier1AllocationIn
             const uint32_t end = out.fragment_offsets[i + 1];
             const uint32_t value = in.values[i];
             valid = begin < end && end <= out.fragment_count;
+            // Every interval of one value must share its class; the per-value
+            // class column below drives the register-occupancy sweep. This is
+            // stricter than tier1_allocation_input_valid, which leaves the
+            // per-value class unrestricted, so mixed-class inputs fail here.
             valid = valid && (classes[value] == UINT8_MAX || classes[value] == in.classes[i]);
             classes[value] = in.classes[i];
             uint32_t position = in.starts[i];

@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 typedef struct Tier1CertFixture Tier1CertFixture;
 struct Tier1CertFixture
@@ -569,6 +571,59 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     tier1_cert_test_pair(test, &f, 0, "unstable frame recipe");
 
     tier1_cert_test_init(&f);
+    f.values[1].recipe = TIER1_CERT_FRAME_RECIPE;
+    f.values[1].dependency = 0;
+    f.values[1].stable = true;
+    f.values[1].payload = 16;
+    tier1_cert_test_def(&f, 0, 0, 0);
+    f.code[0][f.blocks[0].code_count++] = (Tier1CertInstruction){
+        .immediate = 16,
+        .a = 2,
+        .b = 0,
+        .value = 1,
+        .op = TIER1_CERT_FRAME_ADDRESS,
+    };
+    tier1_cert_test_pair(test, &f, 0, "frame recipe keeps the base incarnation from its establishment");
+    tier1_cert_test_init(&f);
+    f.values[1].recipe = TIER1_CERT_FRAME_RECIPE;
+    f.values[1].dependency = 0;
+    f.values[1].stable = true;
+    f.values[1].payload = 16;
+    tier1_cert_test_def(&f, 0, 1, 1);
+    f.code[0][f.blocks[0].code_count++] = (Tier1CertInstruction){
+        .immediate = 16,
+        .a = 2,
+        .b = 0,
+        .value = 1,
+        .op = TIER1_CERT_FRAME_ADDRESS,
+    };
+    tier1_cert_test_pair(test, &f, 1, "redefined frame value binds the current base incarnation");
+    tier1_cert_test_init(&f);
+    f.values[1].recipe = TIER1_CERT_FRAME_RECIPE;
+    f.values[1].dependency = 0;
+    f.values[1].stable = true;
+    f.values[1].payload = 16;
+    f.program.entry_count = 1;
+    f.blocks[0].certificate_count = 1;
+    f.code[0][0] = (Tier1CertInstruction){
+        .immediate = 16,
+        .a = 2,
+        .b = 0,
+        .value = 1,
+        .op = TIER1_CERT_FRAME_ADDRESS,
+    };
+    f.blocks[0].code_count = 1;
+    tier1_cert_test_def(&f, 0, 0, 0);
+    f.code[0][f.blocks[0].code_count++] = (Tier1CertInstruction){
+        .immediate = 16,
+        .a = 3,
+        .b = 0,
+        .value = 1,
+        .op = TIER1_CERT_FRAME_ADDRESS,
+    };
+    tier1_cert_test_pair(test, &f, 0, "materialized frame recipe reuses its recorded base");
+
+    tier1_cert_test_init(&f);
     f.program.exit_count = 1;
     f.exit[0] = f.entry[0];
     tier1_cert_test_def(&f, 0, 2, 0);
@@ -578,6 +633,34 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     f.code[0][2] = tier1_cert_test_edit(TIER1_CERT_MOVE, 0, 4, 0);
     f.blocks[0].code_count = 3;
     tier1_cert_test_pair(test, &f, 1, "callee-saved register restored");
+
+    tier1_cert_test_init(&f);
+    f.program.exit_count = 2;
+    f.exit[0] = (Tier1CertFact){
+        .value = 0,
+        .location = 0,
+    };
+    f.exit[1] = (Tier1CertFact){
+        .value = 0,
+        .location = 4,
+    };
+    f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 0, 0);
+    tier1_cert_test_pair(test, &f, 0, "exit assertions name one location per value");
+    f.exit[1] = (Tier1CertFact){
+        .value = 1,
+        .location = 7,
+    };
+    tier1_cert_test_pair(test, &f, 0, "exit assertions refuse partially overlapping homes");
+
+    tier1_cert_test_init(&f);
+    f.program.exit_count = 1;
+    f.exit[0] = (Tier1CertFact){
+        .value = 0,
+        .location = 0,
+    };
+    f.blocks[0].edge_count = 1;
+    f.edges[0][0].destination = 0;
+    tier1_cert_test_pair(test, &f, 0, "exit requirements without a sink block");
 
     tier1_cert_test_init(&f);
     f.source[0][0] = (Tier1CertSource){
@@ -705,6 +788,116 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     tier1_cert_test_pair(test, &f, 0, "unreachable cyclic assertions are not trusted");
 }
 
+// Every borrowed array is copied so its last byte ends at a PROT_NONE page:
+// any read past the declared count faults instead of grazing the fixture.
+#define BUSTER_CERT_TEST_MAPPINGS 64
+
+typedef struct Tier1CertGuard Tier1CertGuard;
+struct Tier1CertGuard
+{
+    uint8_t* mappings[BUSTER_CERT_TEST_MAPPINGS];
+    size_t spans[BUSTER_CERT_TEST_MAPPINGS];
+    uint32_t count;
+};
+
+static void* tier1_cert_test_map(Tier1CertGuard* guard, const void* data, uint32_t count, size_t size, size_t page)
+{
+    const size_t bytes = (size_t)count * size;
+    const size_t span = ((bytes + page - 1) / page + 1) * page;
+    uint8_t* const mapping = mmap(0, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void* result = 0;
+    if (mapping != MAP_FAILED && guard->count < BUSTER_CERT_TEST_MAPPINGS && mprotect(mapping + span - page, page, PROT_NONE) == 0)
+    {
+        result = mapping + span - page - bytes;
+        if (bytes != 0)
+        {
+            memcpy(result, data, bytes);
+        }
+        guard->mappings[guard->count] = mapping;
+        guard->spans[guard->count] = span;
+        guard->count += 1;
+    }
+    else if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, span);
+    }
+    return result;
+}
+
+static void tier1_cert_test_guards(Tier1CertTest* test)
+{
+    Tier1CertFixture f;
+    tier1_cert_test_init(&f);
+    f.program.block_count = 2;
+    f.blocks[0].edge_count = 1;
+    f.edges[0][0].destination = 1;
+    f.edges[0][0].rename_count = 1;
+    f.renames[0][0][0] = (Tier1CertRename){
+        .destination = 2,
+        .source = 0,
+    };
+    f.edges[0][0].move_count = 1;
+    f.moves[0][0][0] = tier1_cert_test_edit(TIER1_CERT_MOVE, 2, 0, 0);
+    f.blocks[1].certificate_count = 2;
+    f.facts[1][0] = (Tier1CertFact){
+        .value = 0,
+        .location = 0,
+    };
+    f.facts[1][1] = (Tier1CertFact){
+        .value = 2,
+        .location = 2,
+    };
+    tier1_cert_test_use(&f, 1, 2, 2, false);
+    f.program.exit_count = 1;
+    f.exit[0] = (Tier1CertFact){
+        .value = 0,
+        .location = 0,
+    };
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    Tier1CertGuard guard = { 0 };
+    Tier1CertProgram program = f.program;
+    bool ready = page >= 4096;
+    if (ready)
+    {
+        program.locations = tier1_cert_test_map(&guard, program.locations, program.location_count, sizeof(*program.locations), page);
+        program.values = tier1_cert_test_map(&guard, program.values, program.value_count, sizeof(*program.values), page);
+        program.entry = tier1_cert_test_map(&guard, program.entry, program.entry_count, sizeof(*program.entry), page);
+        program.exit = tier1_cert_test_map(&guard, program.exit, program.exit_count, sizeof(*program.exit), page);
+        Tier1CertBlock* const blocks = tier1_cert_test_map(&guard, program.blocks, program.block_count, sizeof(*program.blocks), page);
+        program.blocks = blocks;
+        ready = program.locations != 0 && program.values != 0 && program.entry != 0 && program.exit != 0 && blocks != 0;
+        for (uint32_t b = 0; ready && b < program.block_count; b += 1)
+        {
+            const Tier1CertBlock block = f.program.blocks[b];
+            blocks[b].source = tier1_cert_test_map(&guard, block.source, block.source_count, sizeof(*block.source), page);
+            blocks[b].code = tier1_cert_test_map(&guard, block.code, block.code_count, sizeof(*block.code), page);
+            blocks[b].certificate = tier1_cert_test_map(&guard, block.certificate, block.certificate_count, sizeof(*block.certificate), page);
+            Tier1CertEdge* const edges = tier1_cert_test_map(&guard, block.edges, block.edge_count, sizeof(*block.edges), page);
+            blocks[b].edges = edges;
+            ready = blocks[b].source != 0 && blocks[b].code != 0 && blocks[b].certificate != 0 && edges != 0;
+            for (uint32_t e = 0; ready && e < block.edge_count; e += 1)
+            {
+                const Tier1CertEdge edge = block.edges[e];
+                edges[e].renames = tier1_cert_test_map(&guard, edge.renames, edge.rename_count, sizeof(*edge.renames), page);
+                edges[e].moves = tier1_cert_test_map(&guard, edge.moves, edge.move_count, sizeof(*edge.moves), page);
+                ready = edges[e].renames != 0 && edges[e].moves != 0;
+            }
+        }
+    }
+    tier1_cert_test_expect(test, ready, "guard-page mappings for every borrowed array");
+    if (ready)
+    {
+        const Tier1CertFixture clone = {
+            .program = program,
+        };
+        tier1_cert_test_pair(test, &clone, 1, "borrowed arrays ending at guard pages");
+    }
+    for (uint32_t m = 0; m < guard.count; m += 1)
+    {
+        munmap(guard.mappings[m], guard.spans[m]);
+    }
+}
+
 static uint32_t tier1_cert_test_random(uint64_t* seed)
 {
     *seed = *seed * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
@@ -827,6 +1020,7 @@ static int run_tier1_certificate_tests(void)
         tier1_cert_test_cases(&test);
         tier1_cert_test_fuzz(&test);
         tier1_cert_test_bounds(&test);
+        tier1_cert_test_guards(&test);
     }
     free(test.slow);
     free(test.fast);

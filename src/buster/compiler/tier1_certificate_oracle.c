@@ -22,6 +22,12 @@ struct Tier1CertOracle
     uint64_t* copy;
     uint64_t* expressions;
     uint64_t* expression_copy;
+    // Incarnation bookkeeping for frame recipes: definitions erase a value
+    // globally, so a recipe's recorded base generation is only usable while
+    // the dependency has not been defined again since the establishment.
+    uint32_t* generations;
+    uint32_t* base_generations;
+    uint32_t* establishments;
     size_t cells;
     uint32_t expression_words;
     bool checking;
@@ -133,6 +139,16 @@ static bool tier1_cert_oracle_original(Tier1CertOracle* oracle, uint64_t* state,
             for (uint32_t u = 0; u < units; u += 1)
             {
                 state[(size_t)u * values + value] = 0;
+            }
+            if (oracle->checking)
+            {
+                oracle->generations[value] += 1;
+                const Tier1CertValue defined = program->values[value];
+                if (defined.recipe == TIER1_CERT_FRAME_RECIPE)
+                {
+                    oracle->establishments[value] = oracle->report->block + 1;
+                    oracle->base_generations[value] = oracle->generations[defined.dependency];
+                }
             }
         }
         if (source->copy)
@@ -314,7 +330,23 @@ static bool tier1_cert_oracle_remat(Tier1CertOracle* oracle, uint64_t* state, Ti
     const Tier1CertLocation l = program->locations[in.a];
     const uint32_t values = program->value_count;
     const uint32_t units = program->unit_count;
-    bool valid = !oracle->checking || in.op != TIER1_CERT_FRAME_ADDRESS || tier1_cert_oracle_has(oracle, state, value.dependency, in.b);
+    bool valid = true;
+    if (oracle->checking && in.op == TIER1_CERT_FRAME_ADDRESS)
+    {
+        const uint32_t tag = oracle->report->block + 1;
+        if (oracle->establishments[in.value] == tag)
+        {
+            // The recorded base generation must still be current: a definition
+            // of the base after the establishment retires the old recipe.
+            valid = oracle->generations[value.dependency] == oracle->base_generations[in.value];
+        }
+        else
+        {
+            oracle->establishments[in.value] = tag;
+            oracle->base_generations[in.value] = oracle->generations[value.dependency];
+        }
+        valid = valid && tier1_cert_oracle_has(oracle, state, value.dependency, in.b);
+    }
     if (valid)
     {
         memset(oracle->copy, 0, (size_t)l.width * values * sizeof(uint64_t));
@@ -434,12 +466,18 @@ static Tier1CertError tier1_certificate_oracle(const Tier1CertProgram* program, 
         oracle.copy = tier1_cert_take(&memory, (size_t)BUSTER_CERT_MAX_WIDTH * values, sizeof(uint64_t));
         oracle.expressions = tier1_cert_take(&memory, (size_t)units * words, sizeof(uint64_t));
         oracle.expression_copy = tier1_cert_take(&memory, (size_t)BUSTER_CERT_MAX_WIDTH * words, sizeof(uint64_t));
+        oracle.generations = tier1_cert_take(&memory, values, sizeof(uint32_t));
+        oracle.base_generations = tier1_cert_take(&memory, values, sizeof(uint32_t));
+        oracle.establishments = tier1_cert_take(&memory, values, sizeof(uint32_t));
         uint32_t* queue = tier1_cert_take(&memory, blocks, sizeof(uint32_t));
         uint8_t* seen = tier1_cert_take(&memory, blocks, sizeof(uint8_t));
         result.scratch_bytes = memory.used;
         valid = !memory.failed;
         if (valid)
         {
+            memset(oracle.generations, 0, (size_t)values * sizeof(uint32_t));
+            memset(oracle.base_generations, 0, (size_t)values * sizeof(uint32_t));
+            memset(oracle.establishments, 0, (size_t)values * sizeof(uint32_t));
             valid = tier1_cert_reachable(program, queue, seen) && tier1_cert_oracle_shapes(program, program->entry, program->entry_count);
             result.error = TIER1_CERT_INVALID;
         }
@@ -507,6 +545,12 @@ static Tier1CertError tier1_certificate_oracle(const Tier1CertProgram* program, 
                 for (uint32_t f = 0; f < block.certificate_count; f += 1)
                 {
                     const Tier1CertFact fact = block.certificate[f];
+                    const Tier1CertValue value = program->values[fact.value];
+                    if (value.recipe == TIER1_CERT_FRAME_RECIPE)
+                    {
+                        oracle.establishments[fact.value] = b + 1;
+                        oracle.base_generations[fact.value] = oracle.generations[value.dependency];
+                    }
                     if (fact.location != BUSTER_CERT_NONE)
                     {
                         const Tier1CertLocation l = program->locations[fact.location];
