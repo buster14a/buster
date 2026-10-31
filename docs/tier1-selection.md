@@ -29,7 +29,31 @@ patterns are:
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. Larger displacements
-  return an unsupported result until materialization is implemented.
+  return an unsupported result until materialization is implemented. An
+  access's address is walked (`tier1_select_address`, #140) through the nodes
+  only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
+  typed stream's integers put around every address, addresses (one after
+  another while the operand has room for their one index), constant indices
+  and 64-bit additions of constants, which join the displacement while it fits
+  32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
+  conversions, two `lea`s and the constants' moves; a pointer that is a value
+  (a ptrtoint or an inttoptr of such a chain) is one `lea`.
+- C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
+  `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
+  `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
+  nests. A branch on such a chain is its comparison's `cmp` and `jcc`, and its
+  zero extension to an integer the comparison's `cmp`, `setcc` and `movzx`,
+  negated for an odd number of `eq` links, where every link is consecutive and
+  used only by the next, so that nothing the pattern doesn't compute runs
+  between the comparison and its test. `if (a < b)` had been
+  `cmp; setl; movzx; test; setne; movzx; test; jne`.
+- Division and remainder by a power of two 2^k: unsigned, a shift right by k or
+  a mask of k bits (a mask fitting an imm32); signed, for 1 ≤ k ≤ bits − 2,
+  `TIER1_RULE_DIVIDE_POWER`'s sequence, rounded toward zero as C's: the bias
+  2^k − 1 where the dividend is negative, from its sign in the scratch register
+  (`mov`, `sar`, `shr`), added by a `lea`, then an arithmetic shift, or for the
+  remainder a mask and the bias subtracted. A divisor of 1 is a copy (a zero
+  remainder). Other divisors remain `TIER1_RULE_DIVIDE`.
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
@@ -130,9 +154,16 @@ operand, type, immediate, memory-order and single-use constraints.
 
 The vector path chooses the cheapest candidate for sixteen independent ready
 nodes at a time, with unsigned comparisons over contiguous cost columns. The
-final batch is masked. A reverse node pass selects the cover and suppresses
-only the exact nodes consumed by its rules; an iterative pass publishes the
-effective-use CSR. There is no recursive tree walk or speculative input load.
+final batch is masked. A reverse node pass then marks what the code computes:
+the nodes with an effect (stores, calls, terminators, volatile loads), the
+parameters, the phis and their operands, the nodes nothing uses (an unused load
+or division the optimizer kept for the fault it may raise), and each value a
+marked node's chosen pattern reads. Every other node is covered, its users'
+patterns computing it themselves: a constant as an immediate, a load as a
+memory operand, an address as a displacement, a truth value's chain as a
+comparison, however deep their walks went (#140). A pattern's `fold_count` is
+only maximal munch's rank. An iterative pass publishes the effective-use CSR.
+There is no recursive tree walk or speculative input load.
 
 The scalar twin uses a switch to rank maximal-munch patterns by coverage and
 rule priority. It deliberately does not call the vector minimum-cost chooser.
