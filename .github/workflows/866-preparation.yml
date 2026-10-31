@@ -1,0 +1,22 @@
+name: Issue 866 source preparation
+on:
+  push:
+    branches: [chatgpt/866-preparation]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: e10b9ff75d58471cb5e6a1400e49767f9ea0fff9
+          persist-credentials: false
+      - name: Archive the exact base with its licenses
+        run: git archive --format=tar --prefix=buster/ HEAD > "$RUNNER_TEMP/buster-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-866-source
+          path: ${{ runner.temp }}/buster-source.tar
+          retention-days: 3
