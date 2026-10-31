@@ -14,13 +14,6 @@
 #include "../../src/buster/compiler/lane.c"
 #include "../../src/buster/compiler/tier1_allocate.c"
 #include "../../src/buster/compiler/tier1_problem_intervals.c"
-#if BUSTER_SANITIZER_RESOURCES
-static bool arena_test_reservation_allowed(uint64_t bytes)
-{
-    (void)bytes;
-    return true;
-}
-#endif
 #endif
 
 #include "fixtures.h"
