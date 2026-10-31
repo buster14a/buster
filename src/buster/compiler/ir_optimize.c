@@ -1601,15 +1601,19 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
     return check;
 }
 
-// #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's functions and
-// benchmark-ir-source's corpus: below it the vector passes' per-call set-up doesn't pay and the scalar passes run.
-#define BUSTER_IR_OPTIMIZE_AUTO_BOUND 4096u
-#define BUSTER_IR_OPTIMIZE_AUTO_BLOCK_COST 16u
+// #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's shapes and
+// benchmark-ir-source's corpora (sqlite3.c's 2602 functions, lua's 1096): the vector passes' per-block
+// set-up only pays on giant dataflow-dense functions — at 16K+ instructions in near-single-block shape
+// vector wins 9-11%, at 8K it breaks even, and it loses everywhere smaller or branchier — so the scalar
+// passes run everywhere else. No corpus function reaches the bound; the largest real instruction-per-block
+// density is chacha_block's 247, where vector still loses 5%.
+#define BUSTER_IR_OPTIMIZE_AUTO_VECTOR_INSTRUCTIONS 8192u
+#define BUSTER_IR_OPTIMIZE_AUTO_VECTOR_BLOCK_LENGTH 512u
 
 static bool ir_optimize_auto_scalar(const IrFunction* function)
 {
-    const uint64_t cost = (uint64_t)function->instruction_count + BUSTER_IR_OPTIMIZE_AUTO_BLOCK_COST * (uint64_t)function->block_count;
-    const bool result = cost <= BUSTER_IR_OPTIMIZE_AUTO_BOUND;
+    const bool result = function->instruction_count < BUSTER_IR_OPTIMIZE_AUTO_VECTOR_INSTRUCTIONS ||
+                        (uint64_t)function->block_count * BUSTER_IR_OPTIMIZE_AUTO_VECTOR_BLOCK_LENGTH > function->instruction_count;
     return result;
 }
 

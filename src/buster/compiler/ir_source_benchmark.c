@@ -31,7 +31,8 @@
 #define BUSTER_IR_SOURCE_GVN_SCALAR 7
 #define BUSTER_IR_SOURCE_OPTIMIZE 8
 #define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 9
-#define BUSTER_IR_SOURCE_VARIANTS 10
+#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 10
+#define BUSTER_IR_SOURCE_VARIANTS 11
 #define BUSTER_IR_SOURCE_LARGEST 10
 
 static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
@@ -45,6 +46,7 @@ static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
     "gvn-scalar",
     "optimize",
     "optimize-scalar",
+    "optimize-vector",
 };
 
 // The corpus: every file's functions (their streams in `lowered`, their table in `table`), each one's IR as the vector
@@ -116,11 +118,13 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
         break;
         case BUSTER_IR_SOURCE_OPTIMIZE:
         case BUSTER_IR_SOURCE_OPTIMIZE_SCALAR:
+        case BUSTER_IR_SOURCE_OPTIMIZE_VECTOR:
         {
             // #860: `optimize` is the default AUTO path, as a caller's ir_optimize_options gives it; optimize-scalar
-            // is the forced twin, so the corpus measures the bound's cost against the path it replaces.
+            // and optimize-vector are the forced twins, so the corpus measures the bound's cost against the paths it
+            // chooses between.
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = variant == BUSTER_IR_SOURCE_OPTIMIZE_SCALAR ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_AUTO;
+            options.path = variant == BUSTER_IR_SOURCE_OPTIMIZE_SCALAR ? BUSTER_IR_OPTIMIZE_SCALAR : variant == BUSTER_IR_SOURCE_OPTIMIZE_VECTOR ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_AUTO;
             IrOptimizeResult run = { 0 };
             check = ir_optimize(lowered, output, scratch, options, &run);
         }
@@ -318,13 +322,13 @@ static bool ir_source_measure(const IrSourceCorpus* corpus, Arena* output, Arena
     {
         for (uint32_t k = 0; k < BUSTER_IR_SOURCE_VARIANTS && failed == BUSTER_IR_SOURCE_VARIANTS; k += 1)
         {
-            // Each pair's two paths take turns running first.
-            const uint32_t v = (pass & 1) != 0 ? k ^ 1 : k;
+            // Each pair's two paths take turns running first; optimize-vector has no twin to turn with.
+            const uint32_t v = (pass & 1) != 0 && (k ^ 1) < BUSTER_IR_SOURCE_VARIANTS ? k ^ 1 : k;
             if (only != BUSTER_IR_SOURCE_VARIANTS && v != only)
             {
                 continue;
             }
-            if ((v & 1) == 0 && after_scalar != 0)
+            if ((v & 1) == 0 && v + 1 < BUSTER_IR_SOURCE_VARIANTS && after_scalar != 0)
             {
                 const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
                 while (tier0_benchmark_now() < until && failed == BUSTER_IR_SOURCE_VARIANTS)
@@ -436,25 +440,27 @@ static bool ir_source_functions(const IrSourceCorpus* corpus, Arena* output, Are
         failed |= ssa_ir_promote(lowered, output, scratch, &promoted).error != IR_OK;
         const uint32_t promoted_instructions = promoted.instruction_count;
         arena_pop_to(output, mark);
-        uint64_t optimize_least[2] = { UINT64_MAX, UINT64_MAX };
+        uint64_t optimize_least[3] = { UINT64_MAX, UINT64_MAX, UINT64_MAX };
         const uint64_t optimize_once = ir_source_optimize_run(lowered, BUSTER_IR_OPTIMIZE_VECTOR, 1, output, scratch, &failed) +
-                                       ir_source_optimize_run(lowered, BUSTER_IR_OPTIMIZE_SCALAR, 1, output, scratch, &failed);
+                                       ir_source_optimize_run(lowered, BUSTER_IR_OPTIMIZE_SCALAR, 1, output, scratch, &failed) +
+                                       ir_source_optimize_run(lowered, BUSTER_IR_OPTIMIZE_AUTO, 1, output, scratch, &failed);
         const uint64_t optimize_wanted = BUSTER_IR_SOURCE_FUNCTION_NS / (optimize_once != 0 ? optimize_once : 1) + 1;
         const uint32_t optimize_repetitions = optimize_wanted < 100000 ? (uint32_t)optimize_wanted : 100000;
         for (uint32_t sample = 0; sample < BUSTER_IR_SOURCE_FUNCTION_SAMPLES && !failed; sample += 1)
         {
-            for (uint32_t turn = 0; turn < 2; turn += 1)
+            for (uint32_t turn = 0; turn < 3; turn += 1)
             {
-                const uint32_t path = (sample & 1) != 0 ? 1 - turn : turn;
-                const uint64_t taken = ir_source_optimize_run(lowered, path == 0 ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_SCALAR, optimize_repetitions, output, scratch, &failed);
+                const uint32_t path = (sample & 1) != 0 ? 2 - turn : turn;
+                const uint64_t taken = ir_source_optimize_run(lowered, path == 0 ? BUSTER_IR_OPTIMIZE_VECTOR : path == 1 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_AUTO,
+                                                              optimize_repetitions, output, scratch, &failed);
                 optimize_least[path] = taken < optimize_least[path] ? taken : optimize_least[path];
             }
         }
         if (!failed)
         {
-            printf("benchmark-ir-source: function=%s blocks=%u slots=%u instructions=%u promoted_instructions=%u vector_ns=%.1f scalar_ns=%.1f optimize_vector_ns=%.1f optimize_scalar_ns=%.1f\n", corpus->functions[f].name,
+            printf("benchmark-ir-source: function=%s blocks=%u slots=%u instructions=%u promoted_instructions=%u vector_ns=%.1f scalar_ns=%.1f optimize_vector_ns=%.1f optimize_scalar_ns=%.1f optimize_auto_ns=%.1f\n", corpus->functions[f].name,
                    lowered->block_count, lowered->slot_count, lowered->instruction_count, promoted_instructions, (double)least[0] / repetitions, (double)least[1] / repetitions,
-                   (double)optimize_least[0] / optimize_repetitions, (double)optimize_least[1] / optimize_repetitions);
+                   (double)optimize_least[0] / optimize_repetitions, (double)optimize_least[1] / optimize_repetitions, (double)optimize_least[2] / optimize_repetitions);
         }
     }
     return !failed;
@@ -533,7 +539,7 @@ static int run_ir_source_benchmark(int count, char** arguments)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source [--only lower|lower-scalar|verify|verify-scalar|promote|promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar] [--after-scalar MS] [--functions] "
+        fprintf(stderr, "usage: compiler benchmark-ir-source [--only lower|lower-scalar|verify|verify-scalar|promote|promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector] [--after-scalar MS] [--functions] "
                         "[preprocessor options] file...\n");
     }
     fflush(stdout);
