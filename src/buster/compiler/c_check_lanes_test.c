@@ -1129,20 +1129,22 @@ static void check_lanes_test_address_space(CheckLanesTestTally* tally, const cha
                         };
                         CheckLanesTestEmission limited =
                             check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, kind == 0 ? NULL : &lanes, scalar != 0, rows, rows, allowed, UINT64_MAX);
-                        snprintf(detail, sizeof(detail), "%s path%s, %s, %llu bytes more: status %u/%u, %llu/%llu bytes, columns' arena %llu bytes, active %u, again %u",
+                        snprintf(detail, sizeof(detail), "%s path%s, %s, %llu bytes more: status %u/%u, %llu/%llu bytes, columns' arena %llu bytes, active %u, again %u, reason %s",
                                  scalar != 0 ? "scalar" : "vector", rows ? ", -g and unwind tables" : "",
                                  kind == 0 ? "check_program_emit" : kind == 1 ? "lanes of one" : "8 lanes", (unsigned long long)allowed, (uint32_t)one.status,
                                  (uint32_t)limited.status, (unsigned long long)one.size, (unsigned long long)limited.size,
-                                 (unsigned long long)limited.columns_capacity, (uint32_t)limited.active, (uint32_t)limited.again);
+                                 (unsigned long long)limited.columns_capacity, (uint32_t)limited.active, (uint32_t)limited.again,
+                                 limited.reason != NULL ? limited.reason : "-");
                         check_lanes_test_expect(&own, limited.limited, "limit the child's address space for an emission", detail);
                         check_lanes_test_expect(&own, check_lanes_test_same(&one, &limited), "an emission in a limited address space makes one lane's", detail);
                         check_lanes_test_expect(&own, kind == 0 || limited.columns_capacity == (bound == 0 ? 0 : room),
                                                 bound == 0 ? "lane 0's columns go in the caller's scratch without room for their own"
                                                            : "lane 0's columns go in the room reserved for them",
                                                 detail);
-                        // Fewer active lanes (a shared worker budget, as on the hosted runners) need so few compact
-                        // reservations that the whole emission can fit the room left for them without a rerun.
-                        check_lanes_test_expect(&own, kind != 2 || limited.again != CHECK_PROGRAM_AGAIN_NONE || limited.active < 8,
+                        // The room that keeps only lane 0's columns out turns every lane arena's reservation away,
+                        // so a run that got lanes must go again; under the larger room a throttled or pool-reusing
+                        // run can legitimately take all of its lanes without a rerun.
+                        check_lanes_test_expect(&own, kind != 2 || bound != 0 || limited.active < 2 || limited.again != CHECK_PROGRAM_AGAIN_NONE,
                                                 "8 lanes without their arenas run again on one", detail);
                         again[limited.again] += kind == 2 ? 1 : 0;
                         free(limited.object);
