@@ -141,7 +141,6 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
         {
             valid = (input->allowed_registers[i] & ~input->registers[input->classes[i]]) == 0;
             valid = valid && (input->hints == 0 || input->hints[i] == UINT8_MAX || (input->hints[i] < 32 && ((input->allowed_registers[i] >> input->hints[i]) & 1) != 0));
-            valid = valid && (input->hint_values == 0 || input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count);
         }
         if (valid && input->use_offsets != 0)
         {
@@ -493,8 +492,8 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
 // that holds it, which then holds the register the rule would have taken, or as a fresh one, which makes a register
 // taken from this level fresh again. Every level from the current one up then still holds a free register or none,
 // and every level below none, so an end never overwrites a deposit and a start never runs out of registers while the
-// class's pressure fits. The body is compiled twice (tier1_allocate_impl's calls): with a constant null `last` it is
-// the rule's loop alone, so an input without hints runs the code it ran before hints existed.
+// class's pressure fits. In tier1_allocate_body's copy without hints, `last` is a constant null and this is the rule's
+// loop alone.
 static inline __attribute__((always_inline)) void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs, uint8_t* last)
 {
     uint8_t ended[32];
@@ -670,7 +669,9 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
     return valid;
 }
 
-static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+// The allocator, compiled twice (tier1_allocate_impl): `hinted`, a constant, says whether the input has hint_values.
+// Without them the body has no hint code at all, so that an input without hints runs the code it ran before them.
+static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool hinted, Tier1Allocation* result)
 {
     (void)vector;
 
@@ -732,7 +733,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
         {
             error = TIER1_ALLOCATION_OK;
         }
-        if (error == TIER1_ALLOCATION_OK && columns.hint_values != 0)
+        if (error == TIER1_ALLOCATION_OK && hinted)
         {
             value_last = arena_push_array(arena, (uint64_t)columns.value_count + 1, sizeof(uint8_t), 1);
             if (value_last == 0)
@@ -831,7 +832,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             }
         }
         // A hinted value's registers are its class's: a value without intervals gives no hint.
-        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && value_last != 0 && i < columns.count; i += 1)
+        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && hinted && i < columns.count; i += 1)
         {
             const uint32_t hinted = columns.hint_values[i];
             if (hinted != UINT32_MAX && value_seen[hinted] != 0 && value_seen[hinted] != columns.classes[i] + 1)
@@ -839,7 +840,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 error = TIER1_ALLOCATION_INVALID;
             }
         }
-        if (value_last != 0)
+        if (hinted && value_last != 0)
         {
             memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1);
         }
@@ -882,15 +883,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(columns.registers[class]);
             if (regular && class_count != 0)
             {
-                // Each body twice: with hints, and without, where it is the loop it was before them.
-                if (value_last != 0)
-                {
-                    tier1_allocation_color(input, class, class_events, class_event_count, regs, value_last);
-                }
-                else
-                {
-                    tier1_allocation_color(input, class, class_events, class_event_count, regs, 0);
-                }
+                tier1_allocation_color(input, class, class_events, class_event_count, regs, hinted ? value_last : 0);
                 allocation.vector_intervals += class_count;
             }
             else
@@ -900,11 +893,11 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 if (columns.use_required != 0)
                 {
                     extended[class] = true;
-                    assigned = value_last != 0 ? tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, value_last) : tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, 0);
+                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, hinted ? value_last : 0);
                 }
                 else
                 {
-                    assigned = value_last != 0 ? tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, value_last) : tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, 0);
+                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, hinted ? value_last : 0);
                 }
                 if (!assigned)
                 {
@@ -994,6 +987,22 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
         arena_pop_to(arena, saved);
     }
     return error;
+}
+
+// The hinted copy: each hint a value of the input's, then the body with its hint code.
+static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
+    {
+        valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
+    }
+    return valid ? tier1_allocate_body(input, arena, vector, true, result) : TIER1_ALLOCATION_INVALID;
+}
+
+static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+{
+    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, result) : tier1_allocate_body(input, arena, vector, false, result);
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
