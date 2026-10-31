@@ -2291,7 +2291,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                     .bytes = literal.bytes,
                     .byte_count = literal.byte_count,
                 };
-                reader->output->resource |= !check_const_append(&reader->const_values, object, &part, 1, NULL, 0);
+                reader->output->resource |= !check_const_append(&reader->const_values, object, &part, 1, NULL, 0, true);
                 reader->output->const_values = check_const_view(&reader->const_values);
             }
             else

@@ -1347,7 +1347,7 @@ static bool check_deferred_const_values(CheckConstBuffer* output, const CheckCon
                 unions[u] = input->unions[object.union_first + u];
                 unions[u].type = check_deferred_type(remap, unions[u].type);
             }
-            valid = check_const_append(output, object, parts, object.part_count, unions, object.union_count);
+            valid = check_const_append(output, object, parts, object.part_count, unions, object.union_count, true);
         }
         arena_pop_to(scratch, mark);
     }
