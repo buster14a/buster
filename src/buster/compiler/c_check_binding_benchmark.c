@@ -292,7 +292,7 @@ static bool check_binding_benchmark_equal(const CheckInput* left, const CheckInp
         equal = left->declarations[token] == right->declarations[token] && left->declared_types[token] == right->declared_types[token] &&
                 left->declaration_kinds[token] == right->declaration_kinds[token] && left->objects[token] == right->objects[token] &&
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
-                left->token_nodes[token] == right->token_nodes[token];
+                left->token_nodes[token] == right->token_nodes[token] && left->evaluation_nodes[token] == right->evaluation_nodes[token];
     }
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {

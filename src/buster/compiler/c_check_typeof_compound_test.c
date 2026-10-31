@@ -153,4 +153,27 @@ static void check_test_typeof_compounds(CheckTest* test, const char* clang)
         "struct S { int x; }; int tested(int n) { int x=n; __typeof__((struct S){++x}) s={3};"
         "__typeof__((int[]){++x,++x,++x}) a={1,2,4}; return x+s.x+a[2]+sizeof(a); }",
         "typeof-compound-unevaluated-record-and-inferred-array", clang);
+    // A variably modified typeof operand is evaluated, so its compound initializer's effects run. The same operand
+    // with a fixed type is unevaluated; both forms must agree with Clang's code on every input.
+    check_test_program_source(test,
+        "static void *bump(int *p) { ++*p; return 0; }"
+        "int tested(int n) { int x = 0; int m = n > 0 ? n : 1;"
+        "__typeof__((int (*)[m]){bump(&x)}) p = 0; return x * 100 + (p != 0); }",
+        "typeof-variably-modified-compound-operand-is-evaluated", clang);
+    check_test_program_source(test,
+        "static void *bump(int *p) { ++*p; return 0; }"
+        "int tested(int n) { int x = n; __typeof__((int (*)[3]){bump(&x)}) p = 0;"
+        "return x * 100 + (p != 0); }",
+        "typeof-fixed-compound-operand-is-unevaluated", clang);
+    // The operand is evaluated before the declared object's initializer, as Clang orders a declaration's effects.
+    check_test_program_source(test,
+        "static void *bump(int *p, int v) { *p = *p * 10 + v; return 0; }"
+        "int tested(int n) { int x = 0; int m = n > 0 ? n : 1;"
+        "__typeof__((int (*)[m]){bump(&x, 1)}) p = bump(&x, 2); (void)p; return x; }",
+        "typeof-variably-modified-operand-precedes-initializer", clang);
+    check_test_program_source(test,
+        "static void *bump(int *p, int v) { *p = *p * 10 + v; return 0; }"
+        "int tested(int n) { int x = 0; (void)n;"
+        "__typeof__((int (*)[3]){bump(&x, 1)}) p = bump(&x, 2); (void)p; return x; }",
+        "typeof-fixed-operand-does-not-precede-initializer", clang);
 }

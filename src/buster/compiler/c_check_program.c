@@ -1605,6 +1605,11 @@ static void check_control_drain(CheckControlWriter* writer)
             uint32_t i = plan;
             uint32_t v = writer->vla_first[task.token];
             uint32_t a = writer->allocation_first[task.token];
+            // A variably modified typeof's operand (check_input_expressions' evaluation_nodes) is a side effect of the
+            // declaration, after its type's variable bounds and before its initializers.
+            const uint32_t evaluation = writer->program->input->evaluation_nodes != NULL ?
+                                        writer->program->input->evaluation_nodes[task.token] : BUSTER_CHECK_NONE;
+            bool evaluated = false;
             while ((i != BUSTER_CHECK_NONE || v != BUSTER_CHECK_NONE || a != BUSTER_CHECK_NONE) && writer->program->status == CHECK_PROGRAM_OK)
             {
                 const CheckInitializers* initializers = writer->program->initializers;
@@ -1616,6 +1621,18 @@ static void check_control_drain(CheckControlWriter* writer)
                 const bool bound = v != BUSTER_CHECK_NONE && bounded <= a && bounded <= initialized;
                 const bool allocation = !bound && a != BUSTER_CHECK_NONE && a <= initialized;
                 const uint32_t declaration = bound ? bounded : initialized;
+                if (evaluation != BUSTER_CHECK_NONE && !evaluated && !bound)
+                {
+                    if (writer->count < writer->capacity)
+                    {
+                        writer->entries[writer->count++] = (CheckControl){ .kind = CHECK_CONTROL_EVALUATE, .node = evaluation, .token = task.token, .target = BUSTER_CHECK_NONE };
+                        evaluated = true;
+                    }
+                    else
+                    {
+                        check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
+                    }
+                }
                 if (allocation)
                 {
                     const uint32_t closing = writer->parser->tree.parents[task.token];
@@ -1657,6 +1674,18 @@ static void check_control_drain(CheckControlWriter* writer)
                 else if (!allocation)
                 {
                     i = writer->plan_next[i];
+                }
+            }
+            if (evaluation != BUSTER_CHECK_NONE && !evaluated && writer->program->status == CHECK_PROGRAM_OK)
+            {
+                // A declaration whose only entries were variable bounds: its operand follows them.
+                if (writer->count < writer->capacity)
+                {
+                    writer->entries[writer->count++] = (CheckControl){ .kind = CHECK_CONTROL_EVALUATE, .node = evaluation, .token = task.token, .target = BUSTER_CHECK_NONE };
+                }
+                else
+                {
+                    check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
                 }
             }
             // The graph's token groups are in postorder. Each wrapper here is a complete discarded expression

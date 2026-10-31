@@ -2378,7 +2378,9 @@ What the lowering covers past scalars (#145's programs):
   each instead of all earlier records (#611); the small, ordered span updates
   retain the existing scalar record layout and stable bound identities.
   Empty ranges still validate variably modified declarations and retain their
-  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  jump-scope metadata. A variably modified `typeof` operand is evaluated where its
+   declaration is executed, after the type's bounds and before the declaration's
+   initializers; a fixed-type `typeof` operand is not evaluated. In eleven paired fresh-process runs on the locked
   9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
   34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
   instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
