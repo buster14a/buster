@@ -10,8 +10,10 @@ tier0_emit / tier0_program_functions (including abi_assign)
   → rebuilt CFG and dominance; both IR verifiers
   → tier1_select_plan
   → tier1_emit_function
-      → effective-use liveness
-      → required input/definition locations and fragment allocation
+      → a straight-line chain: effective-use liveness, required input/definition
+        locations and fragment allocation
+      → any other CFG (tier1_emit_cfg.c): tier1_cfg.c's allocation over the CFG,
+        with edge moves
       → actual spill frame, saves/restores and fragment transitions
   → branch sizing
   → baseline x86-64 record validation
@@ -55,7 +57,7 @@ changes to compiler options or production routing.
 ## Supported fixtures and independent oracles
 
 Each supported function takes three `uint64_t` parameters and returns a
-`uint64_t`. Eight original fixtures cover:
+`uint64_t`. Fifteen original fixtures cover:
 
 | Fixture | Handoff exercised |
 | --- | --- |
@@ -67,6 +69,13 @@ Each supported function takes three `uint64_t` parameters and returns a
 | Three-argument local helper with values live across the call | Argument permutation, preservation across CALL and helper/entry compilation through the complete pipeline |
 | The byte-swap-16 typed recipe followed by a widened result | Wide mask/shift expansion, `I16` truncation and canonical zero extension |
 | Signed byte, word and dword locals | Local promotion and signed widening, including `I8` through `I16` to `I64` |
+| An early return: `a ? b : c` by two returns | A conditional branch, two epilogues, the CFG consumer |
+| `do { b += a; a >>= 1; } while (a)`, a loop back to the original entry | Lowering's preheader, loop-carried parameters, a back edge's moves |
+| `a ? 17 : 29` through a local | A join's phi of two constants |
+| A loop whose carried values swap | Phis whose back-edge moves can form a cycle |
+| Eight values and a counter around a loop | Pressure past five registers across a back edge: spill slots meeting edge moves |
+| A call of the helper in a loop | Caller-save rows around a call inside a loop, the result carried by a phi |
+| `x = a; if (b & 1) x ^= c; return x + (b >> 1)` | A critical edge into a phi's join, through a stub |
 
 Every fixture runs through scalar and vector paths, with rematerialization both
 disabled and enabled. A five-register pool contains the three required System V
@@ -91,9 +100,11 @@ formulas with Clang at `-O0` and `-O2`, using `-march=x86-64`, and checks every
 fixture/input pair against the typed interpreter. It does not translate selected
 instructions or optimized IR back into C.
 
-A successful complete run reports 1,024 native results, including eight emitted
-call sites across the scalar/vector and rematerialization combinations. A
-cross-check additionally reports 512 Clang results. Original typed symbols
+A successful complete run reports 1,920 native results, including twelve
+emitted call sites across the scalar/vector and rematerialization combinations,
+and 28 functions through the CFG consumer, whose edge moves and stubs it counts:
+each one's allocation must pass `tier1_cfg_verify` as well. A cross-check
+additionally reports 960 Clang results. Original typed symbols
 resolve to helpers compiled through the same complete pipeline; relocation
 metadata, signed rel32 range and encoder instruction ends are checked before
 execution. The check count also includes stage validation,
@@ -107,21 +118,28 @@ all three processes and proof that both descendant PIDs no longer exist.
 
 ## Unsupported cases and limits
 
-Four additional valid typed fixtures pass through lowering, promotion and
-optimization on both paths. An early-return branch and an entry backedge reach
-the selected machine consumer, which must return `TIER1_EMIT_UNSUPPORTED`. A
-join requiring a phi and floating-point arithmetic must return
-`TIER1_SELECT_ERROR_UNSUPPORTED`. These eight refusals must preserve the failing stage's
-result and restore its output and scratch arena lengths. They are never executed
-as native code.
+An additional valid typed fixture, floating-point arithmetic, passes through
+lowering, promotion and optimization on both paths and must return
+`TIER1_SELECT_ERROR_UNSUPPORTED`. Its two refusals must preserve the failing
+stage's result and restore its output and scratch arena lengths. It is never
+executed as native code.
 
-The current machine consumer supports one block or a physical straight-line
-chain whose intermediate terminators branch to the next block and whose final
-block returns, ends in explicit unreachable, or contains only a branch to
-itself. The terminal consumer tests exercise these last two forms separately;
-they preserve a real self-loop even when a preceding helper unexpectedly
-returns. General control flow needs edge location reconciliation.
-Indirect/variadic/wide-ABI calls, phis, floating point, dynamic/variadic frames, dynamic shifts, division,
+The straight-line consumer takes one block or a physical straight-line chain
+whose intermediate terminators branch to the next block and whose final block
+returns, ends in explicit unreachable, or contains only a branch to itself. The
+terminal consumer tests exercise these last two forms separately; they preserve
+a real self-loop even when a preceding helper unexpectedly returns. Every other
+function goes through the CFG consumer (`tier1_emit_cfg.c`, #140): its plan
+becomes `tier1_cfg.c`'s problem (each node's effective uses, its definition's
+required register, phis at their blocks' starts, parameters at entry), and its
+records take each edge's moves before the predecessor's jump, at the
+successor's start, or in a stub after the branch for a split critical edge,
+whose jumps then go to the stub. Jumps to the next block are left out, and a
+branch whose true successor follows is inverted. Where the IR's entry has
+predecessors, an empty entry block goes before it. The terminal tests' nonempty
+self-loops, conditional returns and phis go through it now, keeping their calls
+and jumps back, with no trap in their place.
+Indirect/variadic/wide-ABI calls, floating point, dynamic/variadic frames, dynamic shifts, division,
 undefined values and unsupported conversions remain outside this integration
 subset. See [selection](tier1-selection.md), [liveness](tier1-liveness.md),
 [allocation](tier1-allocation.md), and [frames](tier1-frame.md) for their contracts.

@@ -7,9 +7,10 @@
 // The existing typed interpreter supplies expected return bits independently of lowering, selection and allocation.
 // Optional Clang -O0/-O2 oracles compile separately written C formulas, never the emitted machine or optimized IR.
 //
-// Defined integer straight-line programs and bounded direct local calls execute. Branches, joins, loops and
-// floating point traverse the upstream stages and must stop explicitly before native execution. These fixtures do not qualify a
-// source corpus. Native calls and external tools run in bounded child processes; all temporary files use TMPDIR.
+// Defined integer programs execute: straight-line ones, bounded direct local calls, and general control flow (early
+// returns, loops, a loop back to the entry, phi joins and swaps, a call in a loop, a critical edge) through the CFG
+// consumer's edge moves. Floating point traverses the upstream stages and must stop explicitly before native
+// execution. These fixtures do not qualify a source corpus. Native calls and external tools run in bounded child processes; all temporary files use TMPDIR.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -24,8 +25,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUSTER_TIER1_PIPELINE_CASES 8
-#define BUSTER_TIER1_PIPELINE_CALL_CASES 2
+#define BUSTER_TIER1_PIPELINE_CASES 15
+#define BUSTER_TIER1_PIPELINE_CALL_CASES 3
 #define BUSTER_TIER1_PIPELINE_FUNCTIONS 2
 #define BUSTER_TIER1_PIPELINE_INPUTS 32
 #define BUSTER_TIER1_PIPELINE_ENTRIES 512
@@ -77,6 +78,10 @@ struct Tier1PipelineTest
     uint32_t clang_results;
     uint32_t resolved_calls;
     uint32_t refused;
+    // The CFG consumer's functions, and what their edges took.
+    uint32_t general;
+    uint64_t edge_moves;
+    uint64_t edge_stubs;
     uint32_t fixture;
     bool vector;
     bool rematerialize;
@@ -224,7 +229,16 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
     }
     else if (shape == 5)
     {
-        // The original entry is a backedge target. Lowering must supply its own ABI initialization preheader.
+        // The original entry is a backedge target. Lowering must supply its own ABI initialization preheader. The loop
+        // halves a, so it ends within 64 rounds: do { b += a; a >>= 1; } while (a != 0); return b.
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
@@ -383,6 +397,154 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 17);
         tier0_emit(program, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (shape == 12)
+    {
+        // A loop whose carried values swap: i = c & 15, x = a, y = b; while (i) { t = x; x = y ^ (t << 1); y = t; i--; }
+        // return x + y. The back edge's moves can be a cycle.
+        program->local_count = 7;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 15);
+        tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+        const uint32_t head = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        const uint32_t exit = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 6);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 6);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 6);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
+        fixture->values[exit] = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (shape == 13)
+    {
+        // Eight values and a counter around a loop, past five registers: v[k] = a ^ constant(k); i = c & 7; while (i)
+        // { for each k, v[k] = (v[k] + v[(k + 1) % 8]) ^ b; i--; } return the v[k] xored. Edge moves meet spill slots.
+        program->local_count = 12;
+        for (uint32_t k = 0; k < 8; k += 1)
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, tier1_pipeline_constant(k));
+            tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3 + k);
+        }
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 7);
+        tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 11);
+        const uint32_t head = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 11);
+        const uint32_t exit = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
+        for (uint32_t k = 0; k < 8; k += 1)
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3 + k);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3 + (k + 1) % 8);
+            tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+            tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3 + k);
+        }
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 11);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 11);
+        tier0_emit(program, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
+        fixture->values[exit] = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        for (uint32_t k = 1; k < 8; k += 1)
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3 + k);
+            tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        }
+    }
+    else if (shape == 14)
+    {
+        // A call in a loop, values live across it: s = 0, i = c & 7; while (i) { s = helper(s, a, i); i--; } return
+        // s ^ b, with shape 9's helper (x + (y << 3)) ^ z.
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        program->function_count = 2;
+        program->functions[0] = (Tier0GeneratedFunction){
+            .entry_count = program->entry_count,
+            .local_count = 3,
+            .parameter_count = 3,
+            .result_class = BUSTER_TYPED_CLASS_U64,
+        };
+        entry_first = program->entry_count;
+        entry_local_first = 3;
+        program->local_count = entry_local_first + 5;
+        program->call_count = 1;
+        program->argument_count = 3;
+        fixture->call_argument_counts[0] = 3;
+        memset(fixture->argument_classes, BUSTER_TYPED_CLASS_U64, sizeof(fixture->argument_classes));
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 7);
+        tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        const uint32_t head = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        const uint32_t exit = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
+        fixture->values[exit] = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (shape == 15)
+    {
+        // A critical edge into a join: x = a; if (b & 1) x ^= c; return x + (b >> 1). The entry's edge to the join
+        // leaves a block of two successors for one of two predecessors, where the phi's moves need a stub.
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        const uint32_t join = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        fixture->values[join] = program->entry_count - entry_first;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
     }
     else
@@ -947,6 +1109,13 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
         9,
         10,
         11,
+        4,
+        5,
+        6,
+        12,
+        13,
+        14,
+        15,
     };
     for (uint32_t fixture_index = 0; fixture_index < BUSTER_TIER1_PIPELINE_CASES; fixture_index += 1)
     {
@@ -1006,11 +1175,31 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                     }
                     tier1_pipeline_expect(test, test->arenas[TIER1_PIPELINE_SCRATCH].length == 0, "fragment emission returns scratch");
-                    if (ok)
+                    if (ok && emitted->general)
                     {
+                        // The CFG consumer's allocation: its own problem, through the independent CFG checker.
+                        Tier1CfgCheck check;
+                        const bool verified = tier1_cfg_verify(&emitted->cfg_input, &emitted->cfg, &test->arenas[TIER1_PIPELINE_SCRATCH], &check);
+                        tier1_pipeline_expect(test, verified, "the independent CFG checker accepts the consumer's allocation and edge moves");
+                        if (!verified)
+                        {
+                            fprintf(stderr, "  %s (block %u value %u position %u)\n", check.reason, check.block, check.value, check.position);
+                        }
+                        const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
+                        tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots + ((emitted->cfg.temp_slots & 1u) != 0), "spill values, caller-save values and the temporary slot have complete frame rows");
+                        test->general += 1;
+                        test->edge_moves += emitted->edge_moves;
+                        test->edge_stubs += emitted->edge_stubs;
+                    }
+                    else if (ok)
+                    {
+                        tier1_pipeline_expect(test, shape < 4 || shape == 7 || shape == 9 || shape == 10 || shape == 11 || (shape == 14 && f + 1 != fixture.program.function_count), "a straight-line fixture keeps the straight-line consumer");
                         tier1_pipeline_expect(test, tier1_allocation_verify(&emitted->prepared.allocation, &emitted->allocation), "independent allocation verifier accepts actual fragments");
                         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
                         tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots, "spill values and reserved caller-save values have complete frame rows");
+                    }
+                    if (ok)
+                    {
                         tier1_pipeline_expect(test, emitted->reference_count == fixture.program.functions[f].call_count, "every original direct call survives optimization and reaches a symbolic native call");
                         if (emitted->reference_count != 0)
                         {
@@ -1024,9 +1213,13 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         {
                             tier1_pipeline_expect(test, emitted->rematerializations != 0, "wide constant pressure reaches real rematerialization");
                         }
-                        if (shape == 9 && f + 1 == fixture.program.function_count)
+                        if ((shape == 9 || shape == 14) && f + 1 == fixture.program.function_count)
                         {
                             tier1_pipeline_expect(test, emitted->call_stores != 0 && emitted->call_loads != 0, "nonconstant values live across a direct call reach caller-save stores and reloads");
+                        }
+                        if (shape == 13)
+                        {
+                            tier1_pipeline_expect(test, emitted->general && emitted->allocation.spill_count != 0, "values carried around a loop past the registers reach spill slots");
                         }
                         test->stores += emitted->spill_stores;
                         test->loads += emitted->spill_loads;
@@ -1048,9 +1241,6 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
 static void tier1_pipeline_refusals(Tier1PipelineTest* test)
 {
     const uint32_t shapes[] = {
-        4,
-        5,
-        6,
         8,
     };
     for (uint32_t fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(shapes); fixture_index += 1)
@@ -1080,33 +1270,9 @@ static void tier1_pipeline_refusals(Tier1PipelineTest* test)
                 memcpy(&prior, &plan, sizeof(plan));
                 uint32_t node = BUSTER_IR_NONE;
                 const Tier1SelectError selection = tier1_select_plan(&function, &dominance, selected, scratch, test->vector, &plan, &node);
-                // Simple branches can be selected, but cannot yet reconcile allocation locations along edges.
-                if (shape == 4 || shape == 5)
-                {
-                    const bool ok = tier1_pipeline_expect(test, selection == TIER1_SELECT_OK, "valid unsupported CFG reaches the machine consumer");
-                    if (ok)
-                    {
-                        const Tier1EmitOptions options = {
-                            .register_mask = tier1_liveness_register_mask(),
-                            .vector = test->vector,
-                        };
-                        Tier1EmitResult emitted;
-                        memset(&emitted, 0x5a, sizeof(emitted));
-                        Tier1EmitResult before;
-                        memcpy(&before, &emitted, sizeof(emitted));
-                        Arena* output = &test->arenas[TIER1_PIPELINE_EMITTED];
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, output, scratch, &emitted, &node);
-                        const bool refused = tier1_pipeline_expect(test, error == TIER1_EMIT_UNSUPPORTED, "branch or backedge receives explicit unsupported status");
-                        tier1_pipeline_expect(test, output->length == 0 && scratch->length == 0 && memcmp(&emitted, &before, sizeof(emitted)) == 0, "unsupported machine consumer rolls back arenas and result");
-                        test->refused += refused;
-                    }
-                }
-                else
-                {
-                    const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "phi or floating point receives explicit unsupported status");
-                    tier1_pipeline_expect(test, selected->length == 0 && scratch->length == 0 && memcmp(&plan, &prior, sizeof(plan)) == 0, "unsupported selection rolls back arenas and result");
-                    test->refused += refused;
-                }
+                const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "floating point receives explicit unsupported status");
+                tier1_pipeline_expect(test, selected->length == 0 && scratch->length == 0 && memcmp(&plan, &prior, sizeof(plan)) == 0, "unsupported selection rolls back arenas and result");
+                test->refused += refused;
             }
             tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "unsupported compilation preserves the original typed fixture");
         }
@@ -1134,6 +1300,13 @@ static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const ch
               "    else if (shape == 4) { result = helper_constant(); }\n"
               "    else if (shape == 5) { uint64_t live = a ^ b; uint64_t called = helper_arguments(c, a, b); result = (called + live) ^ c; }\n"
               "    else if (shape == 6) { uint64_t low = a % UINT64_C(65536); uint64_t swapped = (low % 256) * 256 + low / 256; result = (swapped + b) ^ c; }\n"
+              "    else if (shape == 8) { result = a != 0 ? b : c; }\n"
+              "    else if (shape == 9) { do { b += a; a >>= 1; } while (a != 0); result = b; }\n"
+              "    else if (shape == 10) { result = a != 0 ? 17 : 29; }\n"
+              "    else if (shape == 11) { uint64_t i = c & 15, x = a, y = b; while (i != 0) { uint64_t t = x; x = y ^ (t << 1); y = t; i -= 1; } result = x + y; }\n"
+              "    else if (shape == 12) { uint64_t v[8]; for (unsigned k = 0; k < 8; ++k) v[k] = a ^ constant(k); for (uint64_t i = c & 7; i != 0; i -= 1) for (unsigned k = 0; k < 8; ++k) v[k] = (v[k] + v[(k + 1) % 8]) ^ b; result = v[0]; for (unsigned k = 1; k < 8; ++k) result ^= v[k]; }\n"
+              "    else if (shape == 13) { uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b; }\n"
+              "    else if (shape == 14) { uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1); }\n"
               "    else { int8_t small = (int8_t)((int)(a & 255) - ((a & 128) != 0 ? 256 : 0)); int16_t via = small; int16_t medium = (int16_t)((int32_t)(b & 65535) - ((b & 32768) != 0 ? 65536 : 0)); int32_t wide = (int32_t)((int64_t)(c & UINT32_MAX) - ((c & UINT64_C(0x80000000)) != 0 ? INT64_C(0x100000000) : 0)); result = (((uint64_t)(int64_t)via + (uint64_t)(int64_t)medium) ^ (uint64_t)(int64_t)wide) + ((uint64_t)(int64_t)small << 17); }\n"
               "    return result;\n}\n"
               "static const uint64_t inputs[][3] = {\n", file);
@@ -1340,13 +1513,14 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             }
             tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
             tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
-            tier1_pipeline_expect(&test, test.refused == 8, "every remaining unsupported shape is refused on both paths");
+            tier1_pipeline_expect(&test, test.refused == 2, "every remaining unsupported shape is refused on both paths");
+            tier1_pipeline_expect(&test, test.general == 7 * 4 && test.edge_moves != 0 && test.edge_stubs != 0, "every control-flow fixture goes through the CFG consumer, whose edges move values, critical ones through stubs");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, seed);
+        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {
             arena_release(&test.arenas[a]);

@@ -6,7 +6,9 @@
 // tier1_cfg_allocate takes a machine CFG in layout order. Block b occupies positions [block_starts[b],
 // block_starts[b + 1]); block 0 is the entry, without predecessors or phis. Every value is defined once: a phi at its
 // block's start, by the moves on the block's incoming edges, any other value at its definition position, before its
-// uses in that block (SSA). A phi has one operand per predecessor, in the predecessor CSR's order.
+// uses in that block (SSA). A phi has one operand per predecessor, in the predecessor CSR's order. A use of a value
+// other than a phi at its own definition position is the definition's requirement: a required one asks that the
+// definition write a register, as an instruction's destination does (tier1_emit_cfg.c's).
 //
 // 1. Liveness is dataflow.c's, on the values used outside their definition's block (phi operands included), with
 //    each phi operand a use on its edge: USE[b] = U[b] | (P[b] & ~D[b]), then OUT[b] |= P[b] after the solve.
@@ -254,8 +256,9 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
             }
         }
     }
-    // Every value: its class, registers and definition; its uses sorted, after a definition in its own block (a phi's
-    // definition precedes its block's first position, which may use it).
+    // Every value: its class, registers and definition; its uses sorted, none before a definition in its own block (a
+    // phi's definition precedes its block's first position, which may use it; another value's use at its own definition
+    // is the definition's: required, the definition writes a register).
     valid = valid && (input->value_count == 0 || input->use_offsets[0] == 0) && (input->value_count == 0 || input->use_offsets[input->value_count] == input->use_count);
     for (uint32_t v = 0; valid && v < input->value_count; v += 1)
     {
@@ -266,7 +269,7 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
         {
             const uint32_t position = input->use_positions[u];
             valid = position < input->position_count && (u == input->use_offsets[v] || position >= input->use_positions[u - 1]);
-            valid = valid && (tier1_cfg_block_of(input, position) != block || position > input->definitions[v] || (phi[v] != 0 && position == input->definitions[v]));
+            valid = valid && (tier1_cfg_block_of(input, position) != block || position >= input->definitions[v]);
             valid = valid && (input->use_required == 0 || input->use_required[u] <= 1);
         }
     }
@@ -1580,7 +1583,17 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                         }
                         check->checks += 1;
                     }
-                    else if (kind == 1 && step == 2)
+                    else if (kind == 1 && step == 4 && q == input->definitions[use_values[item]] && is_phi[use_values[item]] == 0)
+                    {
+                        // The definition's own use: where the definition puts the value, a register if it's required.
+                        const uint32_t v = use_values[item];
+                        uint32_t location = 0;
+                        uint8_t where = 0;
+                        valid = tier1_cfg_location(result, v, q, &location, &where) || tier1_cfg_fail(check, "a definition outside its value's intervals", b, v, q);
+                        valid = valid && ((where == BUSTER_TIER1_ALLOCATE_REGISTER || input->use_required == 0 || input->use_required[item] == 0) || tier1_cfg_fail(check, "a required definition without a register", b, v, q));
+                        check->checks += 1;
+                    }
+                    else if (kind == 1 && step == 2 && (q != input->definitions[use_values[item]] || is_phi[use_values[item]] != 0))
                     {
                         const uint32_t v = use_values[item];
                         uint32_t location = 0;

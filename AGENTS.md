@@ -178,9 +178,12 @@ designs and the compilers already built this way.
   records. Bounded direct scalar calls preserve live caller registers and
   publish symbolic CALL references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. General CFG/phis and indirect/variadic/wide-ABI calls still refuse
-  explicitly. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
-  and `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  self-loops. Every other function, general CFGs with loops and phis, goes
+  through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
+  move values, before a jump, at a successor's start or in a split critical
+  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. Run
+  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit` and
+  `test-tier1-pipeline --cross-check` for bounded typed-stream/native
   validation. `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)

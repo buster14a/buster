@@ -332,9 +332,17 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         tier1_emit_test_expect(test, ready, "loop fixture selected independently");
         if (ready)
         {
+            // The entry is its own loop's header: the CFG consumer puts a block before it and jumps back to the loop.
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true };
             Tier1EmitResult output;
-            tier1_emit_test_expect(test, tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &output, &node) == TIER1_EMIT_UNSUPPORTED, "loop requires a future edge-location consumer");
+            const bool emitted = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &output, &node) == TIER1_EMIT_OK;
+            tier1_emit_test_expect(test, emitted, "a loop through the entry goes through the CFG consumer");
+            bool back = false;
+            for (uint32_t branch = 0; emitted && branch < output.code.branch_count; branch += 1)
+            {
+                back |= output.code.targets[branch] <= output.code.branches[branch];
+            }
+            tier1_emit_test_expect(test, !emitted || (output.general && output.cfg_input.block_count == 2 && back), "the loop keeps its jump back, after an added entry");
         }
     }
     arena_pop_to(&test->output, 0);

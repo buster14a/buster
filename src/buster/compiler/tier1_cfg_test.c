@@ -36,6 +36,8 @@ struct Tier1CfgTestBuilder
     uint32_t use_block[BUSTER_TIER1_CFG_TEST_USES];
     uint32_t use_instruction[BUSTER_TIER1_CFG_TEST_USES];
     uint8_t use_required[BUSTER_TIER1_CFG_TEST_USES];
+    // 1 for the definition's own use, at its value's definition position: a required one asks for a register there.
+    uint8_t use_definition[BUSTER_TIER1_CFG_TEST_USES];
     uint32_t phi_count;
     uint32_t phi_value[BUSTER_TIER1_CFG_TEST_PHIS];
     // A phi's operand for each of its block's predecessors, in the order the edges list them.
@@ -68,6 +70,9 @@ struct Tier1CfgTestTally
     uint64_t interference_killed;
     uint64_t order_mutants;
     uint64_t order_killed;
+    // A required definition's register fragment made a slot's: every one must fail the checker.
+    uint64_t definition_mutants;
+    uint64_t definition_killed;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -102,7 +107,15 @@ static void tier1_cfg_test_use(Tier1CfgTestBuilder* builder, uint32_t value, uin
     builder->use_block[u] = block;
     builder->use_instruction[u] = instruction;
     builder->use_required[u] = required;
+    builder->use_definition[u] = 0;
     builder->use_count += 1;
+}
+
+// Value v's definition needs a register: a required use at its definition position.
+static void tier1_cfg_test_definition_use(Tier1CfgTestBuilder* builder, uint32_t value)
+{
+    tier1_cfg_test_use(builder, value, builder->def_block[value], 0, true);
+    builder->use_definition[builder->use_count - 1] = 1;
 }
 
 static uint32_t tier1_cfg_test_phi(Tier1CfgTestBuilder* builder, uint32_t block, uint8_t class, const uint32_t* operands)
@@ -197,7 +210,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             {
                 if (builder->use_value[u] == v)
                 {
-                    const uint32_t position = block_starts[builder->use_block[u]] + 2 * builder->use_instruction[u];
+                    const uint32_t position = builder->use_definition[u] != 0 ? definitions[v] : block_starts[builder->use_block[u]] + 2 * builder->use_instruction[u];
                     // Insertion keeps the value's positions sorted.
                     uint32_t at = use;
                     while (at > first && use_positions[at - 1] > position)
@@ -407,6 +420,26 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                         }
                     }
                 }
+                // Definition: a value whose definition needs a register (its first use is at its definition, required)
+                // and that has a slot elsewhere, written into its slot instead.
+                tried = 0;
+                for (uint32_t i = 0; tried < 8 && i < result.intervals.count; i += 1)
+                {
+                    const uint32_t v = result.intervals.values[i];
+                    const uint32_t first = allocation->fragment_offsets[i];
+                    const uint32_t use = input->use_offsets[v];
+                    const bool required = use < input->use_offsets[v + 1] && input->use_positions[use] == input->definitions[v] && input->use_required[use] != 0;
+                    if (required && result.intervals.starts[i] == input->definitions[v] && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->spill_ids[v] < allocation->spill_count)
+                    {
+                        allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_SPILL;
+                        Tier1CfgCheck mutated;
+                        const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                        allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_REGISTER;
+                        tally->definition_mutants += 1;
+                        tally->definition_killed += rejected;
+                        tried += 1;
+                    }
+                }
                 Tier1CfgCheck again;
                 tier1_cfg_test_expect(tally, tier1_cfg_verify(input, &result, scratch, &again), "the checker accepts the restored allocation");
             }
@@ -582,6 +615,8 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
                     builder->remat[v] = tier1_cfg_test_random(&random) % 10 == 0;
                 }
             }
+            const bool defined = (b != 0 || i != 0) && builder->value_count != 0 && builder->def_block[builder->value_count - 1] == b && builder->def_instruction[builder->value_count - 1] == i;
+            const uint32_t fixed_before = builder->fixed_count;
             if (tier1_cfg_test_random(&random) % 9 == 0 && builder->fixed_count < BUSTER_TIER1_CFG_TEST_FIXED)
             {
                 const uint8_t class = tier1_cfg_test_random(&random) % 3 == 0 ? 1 : 0;
@@ -596,6 +631,11 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
                 builder->fixed_class[builder->fixed_count] = class;
                 builder->fixed_register[builder->fixed_count] = pick;
                 builder->fixed_count += pick != 0;
+            }
+            // Half the definitions where no fixed range clobbers need a register, as an instruction's destination does.
+            if (defined && builder->fixed_count == fixed_before && builder->use_count < BUSTER_TIER1_CFG_TEST_USES && tier1_cfg_test_random(&random) % 2 == 0)
+            {
+                tier1_cfg_test_definition_use(builder, builder->value_count - 1);
             }
         }
     }
@@ -917,9 +957,10 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         }
         // Every mutant must fail the checker, and a full run must reach each kind of mutant, a split edge, a cycle or
         // slot-to-slot move through the scratch register and a temporary slot.
-        tier1_cfg_test_expect(&tally, tally.interference_killed == tally.interference_mutants && tally.order_killed == tally.order_mutants, "every mutant fails the checker");
+        tier1_cfg_test_expect(&tally, tally.interference_killed == tally.interference_mutants && tally.order_killed == tally.order_mutants && tally.definition_killed == tally.definition_mutants, "every mutant fails the checker");
+        tier1_cfg_test_expect(&tally, tally.definition_mutants != 0, "the random programs' required definitions reach the definition mutant");
         tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, seed, count);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);
