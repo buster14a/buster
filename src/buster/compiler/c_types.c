@@ -437,6 +437,10 @@ struct TypeTable
     // Whether plain char is unsigned (-funsigned-char): the source reader sets it from the unit's options
     // (check_input_run), and type_integer_properties answers it. Signed, x86-64's, when false.
     bool char_unsigned;
+    // Whether the target inlines atomics of 16 bytes (CMPXCHG16B, cx16: clang's MaxAtomicInlineWidth of 128 bits rather
+    // than 64), which the lock-free queries answer by (#148): the source reader sets it from the unit's target, as it sets
+    // char_unsigned. 8 bytes, x86-64's baseline, when false.
+    bool atomic_inline_16;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, tags and members besides record 0,
@@ -5946,6 +5950,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         table->lookup.count = source->lookup.count;
         table->last_error = source->last_error;
         table->char_unsigned = source->char_unsigned;
+        table->atomic_inline_16 = source->atomic_inline_16;
         // type_find_or_add grows the index past 3 types a bucket. An index for every type the copy may hold would be mostly
         // empty, and its probes would miss the caches: #113's lanes each copy a unit's table with room for eight types a
         // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane. So it has room for a slack

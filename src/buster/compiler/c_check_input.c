@@ -48,8 +48,17 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CLEANUP_ARGUMENTS,
     // GNU's weak attribute on a declaration without external linkage.
     CHECK_INPUT_WEAK_LINKAGE,
-    // A function definition cannot also define an alias.
+    // GNU's alias and ifunc attributes on a definition, or after another that makes the declaration one (#147): clang's
+    // "definition 'f' cannot also be an alias" (or "an ifunc"), at the attribute, naming the declaration (the report's
+    // subject).
     CHECK_INPUT_ALIAS_DEFINITION,
+    CHECK_INPUT_IFUNC_DEFINITION,
+    // GNU's weakref attribute (#147): on a declaration with external linkage, at the attribute; in a block, or without a
+    // target (its argument, or an alias attribute beside it), naming the declaration; and on a typedef.
+    CHECK_INPUT_WEAKREF_LINKAGE,
+    CHECK_INPUT_WEAKREF_CONTEXT,
+    CHECK_INPUT_WEAKREF_ALIAS,
+    CHECK_INPUT_WEAKREF_SUBJECT,
     // Labels' errors, at the label's name (check_input_controls_mode): a use of one no definition has, or a local
     // label's declaration without one; a second definition in the label's scope; a name a block's `__label__` lists
     // declare twice.
@@ -68,6 +77,11 @@ typedef enum CheckInputMessage
     // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
     CHECK_INPUT_WIDE_LITERAL,
     CHECK_INPUT_PRAGMA_SEMANTICS,
+    // clang's musttail attribute (#147) where it doesn't go, at the attribute: with arguments, on a declaration (a label
+    // among them), and on a statement other than a return.
+    CHECK_INPUT_MUSTTAIL_ARGUMENTS,
+    CHECK_INPUT_MUSTTAIL_DECLARATION,
+    CHECK_INPUT_MUSTTAIL_STATEMENT,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -101,7 +115,12 @@ static const char* const check_input_messages[] =
     "'cleanup' function's parameter has a type incompatible with the variable's address",
     "'cleanup' attribute takes one argument",
     "weak declaration cannot have internal linkage",
-    "function definition cannot also be an alias",
+    "definition cannot also be an alias",
+    "definition cannot also be an ifunc",
+    "weakref declaration must have internal linkage",
+    "weakref declaration must be in a global context",
+    "weakref declaration must also have an alias attribute",
+    "'weakref' attribute only applies to variables and functions",
     "use of undeclared label",
     "redefinition of label",
     "ambiguous reference to a label",
@@ -113,6 +132,9 @@ static const char* const check_input_messages[] =
     "cannot pass bit-field as __auto_type initializer in C",
     "bit-precise integer constants wider than 128 bits are not supported",
     "unsupported semantic pragma",
+    "'musttail' attribute takes no arguments",
+    "'musttail' attribute cannot be applied to a declaration",
+    "'musttail' attribute only applies to return statements",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -141,6 +163,8 @@ struct CheckInputReport
     uint32_t pragma;
     // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
     uint32_t completion;
+    // The declaration a message located elsewhere names (an attribute's, #147), plus one; 0 for none.
+    uint32_t subject;
 };
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
@@ -244,6 +268,19 @@ struct CheckInputCleanup
     uint32_t argument;
     uint32_t scope;
     uint32_t end;
+};
+
+// A return statement with clang's musttail attribute (#147, check_input_statement_attributes): its `return` token, the
+// first token of its attributes (where clang's statement starts, which its scope's error names), the first token of its
+// first musttail attribute (`__attribute__`'s name, or clang::'s scope, which spells it), and its function's body (its
+// `{`). c_check_musttail.c checks it once the types are known, and check_program lowers it to a tail call.
+typedef struct CheckInputMusttail CheckInputMusttail;
+struct CheckInputMusttail
+{
+    uint32_t statement;
+    uint32_t attributes;
+    uint32_t name;
+    uint32_t body;
 };
 
 struct CheckInput
@@ -350,6 +387,10 @@ struct CheckInput
     CheckInputCleanup* cleanups;
     uint32_t cleanup_count;
     uint32_t cleanup_capacity;
+    // The musttail return statements, in source order: none in a unit without one.
+    CheckInputMusttail* musttails;
+    uint32_t musttail_count;
+    uint32_t musttail_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -782,10 +823,13 @@ struct CheckInputReader
     uint32_t section_event_capacity;
     uint32_t section_record_from;
     // Whether the unit has read a cleanup attribute, which only then each declarator's attributes are looked through for
-    // (check_input_cleanup_declaration), a weak one, which only then each declarator's are for its linkage, and a weak,
-    // a constructor, a destructor or unscoped standard noreturn, which only then each redeclaration's are for those after a definition
-    // (check_input_attribute_late).
+    // (check_input_cleanup_declaration), a weak or weakref one, which only then each declarator's are for its linkage, and
+    // a weak, a constructor, a destructor or unscoped standard noreturn, which only then each redeclaration's are for those
+    // after a definition (check_input_attribute_late).
     bool cleanup_attributes;
+    // While a statement's attributes are read (check_input_statement_attributes): musttail's place, which anywhere else is
+    // a declaration's, clang's error.
+    bool statement_attributes;
     bool weak_attributes;
     bool late_attributes;
     // Allocated only after the first late attribute: accepted attribute kinds indexed by linked object.
@@ -963,6 +1007,17 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
     else
     {
         input->resource = true;
+    }
+}
+
+// check_input_report of a message that names `subject`, a declaration's token, at another token (an attribute's).
+static void check_input_report_subject(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t subject)
+{
+    const uint32_t count = reader->output->report_count;
+    check_input_report(reader, token, message);
+    if (reader->output->report_count != count)
+    {
+        reader->output->reports[count].subject = subject + 1;
     }
 }
 
@@ -3969,7 +4024,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             valid &= complete_object;
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
-            valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
+            // A variable's definition is its initializer or, at file scope, its tentative definition with external linkage
+            // (GNU's alias attributes, #147).
+            const CheckInputAttributeSubject subject = {
+                .name = name,
+                .function = function && !is_typedef,
+                .is_typedef = is_typedef,
+                .file = file,
+                .function_definition = function && !is_typedef && kind == PARSE_KIND_L_BRACE,
+                .variable_definition = !function && !is_typedef && (kind == PARSE_KIND_EQUAL || (file && !is_static && storage != C_NAME_EXTERN)),
+                .external = file && !is_static,
+            };
+            valid = valid && check_input_attribute_definition(reader, attributes, subject);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid && reader->cleanup_attributes && attributes != 0)
@@ -3998,12 +4064,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->output->explicit_abis[name] = abi_origin;
                 reader->defined[name] = kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE);
                 reader->defined[name] |= !is_typedef && !function && !file && is_static;
-                const bool alias_definition = function && !is_typedef && check_input_attribute_alias_definition(attributes);
+                // A function's or variable's alias, ifunc or weakref target defines it (#147).
+                const bool alias_definition = !is_typedef && check_input_attribute_alias_definition(attributes);
                 // A block-scope alias changes the linked entity's definition history outside this body. A deferred
                 // lane cannot publish that change in source order, so let the serial reader handle the unit.
                 check_input_lane_refuse(reader, reader->lane && alias_definition, "a body's alias changes its linked entity's definition history");
                 reader->definition_origins[name] = reader->defined[name] || alias_definition ? name + 1 : 0;
-                reader->output->tentative[name] = !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL;
+                // A static variable's alias or weakref is its definition, not a tentative one: it has no storage of its own.
+                reader->output->tentative[name] = !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL && !alias_definition;
                 reader->static_objects[name] = !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0);
                 reader->registers[name] = storage == C_NAME_REGISTER;
                 reader->output->thread_local[name] = thread_local;
@@ -4029,10 +4097,17 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 // GNU's weak attribute needs external linkage (#147). A redeclaration of an already defined linked
                 // entity is different: clang drops a new attribute before checking its linkage. The binding walk later
                 // diagnoses and drops it (check_input_attribute_late). Do not use a shadowed local as that entity.
+                // GNU's weakref attribute needs internal linkage: clang's error at the attribute, after its others
+                // (checkAttributesAfterMerging).
                 for (uint32_t a = 0; reader->weak_attributes && attributes != 0 && a < attributes->count; a += 1)
                 {
                     CheckInputAttribute* attribute = attributes->records + a;
                     attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
+                    if (valid && attribute->kind == CHECK_ATTRIBUTE_WEAKREF && !attribute->ignored && reader->linkage[name] != 1)
+                    {
+                        check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAKREF_LINKAGE);
+                        valid = false;
+                    }
                     if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
                     {
                         const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
@@ -4357,6 +4432,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
 #include "c_check_asm_input.c"
+#include "c_check_musttail.c"
 
 // A GNU attribute's items are never expressions of the graph: the attribute reader takes them by range. Marking
 // them before any declaration is read keeps them out of the diagnostic graph of a declaration that fails before its
@@ -6408,8 +6484,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .implicit_function_system = pp->options.implicit_function_system };
     check_input_kr_warning_policy(input, &pp->options);
-    // Plain char's signedness, which every phase after the reader reads from the table too.
+    // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
+    // inlines 16-byte atomics (cx16), which the lock-free queries read.
     types->char_unsigned = pp->options.predefines.char_unsigned;
+    types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     const char* const vararg_spellings[] =

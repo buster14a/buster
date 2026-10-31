@@ -36,6 +36,25 @@ and a defined failure result. Unsupported input must be reported before code is
 published. An experimental pass may be disabled explicitly; a semantic error
 must not silently select another compiler or another tier.
 
+## Vector and opmask handoff
+
+[#732](https://github.com/buster14a/buster/issues/732) supplies verified
+`v4i32`/`v8i32`/`v16i32` values, distinct `m8`/`m16`/`m32`/`m64` masks,
+canonical text, scalar execution oracles and the bounded #717 VECTOR/X86
+producer adapter. [Its contract](ir-simd.md) defines comparisons, merging/zeroing
+selection, exact-width memory effects, target eligibility and ABI refusals.
+The shared interpreter keeps wide payloads only for vector-producing values.
+
+[#141](https://github.com/buster14a/buster/issues/141) must select these values
+using the generated target, retain memory effects and publish vector/mask
+register constraints. [#179](https://github.com/buster14a/buster/issues/179)
+must then allocate the distinct opmask class, define k0 eligibility per selected
+form, spill/reload mask widths exactly and reconcile live values at CFG edges.
+Neither consumer may reinterpret a mask as an ordinary GPR value or infer target
+permission from the compiler host. Scalar-only promotion, optimization and
+selection still refuse SIMD functions before publication; this handoff does not
+claim native Tier 1 vector execution, full vector ABI support or a throughput gain.
+
 ## Required evidence
 
 The component issues retain their individual acceptance criteria:

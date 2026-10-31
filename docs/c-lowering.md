@@ -293,9 +293,10 @@ none of its subset's programs makes a name twice in clang's objects.
   and `--symbols-minimum N` fails the run when fewer than N files' objects were
   compared. The 9700X job compares eight of the frozen musl `src` directories
   (`math`, `string`, `stdlib`, `fenv`, `legacy`, `process`, `signal` and
-  `multibyte`: 354 files the backend lowers, 351 before it lowered inline
-  assembly (#147), and every explained difference of musl's) with
-  `--symbols-minimum 354`. `sqlite3.c`, which the backend once refused,
+  `multibyte`: 542 files the backend lowers, 354 before it took musl's
+  register variables, x87 operands and prefix statements, and 351 before it
+  lowered inline assembly at all (#147), with every explained difference of
+  musl's) with `--symbols-minimum 542`. `sqlite3.c`, which the backend once refused,
   compares too: at `d12fd583`, with one difference, inlined.
 - **`main.c`**, the compiler's own unit, with `build.sh`'s flags for a plain
   `-march=znver5` build, whatever the run's host, sanitizer and fuzzing: every

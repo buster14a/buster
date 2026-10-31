@@ -326,7 +326,9 @@ designs and the compilers already built this way.
   as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
   assembles it, by the checker's path, into records, branch columns,
   references and labels. The statement's code calls the result, a per-unit
-  helper; a template of no instructions, a barrier's, is no code at all. A
+  helper; a template of no instructions, a barrier's, is no code at all, but
+  one with x87 operands, whose helper passes them through the x87's stack as
+  clang's code does. A
   naked function's templates are its whole code. Templates' labels are local
   symbols, and the other names they refer to are the unit's symbols of those
   link names or undefined globals (`check_program_emit_asm_symbols`). A
@@ -786,7 +788,9 @@ designs and the compilers already built this way.
   consumer that does not repeat generic instruction validation), or reads them
   from the frame Tier 0 published, with no pass over the body
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
-  refuses, and realigned frames', whose `and rsp` and base's `mov` it checks);
+  refuses, and realigned frames', whose `and rsp` and base's `mov` it checks;
+  `unwind_tier0_frame_tails` with a function's tail calls' teardowns, #147,
+  each remembered and restored around its jump);
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
   batch. `check_program_emit` writes the C driver's unwind tables so, one
@@ -1119,7 +1123,10 @@ designs and the compilers already built this way.
   reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry, and so are
   variable-length arrays' allocations and the stack's saved and restored
-  positions, which give their function a frame pointer. An object, or a call's
+  positions, which give their function a frame pointer. A `TAIL_CALL` (#147's
+  musttail) calls its row as the function's return: its arguments where the
+  function's own arrived, the frame released, then a jump
+  (`Tier0Code.tail_records`). An object, or a call's
   outgoing area, aligned past 16 bytes realigns its function's frame (rbp the
   frame pointer, `and rsp` after the reservation, the frame's places rsp's or,
   where rsp moves, r15's, and its incoming places rbp's: docs/tier0.md's
@@ -1170,8 +1177,9 @@ designs and the compilers already built this way.
   dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
   jump through the function's one dispatch block, as clang's indirect gotos go,
   which keeps an interpreter's CFG linear), aggregates by value, variadic frames,
-  long double and `__int128`; it refuses vectors, `X86` rows and the frame
-  address (`FRAME_ADDRESS`), which no corpus function has. `test-ir` checks
+  long double and `__int128`; it refuses vectors, `X86` rows, the frame
+  address (`FRAME_ADDRESS`) and tail calls (`TAIL_CALL`), which no corpus
+  function has. `test-ir` checks
   independent fixtures, guarded columns, malformed inputs and allocation
   rollback; `test-ir-lowering` also executes generated IR (values, objects,
   indirect calls, records by value, the dynamic stack) against the typed-stream
@@ -2979,7 +2987,9 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
-  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
+  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC` or
+  a section has `SHF_GNU_RETAIN`, as the named sections' descriptors give a
+  third of `.data`'s named atoms);
   and it is compared with the representation, from which the test works out
   every section, symbol and relocation again, with its own tables of section
   formats and relocation types. Among them, every local-exec TLS reference
@@ -5867,7 +5877,15 @@ rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
 nothing, two parts or two parameters in one register, and registers outside
 the convention's, among them), and a function of value parameters in one
-register or outside the convention's. Every function must pass `tier0_validate`, both
+register or outside the convention's; then tail calls (#147, `tier0_tail_test.c`):
+a function per aggregate fixture that passes its parameters on to the probe by a
+`TAIL_CALL`, in five frames (plain, an `ALLOCA`'s frame pointer, saved registers
+across a call of a function that clobbers every register a call may, a realigned
+frame and one with a base), run natively from a driver: the probe must find the
+arguments where their locations say, the driver's slots past them, rsp and the
+callee-saved registers as the driver left them, and what it returns must reach
+the driver; and `tier0_validate` refusing each of the tail calls' rules once.
+Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`, and every record but an X86 entry's must have a form

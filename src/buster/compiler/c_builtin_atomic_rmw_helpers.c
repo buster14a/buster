@@ -6,10 +6,12 @@
 // published. This module does not touch a source object, publish a Link atom, dispatch source syntax or grant a
 // catalog capability. Rules, not implementation, from https://llvm.org/docs/Atomics.html#atomics-and-codegen .
 //
-// GNU exchange/fetch calls take (object, value_bits, order), clang's min/max ones too; GNU compare_exchange_n takes (object, expected_address,
-// desired_bits, weak, success_order, failure_order). Legacy fetch/exchange takes (object, value_bits), legacy CAS takes
-// (object, expected_VALUE_bits, desired_bits), and legacy release takes only object. Pointers and values use U64, order
-// and weak use I32. A bits result is zero-extended U64, a CAS boolean is U64 0/1 and release returns VOID. SysV's six GP
+// GNU exchange/fetch calls take (object, value_bits, order), clang's min/max and IEEE maximum/minimum ones too; GNU compare_exchange_n takes (object, expected_address,
+// desired_bits, weak, success_order, failure_order). Legacy fetch/exchange takes (object, value_bits), __sync_swap's and
+// clang's legacy minimum and maximum (__sync_fetch_and_min, _umin, _max and _umax) too, legacy CAS takes
+// (object, expected_VALUE_bits, desired_bits), and legacy release takes only object. GNU's byte flag, test_and_set and
+// clear, takes (object, order). Pointers and values use U64, order and weak use I32. A bits result is zero-extended U64,
+// a CAS boolean and test_and_set's U64 0/1, and release and clear return VOID. SysV's six GP
 // argument registers suffice. Every fixed source argument, including semantically unused valid orders/weak,
 // evaluates exactly once in the caller. Legacy ignored trailing arguments are not passed or evaluated by the call.
 // Source type/order/history/alias checks are the typed action's job. Strong CAS implements weak requests.
@@ -29,12 +31,19 @@
 // Arithmetic is raw modular integer/pointer arithmetic; the source producer supplies GNU's unscaled pointer delta.
 // clang's min and max (fetch_min, max_fetch, ...) keep the smaller or the larger of the object and the operand, in the
 // object's width: unsigned for INTEGER_BITS and BOOL_BITS, signed for SIGNED_BITS, which no other operation takes.
-// F32/F64 support is raw GNU exchange only: no numeric conversion, floating arithmetic, exceptions or errno handling.
+// clang's fetch_uinc and fetch_udec (atomicrmw uinc_wrap and udec_wrap) compare the object with the operand unsigned in
+// its width: 0 where it is at or above the operand and it plus one otherwise; the operand where it is 0 or above it,
+// and it less one otherwise. They keep BOOL_BITS' 0/1. test_and_set exchanges 1 into its byte and returns whether the
+// old byte wasn't 0; clear stores 0 as a legacy release does.
+// F32/F64 support is raw GNU exchange and clang's IEEE maximum and minimum (fetch_fmaximum, fetch_fmaximum_num,
+// fetch_fminimum and fetch_fminimum_num) only, the latter computed as LLVM's x86 expansion computes them
+// (cbuiltin_atomic_rmw_ieee_body): no numeric conversion, floating arithmetic or errno handling.
 // BOOL_BITS requires canonical 0/1 stored values and arguments; AND/OR/XOR, min/max, exchange/CAS and release preserve
-// that representation. Bool ADD/SUB/NAND and all floating arithmetic/CAS/min/max are explicitly unsupported here.
+// that representation. Bool ADD/SUB/NAND and floating arithmetic/CAS/min/max are explicitly unsupported here.
 //
 // Every call must remain an unknown-effect compiler barrier, including release. These leaves clobber only caller-
-// saved RAX/RDX/R8 and status flags, preserve callee-saved registers/RSP/FP controls, and need no stack or vector state.
+// saved RAX/RDX/R8 and status flags, the IEEE maximum and minimum XMM0 to XMM2 too and MXCSR's exception flags as
+// clang's code does (its DAZ read), preserve callee-saved registers/RSP/FP controls, and need no stack.
 // CAS branches consume ZF before it can be overwritten. Branch records have displacement zero and explicit record
 // index targets, for normal branch sizing before either encoder. No HLE, CX16, XCHG or XADD form is required.
 //
@@ -45,7 +54,7 @@
 #ifndef BUSTER_C_BUILTIN_ATOMIC_RMW_HELPERS_INCLUDED
 #define BUSTER_C_BUILTIN_ATOMIC_RMW_HELPERS_INCLUDED
 
-#define BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS 12u
+#define BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS 17u
 
 typedef enum CBuiltinAtomicRmwFormat
 {
@@ -82,6 +91,14 @@ typedef enum CBuiltinAtomicRmwOperation
     CBUILTIN_ATOMIC_RMW_RELEASE,
     CBUILTIN_ATOMIC_RMW_MIN,
     CBUILTIN_ATOMIC_RMW_MAX,
+    CBUILTIN_ATOMIC_RMW_UINC,
+    CBUILTIN_ATOMIC_RMW_UDEC,
+    CBUILTIN_ATOMIC_RMW_TEST_AND_SET,
+    CBUILTIN_ATOMIC_RMW_CLEAR,
+    CBUILTIN_ATOMIC_RMW_FMAXIMUM,
+    CBUILTIN_ATOMIC_RMW_FMAXIMUM_NUM,
+    CBUILTIN_ATOMIC_RMW_FMINIMUM,
+    CBUILTIN_ATOMIC_RMW_FMINIMUM_NUM,
 } CBuiltinAtomicRmwOperation;
 
 typedef struct CBuiltinAtomicRmwRecipe CBuiltinAtomicRmwRecipe;
@@ -100,7 +117,8 @@ static CBuiltinAtomicRmwOperation cbuiltin_atomic_rmw_operation(CBuiltinId id)
     switch (id)
     {
     case CBUILTIN_ATOMIC_EXCHANGE_N:
-    case CBUILTIN_SYNC_LOCK_TEST_AND_SET: operation = CBUILTIN_ATOMIC_RMW_EXCHANGE; break;
+    case CBUILTIN_SYNC_LOCK_TEST_AND_SET:
+    case CBUILTIN_SYNC_SWAP: operation = CBUILTIN_ATOMIC_RMW_EXCHANGE; break;
     case CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N:
     case CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP:
     case CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP: operation = CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE; break;
@@ -130,9 +148,21 @@ static CBuiltinAtomicRmwOperation cbuiltin_atomic_rmw_operation(CBuiltinId id)
     case CBUILTIN_SYNC_NAND_AND_FETCH: operation = CBUILTIN_ATOMIC_RMW_NAND; break;
     case CBUILTIN_SYNC_LOCK_RELEASE: operation = CBUILTIN_ATOMIC_RMW_RELEASE; break;
     case CBUILTIN_ATOMIC_FETCH_MIN:
-    case CBUILTIN_ATOMIC_MIN_FETCH: operation = CBUILTIN_ATOMIC_RMW_MIN; break;
+    case CBUILTIN_ATOMIC_MIN_FETCH:
+    case CBUILTIN_SYNC_FETCH_AND_MIN:
+    case CBUILTIN_SYNC_FETCH_AND_UMIN: operation = CBUILTIN_ATOMIC_RMW_MIN; break;
     case CBUILTIN_ATOMIC_FETCH_MAX:
-    case CBUILTIN_ATOMIC_MAX_FETCH: operation = CBUILTIN_ATOMIC_RMW_MAX; break;
+    case CBUILTIN_ATOMIC_MAX_FETCH:
+    case CBUILTIN_SYNC_FETCH_AND_MAX:
+    case CBUILTIN_SYNC_FETCH_AND_UMAX: operation = CBUILTIN_ATOMIC_RMW_MAX; break;
+    case CBUILTIN_ATOMIC_FETCH_UINC: operation = CBUILTIN_ATOMIC_RMW_UINC; break;
+    case CBUILTIN_ATOMIC_FETCH_UDEC: operation = CBUILTIN_ATOMIC_RMW_UDEC; break;
+    case CBUILTIN_ATOMIC_TEST_AND_SET: operation = CBUILTIN_ATOMIC_RMW_TEST_AND_SET; break;
+    case CBUILTIN_ATOMIC_CLEAR: operation = CBUILTIN_ATOMIC_RMW_CLEAR; break;
+    case CBUILTIN_ATOMIC_FETCH_FMAXIMUM: operation = CBUILTIN_ATOMIC_RMW_FMAXIMUM; break;
+    case CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM: operation = CBUILTIN_ATOMIC_RMW_FMAXIMUM_NUM; break;
+    case CBUILTIN_ATOMIC_FETCH_FMINIMUM: operation = CBUILTIN_ATOMIC_RMW_FMINIMUM; break;
+    case CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM: operation = CBUILTIN_ATOMIC_RMW_FMINIMUM_NUM; break;
     default: break;
     }
     return operation;
@@ -213,11 +243,63 @@ static void cbuiltin_atomic_rmw_cas(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId 
     }
 }
 
+// Whether an operation is clang's IEEE maximum or minimum, of a float or a double.
+static bool cbuiltin_atomic_rmw_ieee(CBuiltinAtomicRmwOperation operation)
+{
+    return operation >= CBUILTIN_ATOMIC_RMW_FMAXIMUM && operation <= CBUILTIN_ATOMIC_RMW_FMINIMUM_NUM;
+}
+
+// clang's IEEE maximum and minimum as LLVM's x86 expansion of llvm.maximum, llvm.minimum, llvm.maximumnum and
+// llvm.minimumnum computes them on every target without AVX10.2 (X86ISelLowering's LowerFMINIMUM_FMAXIMUM; the lowering
+// refuses the others, check_lower_helper): maxss or minss of the old value and the operand, which is the operand where
+// either is a NaN or both are zeros; the sign of the result cleared where the old value's is clear (maximum: the result
+// AND the old value OR'd with all but the sign) or set where it is set (minimum: OR'd with the old value's sign); and
+// where the old value is a NaN, it. The _num forms then take the operand where the old value is a NaN, and the old value
+// where the operand is one. A NaN result is so neither IEEE's quieted one nor of IEEE's sign. XMM1 holds the operand,
+// XMM0 the old value and XMM2 the computation; a NaN shows as ucomiss's unordered (PF), the instructions raising the
+// exceptions clang's code raises (maxss and minss raise invalid for any NaN, as its cmpunordss do for a signaling one).
+static void cbuiltin_atomic_rmw_ieee_body(CBuiltinAtomicRmwRecipe* recipe, CBuiltinAtomicRmwOperation operation, uint32_t bytes)
+{
+    const bool wide = bytes == 8;
+    const bool maximum = operation == CBUILTIN_ATOMIC_RMW_FMAXIMUM || operation == CBUILTIN_ATOMIC_RMW_FMAXIMUM_NUM;
+    const bool number = operation == CBUILTIN_ATOMIC_RMW_FMAXIMUM_NUM || operation == CBUILTIN_ATOMIC_RMW_FMINIMUM_NUM;
+    const uint16_t compare = wide ? X86_FORM_UCOMISD_X_XM64 : X86_FORM_UCOMISS_X_XM32;
+    const uint16_t select = maximum ? (wide ? X86_FORM_MAXSD_X_XM64 : X86_FORM_MAXSS_X_XM32) : (wide ? X86_FORM_MINSD_X_XM64 : X86_FORM_MINSS_X_XM32);
+    const uint16_t sign = maximum ? (wide ? X86_FORM_BTR_RM64_IMM8 : X86_FORM_BTR_RM32_IMM8) : (wide ? X86_FORM_BTS_RM64_IMM8 : X86_FORM_BTS_RM32_IMM8);
+    cbuiltin_atomic_rmw_register(recipe, wide ? X86_FORM_MOVQ_X_RM64 : X86_FORM_MOVD_X_RM32, 0, X86_REGISTER_RAX);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOVAPS_X_XM, 2, 0);
+    cbuiltin_atomic_rmw_register(recipe, select, 2, 1);
+    cbuiltin_atomic_rmw_register(recipe, wide ? X86_FORM_MOVQ_RM64_X : X86_FORM_MOVD_RM32_X, 2, X86_REGISTER_RDX);
+    // The result's sign: R8 the result with it cleared (maximum) or set (minimum), taken where the old value's sign is clear
+    // (maximum) or set (minimum).
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R64_RM64, X86_REGISTER_R8, X86_REGISTER_RDX);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = sign, .rm = X86_REGISTER_R8, .immediate = wide ? 63 : 31 });
+    cbuiltin_atomic_rmw_register(recipe, wide ? X86_FORM_TEST_RM64_R64 : X86_FORM_TEST_RM32_R32, X86_REGISTER_RAX, X86_REGISTER_RAX);
+    cbuiltin_atomic_rmw_register(recipe, maximum ? X86_FORM_CMOVNS_R64_RM64 : X86_FORM_CMOVS_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R8);
+    // A NaN old value: itself, or in the _num forms the operand, which a NaN operand then gives way to the old value.
+    cbuiltin_atomic_rmw_register(recipe, compare, 0, 0);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVP_R64_RM64, X86_REGISTER_RDX, number ? X86_REGISTER_RSI : X86_REGISTER_RAX);
+    if (number)
+    {
+        cbuiltin_atomic_rmw_register(recipe, compare, 1, 1);
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVP_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RAX);
+    }
+}
+
 static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId id, CBuiltinAtomicRmwOperation operation, uint32_t bytes, bool is_signed)
 {
     cbuiltin_atomic_rmw_memory(recipe, cbuiltin_atomic_rmw_load_form(bytes), X86_REGISTER_RAX, X86_REGISTER_RDI);
+    if (cbuiltin_atomic_rmw_ieee(operation))
+    {
+        // The operand's bits in XMM1, once.
+        cbuiltin_atomic_rmw_register(recipe, bytes == 8 ? X86_FORM_MOVQ_X_RM64 : X86_FORM_MOVD_X_RM32, 1, X86_REGISTER_RSI);
+    }
     recipe->target = recipe->count;
-    if (operation == CBUILTIN_ATOMIC_RMW_EXCHANGE)
+    if (cbuiltin_atomic_rmw_ieee(operation))
+    {
+        cbuiltin_atomic_rmw_ieee_body(recipe, operation, bytes);
+    }
+    else if (operation == CBUILTIN_ATOMIC_RMW_EXCHANGE)
     {
         cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RSI);
     }
@@ -231,6 +313,35 @@ static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId
         cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RAX);
         cbuiltin_atomic_rmw_register(recipe, compare, X86_REGISTER_RSI, X86_REGISTER_RDX);
         cbuiltin_atomic_rmw_register(recipe, move, X86_REGISTER_RDX, X86_REGISTER_RSI);
+    }
+    else if (operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET)
+    {
+        // 1 exchanged into the byte.
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RDX, .immediate = 1 });
+    }
+    else if (operation == CBUILTIN_ATOMIC_RMW_UINC || operation == CBUILTIN_ATOMIC_RMW_UDEC)
+    {
+        // The value plus one (uinc) or less one (udec), then compared with the operand unsigned in the object's width: 0
+        // where the value is at or above it (uinc), and the operand where the value is above it or 0 (udec). R8 holds the
+        // increment's 0, cleared before the compare whose flags the move reads.
+        const bool increment = operation == CBUILTIN_ATOMIC_RMW_UINC;
+        const uint16_t compare = bytes == 1 ? X86_FORM_CMP_RM8_R8 : bytes == 2 ? X86_FORM_CMP_RM16_R16 : bytes == 4 ? X86_FORM_CMP_RM32_R32 : X86_FORM_CMP_RM64_R64;
+        const uint16_t test = bytes == 1 ? X86_FORM_TEST_RM8_R8 : bytes == 2 ? X86_FORM_TEST_RM16_R16 : bytes == 4 ? X86_FORM_TEST_RM32_R32 : X86_FORM_TEST_RM64_R64;
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RAX);
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = increment ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8, .rm = X86_REGISTER_RDX, .immediate = 1 });
+        if (increment)
+        {
+            cbuiltin_atomic_rmw_register(recipe, X86_FORM_XOR_RM32_R32, X86_REGISTER_R8, X86_REGISTER_R8);
+            cbuiltin_atomic_rmw_register(recipe, compare, X86_REGISTER_RSI, X86_REGISTER_RAX);
+            cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVAE_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R8);
+        }
+        else
+        {
+            cbuiltin_atomic_rmw_register(recipe, compare, X86_REGISTER_RSI, X86_REGISTER_RAX);
+            cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVA_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RSI);
+            cbuiltin_atomic_rmw_register(recipe, test, X86_REGISTER_RAX, X86_REGISTER_RAX);
+            cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVE_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RSI);
+        }
     }
     else
     {
@@ -265,6 +376,13 @@ static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId
     {
         cbuiltin_atomic_rmw_register(recipe, cbuiltin_atomic_rmw_load_form(bytes), X86_REGISTER_RAX, X86_REGISTER_RDX);
     }
+    else if (operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET)
+    {
+        // Whether the byte was set: its old value isn't 0.
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_TEST_RM8_R8, X86_REGISTER_RAX, X86_REGISTER_RAX);
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_SETNE_RM8, .rm = X86_REGISTER_RAX });
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOVZX_R32_RM8, X86_REGISTER_RAX, X86_REGISTER_RAX);
+    }
 }
 
 static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helper_emit(CBuiltinId id, uint32_t bytes, CBuiltinAtomicRmwFormat format, Arena* output)
@@ -274,15 +392,20 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
     const CBuiltinAtomicRmwOperation operation = cbuiltin_atomic_rmw_operation(id);
     const bool width = bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8;
     const bool ordered = operation == CBUILTIN_ATOMIC_RMW_MIN || operation == CBUILTIN_ATOMIC_RMW_MAX;
-    const bool integer = format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS || (ordered && format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS);
-    const bool boolean = format == CBUILTIN_ATOMIC_RMW_BOOL_BITS && bytes == 1 && operation != CBUILTIN_ATOMIC_RMW_ADD &&
+    // The IEEE maximum and minimum take a float's or a double's bits alone, and GNU's exchange those too.
+    const bool ieee = cbuiltin_atomic_rmw_ieee(operation);
+    const bool integer = !ieee && (format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS || (ordered && format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS));
+    const bool boolean = !ieee && format == CBUILTIN_ATOMIC_RMW_BOOL_BITS && bytes == 1 && operation != CBUILTIN_ATOMIC_RMW_ADD &&
                          operation != CBUILTIN_ATOMIC_RMW_SUB && operation != CBUILTIN_ATOMIC_RMW_NAND;
-    const bool floating = id == CBUILTIN_ATOMIC_EXCHANGE_N && ((format == CBUILTIN_ATOMIC_RMW_F32_BITS && bytes == 4) ||
+    const bool floating = (id == CBUILTIN_ATOMIC_EXCHANGE_N || ieee) && ((format == CBUILTIN_ATOMIC_RMW_F32_BITS && bytes == 4) ||
                           (format == CBUILTIN_ATOMIC_RMW_F64_BITS && bytes == 8));
-    if (operation != CBUILTIN_ATOMIC_RMW_NONE && width && (integer || boolean || floating))
+    // GNU's byte flag (test_and_set and clear) is of one byte, and a clear stores 0 as a legacy release does.
+    const bool byte = operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET || operation == CBUILTIN_ATOMIC_RMW_CLEAR;
+    const bool store = operation == CBUILTIN_ATOMIC_RMW_RELEASE || operation == CBUILTIN_ATOMIC_RMW_CLEAR;
+    if (operation != CBUILTIN_ATOMIC_RMW_NONE && width && (integer || boolean || floating) && (!byte || bytes == 1))
     {
         CBuiltinAtomicRmwRecipe recipe = { 0 };
-        if (operation == CBUILTIN_ATOMIC_RMW_RELEASE)
+        if (store)
         {
             cbuiltin_atomic_rmw_register(&recipe, X86_FORM_XOR_RM32_R32, X86_REGISTER_RDX, X86_REGISTER_RDX);
             const uint16_t store = bytes == 1 ? X86_FORM_MOV_RM8_R8 : bytes == 2 ? X86_FORM_MOV_RM16_R16 :
@@ -305,8 +428,7 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
         }
         else
         {
-            const bool branched = operation != CBUILTIN_ATOMIC_RMW_RELEASE &&
-                                  (operation != CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE || id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N);
+            const bool branched = !store && (operation != CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE || id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N);
             const uint64_t record_bytes = (uint64_t)recipe.count * sizeof(X86Instruction);
             const uint64_t branch_bytes = branched ? sizeof(uint32_t) : 0;
             uint8_t* storage = output != NULL ? arena_push_array(output, record_bytes + 2 * branch_bytes, 1, _Alignof(X86Instruction)) : NULL;
@@ -328,17 +450,20 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
                     result.code.branch_count = 1;
                 }
                 result.code.error = TIER0_OK;
-                const bool gnu = (id >= CBUILTIN_ATOMIC_EXCHANGE_N && id <= CBUILTIN_ATOMIC_NAND_FETCH) || ordered;
+                // The GNU builtins take an order (the byte flag's its second argument), the legacy ones (__sync_fetch_and_min's
+                // minimum too) none.
+                const bool gnu = (id >= CBUILTIN_ATOMIC_EXCHANGE_N && id <= CBUILTIN_ATOMIC_NAND_FETCH) ||
+                                 (id >= CBUILTIN_ATOMIC_FETCH_MIN && id <= CBUILTIN_ATOMIC_FETCH_UDEC) || ieee;
                 result.parameter_count = operation == CBUILTIN_ATOMIC_RMW_RELEASE ? 1 : id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N ? 6 :
-                                         operation == CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE || gnu ? 3 : 2;
-                result.result_class = operation == CBUILTIN_ATOMIC_RMW_RELEASE ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64;
+                                         byte ? 2 : operation == CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE || gnu ? 3 : 2;
+                result.result_class = store ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64;
                 for (uint32_t i = 0; i < result.parameter_count; i += 1)
                 {
                     result.parameter_classes[i] = BUSTER_TYPED_CLASS_U64;
                 }
-                if (gnu)
+                if (gnu || byte)
                 {
-                    const uint32_t first_order = id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N ? 3 : 2;
+                    const uint32_t first_order = id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N ? 3 : byte ? 1 : 2;
                     for (uint32_t i = first_order; i < result.parameter_count; i += 1)
                     {
                         result.parameter_classes[i] = BUSTER_TYPED_CLASS_I32;

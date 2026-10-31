@@ -1543,6 +1543,48 @@ BUSTER_INLINE bool parse_scalar_standard_attribute(const ParseScalar* parser, ui
     return parser->kinds[token] == PARSE_KIND_L_SQUARE && parser->kinds[token + 1] == PARSE_KIND_L_SQUARE;
 }
 
+// The token after a block item's attribute specifiers from `token`, C23's ([[ and its brackets, balanced) and GNU's
+// (__attribute__ and its parentheses, balanced), or the count: what decides whether C23 attributes there start a statement
+// (parse_scalar_keyword_statement). A lookahead over the attributes alone, which a block item has few of.
+static uint32_t parse_scalar_after_attributes(const ParseScalar* parser, uint32_t token)
+{
+    uint32_t at = token;
+    bool more = true;
+    while (more && at + 1 < parser->count)
+    {
+        const bool standard = parse_scalar_standard_attribute(parser, at);
+        more = standard || parser->kinds[at] == PARSE_KIND_ATTRIBUTE;
+        if (more)
+        {
+            const uint8_t open = standard ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_PAREN;
+            const uint8_t close = standard ? PARSE_KIND_R_SQUARE : PARSE_KIND_R_PAREN;
+            uint32_t depth = 0;
+            uint32_t k = standard ? at : at + 1;
+            bool inside = true;
+            while (inside && k < parser->count)
+            {
+                depth += parser->kinds[k] == open ? 1 : 0;
+                depth -= parser->kinds[k] == close && depth != 0 ? 1 : 0;
+                k += 1;
+                inside = depth != 0;
+            }
+            at = k;
+        }
+    }
+    return at;
+}
+
+// Whether `token` is a statement's keyword (or a compound statement's brace), after which C23 attributes at a block item
+// are the statement's, as clang reads them, rather than a declaration's. A null statement's `;` isn't one: C23 attributes
+// before it read as a declaration's, which the checker takes as the null statement's (fallthrough's).
+static bool parse_scalar_keyword_statement(const ParseScalar* parser, uint32_t token)
+{
+    const uint8_t kind = token < parser->count ? parser->kinds[token] : PARSE_KIND_SEMI;
+    return kind == PARSE_KIND_RETURN || kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
+           kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CASE ||
+           kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE;
+}
+
 BUSTER_INLINE void parse_scalar_bind_name(ParseScalar* parser, uint32_t name, uint8_t meaning)
 {
     parser->log_names[parser->log_count] = name;
@@ -2808,6 +2850,13 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
             frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
         }
+        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_keyword_statement(parser, parse_scalar_after_attributes(parser, i)))
+        {
+            // C23 attributes before a statement's keyword, which clang reads as that statement's (#147's
+            // [[clang::musttail]] return): read as GNU's are at a block item, the keyword after them deciding.
+            parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
+            frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+        }
         else if ((parse_scalar_starts_declaration(parser, i, true) || kind == PARSE_KIND_STATIC_ASSERT) && waiting && !labeled)
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_EXPRESSION, BUSTER_PARSE_AT_TOKEN);
@@ -2846,6 +2895,10 @@ static void parse_scalar_block_attribute(ParseScalar* parser, uint32_t i, ParseF
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
         frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
+    }
+    else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_keyword_statement(parser, parse_scalar_after_attributes(parser, i)))
+    {
+        parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
     }
     else
     {

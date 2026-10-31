@@ -262,7 +262,8 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
     }
     effect |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP || builtin == CBUILTIN_PREFETCH ||
               builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET || builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA);
-    effect |= op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_NONTEMPORAL_STORE;
+    effect |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
+                                                builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
     effect |= op == CHECK_OP_BUILTIN_FLOAT && check_builtin_math_kind(builtin) == CHECK_BUILTIN_MATH_SQRT;
     const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
                              (op == CHECK_OP_BUILTIN_FLOAT && builtin >= CBUILTIN_NAN && builtin <= CBUILTIN_NANL) ||

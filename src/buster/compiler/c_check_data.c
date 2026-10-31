@@ -23,7 +23,9 @@
 // demand still complete. Such a payload is never published. All type, constant, symbol, duplicate, binding and
 // capacity checks precede Link publication. A failed call leaves Link (including its error), symbols and byte length
 // unchanged. Empty batches accept null input arrays. Records may be partitioned into batches only when local
-// forward-reference definitions remain in the same batch or were published earlier.
+// forward-reference definitions remain in the same batch or were published earlier. A local target the program
+// defines after the batch, at another definition's place, is marked as the program's (BUSTER_LINK_SOURCE_PROGRAM)
+// without an atom yet: an alias's symbol (#147, check_program_define_aliases), which link_check holds to its atom.
 //
 // The batch boundary preserves independent object work and avoids reparsing, interning or name lookup. Planning
 // encodes each subobject once, applies source-order replacements and counts final output; publication uses existing
@@ -1159,7 +1161,8 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
                 const AtomId atom = link->symbols.atom[target];
                 const bool defined_here = (definitions[target / 64] & (UINT64_C(1) << (target % 64))) != 0;
                 const bool same_unit = atom != 0 && atom < link->atoms.count && link->atoms.unit[atom] == unit;
-                if (!defined_here && !same_unit)
+                const bool later = atom == 0 && link->symbols.source[target] == BUSTER_LINK_SOURCE_PROGRAM;
+                if (!defined_here && !same_unit && !later)
                 {
                     result->status = CHECK_DATA_SYMBOL;
                     result->failed_record = i;

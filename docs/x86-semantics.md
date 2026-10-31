@@ -662,7 +662,8 @@ Mutations of the tables, each built and run once, are caught. Among them:
     multiply-adds (vfmadd213, vfmadd231, vfmsub231, vfmaddsub213,
     vfmaddsub231, vfmsubadd231) and AVX512-FP16's complex multiplies (vfmulc,
     vfcmulc, vfmaddc, vfcmaddc); the approximations (vrcp, vrsqrt, their 14-bit
-    and half-precision forms); vgetexp, vscalef and vrndscale; AVX512BF16's
+    and half-precision forms); vgetexp, vscalef and vrndscale; vgetmant,
+    vreduce, vrange and vfixupimm in ps, pd, ss and sd; AVX512BF16's
     vdpbf16ps;
   - the conversions: between floating formats (vcvtss2sd, vcvtsd2ss,
     vcvtpd2ps, the half-precision ones, F16C's vcvtph2ps and vcvtps2ph,
@@ -672,13 +673,16 @@ Mutations of the tables, each built and run once, are caught. Among them:
     uw to ph);
   - the compares: vcmp (VEX's into a vector, EVEX's into an opmask), vcomis
     and vucomis into the flags, vpcmp and vpcmpu in b, w, d and q, vpcmpeqb,
-    vptestm and vptestnm, vp2intersectd and vp2intersectq; the tests into the
-    flags: vptest, vtestps, vtestpd, kortest and ktest;
+    vptestm and vptestnm, vp2intersectd and vp2intersectq, and the classes into
+    an opmask, vfpclass in ps, pd, ss and sd; the tests into the flags: vptest,
+    vtestps, vtestpd, kortest and ktest;
   - integer arithmetic: vpadd and vpsub in b, w, d and q and their
     saturating forms (vpadds, vpaddus, vpsubs, vpsubus in b and w), vpmin and
     vpmax (signed and unsigned, b, w, d and q), vpabs, vpavgb and vpavgw,
     vpmaddwd, vpmaddubsw, vpmullw, vpmulld, vpmullq, vpmulhw, vpmulhuw,
-    vpmulhrsw, vpmuldq, vpmuludq, vpsadbw, the horizontal vphadd and vphsub
+    vpmulhrsw, vpmuldq, vpmuludq, vpsadbw, vdbpsadbw, VEX's vmpsadbw (and
+    AVX10.2's of 64 bytes), vpclmulqdq (VEX's and EVEX's), the horizontal
+    vphadd and vphsub
     (w, d, sw), vpsign, vphminposuw, vpconflictd, vpconflictq, vplzcntd,
     vplzcntq, vpopcnt (b, w, d, q), vpmultishiftqb,
     and the accumulating dot products (AVX512VNNI's and AVX-VNNI's vpdpbusd,
@@ -687,16 +691,19 @@ Mutations of the tables, each built and run once, are caught. Among them:
   - the logic: vpandq, vporq, vpxorq, vpternlogd and vpternlogq;
   - the shifts: vpsll, vpsrl and vpsra in w, d and q, by an immediate and by an
     XMM register's count, vpsraq, the variable ones (vpsllv, vpsrlv, vpsrav in
-    w, d and q), vpslldq, vpsrldq, vprold, and AVX512VBMI2's concatenating
-    vpshldv and vpshrdv (w, d, q);
+    w, d and q), vpslldq, vpsrldq, the rotates by an immediate (vprold,
+    vprolq, vprord, vprorq), and AVX512VBMI2's concatenating vpshldv and
+    vpshrdv, and vpshld and vpshrd by an immediate (w, d, q);
   - the moves of elements: the permutes (vpermb, vpermw, vpermd, vpermq,
-    vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd),
-    vpshufb, vpshufd, vpshuflw, vpshufhw, vshufps, vpalignr, valignd, valignq,
-    vshufi32x4, vshufi64x2, the broadcasts
+    vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd,
+    and VEX's vperm2f128 and vperm2i128), vpshufb, vpshufd, vpshuflw,
+    vpshufhw, vshufps, vshufpd, vpalignr, valignd, valignq, vshuff32x4,
+    vshuff64x2, vshufi32x4, vshufi64x2, VEX's blends by an immediate
+    (vblendps, vblendpd, vpblendd, vpblendw), the broadcasts
     (vbroadcastss, vbroadcastsd, vpbroadcast in b, w, d and q, from a general
-    register too), the inserts and extracts (vinserti32x4, vinserti64x4,
-    vinsertf64x4, vextract in f32x4, f64x4, i32x4 and i64x4, vpinsr and vpextr
-    in b, w, d, q), the packs (vpacksswb,
+    register too), the inserts and extracts (vinsert and vextract in f32x4,
+    f32x8, f64x2, f64x4, i32x4, i32x8, i64x2 and i64x4, vinsertps, vpinsr and
+    vpextr in b, w, d, q), the packs (vpacksswb,
     vpackssdw, vpackuswb, vpackusdw), the narrowing moves (vpmov, vpmovs and
     vpmovus from d and q to b, w and d, and from w to b) and the widening ones
     (vpmovzx and vpmovsx from b, w and d), and the compresses
@@ -710,9 +717,10 @@ Mutations of the tables, each built and run once, are caught. Among them:
   - gathers and scatters: vpgatherdd, vpgatherdq, vpgatherqq, vpscatterdd,
     vpscatterqd, vpscatterqq (VEX and EVEX);
   - AES and GF(2^8): vaesenc, vaesenclast, vaesdec, vaesdeclast, vaesimc,
-    vgf2p8affineqb, vgf2p8mulb;
+    vgf2p8affineqb, vgf2p8affineinvqb, vgf2p8mulb;
   - the opmask registers: kmov (to and from general registers, memory and each
-    other), kand, kandn, kor, kxor, kxnor, kadd, knot, kunpck and kshiftl;
+    other), kand, kandn, kor, kxor, kxnor, kadd, knot, kunpck, kshiftl and
+    kshiftr;
   - BMI's andn, bextr, bzhi, pdep and pext (their VEX forms), paddd (SSE2's,
     the vector check's) and prefetchit0 and prefetchit1;
   - AMD's XOP (#136): vfrczps, vfrczpd, vfrczss and vfrczsd (whose scalar

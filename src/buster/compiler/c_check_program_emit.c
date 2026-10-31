@@ -8,7 +8,8 @@
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers, only
 // when the selected program has a body: its helpers also come only from those bodies. Data-only links need no tables.
-// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame), at
+// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame, and
+// its tail calls' teardowns with unwind_tier0_frame_tails, #147), at
 // its records' ends after branch sizing, written after the last function (unwind_write) as one EH_FRAME atom, a CIE
 // and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with `verify`,
 // each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
@@ -45,6 +46,11 @@ struct CheckProgramCode
     AtomId* asm_atoms;
     ObjectAtomSection* asm_sections;
     uint32_t asm_atom_count;
+    // GNU's retain attribute (#147): the symbols of the program whose declarations have one before their definitions, in
+    // symbol order, whose definitions -c's object puts in sections of their own with SHF_GNU_RETAIN
+    // (check_program_sections); none in a unit without one.
+    SymbolId* retained_symbols;
+    uint32_t retained_count;
     CheckProgramStatus status;
     Tier0Error backend_error;
     uint32_t token;
@@ -449,13 +455,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint64_t rows = run->sources ? (uint64_t)code->entry_count + 2 + BUSTER_CHECK_DEBUG_SLACK : 0;
     body->row_offsets = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
+    // Its tail calls' unwind events (#147, unwind_tier0_frame_tails), which the tables read once the lanes are done.
+    const uint64_t tail_room = run->unwind && naked == 0 && code->tail_count != 0 ? unwind_tier0_tail_room(code) : 0;
+    uint32_t* tails = tail_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, tail_room) : 0;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0));
+                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0)) &&
+                 (tail_room == 0 || tails != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     if (valid && run->verify && x86_validate(code->records, code->count) != code->count)
     {
@@ -494,7 +504,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // A prologue or epilogue that isn't the frame Tier 0 published is the compiler's own failure; and with --verify,
             // so is a frame the analyzer proves otherwise from the records, where it takes the function (a fixed frame's,
             // and not a computed goto's).
-            valid = length <= INT32_MAX && unwind_tier0_frame(code, offsets, (uint32_t)length, &run->frames[b]) == UNWIND_OK;
+            valid = length <= INT32_MAX && unwind_tier0_frame_tails(code, offsets, (uint32_t)length, &run->frames[b], tails) == UNWIND_OK;
             UnwindFunction proven;
             const UnwindError analyzed = !valid || !run->verify ? UNWIND_ERROR_UNSUPPORTED :
                                          run->scalar ? unwind_tier0_scalar(code, offsets, (uint32_t)length, &proven) :
@@ -982,7 +992,8 @@ static uint64_t check_program_emit_marked(const Tier0Code* code)
 // shared library's, which the direct path, without copy relocations, reaches only through its GOT slot (an executable's
 // writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
 // another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
-// check_data_prepare selects them), its literals and whatever has no external linkage. The emission's column
+// check_data_prepare selects them), its aliases and ifuncs (#147), its literals and whatever has no external linkage
+// but a weakref's own symbol, a weak reference to another's name (check_program_alias_external). The emission's column
 // (check_program_emit_lanes) and check_program_access's share it. The objects it defines are found among the tokens
 // that define or tentatively define, few of a unit's (#592), 64 at a time (the scalar path, `scalar`, takes every token).
 static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, bool scalar)
@@ -1013,12 +1024,22 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
             }
         }
     }
+    // GNU's aliases and ifuncs are definitions of the unit's (#147), whose symbols the emission defines at their bases.
+    for (uint32_t k = 0; k < program->alias_count; k += 1)
+    {
+        defined[program->aliases[k].object] |= program->aliases[k].kind != CHECK_PROGRAM_WEAKREF;
+    }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
         const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
-        const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
+        // A weakref's own symbol (one without a target in the unit) is a weak reference to another's name, and so is a
+        // weakref's target of internal linkage that the unit doesn't define and refers to through weakrefs alone.
+        const bool internal = !literal && !defined[object] && program->input->linkage[declaration] != 2;
+        const bool external = internal && program->alias_count != 0 &&
+                              (check_program_alias_external(program, object) || check_program_alias_weak_target(program, object));
+        const bool own = literal || defined[object] || (program->input->linkage[declaration] != 2 && !external);
         const bool thread_local = !literal && program->input->thread_local[declaration];
         access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
     }
@@ -1051,8 +1072,9 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
             const uint32_t symbol = lowered->runtime_symbols[runtime];
+            // The C library's and libm's functions are a shared library's, which the GOT reaches.
             access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ||
-                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX)
+                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX) || runtime >= BUSTER_CHECK_LOWER_LIBM_FIRST
                                  ? BUSTER_TIER0_ACCESS_GOT
                                  : BUSTER_TIER0_ACCESS_DIRECT;
         }
@@ -1436,27 +1458,33 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     valid = valid && check_program_emit_file_asm(&file_asm, result, program, scalar, bytes, output, scratch);
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
-    uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
     // Each symbol's weak binding, and its constructor's and destructor's priorities (#147), two a symbol, each plus one (0
     // for none), with the declaration whose attribute gave it: the latest declaration's first, as clang takes it.
     uint8_t* weak = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     uint32_t* structors = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
     uint32_t* structor_tokens = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
-    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0;
+    // Each symbol's alias, ifunc or weakref (#147), its entry plus one: an alias's or ifunc's own symbol, and a weakref's
+    // own one (a weak reference to its name); none in a unit without them. And whether a retain attribute (#147) keeps
+    // its definition's section.
+    uint32_t* symbol_aliases = valid && program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
+    uint8_t* retained = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    bool retaining = false;
+    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
     const uint64_t attributes_mark = scratch->length;
     uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
+    valid = valid && alignments != 0 && symbol_names != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(weak, 0, (uint64_t)program->symbol_count + 1);
+        memset(retained, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
-        // declaration's attributes and keeps parameters' retain/alias obligations as well as static declarations'.
+        // declaration's attributes and keeps parameters' retain obligations as well as static declarations'.
         uint32_t attributed = 0;
         for (uint32_t first = 0; first < program->input->token_count; first += 8)
         {
@@ -1467,23 +1495,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 if (program->input->declarations[token] == token && program->input->attributes[token] != NULL)
                 {
                     declared[attributed++] = token;
-                    const uint32_t object = program->input->objects[token];
-                    if (object != 0 && object < program->object_count)
-                    {
-                        retained_objects[object] = 0;
-                    }
                 }
-            }
-        }
-        for (uint32_t d = 0; d < attributed; d += 1)
-        {
-            const uint32_t token = declared[d];
-            const uint32_t object = program->input->objects[token];
-            if (object != 0 && object < program->object_count)
-            {
-                bool gnu_inline = false;
-                retained_objects[object] |= check_program_attribute_roots(program->input->attributes[token],
-                    program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
         // The first emitted variable under active #pragma clang section object settings, or BUSTER_CHECK_NONE (#619).
@@ -1505,7 +1517,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint32_t object = program->input->objects[token];
             if (object != 0 && object < program->object_count)
             {
-                const SymbolId symbol = program->object_symbols[object];
+                // The object's own symbol: a referenced weakref's is its target's (#147), which its attributes don't touch.
+                const SymbolId taken = program->object_symbols[object];
+                const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];
                 for (uint32_t i = 0; valid && i < attributes->count; i += 1)
                 {
@@ -1538,20 +1552,62 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         structors[structor] = (uint32_t)(priority < 65535 ? priority : 65535) + 1;
                         structor_tokens[structor] = token;
                     }
-                    const bool alias = kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC;
-                    const bool visible_alias = alias && (symbol != 0 || program->input->linkage[token] == 2 || retained_objects[object]);
-                    const bool unpublished = kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN || kind == CHECK_ATTRIBUTE_COMMON;
-                    if (!attribute->ignored && (visible_alias || (symbol != 0 && unpublished)))
+                    // A retain attribute keeps an emitted definition's section (the reader ignores one after the
+                    // definition), and makes it one of its own (check_program_sections).
+                    retained[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_RETAIN;
+                    retaining |= retained[symbol];
+                    if (!attribute->ignored && symbol != 0 && kind == CHECK_ATTRIBUTE_COMMON)
                     {
-                        // The typed source contract retains these obligations. Until symbol aliases, weak references to
-                        // other names, retained sections and common symbols are published, refusing code emission is
-                        // required. A dropped definition has no object-format obligation of its own.
+                        // The typed source contract retains this obligation. Until common symbols (SHN_COMMON), which
+                        // neither the link representation nor the object writer has, are published, refusing code
+                        // emission is required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (alias, ifunc, weakref, retain or common)";
+                        result->reason = "this attribute (common)";
                         result->token = attribute->name_token;
                         valid = false;
                     }
                 }
+            }
+        }
+        // GNU's alias, ifunc and weakref attributes (#147): each entry's own symbol, and its name where it is a weakref's,
+        // a weak reference to its target's name; a weakref's target's undefined symbol is weak where the unit refers to it
+        // through weakrefs alone (BUSTER_CHECK_PROGRAM_ALIAS_WEAK). An alias or ifunc clang's code generation refuses (the
+        // driver reports its error before the emission: check_driver_aliases), or one the emission doesn't take, is
+        // refused at its attribute, in source order.
+        if (symbol_aliases != 0)
+        {
+            memset(symbol_aliases, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
+        }
+        uint32_t refused = BUSTER_CHECK_NONE;
+        for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
+        {
+            const CheckProgramAlias* alias = program->aliases + k;
+            const SymbolId taken = program->object_symbols[alias->object];
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == alias->object ? taken : 0;
+            const uint8_t state = program->alias_states[k];
+            const bool failed = alias->error != CHECK_PROGRAM_ALIAS_OK || (state & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0 ||
+                                (alias->kind != CHECK_PROGRAM_WEAKREF && alias->base == 0);
+            refused = failed && alias->attribute < refused ? alias->attribute : refused;
+            if (symbol != 0)
+            {
+                symbol_aliases[symbol] = k + 1;
+                symbol_names[symbol] = alias->kind == CHECK_PROGRAM_WEAKREF ? alias->target : symbol_names[symbol];
+            }
+            const SymbolId target = alias->kind == CHECK_PROGRAM_WEAKREF && alias->target_object != 0 ? program->object_symbols[alias->target_object] : 0;
+            weak[target] |= target != 0 && (state & BUSTER_CHECK_PROGRAM_ALIAS_WEAK) != 0 && !defined[alias->target_object];
+        }
+        for (uint32_t k = 0; valid && refused != BUSTER_CHECK_NONE && k < program->alias_count; k += 1)
+        {
+            const CheckProgramAlias* alias = program->aliases + k;
+            if (alias->attribute == refused)
+            {
+                result->status = CHECK_PROGRAM_UNSUPPORTED;
+                result->reason = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL ? "an alias whose thread-local storage isn't its definition's" :
+                                 alias->error == CHECK_PROGRAM_ALIAS_DEFINED ? "an alias variable that the unit also defines tentatively" :
+                                 alias->kind == CHECK_PROGRAM_WEAKREF ? "a weakref without a target" :
+                                                                         "an alias or ifunc that clang's code generation refuses";
+                result->token = refused;
+                valid = false;
             }
         }
         // A variable under active #pragma clang section object settings (#619) is refused, where no attribute's refusal
@@ -1566,6 +1622,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, attributes_mark);
+    // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
+    // retain attribute for the counting pass to look for.
+    uint32_t retained_count = 0;
+    for (uint32_t s = 1; valid && retaining && s <= program->symbol_count; s += 1)
+    {
+        retained_count += retained[s];
+    }
+    result->retained_symbols = valid && retained_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, retained_count) : 0;
+    valid = valid && (retained_count == 0 || result->retained_symbols != 0);
+    for (uint32_t s = 1; valid && retained_count != 0 && s <= program->symbol_count; s += 1)
+    {
+        if (retained[s])
+        {
+            result->retained_symbols[result->retained_count++] = s;
+        }
+    }
     // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
     // asm labels (which override mangling), before external binding, static-local naming and object publication.
     CheckMangleSource mangling = {
@@ -1675,7 +1747,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
-        if (declaration != BUSTER_CHECK_NONE && !program->input->compound_objects[declaration] && !defined[object] && program->input->linkage[declaration] == 2)
+        // A weakref's own symbol (#147) refers to its name, which symbol_names holds, and a weakref's target referred to
+        // through weakrefs alone is weak whatever its linkage.
+        const bool weakref = symbol_aliases != 0 && symbol_aliases[s + 1] != 0 && program->aliases[symbol_aliases[s + 1] - 1].kind == CHECK_PROGRAM_WEAKREF;
+        if (declaration != BUSTER_CHECK_NONE && !program->input->compound_objects[declaration] && !defined[object] &&
+            (program->input->linkage[declaration] == 2 || weakref || weak[s + 1]))
         {
             const uint32_t identifier = parser->tokens.names[declaration];
             externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
@@ -1825,11 +1901,25 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
-            flags = kind | (program->input->linkage[declaration] != 2 ? BUSTER_LINK_SYMBOL_LOCAL : weak[s + 1] ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL);
+            // Weak where a weak attribute makes it so, or a weakref's target that the unit doesn't define is referred to
+            // through weakrefs alone (#147), whatever linkage its own declarations give it (the reader refuses weak on
+            // one of internal linkage).
+            flags = kind | (program->input->linkage[declaration] != 2 && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
+                            weak[s + 1]                                      ? BUSTER_LINK_SYMBOL_WEAK :
+                                                                               BUSTER_LINK_SYMBOL_GLOBAL);
             if (program->input->linkage[declaration] == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
             {
                 flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
             }
+            // An alias's symbol (#147) has its entry's type with its own binding and visibility; an ifunc's is global
+            // whatever its declaration's linkage or weak attribute, as clang gives every ifunc external linkage; and a
+            // weakref's own one is a weak reference to its name, of default visibility.
+            const uint32_t entry = symbol_aliases != 0 ? symbol_aliases[s + 1] : 0;
+            const CheckProgramAlias* alias = entry != 0 ? program->aliases + entry - 1 : NULL;
+            flags = alias == NULL ? flags :
+                    alias->kind == CHECK_PROGRAM_WEAKREF ? (uint8_t)(kind | BUSTER_LINK_SYMBOL_WEAK) :
+                    alias->kind == CHECK_PROGRAM_IFUNC ? (uint8_t)(BUSTER_LINK_SYMBOL_IFUNC | BUSTER_LINK_SYMBOL_GLOBAL | (flags & BUSTER_LINK_SYMBOL_VISIBILITY)) :
+                                                         (uint8_t)(alias->type | (flags & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)));
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
                  (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
@@ -1930,6 +2020,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t k = 0; valid && binding != NULL && k < result->lowered.label_symbol_count; k += 1)
     {
         result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
+    }
+    // The aliases' and ifuncs' symbols (#147), which check_program_sections defines once the static data's atoms exist:
+    // the program's in -c's link too, so that the static data may refer to a local one before it has an atom
+    // (check_data_emit's local targets).
+    for (SymbolId s = 1; valid && symbol_aliases != 0 && s <= program->symbol_count; s += 1)
+    {
+        if (symbol_aliases[s] != 0 && program->aliases[symbol_aliases[s] - 1].kind != CHECK_PROGRAM_WEAKREF)
+        {
+            result->link.symbols.source[s] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
     }
     for (uint32_t t = 0; valid && binding != NULL && t < result->lowered.table_count; t += 1)
     {
@@ -2274,6 +2374,36 @@ static bool check_program_section_prefix(String8 name, const char* prefix)
     return name.length >= length && memcmp(name.pointer, prefix, length) == 0;
 }
 
+// GNU's aliases and ifuncs (#147), once every atom of the unit's is in the link: each one's symbol defined at its base's
+// atom and place, with its size, as an assembler defines clang's `.set alias, base` (LLVM's ELF writer gives such a
+// symbol its base's section and value, and its size where it has none of its own, which clang's hasn't). Returns false,
+// with `code`'s status, reason and token, where a base has no atom (its definition wasn't emitted).
+static bool check_program_define_aliases(CheckProgramCode* code, const CheckProgram* program)
+{
+    Link* link = &code->link;
+    bool valid = true;
+    for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + k;
+        const SymbolId taken = alias->kind != CHECK_PROGRAM_WEAKREF ? program->object_symbols[alias->object] : 0;
+        const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == alias->object ? taken : 0;
+        const SymbolId base = symbol != 0 && alias->base != 0 ? program->object_symbols[alias->base] : 0;
+        const AtomId atom = base != 0 && base < link->symbols.count ? link->symbols.atom[base] : 0;
+        valid = symbol == 0 || (atom != 0 && link_define_symbol(link, symbol, atom, link->symbols.value[base], link->symbols.size[base]));
+        if (valid && symbol != 0)
+        {
+            link->symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
+        else if (!valid)
+        {
+            code->status = atom == 0 ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+            code->reason = atom == 0 ? "an alias or ifunc whose definition isn't emitted" : "an alias's or ifunc's symbol couldn't be defined at its definition";
+            code->token = alias->attribute;
+        }
+    }
+    return valid;
+}
+
 // The named sections of the unit's emitted definitions (#619), once its static data is published, for -c's object
 // (ObjectOptions.atom_sections) and the direct path alike: each definition CheckInputSections.placements names a
 // section for, which the unit defines in an atom of the link, gets a descriptor of that name, of the kind LLVM gives a
@@ -2287,7 +2417,9 @@ static bool check_program_section_prefix(String8 name, const char* prefix)
 // initialized variable in a .bss, which clang's code generation refuses too, a function in a .tdata), and one it gives
 // another type (.note, the arrays'), or the conservatively reserved .llvm.* family (including ordinary PROGBITS names).
 // `*table` is null for a unit without either, and otherwise the descriptors by AtomId,
-// in `output`. Returns false with `code`'s status, reason and token set.
+// in `output`. Then, every atom in place, the aliases' and ifuncs' symbols are defined at their bases' (#147,
+// check_program_define_aliases): every caller that publishes the static data calls this after it. Returns false with
+// `code`'s status, reason and token set.
 static bool check_program_sections(CheckProgramCode* code, const CheckProgram* program, Arena* bytes, Arena* output, ObjectAtomSection** table)
 {
     const CheckInputSections* sections = program->input->sections;
@@ -2295,7 +2427,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     Link* link = &code->link;
     *table = 0;
     bool valid = true;
-    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1)
+    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -2328,7 +2460,10 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         {
             const CheckInputSectionPlacement* placement = sections->placements + p;
             const uint32_t object = placement->token < program->input->token_count ? program->input->objects[placement->token] : 0;
-            const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+            // The object's own symbol, defined: not a weakref's target's (#147), nor an alias's or ifunc's, which clang
+            // keeps in its base's section, and which check_program_define_aliases defines after the placements.
+            const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
             const AtomId atom = symbol != 0 && symbol < link->symbols.count ? link->symbols.atom[symbol] : 0;
             const String8 name = placement->name;
             const uint8_t class = atom != 0 ? link->atoms.class[atom] : BUSTER_LINK_CLASS_NONE;
@@ -2393,6 +2528,32 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 descriptors[atom] = descriptor;
             }
         }
+        // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
+        // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
+        // getELFSectionNameForGlobal), of its class's type and flags.
+        for (uint32_t r = 0; valid && refused == BUSTER_CHECK_NONE && r < code->retained_count; r += 1)
+        {
+            const SymbolId symbol = code->retained_symbols[r];
+            const AtomId atom = link->symbols.atom[symbol];
+            const NameId name = link->symbols.name[symbol];
+            const ObjectSectionFormat* format = atom != 0 ? &object_class_sections[link->atoms.class[atom]] : NULL;
+            const uint64_t prefix = format != NULL ? strlen(format->name) : 0;
+            char* spelled = format != NULL && descriptors[atom].name.length == 0 ? BUSTER_ARENA_PUSH_ARRAY(output, char, prefix + 1 + link->names.length[name]) : 0;
+            valid = format == NULL || descriptors[atom].name.length != 0 || spelled != 0;
+            code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+            if (valid && spelled != 0)
+            {
+                memcpy(spelled, format->name, prefix);
+                spelled[prefix] = '.';
+                memcpy(spelled + prefix + 1, link->names.bytes[name], link->names.length[name]);
+                descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = spelled, .length = prefix + 1 + link->names.length[name] }, .type = format->type,
+                                                         .flags = format->flags, .entry_size = format->entry_size };
+            }
+            if (valid && format != NULL)
+            {
+                descriptors[atom].flags |= SHF_GNU_RETAIN;
+            }
+        }
         if (valid && refused != BUSTER_CHECK_NONE)
         {
             code->status = CHECK_PROGRAM_UNSUPPORTED;
@@ -2401,5 +2562,6 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             valid = false;
         }
     }
+    valid = valid && check_program_define_aliases(code, program);
     return valid;
 }

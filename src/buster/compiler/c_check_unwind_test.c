@@ -9,12 +9,16 @@
 // I128 and U128, in their frame slots), four of them live across the call, its division and remainder libgcc's calls,
 // called with shifts of 3 and of 64 so that its shifts' cmovne takes both values, from one with an array aligned to 64
 // (a realigned frame) and from one with an array aligned to 4096 and a variable-length array (a realigned frame with a
-// base, r15, rsp moved in its body):
+// base, r15, rsp moved in its body); and from `tailed`, which three functions reach by musttail returns (#147) as well
+// as calling `depth` themselves, each called down both paths: one with a frame and a value live across its call (a
+// saved register), one with a variable-length array (a frame pointer) and one with an array aligned to 64 (a realigned
+// frame), whose tail calls leave no frame of theirs behind, so that `tailed`'s count is main's caller's plus one:
 //
 // - The driver's executable by each path, the same bytes: by default, and with -funwind-tables or -g after
 //   -fno-asynchronous-unwind-tables, the unwinder walks through every function to main and libc's start, which the
-//   program checks (it prints the nine depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
-//   the first of them, and the program prints 1 1 1 1 -1 1 1 1 1.
+//   program checks (it prints the nine depths and the six tail-call paths' sum, and returns 0); with
+//   -fno-asynchronous-unwind-tables alone, it stops at the first of them, and the program prints
+//   1 1 1 1 -1 1 1 1 1 6.
 // - Its object (-c) by each path, the same bytes: an .eh_frame of one CIE and an FDE per function the object defines,
 //   each a relocation; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's line, into
 //   programs that walk alike. With -fno-asynchronous-unwind-tables, no .eh_frame.
@@ -25,9 +29,10 @@
 //   them off, whose call frame information clang writes to .debug_frame rather than .eh_frame. Clang's object must have
 //   an FDE per function exactly where ours has: every function of the fixture calls, so -fexceptions's FDEs, which
 //   clang gives only a function that may unwind, are every function's here too.
-// - gdb on the -g executable, at every instruction it executes of each function from its first to its ret, stepping
-//   over calls, through as many of the function's calls as the fixture's paths need: each backtrace's frames are the
-//   function and its callers, and the steps reach every instruction of gdb's disassembly of the function.
+// - gdb on the -g executable, at every instruction it executes of each function from its first to its ret (or its tail
+//   call's jump), stepping over calls, through as many of the function's calls as the fixture's paths need: each
+//   backtrace's frames are the function and its callers, and the steps reach every instruction of gdb's disassembly
+//   of the function, a tail call's teardown among them.
 // - A second fixture (#523) whose SIGILL handler counts the frames from __builtin_trap()'s helper, a ud2 alone with an
 //   FDE of no transitions: by each path, the same bytes, and its object linked by cc through GNU ld, the unwinder walks
 //   from the handler through the helper to main; without unwind tables, it still traps into the handler.
@@ -112,6 +117,45 @@ static const char check_unwind_test_text[] =
     "    return depth() + values[n - 1] - (n - 1) + page[0] - n + (int)((unsigned long)page & 4095);\n"
     "}\n"
     "\n"
+    "int tailed(int x)\n"
+    "{\n"
+    "    return depth() + x;\n"
+    "}\n"
+    "\n"
+    "int hop(int x)\n"
+    "{\n"
+    "    int values[3] = { x, x + 1, x + 2 };\n"
+    "    if (x < 0)\n"
+    "    {\n"
+    "        return depth() + values[2] - x - 2;\n"
+    "    }\n"
+    "    __attribute__((musttail)) return tailed(values[2] - x - 2);\n"
+    "}\n"
+    "\n"
+    "int hop_vla(int n)\n"
+    "{\n"
+    "    int values[n];\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        values[i] = i;\n"
+    "    }\n"
+    "    if (n > 4)\n"
+    "    {\n"
+    "        return depth() + values[n - 1] - (n - 1);\n"
+    "    }\n"
+    "    __attribute__((musttail)) return tailed(values[n - 1] - (n - 1));\n"
+    "}\n"
+    "\n"
+    "int hop_aligned(int x)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { x, x + 1, x + 2, x + 3 };\n"
+    "    if (x < 0)\n"
+    "    {\n"
+    "        return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
+    "    }\n"
+    "    [[clang::musttail]] return tailed(values[3] - x - 3 + (int)((unsigned long)values & 63));\n"
+    "}\n"
+    "\n"
     "int main(void)\n"
     "{\n"
     "    int baseline = depth();\n"
@@ -123,9 +167,18 @@ static const char check_unwind_test_text[] =
     "    __int128 long_shift = wide(7, 64);\n"
     "    int realigned = aligned(7);\n"
     "    int rebased = based(4);\n"
-    "    printf(\"%d %d %d %ld %ld %ld %ld %d %d\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift, realigned, rebased);\n"
+    "    int tails = hop(0);\n"
+    "    tails += hop(-1);\n"
+    "    tails += hop_vla(3);\n"
+    "    tails += hop_vla(7);\n"
+    "    tails += hop_aligned(5);\n"
+    "    tails += hop_aligned(-1);\n"
+    "    printf(\"%d %d %d %ld %ld %ld %ld %d %d %d\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift, realigned, rebased,\n"
+    "           tails);\n"
     "    return baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&\n"
-    "           short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1 ? 0 : 1;\n"
+    "           short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1 && tails == 6 * (baseline + 1) ?\n"
+    "               0 :\n"
+    "               1;\n"
     "}\n";
 
 // The terminal builtins' helper (#523): __builtin_trap's and __builtin_unreachable's calls reach a helper of a ud2
@@ -307,7 +360,7 @@ static bool check_unwind_test_compile(const char* compiler, const char* source, 
 }
 
 // Whether the program runs as its unwind tables (or their absence) make it: with them, it returns 0 having printed
-// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1 1 1.
+// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1 1 1 6.
 static bool check_unwind_test_run(const char* program, bool tables, Arena* arena)
 {
     char report[PATH_MAX + 8];
@@ -324,12 +377,13 @@ static bool check_unwind_test_run(const char* program, bool tables, Arena* arena
     long long_shift = 0;
     int realigned = 0;
     int rebased = 0;
-    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld %d %d", &baseline, &deep, &shallow, &pressed, &negative, &short_shift,
-                                                     &long_shift, &realigned, &rebased) == 9;
+    int tails = 0;
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld %d %d %d", &baseline, &deep, &shallow, &pressed, &negative,
+                                                     &short_shift, &long_shift, &realigned, &rebased, &tails) == 10;
     const bool walked = status == 0 && baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&
-                        short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1;
+                        short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1 && tails == 6 * (baseline + 1);
     const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1 && short_shift == 1 && long_shift == 1 &&
-                         realigned == 1 && rebased == 1;
+                         realigned == 1 && rebased == 1 && tails == 6;
     return read && (tables ? walked : stopped);
 }
 
@@ -672,8 +726,18 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
     static const char* const jump[] = { "jump", "main" };
     static const char* const aligned[] = { "aligned", "main" };
     static const char* const based[] = { "based", "main" };
+    // The tail calls' functions, each down both paths (its tail call's teardown and jump, and its ret), and `tailed`,
+    // first reached by hop's tail call, its caller main.
+    static const char* const hop[] = { "hop", "main" };
+    static const char* const hop_vla[] = { "hop_vla", "main" };
+    static const char* const hop_aligned[] = { "hop_aligned", "main" };
+    static const char* const tailed[] = { "tailed", "main" };
     if (file.pointer != 0)
     {
+        check_unwind_test_gdb(tally, debug_program, file, hop, BUSTER_ARRAY_LENGTH(hop), 2, arena);
+        check_unwind_test_gdb(tally, debug_program, file, hop_vla, BUSTER_ARRAY_LENGTH(hop_vla), 2, arena);
+        check_unwind_test_gdb(tally, debug_program, file, hop_aligned, BUSTER_ARRAY_LENGTH(hop_aligned), 2, arena);
+        check_unwind_test_gdb(tally, debug_program, file, tailed, BUSTER_ARRAY_LENGTH(tailed), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, pressure, BUSTER_ARRAY_LENGTH(pressure), 2, arena);
         check_unwind_test_gdb(tally, debug_program, file, wide, BUSTER_ARRAY_LENGTH(wide), 1, arena);

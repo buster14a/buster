@@ -2076,11 +2076,72 @@ What the lowering covers past scalars (#145's programs):
     records. Byte product reductions first zero-extend to 16-bit elements and
     use VPMULLW, keeping the final low byte. A 64-byte input widens its two
     halves separately and multiplies them before the halvings. Row boundaries
-    always keep each shuffle and its multiplication together;
+    always keep each shuffle and its multiplication together. A vector its
+    elements don't fill (an `ext_vector_type` of 3 ints or of 6 shorts, padded
+    to a power of two) first gets its operation's identity in the lanes past
+    them, as LLVM's widening gives them before clang's code reduces it: a row
+    of VPTERNLOGD 0xEA, (v & keep) | fill, by two constants
+    (`check_vector_reduce_fill_row`), for the floating sums too; the
+    halvings once reduced whatever those lanes held. A floating maximum or
+    minimum of such a vector is refused by name: LLVM reduces it in an order
+    its width decides (an element at a time once halved to 16 bytes, three
+    floats' over their elements alone), which picks the operand a NaN result
+    takes its sign and payload from, where the halvings take another;
   - byte bit reversal uses AVX512-BMM's VBITREVB at 16, 32 or 64 bytes. Its
     masked intrinsics use the existing masked byte selection. The opcode and
     result/effect traces are compared with clang by `test-x86-intrinsics`;
-    no runtime result is claimed on a host without AVX512-BMM.
+    no runtime result is claimed on a host without AVX512-BMM. Without it, bit
+    reversal of any element is clang's with GFNI: each element's bytes
+    reversed (VPSHUFB by a constant of their places, BW's for elements wider
+    than a byte), then each byte's bits (VGF2P8AFFINEQB by the matrix
+    0x8040201008040201);
+  - ctzg is clang's popcount(~x & (x - 1)) (all ones by VPTERNLOGD, VPADD,
+    VPTERNLOGD's and-not, VPOPCNT: BITALG's for 8- and 16-bit elements,
+    VPOPCNTDQ's for the others), each element's width for a zero one; its
+    second operand's elements replace the zero ones' (VPTESTNM and VPBLENDM, or
+    for 8- and 16-bit elements VPCMPEQ with zeros and a masked VMOVDQU8 or
+    VMOVDQU16). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
+    instruction deposits or extracts bits), of 32-bit zero extensions of 8- and
+    16-bit ones, through frame objects of the vectors
+    (`check_lower_vector_deposit`);
+  - the floating functions clang -O0's code computes by instructions are clang's
+    sequences, operand for operand, so that NaN payloads and zeros' signs are
+    clang's (`check_vector_floating_row`, of vectors of floats and doubles, and
+    `check_vector_floating_scalar_row`, of float and double scalars, with
+    AVX-512F): the roundings VRNDSCALE (floor 9, ceil 10, trunc 11, rint 4,
+    nearbyint 12, roundeven 8; a scalar's of a register holding it alone,
+    zeros past it, VRNDSCALESS being no form `x86_semantics.c` covers);
+    round's x + copysign(0.5's predecessor, x), truncated, but under
+    `FENV_ACCESS`, where clang computes the constrained round, the C library's
+    round as the functions below are called (`check_lower_strict_round`, #934's
+    review: the addition rounds by MXCSR's mode, which takes 0.5 to 0 under
+    `FE_DOWNWARD`, and raises inexact); canonicalize's x *
+    1.0; copysign's VPTERNLOGD by the magnitude mask; maxnum and minnum's VMAXP
+    or VMINP of y and x and y where x is a NaN; maximum and minimum's of x and
+    y with VPTERNLOGD's sign fix and x where x is a NaN; maximumnum and
+    minimumnum's the same, but y where x is a NaN and x where y is; and ldexp's
+    exponents converted by their bits' signed values (VPMOVSX first for 8- and
+    16-bit ones, VCVTDQ2PS/PD, or VCVTQQ2PS/PD with DQ), then VSCALEFPS/PD,
+    a scalar's exponent converted in the typed stream from its promoted type
+    as the signed integer of its width. Their constants (the masks, 1.0, 0.5's
+    predecessor) are operands past the arguments;
+  - acos ... tanh, atan2, fmod and pow are the C library's functions, as
+    clang's code calls them (sinf, sin; sinl of a long double), a vector's an
+    element at a time, in element order, through frame objects of the vectors
+    (`check_lower_vector_calls`): clang -O0's code makes a vector's calls in its
+    scheduler's order, which the code around them changes, so errno after them
+    is unspecified. The lowering's tables have room for a vector's calls, an
+    element each, beside a node's own (`check_lower_prepare`'s lane calls:
+    64 nested sines of a 64-byte float vector make 1,024). A long double's roundings (floorl ... roundl), maxnum and
+    minnum (fmaxl, fminl) and ldexp by an int's exponent (ldexpl) are calls
+    too;
+  - the floating reductions are clang's trees: maximum and minimum halve the
+    vector as the integer ones do, combining the halves by llvm.maximum's or
+    minimum's sequence, a row a halving (`check_vector_reduce_floating_rows`);
+    assoc_fadd adds the halves (VADDP), then the tree to its start value
+    (-0.0 without one); in_order_fadd adds each element to the sum, first to
+    last, in the typed stream (`check_lower_reduce_in_order`); and xor
+    reduces as and and or do (VPXORQ).
   - byte funnel shifts of 16-byte vectors use XOP's VPSHLB with signed byte
     counts, masking the original counts modulo eight. Their two halves are
     shifted separately and combined with VPOR; splitting the complementary
@@ -2100,26 +2161,37 @@ What the lowering covers past scalars (#145's programs):
   memory. A `_Complex _Float16` or `_Complex __bf16` bit cast reads or writes
   its four bytes through its frame object, keeping both parts'
   representations, including signed zeros and NaN payloads; a result gets an
-  object of its own. The other floating elementwise functions and conversions (between
-  8-bit integers and half-precision elements, between 8- and 16-bit integers and
-  bf16 elements, to bf16 elements, and between half-precision elements and other
-  types than floats without AVX512-FP16), the bf16 elements' other elementwise
-  functions and their square roots and multiply-adds without AVX10.2, the
-  half-precision ones' without AVX512-FP16, floating
-  reductions, a shuffle by a vector of indices,
-  bit reversal of elements wider than a byte, byte bit reversal without
-  AVX512-BMM, funnel shifts of 8-bit elements outside 16-byte vectors or without XOP, the
-  leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
-  at underaligned addresses, bit casts of other types, and the rows whose
-  extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
-  BITALG, VPOPCNTDQ, VBMI2, DQ) are refused by name. `test-checker`'s vector
-  builtin programs (`c_check_program_vector_builtins_test.c`) call each at every
-  width, those of vectors of 4 and 8 bytes, the narrowing conversions and the
-  floating intrinsics as the headers write them, with the masked truncating
-  stores and the leaves (monitorx and mwaitx where the host has MWAITX), by both
-  paths against clang -O0's code for znver5; and `test-checker-driver` links a
-  program of MMX's intrinsics through clang's `<immintrin.h>` by both paths,
-  whose output must be clang's build's.
+  object of its own. The conversions between 8-bit integers and half-precision
+  elements, between 8- and 16-bit integers and bf16 elements, to bf16 elements,
+  and between half-precision elements and other types than floats without
+  AVX512-FP16; the
+  floating elementwise functions and reductions of half-precision and bf16
+  elements but the square roots and multiply-adds (without AVX10.2 for bf16's,
+  without AVX512-FP16 for half-precision ones'), and of half-precision, bf16 and
+  `__float128` scalars; a long double's copysign, canonicalize, maximum,
+  minimum, maximumnum and minimumnum (x87 sequences in clang's code) and its
+  ldexp by a 64-bit exponent; a scalar's roundings, round, canonicalize,
+  copysign, maximum and minimum functions and ldexp without AVX-512F; ldexp by
+  an exponent wider than 64 bits; carry-less products (clmul: VPCLMULQDQ is no
+  form `x86_semantics.c` covers); the masked memory builtins (their masks are
+  vectors of bools, which the lowering has no class for); a shuffle by a vector
+  of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
+  shifts of 8-bit elements outside 16-byte vectors or without XOP; the leading
+  zero counts of 8- and 16-bit elements; the integer elementwise functions of
+  scalars; nontemporal builtins of scalars and at underaligned addresses; bit
+  casts of other types; and the rows whose extensions the target hasn't (VBMI
+  for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI,
+  BMI2) are refused by name. `test-checker`'s vector builtin programs
+  (`c_check_program_vector_builtins_test.c`) call each at every width, those
+  of vectors of 4 and 8 bytes, the narrowing conversions and the floating
+  intrinsics as the headers write them, with the masked truncating stores and
+  the leaves (monitorx and mwaitx where the host has MWAITX), by both paths
+  against clang -O0's code for znver5: the floating functions of inputs with
+  both zeros, infinities, quiet NaNs of their own payloads and a signaling one
+  among them, and of float, double and long double scalars, with errno after
+  each scalar's call of the C library; and
+  `test-checker-driver` links a program of MMX's intrinsics through clang's
+  `<immintrin.h>` by both paths, whose output must be clang's build's.
 - **A function's target attribute (#180).** A function's
   `__attribute__((target("...")))` gives its rows and leaves its own
   instruction set (`CheckProgram.body_targets`, made by
@@ -2484,6 +2556,112 @@ What the lowering covers past scalars (#145's programs):
   and with another object's strong definitions, and the direct path's
   executables, must print what clang's build prints, its constructors' order
   before `main` and its destructors' after it.
+- **GNU's `alias`, `ifunc` and `weakref` attributes** (#147,
+  `c_check_program_alias.c`). `check_program`'s pass over the static
+  declarations finds the file-scope ones with one (clang's code generation
+  ignores a block-scope alias), and `check_program_aliases` makes an entry per
+  object (`CheckProgram.aliases`), from its first such declaration: a weakref,
+  whose target is its argument or an alias attribute's beside it, else an
+  ifunc, else an alias. An entry's name is resolved to the unit's object whose
+  symbol it names: an object's asm label (from any of its declarations), or
+  else its identifier, of a file-scope declaration with linkage that isn't a
+  weakref's (a weakref's own name is no symbol); a block-scope static's made
+  name is none, as clang finds none. An overloadable function's name is the
+  one its symbol gets: its mangled name (`check_mangle_name`, `_Z1fi`) where
+  no asm label replaces it, never its identifier. The names are grouped by their bytes'
+  hashes and found by their identifiers' ids in two scans of the static
+  declarations, 64 tokens at a time, which a unit without these attributes
+  never makes. The chains of aliases are followed by pointer jumping (at most
+  33 rounds) to clang's aliasee, the first object on the way that isn't an
+  alias (`GlobalAlias::getAliaseeObject`), which must be defined: a body, a
+  variable's definition or tentative definition, or an ifunc; an ifunc's must
+  be a function returning a pointer. An alias's symbol is at its aliasee's
+  definition, or an aliased ifunc's resolver's, with that definition's size
+  (as LLVM's ELF writer gives `alias = base` the base's section, value and
+  size), its own name, binding (weak with `weak`) and visibility, and its
+  definition's type, IFUNC where an ifunc is on the way; an ifunc's is an
+  `STT_GNU_IFUNC` at its resolver, global whatever its declaration says, as
+  clang gives every ifunc external linkage. Both are definitions of the unit
+  (`check_program_object_access`: reached directly), which the emission names
+  and flags with the other symbols and defines once the static data's atoms
+  exist (`check_program_define_aliases`, at the end of
+  `check_program_sections`, which every caller that publishes the static data
+  runs); until then their symbols are marked as the program's without an
+  atom, which lets the static data refer to a local one (`check_data_emit`'s
+  local targets). Every alias and ifunc is emitted, as clang emits each, so the
+  selection roots its definition (`BUSTER_C_LOWERING_ALIAS_TARGET`), unless
+  that is an inline-only function, which isn't emitted: clang's error
+  (`BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED`). A weakref's references are its
+  target's: the selection's edges reach the target's definition, and its
+  numbering (`check_program_alias_number`) gives a referenced weakref its
+  target's symbol, whose undefined symbol is weak where nothing but weakrefs
+  refers to it (`BUSTER_CHECK_PROGRAM_ALIAS_WEAK`, clang's
+  `GetWeakRefReference`), whatever linkage its declarations give it, and then
+  reached through the GOT; or, where no object has the name, a symbol of its own
+  named after it, weak and reached through the GOT, which the name's later
+  weakrefs share. Code generation's errors, at `-c` and when it links but not
+  at `-fsyntax-only` (`check_driver_aliases`, after the selection, in the
+  order clang emits the aliases): "alias must point to a defined variable or
+  function" and "ifunc must point to a defined function" with clang's notes
+  (that the name must be the mangled one, and the name clang gives each
+  emitted, referenced or defined declaration of that identifier, an
+  overloadable function's mangled one: `check_driver_overload_name`), "alias (or
+  ifunc) definition is part of a cycle", "cannot alias a variable with a
+  function" and "cannot alias a function with a variable" with the aliasee's
+  definition noted, and "ifunc resolver function must return a pointer".
+  But an alias or ifunc that names itself stops clang's code generation at
+  its declaration, which reports its cycle at once, emits no later one and
+  checks no alias: the first such one's error is then the unit's only one.
+  `test-ir-source` and `test-ssa-source` define the aliases' symbols too
+  (`ir_source_prepare`), and a run in the shared IR's interpreter reaches an
+  alias's function through its symbol as through the function's own
+  (`ssa_source_child`); an ifunc, whose resolver the interpreter doesn't call,
+  leaves a program to run out.
+  Sema's, at `-fsyntax-only` too (`check_input_attribute_definition`): a
+  definition (a body, an initializer, an external tentative definition, or an
+  earlier alias or ifunc of the declaration) that is also an alias or ifunc,
+  "definition 'f' cannot also be an alias"; and a weakref with external
+  linkage, in a block, without a target or on a typedef. A static variable's
+  alias or weakref is no tentative definition, and an alias, ifunc or weakref
+  target defines its entity for later redeclarations, functions' and
+  variables'. Refused by name: an alias whose thread-local storage isn't its
+  definition's, and an alias variable that the unit also defines tentatively
+  (before it clang's error "alias definition of 'w' after tentative
+  definition", which the reader doesn't make; after it clang takes the
+  declaration as the alias's). Not modeled: clang's warnings at them (an alias
+  of a weak alias, a section on an alias, different types, an ifunc on a
+  variable, which is ignored), and the redefinition's own message (the
+  generic "conflicting declaration"). `__has_attribute` and
+  `__has_c_attribute` answer 1 for them. `test-checker` runs programs of
+  aliases of static functions and objects (thread-local ones too) and chains of
+  them, with static data that refers to local ones, ifuncs and weakrefs
+  against clang -O0's build (`c_check_program_alias_test.c`), and the
+  selection's fixtures of their roots (`c_check_program_select_test.c`);
+  `test-checker-driver` (`c_check_alias_driver_test.c`) compiles a fixture of
+  every shape by clang and both paths: each symbol's type, binding,
+  visibility and definedness clang's, each alias and ifunc at its
+  definition's section, value and size, both paths' objects the same bytes,
+  run by `cc`'s links alone and with strong definitions of a weak alias's and
+  of the weakrefs' names, and the direct path's executables (the dynamic
+  PIE's own IFUNCs through its stubs), as clang's build runs; and compares
+  every error and note of the errors above with clang's, at `-c` and at
+  `-fsyntax-only`, an alias and an ifunc of themselves among them.
+- **GNU's `retain` attribute** (#147). A definition with one before it (the
+  reader drops one after it) that the unit emits keeps its section: its named
+  section's (a section attribute's), or a section of its own, its class's
+  section's name and its symbol's (`.data.kept`, `.text.f`, `.bss.z`,
+  `.tbss.t`, `.data.function.local`, as LLVM names a retained global's unique
+  section), with `SHF_GNU_RETAIN` (`check_program_sections`, from the
+  emission's `CheckProgramCode.retained_symbols`), which makes `-c`'s object
+  `ELFOSABI_GNU`, as clang's is. Retain alone emits nothing: clang 23 emits
+  no unreferenced static with it, so the selection doesn't take it as a root
+  (`used` is one). `__has_attribute(retain)` and
+  `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
+  each retained definition's section (name, type, flags and alignment) and
+  the object's OS/ABI with clang's object's, and runs the programs, linked
+  from `-c`'s objects and by the direct path. `common` stays refused by name:
+  its symbols are `SHN_COMMON`'s, which neither the link representation nor
+  the object writer has.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -3649,6 +3827,54 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+## Tail calls (#147)
+
+clang's `musttail` on a return statement (GNU's spelling, `__attribute__((musttail))`, and `[[clang::musttail]]`)
+makes the call it returns run in place of the function, so that recursion through it takes no stack.
+
+**The reader.** The parser reads C23 attributes before a statement's keyword as that statement's. The reader records
+each musttail return (`CheckInput.musttails`, `check_input_statement_attributes`) and reports the attribute's own
+errors at clang's places: arguments, which it takes none of, and any place but a return (a declaration's, another
+statement's, a null statement's). `[[gnu::musttail]]`, which clang ignores as an unknown attribute, and another
+attribute on a return are refused as unsupported, as the checker's unknown attributes are.
+
+**The rules.** `c_check_musttail.c` checks each recorded return once the expressions have their types, in source
+order, the first rule each breaks in the order of clang 23's `Sema::checkMustTailAttr`:
+
+1. its value is a call, of its expression with parentheses, `__extension__` and a selection's chosen operand looked
+   through, but no cast;
+2. both the function and the callee have prototypes;
+3. both have the same calling convention;
+4. neither is variadic;
+5. the callee isn't declared `[[noreturn]]`: by an accepted unscoped standard spelling on a declaration of its entity
+   before the call, whose attribute clang's later declarations inherit (`check_musttail_noreturns`), not one clang
+   drops after the definition (`ignored`, `check_input_attribute_late`), GNU's or the `_Noreturn` keyword;
+6. both have the same signature, as similar types (`hasSimilarType`: the same canonical type once each level's
+   qualifiers are gone, an array's elements' too, past arrays of the same constant bound or of none and pointers'
+   pointees, `UnwrapSimilarTypes`), at any depth: the steps go into types of their own, no more than the table has.
+
+A return that keeps them can't leave a cleanup variable's scope: an error for each such variable, the innermost first,
+which clang reports as its function ends. Errors past what their count holds (a uint32_t's, which each active cleanup
+at each return can pass) are a resource failure (`check_musttail_collect`'s limit), checked with a limit of 5. The driver spells clang's messages (`check_driver_musttail_message`), each
+scope's error at its place even where one return leaves several: the reports' walk keeps every one of them
+(`CheckDriverDiagnostic.repeated`) rather than a token's first alone. A call of a builtin's, which the checker
+computes with no call, is refused as unsupported.
+
+**The lowering.** `check_program` lowers a musttail return as its call alone, a `TAIL_CALL` entry
+(`check_lower_tail_return`): no conversion, since the call's result is the function's own, and no result object, since
+a result through a hidden pointer goes where the function's own hidden pointer points. The function's tail calls' rows
+are marked (`Tier0Function.call_tails`). Tier 0 emits the call's moves as a call's, copies its stack arguments into the
+function's own incoming area, tears the frame down as the epilogue does and jumps ([the Tier 0 guide](tier0.md)'s
+"Tail calls"), and the unwind tables describe each teardown ([the unwind guide](unwind.md)'s "Tail calls"). The
+region reader takes a musttail return for a return, inside a statement expression too.
+
+**Tests.** `test-checker` compares 48 source fixtures' acceptance and first errors with clang's
+(`c_check_musttail_test.c`). Its programs run natively against clang -O0's build of the same source, by both paths:
+`musttail-shapes`, 23 shapes of recursion 20,000 calls deep and more, each checking at its deepest call that its
+frame is where its first was; `musttail-external-callees`, tail calls of the harness's clang functions and of the C
+library's `isatty`; and `musttail-vectors`, for x86-64-v4. `test-checker-driver` compares every error's place and
+message and the exit status with clang's on 41 fixtures (`c_check_musttail_driver_test.c`).
 
 ## Ignorable and unsupported pragmas
 

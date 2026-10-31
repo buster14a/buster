@@ -56,22 +56,24 @@ static const CBuiltinSourceScope cbuiltin_source_intrinsic_scope[] = {
 };
 #undef BUSTER_BUILTIN_METADATA
 
-#define BUSTER_CBUILTIN_IMMEDIATE_NAME(n, f) { n, sizeof(n) - 1, f, "ALL_LANGUAGES" },
-static const CBuiltinSourceScope cbuiltin_source_immediate_scope[] = {
-#include "c_builtin_immediate_scope.inc"
+// The supplementary scope's names past the inventory (c_builtin_supplementary_scope.inc), sorted too, each of every
+// language mode.
+#define BUSTER_CBUILTIN_SUPPLEMENTARY_NAME(n, f) { n, sizeof(n) - 1, f, "ALL_LANGUAGES" },
+static const CBuiltinSourceScope cbuiltin_source_supplementary_scope[] = {
+#include "c_builtin_supplementary_scope.inc"
 };
-#undef BUSTER_CBUILTIN_IMMEDIATE_NAME
+#undef BUSTER_CBUILTIN_SUPPLEMENTARY_NAME
 
-// The scopes' row of a name, or null: the sorted inventory's by a binary search, then the five immediate names'.
-static __attribute__((unused)) const CBuiltinSourceScope* cbuiltin_source_scope(const uint8_t* name, uint32_t length)
+// A sorted scope's row of a name, or null, by a binary search of the bounded slice's bytes.
+static const CBuiltinSourceScope* cbuiltin_source_scope_search(const CBuiltinSourceScope* rows, uint32_t count, const uint8_t* name, uint32_t length)
 {
     const CBuiltinSourceScope* result = NULL;
     uint32_t low = 0;
-    uint32_t high = sizeof(cbuiltin_source_intrinsic_scope) / sizeof(cbuiltin_source_intrinsic_scope[0]);
+    uint32_t high = count;
     while (name != NULL && length != 0 && length < 128 && low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        const CBuiltinSourceScope* entry = cbuiltin_source_intrinsic_scope + middle;
+        const CBuiltinSourceScope* entry = rows + middle;
         const uint32_t common = length < entry->length ? length : entry->length;
         const int bytes = memcmp(name, entry->name, common);
         const int compared = bytes != 0 ? bytes : (length > entry->length) - (length < entry->length);
@@ -89,12 +91,18 @@ static __attribute__((unused)) const CBuiltinSourceScope* cbuiltin_source_scope(
             low = middle + 1;
         }
     }
-    const bool immediate_candidate = result == NULL && name != NULL && (length == 21 || length == 24 || length == 25) && memcmp(name, "__builtin_ia32_", 15) == 0;
-    for (uint32_t i = 0; immediate_candidate && result == NULL && i < sizeof(cbuiltin_source_immediate_scope) / sizeof(cbuiltin_source_immediate_scope[0]); i += 1)
-    {
-        const CBuiltinSourceScope* entry = cbuiltin_source_immediate_scope + i;
-        result = length == entry->length && memcmp(name, entry->name, length) == 0 ? entry : NULL;
-    }
+    return result;
+}
+
+// The scopes' row of a name, or null: the inventory's, else the supplementary scope's.
+static __attribute__((unused)) const CBuiltinSourceScope* cbuiltin_source_scope(const uint8_t* name, uint32_t length)
+{
+    const CBuiltinSourceScope* inventory =
+        cbuiltin_source_scope_search(cbuiltin_source_intrinsic_scope, sizeof(cbuiltin_source_intrinsic_scope) / sizeof(cbuiltin_source_intrinsic_scope[0]), name, length);
+    const CBuiltinSourceScope* result =
+        inventory != NULL ? inventory :
+                            cbuiltin_source_scope_search(cbuiltin_source_supplementary_scope,
+                                                         sizeof(cbuiltin_source_supplementary_scope) / sizeof(cbuiltin_source_supplementary_scope[0]), name, length);
     return result;
 }
 
