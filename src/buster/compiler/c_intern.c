@@ -941,7 +941,7 @@ static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* byte
 BUSTER_INLINE IdentId intern_add_in_bucket(InternTable* table, __m512i spelling, uint32_t length, uint8_t* bucket, uint32_t empties)
 {
     IdentId result = 0;
-    uint8_t* record = table->count < table->capacity ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
+    uint8_t* record = table->count < intern_id_limit(table) && table->count < table->capacity ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
     if (record != 0)
     {
         result = table->count;
