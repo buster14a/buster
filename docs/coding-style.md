@@ -88,6 +88,64 @@ inherit its portability layers, build system, or performance-acceptance machiner
 - Keep existing intentional build semantics (`-fwrapv`, `-funsigned-char`,
   `-fno-strict-aliasing`) unless changed by a deliberate, tested decision.
 
+## Stable pointer-accessed values
+
+Honor the host build's `-fno-strict-aliasing`: do not rely on different pointee
+types to prove that stores cannot affect other loads. Clang documents the
+optimization contract in [Strict Aliasing](https://clang.llvm.org/docs/UsersManual.html#strict-aliasing).
+In new or modified code, **cache repeatedly used pointer-accessed values that
+are proved unchanged over the relevant region into named locals**, especially
+before hot loops and store-heavy scalar/SIMD kernels. Apply this to counts,
+lengths, capacities, flags, strides, base pointers and nested descriptor fields.
+Keep the flag enabled; restoring type-based assumptions is not this optimization.
+
+- Cache the **value**, not merely another pointer to its owner. For example,
+  `const size_t count = input->count;` snapshots a count; assigning `input` to
+  another local and repeatedly reading `local->count` does not. Caching
+  `input->values` snapshots that base pointer, not the array elements.
+- Prove stability against all intervening writes, including writes through
+  aliases, output buffers and helper calls. Document non-obvious ownership or
+  mutation invariants. `const` on a pointer or pointee is not proof that other
+  aliases cannot change the source. Do not invent a `restrict` contract or
+  silently narrow the existing API's supported overlap cases to justify caching.
+- Load only after the necessary pointer, bounds and lifetime validation, and
+  only on paths where the access is valid. Do not hoist a conditional dereference
+  onto an empty-input or error path that previously needed no such access.
+- Keep each snapshot within its proven invariant region. Reacquire affected
+  pointers and metadata after growth, reallocation, arena reset, or a helper
+  that can mutate them. Do not freeze a live worklist bound when processing can
+  append work. Unknown call effects are not evidence of immutability.
+- Do not replace required volatile/atomic accesses, polling or synchronized
+  observations with a cached ordinary local. This rule does not justify data
+  races or delaying externally visible writes to mutable state.
+- Prefer `const` locals for unchanged snapshots and keep their live ranges
+  short; avoid taking their addresses or copying entire aggregates when only
+  a few fields are needed. A local enables reuse but does not guarantee a
+  register: excessive live state can introduce spills.
+
+For example, after validating the descriptor and output bounds, with a contract
+that the descriptor and input storage remain live and unchanged and that output
+does not overlap either:
+
+```c
+const size_t count = input->count;
+const uint32_t *const values = input->values;
+const uint32_t bias = input->bias;
+for (size_t i = 0; i < count; ++i)
+{
+    output[i] = values[i] + bias;
+}
+```
+
+Agents and reviewers must check repeated pointer/field loads in touched hot
+paths against this rule. For performance changes, inspect optimized assembly
+with the actual project Clang flags, including `-fno-strict-aliasing`, for
+remaining reloads, dependency chains and new spills; measure representative
+throughput on the approved host rather than claiming a speedup from source
+changes alone. Add regression coverage for relevant supported aliasing,
+mutation/growth and empty-input cases. Do not claim existing code has been
+fully audited merely because this rule was added.
+
 ## SIMD and Zen 5
 
 - Optimize the host implementation for Zen 5: use AVX-512 intrinsics and
