@@ -142,6 +142,20 @@ variadic definitions.
 `test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
 #142's campaigns.
 
+Measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)):
+speedtest1, with 2,207 of its 2,709 functions by Tier 1, gives Tier 0's
+verification hash by both paths and runs in 285.0 ms, against Tier 0's 256.1
+ms, clang -O0's 289.6 ms and clang -O2's 131.5 ms. The functions Tier 1 compiles
+take 843 M cycles as its code against 667 M as Tier 0's: comparisons stay
+`setcc`/`movzx`/`test` chains through the IR's `zext` of C's comparison-as-int,
+constant offsets are added rather than folded into addresses, and parameters'
+definition intervals keep their caller-saved registers across the entry block's
+calls. 80 of #142's programs, 40 per generator, gave 66 passes at both tiers and
+14 failures, all in clang's own steps. The default path's compile time is
+unchanged, but the checker's unit, which now compiles Tier 1's modules for the
+driver, takes 40.0 s to build against 36.6 to 36.9 s.
+
 ## Current integration boundary
 
 The implementation now consumes the shared IR and the upstream local-SSA
