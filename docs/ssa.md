@@ -170,8 +170,10 @@ The adapter uses the shared IR's deduplicated CFG and value-use descriptions.
 A typed slot is eligible when every use of its STACK_ADDR definitions is the
 address operand of a full-type, nonvolatile LOAD or STORE. Address escapes,
 computed addresses, mismatched access types, volatile accesses and excluded
-slot flags keep the entire slot in memory. Untyped storage stays in memory;
-typed temporary slots can promote. Eligibility relies on the supplied IR
+slot flags keep the entire slot in memory. Other untyped storage stays in memory;
+typed temporary slots can promote, as can an untyped temporary slot whose
+accesses all agree on one scalar type (a depth slot's `&&`, `||` and `?:`
+values), which promotes with the agreed type. Eligibility relies on the supplied IR
 metadata; the source producer is responsible for marking volatility and
 address-taking correctly.
 
