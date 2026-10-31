@@ -65,6 +65,13 @@ static const uint8_t cbuiltin_library_lengths[CBUILTIN_LIBRARY_COUNT] __attribut
 
 // The library builtin a name spells: __builtin_ followed by one of the list's functions, by a binary search over the
 // list's names, which are in byte order; CBUILTIN_LIBRARY_COUNT for any other name.
+// Whether a builtin's name may be one of these lists' (the library's, libgcc's and the refused ones): no x86 builtin's
+// (__builtin_ia32_) is, and most of the calls the checker and the lowering ask about are of x86 builtins.
+static inline __attribute__((unused)) bool cbuiltin_library_candidate(const char* name, uint32_t length)
+{
+    return name != NULL && !(length > 15 && memcmp(name, "__builtin_ia32_", 15) == 0);
+}
+
 static __attribute__((unused)) CBuiltinLibraryId cbuiltin_library_id(const char* name, uint32_t length)
 {
     CBuiltinLibraryId result = CBUILTIN_LIBRARY_COUNT;

@@ -7611,9 +7611,10 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const uint32_t effect = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
     const CBuiltinFortifyId fortify = info != NULL ? cbuiltin_fortify_id(info->name, info->name_length) : CBUILTIN_FORTIFY_COUNT;
-    const CBuiltinLibraryId library = info != NULL ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
-    const uint32_t libgcc = info != NULL ? cbuiltin_library_libgcc(info->name, info->name_length) : BUSTER_CBUILTIN_LIBRARY_LIBGCC;
-    const char* refusal = info != NULL ? cbuiltin_library_refusal(info->name, info->name_length) : NULL;
+    const bool candidate = info != NULL && cbuiltin_library_candidate(info->name, info->name_length);
+    const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+    const uint32_t libgcc = candidate ? cbuiltin_library_libgcc(info->name, info->name_length) : BUSTER_CBUILTIN_LIBRARY_LIBGCC;
+    const char* refusal = candidate ? cbuiltin_library_refusal(info->name, info->name_length) : NULL;
     if (fortify != CBUILTIN_FORTIFY_COUNT)
     {
         check_lower_fortify(writer, node, fortify);
@@ -10615,7 +10616,13 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
         const IdentId name = names[declaration];
         if (name != 0 && declarations[declaration] == declaration && linkage[declaration] == 2 && object != 0 && object < object_count)
         {
+            // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
+            bool any = false;
             for (uint32_t s = 0; s < spelled; s += 1)
+            {
+                any |= identifiers[s] == name;
+            }
+            for (uint32_t s = 0; any && s < spelled; s += 1)
             {
                 const uint32_t r = runtimes[s];
                 if (identifiers[s] == name && symbols[r] == 0)
@@ -10901,7 +10908,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
         {
             const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
-            const CBuiltinLibraryId library = info != NULL ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
+                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
             if (library != CBUILTIN_LIBRARY_COUNT)
             {
                 const uint32_t runtime = check_lower_library_runtime(library);
