@@ -133,7 +133,9 @@ registers: ends deposit downward in input order and starts take upward in input
 order. A CFG's per-block ranges do exactly that at a block's start, so
 `hint_values` names, per interval, a value whose most recently assigned register
 the interval takes where it is free; `tier1_cfg.c` hints each range a value
-enters a block with to the value itself, and each phi to an operand. The common
+enters a block with to the value itself, each phi to an operand, and a value
+a phi takes along a back edge (defined after the phi) to the phi, which has its
+register by then, so that the back edge moves nothing for it. The common
 path takes the hinted register from the level above that holds it, which then
 holds the register the rule would have taken, or as a fresh one, which makes a
 register taken from the current level fresh again. Every level from the current
@@ -289,7 +291,10 @@ with one operand per predecessor, in the predecessor view's order. Block 0 is
 the entry, with no predecessors and no phis. Every other value is defined once,
 before its uses in its block. A use in another block must be dominated by the
 definition: a value live into the entry or into its own block is refused as
-invalid.
+invalid. A use of a value other than a phi at its own definition position is the
+definition's: a required one asks that the definition write a register, as an
+instruction's destination does. The checker checks it after the definition, by
+the location it gives the value.
 
 Liveness is `dataflow.c`'s solve over the values used outside their block, phi
 operands among them. A phi operand is a use on its edge: it joins its
@@ -409,8 +414,14 @@ and the checker scalar around `dataflow.c`'s vector solve and the vector
 allocator; at 570 of the vector path's 815 cycles per instruction, they are
 the next to get vector paths. Each block's interval of a spilled value is stored
 again where it is evicted, though its slot still holds it: storing a spilled
-value once, at its definition, is the next change for the code. Native emission
-of the edge moves and split edges is #140's next step.
+value once, at its definition, is the next change for the code.
+
+Tier 1's machine consumer emits these allocations natively for every function
+that isn't a straight-line chain (`tier1_emit_cfg.c`, in the [pipeline
+guide](tier1-pipeline.md)): each edge's moves before the predecessor's jump, at
+the successor's start, or in a stub for a split critical edge. The plan's
+definitions are its uses there, required, since an instruction writes its
+destination's register.
 
 ## Rematerialization
 

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // A bounded Tier 1 machine consumer: selected straight-line IR -> liveness -> required locations -> allocation ->
-// frame -> native records. Include after link.c, tier1_select.c, tier1_allocate.c, tier1_rematerialize.c, tier1_liveness.c,
-// tier1_frame.c and tier1_frame_emit.c. The existing uniform-register selector remains a separate fail-closed API.
+// frame -> native records. Include after link.c, tier1_select.c, tier1_allocate.c, tier1_rematerialize.c, tier1_cfg.c,
+// tier1_liveness.c, tier1_frame.c and tier1_frame_emit.c. The existing uniform-register selector remains a separate fail-closed API.
 //
 // Every selected input and definition requires a register at its machine phase. At an input phase, all evicted
 // register values are stored before any reload reuses those registers. Definition-phase evictions are stored before
@@ -14,8 +14,9 @@
 //
 // This consumer accepts a straight-line chain ending in RET, UNREACHABLE or an empty self-loop sink; every earlier
 // block must branch to the immediately following block. The sink has no values to reconcile and retains its branch.
-// General CFGs need edge location reconciliation; numeric fragment order is not a substitute.
-// Indirect/variadic/wide-ABI calls, phi nodes, dynamic/variadic frames and direct register-to-register
+// Every other function, general control flow and phis, goes to tier1_emit_cfg.c, which allocates over the CFG and
+// moves values along its edges; numeric fragment order is not a substitute.
+// Indirect/variadic/wide-ABI calls, dynamic/variadic frames and direct register-to-register
 // fragment transitions are explicit unsupported cases. R11 remains reserved for selection and frame probes.
 //
 // Borrowed inputs are immutable and may precede allocations in the output arena, but must not overlap either arena's
@@ -85,6 +86,18 @@ struct Tier1EmitResult
     uint32_t call_loads;
     uint64_t retained_bytes;
     uint64_t transition_scratch_bytes;
+    // A function the straight-line consumer doesn't take goes through tier1_emit_cfg.c, which leaves `liveness` and
+    // `prepared.allocation` empty: its CFG's allocation problem (values numbered densely, value_nodes[v] their nodes,
+    // node_values the inverse, BUSTER_TIER1_CFG_NONE for a node without one), tier1_cfg's result, whose allocation
+    // `allocation` is, and what its edges took: move records, stubs of split edges and jumps between blocks.
+    bool general;
+    Tier1CfgInput cfg_input;
+    Tier1CfgAllocation cfg;
+    uint32_t* value_nodes;
+    uint32_t* node_values;
+    uint32_t edge_moves;
+    uint32_t edge_stubs;
+    uint32_t jumps;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -461,15 +474,11 @@ static X86Instruction tier1_emit_move(uint32_t source, uint32_t destination, uin
 // The allocator has already split ordinary spills. Call preservation is local to a bounded machine-register set:
 // a surviving register is saved before argument shuffles and restored after capturing the return value. Keeping
 // this separate from fixed interval constraints avoids banning caller registers over an entire live interval.
-static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node, const uint32_t* argument_registers, Tier1EmitTransitions* transitions, Tier1EmitBuffer* buffer, Arena* scratch, Tier1EmitResult* result)
+// The registers a call at `node` saves: those holding values that live past it, here a value's interval end.
+static uint32_t tier1_emit_call_saved(const Tier1EmitResult* result, const Tier1EmitTransitions* transitions, uint32_t node)
 {
-    const IrFunction* function = plan->function;
-    const IrCall* call = &function->calls[function->b[node]];
-    const uint64_t scratch_mark = scratch->length;
     const uint32_t position = node * 2 + 1;
-    const uint32_t destination = transitions->registers[node];
     uint32_t saved = 0;
-    Tier1EmitError error = TIER1_EMIT_OK;
     for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
         const uint32_t owner = transitions->owners[reg];
@@ -478,6 +487,15 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
             saved |= 1u << reg;
         }
     }
+    return saved;
+}
+
+static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node, const uint32_t* argument_registers, uint32_t saved, uint32_t destination, Tier1EmitBuffer* buffer, Arena* scratch, Tier1EmitResult* result)
+{
+    const IrFunction* function = plan->function;
+    const IrCall* call = &function->calls[function->b[node]];
+    const uint64_t scratch_mark = scratch->length;
+    Tier1EmitError error = TIER1_EMIT_OK;
     if ((saved & ~result->prepared.call_save_mask) != 0 || (function->type[node] != IR_VOID && ((saved >> destination) & 1)))
     {
         error = TIER1_EMIT_ALLOCATION;
@@ -656,7 +674,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         }
         if (error == TIER1_EMIT_OK && calls)
         {
-            error = tier1_emit_call(plan, node, argument_registers, &transitions, &buffer, scratch, result);
+            error = tier1_emit_call(plan, node, argument_registers, tier1_emit_call_saved(result, &transitions, node), transitions.registers[node], &buffer, scratch, result);
         }
         else if (error == TIER1_EMIT_OK && terminal_sink && node + 1 == count)
         {
@@ -741,6 +759,8 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     return error;
 }
 
+#include "tier1_emit_cfg.c"
+
 static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const bool arguments = plan && plan->function && options && allowed_forms && output && scratch && output != scratch && output->base != scratch->base && result;
@@ -764,36 +784,27 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
             error = TIER1_EMIT_INVALID;
         }
     }
-    if (error == TIER1_EMIT_OK)
+    // A phi-free straight-line chain keeps this consumer; every other function goes through the CFG consumer.
+    const bool chain = error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan->function);
+    if (error == TIER1_EMIT_OK && !chain)
+    {
+        error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
+    }
+    if (error == TIER1_EMIT_OK && chain)
     {
         const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, BUSTER_VECTOR_PATH(options->vector), &emitted.liveness);
         error = live == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : live == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : live == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : live == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     }
-    if (error == TIER1_EMIT_OK)
-    {
-        const IrFunction* function = plan->function;
-        for (uint32_t block = 0; error == TIER1_EMIT_OK && block < function->block_count; block += 1)
-        {
-            const uint32_t last = function->block_offsets[block + 1] - 1;
-            const bool final = block + 1 == function->block_count;
-            const bool sink = function->op[last] == IR_BR && function->a[last] == block && function->block_offsets[block] == last;
-            const bool terminal = function->op[last] == IR_RET || function->op[last] == IR_UNREACHABLE || sink;
-            if ((final && !terminal) || (!final && (function->op[last] != IR_BR || function->a[last] != block + 1)))
-            {
-                error = TIER1_EMIT_UNSUPPORTED;
-            }
-        }
-    }
-    if (error == TIER1_EMIT_OK)
+    if (error == TIER1_EMIT_OK && chain)
     {
         error = tier1_emit_prepare(plan, &emitted.liveness, options, output, &emitted.prepared);
     }
-    if (error == TIER1_EMIT_OK)
+    if (error == TIER1_EMIT_OK && chain)
     {
         const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
     }
-    if (error == TIER1_EMIT_OK)
+    if (error == TIER1_EMIT_OK && chain)
     {
         const uint32_t spill_count = emitted.allocation.spill_count;
         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted.prepared.call_save_mask);
@@ -839,7 +850,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
             error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_FRAME;
         }
     }
-    if (error == TIER1_EMIT_OK)
+    if (error == TIER1_EMIT_OK && chain)
     {
         error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), output, scratch, &emitted, error_node);
     }
