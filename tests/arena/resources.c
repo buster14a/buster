@@ -89,8 +89,16 @@ static bool memory_arenas(void)
         };
         const struct sock_fprog filter = { .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
         bool failed = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
-        failed = failed && arena_push(&arena, UINT64_C(16) << 20, 1) == 0 && memcmp(&arena, &saved, sizeof(arena)) == 0;
-        failed = failed && arena_failure.commit && arena_failure.bytes != 0 && first[0] == 0xa5;
+        failed = failed && arena_push(&arena, UINT64_C(16) << 20, 1) == 0 && arena.base == saved.base && arena.length == saved.length &&
+                 arena.peak == saved.peak && arena.committed == saved.committed && arena.mapping_offset == saved.mapping_offset &&
+                 arena.mapping_bytes == saved.mapping_bytes;
+        // Nothing the attempt may have made writable can be verified under the refusal: the arena is unaccounted and
+        // mustn't be pooled.
+        failed = failed && arena.unaccounted && arena_failure.commit && arena_failure.bytes != 0 && first[0] == 0xa5;
+        ArenaPool pool = { 0 };
+        arena_pool = &pool;
+        arena_release(&arena);
+        failed = failed && pool.count == 0;
         _exit(failed ? 0 : 1);
     }
     valid = memory_wait(child, 0) && valid;
@@ -134,6 +142,93 @@ static bool memory_arenas(void)
     arena_pool = 0;
     arena_pool_release(&pool);
     return valid;
+}
+
+// The process's data charge (VmData), which RLIMIT_DATA bounds: private anonymous mappings' writable pages.
+static uint64_t memory_data(void)
+{
+    FILE* stream = fopen("/proc/self/status", "r");
+    char line[256];
+    uint64_t result = 0;
+    while (stream != 0 && fgets(line, sizeof(line), stream) != 0)
+    {
+        unsigned long long kilobytes = 0;
+        if (sscanf(line, "VmData: %llu kB", &kilobytes) == 1)
+        {
+            result = kilobytes << 10;
+            break;
+        }
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    return result;
+}
+
+static bool memory_data_limit(uint64_t room)
+{
+    const uint64_t data = memory_data();
+    struct rlimit previous;
+    bool result = data != 0 && getrlimit(RLIMIT_DATA, &previous) == 0;
+    if (result)
+    {
+        const rlim_t limit = (rlim_t)(data + room);
+        previous.rlim_cur = limit < previous.rlim_max ? limit : previous.rlim_max;
+        result = setrlimit(RLIMIT_DATA, &previous) == 0;
+    }
+    return result;
+}
+
+// A commit refused across a VMA boundary can leave the leading VMA writable and charged: a real partial failure,
+// which the seccomp child's refusal before any change can't cover. A NOHUGEPAGE advise splits the reserved tail so
+// that a later commit spans two VMAs; RLIMIT_DATA admits the head's growth but not the tail's, and what the attempt
+// made writable must be undone — in the arena's tail and in what the pool hands out again.
+static bool memory_partial_commit(void)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        ArenaPool pool = { 0 };
+        bool valid = true;
+        Arena arena = arena_reserve(UINT64_C(8) << 20);
+        uint8_t* first = arena_push(&arena, 4096, 1);
+        valid = valid && arena.base != 0 && first != 0;
+        if (first != 0)
+        {
+            memset(first, 0xa5, 4096);
+        }
+        // A VMA boundary inside the next commit's span, at 4 MiB of the reservation; the first push's geometric
+        // commit already consumed the reservation's own NOHUGEPAGE head.
+        uint8_t* const tail = arena.base + (UINT64_C(64) << 10);
+        const uint64_t boundary = (UINT64_C(4) << 20) - arena.mapping_offset;
+        valid = valid && madvise(arena.base + boundary, UINT64_C(64) << 10, MADV_NOHUGEPAGE) == 0;
+        valid = valid && memory_data_limit((UINT64_C(2) << 20) + (UINT64_C(768) << 10));
+        // The same limit leaves a two-VMA mprotect half applied; prove that partial-failure mode is real here before
+        // the arena's commit runs into it, then restore the probe.
+        valid = valid && mprotect(tail, UINT64_C(6) << 20, PROT_READ | PROT_WRITE) != 0 && memory_writable(tail);
+        valid = valid && mprotect(tail, UINT64_C(6) << 20, PROT_NONE) == 0;
+        const uint64_t committed = arena.committed;
+        const uint8_t* base = arena.base;
+        valid = valid && arena_push(&arena, UINT64_C(3) << 20, 1) == 0 && arena.committed == committed && first[0] == 0xa5 &&
+                !memory_writable(base + (UINT64_C(64) << 10)) && !memory_writable(base + boundary);
+        arena_pool = &pool;
+        arena_release(&arena);
+        valid = valid && pool.count == 1;
+        arena = arena_reserve(UINT64_C(8) << 20);
+        valid = valid && arena.base == base && arena.length == 0 && !memory_writable(arena.base + (UINT64_C(64) << 10));
+        uint8_t* again = arena_push(&arena, 4096, 1);
+        valid = valid && again != 0 && memory_writable(again);
+        if (again != 0)
+        {
+            again[0] = 0x5a;
+        }
+        arena_pool = 0;
+        arena_release(&arena);
+        arena_pool_release(&pool);
+        _exit(valid ? 0 : 1);
+    }
+    return memory_wait(child, 0);
 }
 
 static bool memory_many_arenas(void)
@@ -317,11 +412,12 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
 int main(int argc, char** argv)
 {
     const bool arenas = memory_arenas();
+    const bool partial = memory_partial_commit();
     const bool limited = memory_many_arenas();
     const bool layout = memory_layout_refusal();
     const bool valgrind = argc > 3 && strcmp(argv[3], "--valgrind") == 0;
     const bool strict = argc > 3 && strcmp(argv[3], "--strict") == 0;
     const bool commands = argc == 1 || (argc >= 3 && memory_commands(argv[1], argv[2], valgrind, strict));
-    printf("memory resources: arenas=%s limited=%s layout=%s commands=%s\n", arenas ? "pass" : "FAIL", limited ? "pass" : "FAIL", layout ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
-    return arenas && limited && layout && commands ? 0 : 1;
+    printf("memory resources: arenas=%s partial=%s limited=%s layout=%s commands=%s\n", arenas ? "pass" : "FAIL", partial ? "pass" : "FAIL", limited ? "pass" : "FAIL", layout ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
+    return arenas && partial && limited && layout && commands ? 0 : 1;
 }

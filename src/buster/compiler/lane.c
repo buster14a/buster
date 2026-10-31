@@ -127,6 +127,10 @@ struct Arena
     // capacity when a bounded view/test temporarily narrows it.
     uint64_t mapping_bytes;
     uint64_t committed;
+    // Set when a failed commit left pages past `committed` whose protection could not be verified or restored: the
+    // arena is never pooled (its writable extent is unknown); capacity is clamped below them, so no push reaches
+    // them, and release unmaps the whole reservation.
+    bool unaccounted;
     // The requested ceiling can exceed capacity after a constrained-address-space reservation.
     uint64_t requested_capacity;
 };
@@ -376,7 +380,8 @@ static void arena_release(Arena* arena)
         uint8_t* mapping = arena->base - arena->mapping_offset;
         const uint64_t bytes = arena->mapping_bytes;
         const uint64_t begin = arena->mapping_offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
-        const bool protected = pool != 0 && (arena->committed == begin || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
+        const bool protected = pool != 0 && !arena->unaccounted &&
+                               (arena->committed == begin || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
         const bool pooled = protected && madvise(mapping, bytes, MADV_DONTNEED) == 0;
         if (pooled)
         {
@@ -425,6 +430,40 @@ static void arena_pool_release(ArenaPool* pool)
     pool->count = 0;
 }
 
+// Undoes a commit attempt that may have applied to a leading part of [committed, target) before refusing across a
+// VMA boundary: PROT_NONE every page of it, halving a range that refuses until it applies or is one page. PROT_NONE
+// only removes access, so retried parts stay correct; a single-page failure ends the walk, with the pages before it
+// certainly inaccessible again — [at, target) may still be writable, which the caller accounts for.
+static uint64_t arena_reprotect(uint8_t* mapping, uint64_t committed, uint64_t target)
+{
+    uint64_t at = committed;
+    while (at < target)
+    {
+        uint64_t span = target - at;
+        bool applied = mprotect(mapping + at, span, PROT_NONE) == 0;
+        while (!applied && span > BUSTER_ARENA_PAGE_BYTES)
+        {
+            span = (span >> 1) & ~(uint64_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+            applied = mprotect(mapping + at, span, PROT_NONE) == 0;
+        }
+        if (!applied)
+        {
+            break;
+        }
+        at += span;
+    }
+    return at;
+}
+
+// An attempt's residue `at` could not be removed: clamp capacity below it, so that no push's writes reach it, and
+// flag the descriptor — arena_release never pools it and unmaps the whole reservation instead.
+static void arena_unaccounted(Arena* arena, uint64_t at)
+{
+    arena->unaccounted = true;
+    const uint64_t room = at > arena->mapping_offset ? at - arena->mapping_offset : 0;
+    arena->capacity = room < arena->capacity ? room : arena->capacity;
+}
+
 // Cold path: amortize protection changes geometrically, keeping tiny arenas in base pages and the huge-page region
 // aligned. The descriptor is published only after mprotect succeeds: a failed push changes neither length nor peak.
 static bool arena_commit(Arena* arena, uint64_t end)
@@ -447,19 +486,39 @@ static bool arena_commit(Arena* arena, uint64_t end)
             target = huge < arena->mapping_bytes ? huge : arena->mapping_bytes;
         }
         uint8_t* mapping = arena->base - offset;
+        // The most an attempt could have made writable: an mprotect that refuses across a VMA boundary may still have
+        // applied to the leading VMAs, leaving [committed, x) writable and charged for some x at most `applied`. Any
+        // such residue is undone before the result is decided (arena_reprotect); what cannot be is accounted for.
+        const uint64_t applied = target;
         result = mprotect(mapping + committed, target - committed, PROT_READ | PROT_WRITE) == 0;
         if (!result && target > needed)
         {
             target = needed;
             result = mprotect(mapping + committed, target - committed, PROT_READ | PROT_WRITE) == 0;
         }
+        const int error = errno;
         if (result)
         {
+            // A successful retry commits only to `needed`; an earlier attempt's residue may run past it, so the undo
+            // covers what the attempts touched beyond the commit, never the published prefix [begin, committed).
+            if (applied > target)
+            {
+                const uint64_t at = arena_reprotect(mapping, target, applied);
+                if (at < applied)
+                {
+                    arena_unaccounted(arena, at);
+                }
+            }
             arena->committed = target;
         }
         else
         {
-            arena_failure = (ArenaFailure){ .bytes = target - committed, .error = errno, .commit = true };
+            const uint64_t at = arena_reprotect(mapping, committed, applied);
+            if (at < applied)
+            {
+                arena_unaccounted(arena, at);
+            }
+            arena_failure = (ArenaFailure){ .bytes = target - committed, .error = error, .commit = true };
             arena_compact = true;
         }
     }
