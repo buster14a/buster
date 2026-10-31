@@ -1406,7 +1406,9 @@ Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
-complete inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`. ASan combines UBSan, bounds,
+inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
+compiler's own `main.c` self-check in the TSan and MSan rows, whose measured
+memory (docs/ci.md) exceeds a hosted runner's. ASan combines UBSan, bounds,
 leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
