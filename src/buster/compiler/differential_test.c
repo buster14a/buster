@@ -35,6 +35,11 @@ static DifferentialOptions differential_test_options(const char* output, const c
     // turning a delayed exit or signal into a different failure class under concurrent test load.
     const bool timeout = strcmp(scenario, "compile-timeout") == 0 || strcmp(scenario, "run-timeout") == 0 || strcmp(scenario, "generator-timeout") == 0;
     options.timeout_ms = timeout ? 200 : 1000;
+    // The short deadline belongs to the scenario's deliberate hang alone; a slow-but-healthy compile or run of the
+    // same scenario keeps the ordinary watchdog instead of taking the hang's failure signature under load.
+    options.timeout_label = strcmp(scenario, "compile-timeout") == 0 ? "buster-tier1-compile" :
+                            strcmp(scenario, "run-timeout") == 0 ? "buster-tier1-run" :
+                            strcmp(scenario, "generator-timeout") == 0 ? "generate" : 0;
     options.output_limit = 4096;
     options.source_limit = 4096;
     options.generator_mask = 1u << generator;

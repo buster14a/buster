@@ -56,6 +56,7 @@ struct DifferentialOptions
     const char* generator_revision;
     const char* replay;
     const char* source_directory;
+    const char* timeout_label;
     DifferentialArguments buster_args;
     DifferentialArguments clang_args;
     DifferentialArguments tier0_args;
@@ -540,6 +541,13 @@ static const char* differential_process_name(uint32_t kind)
     return result;
 }
 
+// timeout_label names the one command a campaign expects to bound at timeout_ms, such as a scenario's deliberate
+// hang. Every other command keeps the ordinary watchdog so a slow-but-healthy step retains its own failure class.
+static uint32_t differential_deadline(const DifferentialOptions* options, const char* label)
+{
+    return options->timeout_label == 0 || strcmp(label, options->timeout_label) == 0 ? options->timeout_ms : BUSTER_DIFFERENTIAL_TIMEOUT_MS;
+}
+
 static DifferentialProcess differential_process(const char* directory, const char* label, const DifferentialArguments* arguments, uint32_t timeout_ms, uint64_t output_limit, uint64_t diagnostic_limit, uint64_t file_limit)
 {
     DifferentialProcess result = {.kind = 5};
@@ -917,6 +925,10 @@ static bool differential_options(int argc, char** argv, DifferentialOptions* opt
                 valid = differential_unsigned(value, 3600000, &number) && number != 0;
                 options->timeout_ms = (uint32_t)number;
             }
+            else if (strcmp(name, "--timeout-label") == 0)
+            {
+                options->timeout_label = value;
+            }
             else if (strcmp(name, "--output-limit") == 0 || strcmp(name, "--source-limit") == 0)
             {
                 valid = differential_unsigned(value, BUSTER_DIFFERENTIAL_MAX_BYTES, &number) && number != 0;
@@ -991,8 +1003,8 @@ static bool differential_config_contents(FILE* file, const DifferentialOptions* 
 {
     *size = 0;
     bool valid = differential_config_token(file, size, "BUSTER_DIFFERENTIAL_V1\n", false);
-    const char* const names[] = {"--buster", "--clang", "--csmith", "--yarpgen", "--csmith-include", "--revision", "--generator-revision"};
-    const char* const values[] = {options->buster, options->clang, options->csmith, options->yarpgen, options->csmith_include, options->revision, options->generator_revision};
+    const char* const names[] = {"--buster", "--clang", "--csmith", "--yarpgen", "--csmith-include", "--revision", "--generator-revision", "--timeout-label"};
+    const char* const values[] = {options->buster, options->clang, options->csmith, options->yarpgen, options->csmith_include, options->revision, options->generator_revision, options->timeout_label};
     for (unsigned i = 0; valid && i < sizeof(names) / sizeof(names[0]); ++i)
     {
         if (values[i])
@@ -1215,7 +1227,7 @@ static bool differential_compilers(const char* directory, const DifferentialOpti
         DifferentialProcess compiled = {.kind = 5};
         if (valid)
         {
-            compiled = differential_process(directory, label, &arguments, options->timeout_ms, options->output_limit, options->output_limit, BUSTER_DIFFERENTIAL_MAX_BYTES);
+            compiled = differential_process(directory, label, &arguments, differential_deadline(options, label), options->output_limit, options->output_limit, BUSTER_DIFFERENTIAL_MAX_BYTES);
         }
         if (compiled.kind != 0)
         {
@@ -1232,7 +1244,7 @@ static bool differential_compilers(const char* directory, const DifferentialOpti
             DifferentialArguments run = {0};
             differential_add(&run, executable);
             snprintf(label, sizeof(label), "%s-run", modes[mode]);
-            const DifferentialProcess executed = differential_process(directory, label, &run, options->timeout_ms, options->output_limit, options->output_limit, options->source_limit);
+            const DifferentialProcess executed = differential_process(directory, label, &run, differential_deadline(options, label), options->output_limit, options->output_limit, options->source_limit);
             successful[mode] = executed.kind == 0 && executed.output_bytes[0] > 0;
             if (executed.kind != 0)
             {
@@ -1287,7 +1299,7 @@ static bool differential_generate(const char* directory, const DifferentialOptio
     DifferentialProcess generated = {.kind = 5};
     if (valid)
     {
-        generated = differential_process(directory, "generate", &arguments, options->timeout_ms, generator == 0 ? options->source_limit : options->output_limit, options->output_limit, options->source_limit);
+        generated = differential_process(directory, "generate", &arguments, differential_deadline(options, "generate"), generator == 0 ? options->source_limit : options->output_limit, options->output_limit, options->source_limit);
     }
     valid = generated.kind == 0;
     if (!valid)
@@ -1354,13 +1366,13 @@ static bool differential_case(const char* directory, const DifferentialOptions* 
         references = references && differential_path(executable, sizeof(executable), directory, "clang-ubsan.exe") && differential_compile_arguments(&arguments, options, 0, generator, executable, false, true);
         if (references)
         {
-            DifferentialProcess checked = differential_process(directory, "clang-ubsan-compile", &arguments, options->timeout_ms, options->output_limit, options->output_limit, BUSTER_DIFFERENTIAL_MAX_BYTES);
+            DifferentialProcess checked = differential_process(directory, "clang-ubsan-compile", &arguments, differential_deadline(options, "clang-ubsan-compile"), options->output_limit, options->output_limit, BUSTER_DIFFERENTIAL_MAX_BYTES);
             references = checked.kind == 0;
             if (references)
             {
                 DifferentialArguments run = {0};
                 differential_add(&run, executable);
-                checked = differential_process(directory, "clang-ubsan-run", &run, options->timeout_ms, options->output_limit, options->output_limit, options->source_limit);
+                checked = differential_process(directory, "clang-ubsan-run", &run, differential_deadline(options, "clang-ubsan-run"), options->output_limit, options->output_limit, options->source_limit);
                 references = checked.kind == 0 && checked.output_bytes[0] > 0 && differential_equal_files(directory, "clang-o0-run.stdout", "clang-ubsan-run.stdout");
             }
         }
@@ -1407,7 +1419,7 @@ static bool differential_version(const char* directory, const char* label, const
     DifferentialArguments arguments = {0};
     differential_add(&arguments, tool);
     differential_add(&arguments, "--version");
-    const DifferentialProcess version = differential_process(directory, label, &arguments, options->timeout_ms, options->output_limit, options->output_limit, options->source_limit);
+    const DifferentialProcess version = differential_process(directory, label, &arguments, differential_deadline(options, label), options->output_limit, options->output_limit, options->source_limit);
     char name[128];
     snprintf(name, sizeof(name), "%s.stdout", label);
     const bool identifies_buster = !buster || options->fixture || differential_contains(directory, name, "buster") || differential_contains(directory, name, "Buster");
@@ -1702,7 +1714,7 @@ static int run_differential_command(int argc, char** argv)
     {
         fprintf(stderr, "Usage: test-differential --buster PATH (--tier0-arg ARG | --tier0-default) [--tier1-arg ARG | --tiers 0]\n"
                         "  [--generator both|csmith|yarpgen] [--csmith PATH] [--yarpgen PATH] [--csmith-include DIR]\n"
-                        "  [--clang PATH] [--seed N] [--count N] [--output DIR] [--timeout-ms N]\n"
+                        "  [--clang PATH] [--seed N] [--count N] [--output DIR] [--timeout-ms N] [--timeout-label LABEL]\n"
                         "  [--output-limit BYTES] [--source-limit BYTES] [--revision ID] [--generator-revision ID]\n"
                         "  [--buster-arg ARG] [--clang-arg ARG] [--csmith-arg ARG] [--yarpgen-arg ARG]\n"
                         "  --generate-only: preserve generator controls; exit 2, no compiler campaign passes.\n"
