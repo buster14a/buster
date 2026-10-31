@@ -596,6 +596,20 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 phi_hints[input->phi_values[k]] = input->phi_operands[input->phi_operand_offsets[k] + nearest];
             }
         }
+        // And a value a phi takes along a back edge (defined after it, in its loop), hinted to the phi, which has its
+        // register by then: where the operand takes it, the back edge moves nothing for it.
+        for (uint32_t b = 0; ready && b < blocks; b += 1)
+        {
+            for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
+            {
+                const uint32_t phi = input->phi_values[k];
+                for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
+                {
+                    const uint32_t operand = input->phi_operands[o];
+                    phi_hints[operand] = phi_hints[operand] == BUSTER_TIER1_CFG_NONE && input->definitions[operand] > input->definitions[phi] ? phi : phi_hints[operand];
+                }
+            }
+        }
         Dataflow liveness = { 0 };
         ready = ready && dataflow_create(scratch, blocks, dense_count, input->edge_count, &liveness);
         const uint64_t words = liveness.row_words;

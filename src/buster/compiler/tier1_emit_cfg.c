@@ -17,8 +17,8 @@
 // transitions at both phases, its selected records, a call's saves and argument moves, a return's epilogue); then the
 // block's terminator. A jump's edge moves go before it. A conditional branch's go at its successors' starts or, for a
 // split critical edge, in a stub after the branch: the edge's moves, then a jump to the successor. A jump to the
-// record that follows it is left out, and a branch whose true successor follows it is inverted. Branch targets are
-// record indices, which branch sizing takes.
+// record that follows it is left out, and a branch is inverted where its true successor follows it or where its true
+// edge alone has a stub, which then follows it. Branch targets are record indices, which branch sizing takes.
 //
 // At every block's start, the emitter's view of where each value is becomes the block's entry state: the intervals
 // that cover its start, at tier1_cfg_entry_location, so that no predecessor's exit state leaks into another block. Move
@@ -569,6 +569,19 @@ static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b
     {
         // The true successor follows: jump on the inverse to the false one, and fall through.
         error = tier1_emit_cfg_jump(buffer, inverse, f, pending_branches, pending_goals, pending, emitted);
+    }
+    else if (error == TIER1_EMIT_OK && split_true && !split_false)
+    {
+        // Only the true edge has a stub: jump on the inverse to the false successor and fall into the stub, so that the
+        // true path (a loop's back edge, often) takes one jump rather than two.
+        error = tier1_emit_cfg_jump(buffer, inverse, f, pending_branches, pending_goals, pending, emitted);
+        stub_first[e_true] = buffer->count;
+        emitted->edge_stubs += 1;
+        error = error == TIER1_EMIT_OK ? tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e_true], cfg->edge_move_offsets[e_true + 1], buffer) : error;
+        if (error == TIER1_EMIT_OK && t != b + 1)
+        {
+            error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, t, pending_branches, pending_goals, pending, emitted);
+        }
     }
     else if (error == TIER1_EMIT_OK)
     {

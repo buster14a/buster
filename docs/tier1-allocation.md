@@ -133,7 +133,9 @@ registers: ends deposit downward in input order and starts take upward in input
 order. A CFG's per-block ranges do exactly that at a block's start, so
 `hint_values` names, per interval, a value whose most recently assigned register
 the interval takes where it is free; `tier1_cfg.c` hints each range a value
-enters a block with to the value itself, and each phi to an operand. The common
+enters a block with to the value itself, each phi to an operand, and a value
+a phi takes along a back edge (defined after the phi) to the phi, which has its
+register by then, so that the back edge moves nothing for it. The common
 path takes the hinted register from the level above that holds it, which then
 holds the register the rule would have taken, or as a fresh one, which makes a
 register taken from the current level fresh again. Every level from the current
