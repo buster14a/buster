@@ -12347,6 +12347,7 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
 // a unit without errors, 1 otherwise. A reservation that fails is reported, and what was reserved is released.
 static __attribute__((unused)) int run_parse_command(int count, char** arguments)
 {
+    arena_failure = (ArenaFailure){ 0 };
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
@@ -12360,7 +12361,7 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         scalar |= strcmp(arguments[i], "--scalar") == 0;
     }
     const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
-    if (arena.base == 0)
+    if (arena.base == 0 || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "parsing", 1ull << 36);
     }

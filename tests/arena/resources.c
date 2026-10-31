@@ -163,6 +163,42 @@ static bool memory_many_arenas(void)
     return memory_wait(child, 0);
 }
 
+// Valgrind's address manager can report EINVAL, not ENOMEM, for a valid oversized mapping. Reproduce that
+// layout refusal without depending on Valgrind's current layout, keeping the compact retry and later pushes real.
+static bool memory_layout_refusal(void)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const struct sock_filter instructions[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap, 0, 5),
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PROT_NONE, 0, 3),
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1]) + 4),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EINVAL),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        const struct sock_fprog filter = { .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
+        bool valid = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
+        arena_pool = 0;
+        arena_compact = false;
+        Arena arena = arena_reserve(UINT64_C(64) << 30);
+        uint8_t* bytes = arena_push(&arena, 32, 16);
+        valid = valid && arena_compact && arena.capacity == BUSTER_ARENA_COMPACT_BYTES && bytes != 0;
+        if (bytes != 0)
+        {
+            bytes[0] = 0x51;
+            bytes[31] = 0xa3;
+            valid = valid && bytes[0] == 0x51 && bytes[31] == 0xa3;
+        }
+        arena_release(&arena);
+        _exit(valid ? 0 : 1);
+    }
+    return memory_wait(child, 0);
+}
+
 // Let exec's loader map its ELF segments and make RELRO read-only. Refuse only the compiler's inaccessible
 // reservations or read/write commits, avoiding a guessed RLIMIT_AS floor that a smaller compiler can pass.
 static bool memory_refuse(uint32_t operation)
@@ -212,6 +248,16 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
     if (!valid)
     {
         fprintf(stderr, "failed memory command: %s %s; log: %s\n", arguments[0], arguments[1] != 0 ? arguments[1] : "", log);
+        FILE* stream = fopen(log, "r");
+        char line[512];
+        for (uint32_t i = 0; stream != 0 && i < 16 && fgets(line, sizeof(line), stream) != 0; i += 1)
+        {
+            fputs(line, stderr);
+        }
+        if (stream != 0)
+        {
+            fclose(stream);
+        }
     }
     return valid;
 }
@@ -240,7 +286,8 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
         { compiler, "-c", source, "-o", output, 0 },
         { compiler, source, "-o", output, 0 },
     };
-    for (uint32_t i = 0; valid && i < sizeof(options) / sizeof(options[0]); i += 1)
+    const bool ready = valid;
+    for (uint32_t i = 0; ready && i < sizeof(options) / sizeof(options[0]); i += 1)
     {
         snprintf(log, sizeof(log), "%s/command-%u.log", directory, i);
         snprintf(profile, sizeof(profile), "--callgrind-out-file=%s/callgrind-%u.out", directory, i);
@@ -250,11 +297,11 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
             traced[5 + j] = options[i][j];
         }
         const rlim_t limit = valgrind || strict ? RLIM_INFINITY : UINT64_C(2) << 30;
-        valid = memory_command(valgrind ? traced : options[i], log, limit, 0);
-        for (uint32_t refused = 1; valid && !valgrind && !strict && refused <= 2; refused += 1)
+        valid = memory_command(valgrind ? traced : options[i], log, limit, 0) && valid;
+        for (uint32_t refused = 1; !valgrind && !strict && refused <= 2; refused += 1)
         {
             snprintf(log, sizeof(log), "%s/failure-%u-%u.log", directory, i, refused);
-            valid = memory_command(options[i], log, RLIM_INFINITY, refused);
+            valid = memory_command(options[i], log, RLIM_INFINITY, refused) && valid;
         }
     }
     if (valid)
@@ -271,9 +318,10 @@ int main(int argc, char** argv)
 {
     const bool arenas = memory_arenas();
     const bool limited = memory_many_arenas();
+    const bool layout = memory_layout_refusal();
     const bool valgrind = argc > 3 && strcmp(argv[3], "--valgrind") == 0;
     const bool strict = argc > 3 && strcmp(argv[3], "--strict") == 0;
     const bool commands = argc == 1 || (argc >= 3 && memory_commands(argv[1], argv[2], valgrind, strict));
-    printf("memory resources: arenas=%s limited=%s commands=%s\n", arenas ? "pass" : "FAIL", limited ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
-    return arenas && limited && commands ? 0 : 1;
+    printf("memory resources: arenas=%s limited=%s layout=%s commands=%s\n", arenas ? "pass" : "FAIL", limited ? "pass" : "FAIL", layout ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
+    return arenas && limited && layout && commands ? 0 : 1;
 }

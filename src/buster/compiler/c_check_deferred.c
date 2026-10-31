@@ -458,7 +458,7 @@ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
         // mapping directly: the parent descriptor does not track the children's writable prefixes.
         Arena storage = arena_reserve_exact(total, total);
 #if !BUSTER_SANITIZER_RESOURCES
-        if (storage.base == 0 && errno == ENOMEM && limit > BUSTER_ARENA_COMPACT_BYTES)
+        if (storage.base == 0 && (errno == ENOMEM || errno == EINVAL) && limit > BUSTER_ARENA_COMPACT_BYTES)
         {
             arena_compact = true;
             limit = arena_reservation_limit();

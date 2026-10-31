@@ -291,8 +291,9 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
 #endif
         errno = ENOMEM;
         uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-        // Do not evade an injected failure. A real layout refusal gets a bounded retry, never a greedy half-limit map.
-        if (bounded && allowed && mapping == MAP_FAILED && errno == ENOMEM && capacity > BUSTER_ARENA_COMPACT_BYTES)
+        // Do not evade an injected failure. Valgrind may reject a valid oversized mapping with EINVAL rather than
+        // ENOMEM. Both layout refusals get a bounded retry, never a greedy half-limit map.
+        if (bounded && allowed && mapping == MAP_FAILED && (errno == ENOMEM || errno == EINVAL) && capacity > BUSTER_ARENA_COMPACT_BYTES)
         {
             arena_compact = true;
             capacity = BUSTER_ARENA_COMPACT_BYTES;

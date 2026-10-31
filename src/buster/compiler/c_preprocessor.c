@@ -20507,6 +20507,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
 // `compiler -E [options] file.c`: preprocesses the file and prints the result, as clang -E does.
 static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
+    arena_failure = (ArenaFailure){ 0 };
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
@@ -20517,7 +20518,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
     options.expansion_starts = markers;
     // -E reads no history but its diagnostics' notes, which record it when there are diagnostics.
     options.defer_history = true;
-    if (arena.base == 0)
+    if (arena.base == 0 || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
     }
