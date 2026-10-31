@@ -3967,6 +3967,18 @@ static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInpu
     return token == BUSTER_CHECK_NONE;
 }
 
+// Whether these attributes include GNU's gnu_inline, which makes inline functions follow GNU89's rules in any mode.
+static bool check_input_attribute_gnu_inline(const CheckInputAttributes* attributes)
+{
+    bool found = false;
+    for (uint32_t i = 0; attributes != 0 && !found && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        found = !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;
+    }
+    return found;
+}
+
 // C23's auto declarator (#793), as clang reads it in C: a variable with an initializer; a typedef's and a function's
 // are errors at the keyword, an array's and an initializer list's at the initializer, and one without an initializer at
 // its name. Unlike __auto_type, a pointer declarator and a declaration's later declarators are the language's.
@@ -4296,7 +4308,20 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             {
                 check_input_schedule(reader, name, i, type, is_typedef ? C_BINDING_TYPEDEF : function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
                 reader->output->explicit_abis[name] = abi_origin;
-                reader->defined[name] = kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE);
+                // GNU inline's extern inline definition is the unit's inline definition only, so it is not a
+                // definition for C's one-definition rule: a later ordinary definition is the external one (GNU89's
+                // idiom, and gnu_inline in later modes). C99's inline definition and GNU89's plain inline are
+                // definitions here, as clang reports a later one as a redefinition, and so is an extern inline
+                // definition after one.
+                const uint32_t previous_handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
+                const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
+                const bool prior_definition = previous_declaration != BUSTER_CHECK_NONE && reader->definition_origins[previous_declaration] != 0;
+                const CheckInputAttributes* previous_attributes =
+                    reader->output->attributes != 0 && previous_declaration < parser->tokens.count ? reader->output->attributes[previous_declaration] : 0;
+                const bool gnu_inline_definition = function && !is_typedef && kind == PARSE_KIND_L_BRACE && is_inline && storage == C_NAME_EXTERN && !prior_definition &&
+                                                   (predefines_gnu_inline(&reader->pp->options.predefines, reader->pp->options.language) ||
+                                                    check_input_attribute_gnu_inline(attributes) || check_input_attribute_gnu_inline(previous_attributes));
+                reader->defined[name] = (kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition;
                 reader->defined[name] |= !is_typedef && !function && !file && is_static;
                 // A function's or variable's alias, ifunc or weakref target defines it (#147).
                 const bool alias_definition = !is_typedef && check_input_attribute_alias_definition(attributes);

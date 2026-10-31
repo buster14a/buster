@@ -4547,6 +4547,60 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
     const int status = built == 0 ? check_test_driver_spawn(run, &text) : -1;
     free(text);
     check_test_expect(test, status == 7, "GNU89 plain inline definition links and runs in the direct path");
+    // A same-translation-unit GNU inline definition and the ordinary definition after it: the ordinary one is the
+    // external definition, in GNU89 and with -fgnu89-inline or gnu_inline in later modes.
+    static const struct
+    {
+        const char* name;
+        const char* standard;
+        const char* flag;
+        const char* source;
+        int status;
+    } same_unit[] = {
+        { "GNU89 extern inline then ordinary", "-std=gnu89", "-w",
+          "extern inline int same(int x){return x+1;}\nint same(int x){return x+2;}\nint same_user(int x){return same(x);}\nint main(void){return same(6);}\n", 8 },
+        { "C17 -fgnu89-inline extern inline then ordinary", "-std=c17", "-fgnu89-inline",
+          "extern inline int same(int x){return x+1;}\nint same(int x){return x+2;}\nint same_user(int x){return same(x);}\nint main(void){return same(6);}\n", 8 },
+        { "C17 gnu_inline extern inline then ordinary", "-std=c17", "-w",
+          "extern inline __attribute__((gnu_inline)) int same(int x){return x+1;}\nint same(int x){return x+2;}\nint same_user(int x){return same(x);}\nint main(void){return same(6);}\n", 8 },
+    };
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(same_unit); m += 1)
+    {
+        char same_source[256];
+        snprintf(same_source, sizeof(same_source), "%s/inline-same-%u.c", directory, m);
+        const bool same_written = parse_test_write(same_source, same_unit[m].source, strlen(same_unit[m].source));
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char same_executable[256];
+            snprintf(same_executable, sizeof(same_executable), "%s/inline-same-%u-%u", directory, m, scalar);
+            char* same_build[] = { (char*)executable, (char*)same_unit[m].standard, (char*)same_unit[m].flag, scalar ? "--scalar" : "-w",
+                                   "-o", same_executable, same_source, NULL };
+            char* same_run[] = { same_executable, NULL };
+            char* same_text = NULL;
+            const int same_built = same_written ? check_test_driver_spawn(same_build, &same_text) : -1;
+            free(same_text); same_text = NULL;
+            const int same_status = same_built == 0 ? check_test_driver_spawn(same_run, &same_text) : -1;
+            free(same_text);
+            char description[256];
+            snprintf(description, sizeof(description), "%s %s links and the ordinary definition runs", same_unit[m].name, scalar ? "scalar" : "vector");
+            check_test_expect(test, same_status == same_unit[m].status, description);
+            unlink(same_executable);
+        }
+        unlink(same_source);
+    }
+    // The same shape is still a redefinition where GNU inline doesn't apply.
+    static const char same_conflict[] = "extern inline int same(void){return 1;} int same(void){return 2;}\n";
+    char conflict_source[256];
+    snprintf(conflict_source, sizeof(conflict_source), "%s/inline-conflict.c", directory);
+    const bool conflict_written = parse_test_write(conflict_source, same_conflict, sizeof(same_conflict) - 1);
+    char* conflict[] = { (char*)executable, "-std=c17", "-fsyntax-only", conflict_source, NULL };
+    char* conflict_text = NULL;
+    const int conflict_status = conflict_written ? check_test_driver_spawn(conflict, &conflict_text) : -1;
+    const bool conflict_said = conflict_text != NULL && strstr(conflict_text, "conflicting declaration") != NULL;
+    free(conflict_text);
+    check_test_expect(test, conflict_status == 1 && conflict_said, "C17 keeps the extern inline followed by a definition a redefinition");
+    unlink(conflict_source);
+
     static const char header_user[] = "extern inline int value(void){return 99;} int main(void){return value();}\n";
     static const char external_body[] = "int value(void){return 7;}\n";
     char second[256], second_object[256];
