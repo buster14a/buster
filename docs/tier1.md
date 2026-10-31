@@ -158,8 +158,9 @@ of C's truth values, addresses and divisions by powers of two (#141's items in
 `tier1_select.c`) it ran in 285.7 ms. By sampled cycles, the functions Tier 1
 compiles take 26% fewer as its code than as Tier 0's (41% fewer than before the
 walks). What still costs: a narrow value's zero extension is a `movzx`, though
-its register is zero-extended already; `&&`, `||` and `?:` results stay in
-untyped temporary frame slots, which SSA promotion leaves in memory; a frame
+its register is zero-extended already; `&&`, `||` and `?:` results whose depth
+slot carries values of several types stay in memory (single-type ones promote
+since #983); a frame
 object's address is a `lea` rather than part of its users' memory operands; the
 pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
 function, is Tier 0's (its switch). 80 of #142's programs, 40 per generator, gave

@@ -262,6 +262,8 @@ struct CheckInputNakedDiagnostic
 // An implicit declaration of a library function (#927, #148), whose type is its catalog row's prototype and whose
 // diagnostic names that and its header (check_input_implicit_function, check_driver_implicit_library).
 #define CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY 0x20u
+// Source-prefix evidence for ISO inline rules; later declarations never rewrite an already emitted warning.
+#define CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION 0x40u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -637,6 +639,25 @@ static bool check_deferred_shared(const CheckDeferred* deferred);
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
+typedef struct CheckWarningQueryPoint CheckWarningQueryPoint;
+struct CheckWarningQueryPoint
+{
+    uint32_t token;
+    uint32_t query;
+};
+typedef struct CheckWarningQueryFrame CheckWarningQueryFrame;
+struct CheckWarningQueryFrame
+{
+    uint32_t first;
+    uint32_t end;
+};
+typedef struct CheckWarningQueries CheckWarningQueries;
+struct CheckWarningQueries
+{
+    const CheckWarningQueryPoint* points;
+    uint32_t count;
+    bool prepared;
+};
 struct CheckInputSpecifierJob
 {
     uint32_t first;
@@ -648,6 +669,7 @@ struct CheckInputSpecifierJob
     uint32_t signedness;
     uint32_t storage;
     uint32_t restrict_token;
+    uint32_t complex_token;
     uint32_t vla_begin;
     uint32_t auto_token;
     uint32_t constexpr_token;
@@ -705,6 +727,13 @@ struct CheckInputReader
     CheckConstBuffer const_values;
     uint32_t const_warning_capacity;
     bool literal_tables_disabled;
+    CheckWarningSet literal_warnings;
+    CheckWarningSet source_warning_keys;
+    CheckWarningSet variable_sized_records;
+    // An independently checked array bound is a semantic unevaluation barrier, even inside sizeof/typeof.
+    uint32_t warning_bound_open;
+    Arena* warning_query_arena;
+    CheckWarningQueries warning_queries;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -1034,6 +1063,131 @@ static void check_input_const_warning(CheckInputReader* reader, uint32_t node, u
     }
 }
 
+static void check_input_warning(CheckInputReader* reader, uint32_t id, uint32_t kind, uint32_t token, uint32_t completion_kind, uint32_t completion)
+{
+    const CheckWarningEvent event = {
+        .id = id,
+        .kind = kind,
+        .token = token,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion_kind = completion_kind,
+        .completion = completion,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+    };
+    check_input_warning_event(reader, &event, NULL, 0);
+}
+
+static void check_input_warning_once(CheckInputReader* reader, const CheckWarningEvent* event)
+{
+    const uint64_t key = (uint64_t)event->kind << 32 | ((uint64_t)event->token + 1);
+    if (!check_warning_set_contains(&reader->source_warning_keys, key))
+    {
+        const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+        reader->output->resource |= !retained;
+        if (retained)
+        {
+            check_input_warning_event(reader, event, NULL, 0);
+        }
+    }
+}
+
+#include "c_check_warning_queries.c"
+
+static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
+                                      uint32_t first, uint32_t end, uint32_t completion)
+{
+    CheckWarningEvent event;
+    if (check_warning_null_event(reader->parser, reader->types, destination, value, first, end, completion, &event))
+    {
+        event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
+        event.payload.token = reader->warning_bound_open;
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// The innermost array bound that holds `token`: a type name's own bound inside a sizeof operand may be deeper than
+// the declaration bound the reader is evaluating. `token`'s own bound is the nearest `[` before it that closes after it.
+static uint32_t check_input_warning_bound(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    uint32_t bound = reader->warning_bound_open;
+    for (uint32_t open = token; bound != BUSTER_CHECK_NONE && open > bound;)
+    {
+        open -= 1;
+        if (parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE)
+        {
+            const uint32_t close = parser->tree.parents[open];
+            if (close > token && close < parser->tokens.count)
+            {
+                bound = open;
+                break;
+            }
+        }
+    }
+    return bound;
+}
+
+static bool check_input_warning_bound_unevaluated(CheckInputReader* reader, uint32_t token, uint32_t bound)
+{
+    const uint32_t previous = reader->warning_bound_open;
+    reader->warning_bound_open = bound;
+    const bool result = check_input_warning_unevaluated(reader, token);
+    reader->warning_bound_open = previous;
+    return result;
+}
+
+// MESSAGE/id30 is a source-use witness, never an emitted diagnostic: a fixed or dependent bound remains
+// independently checked across an outer query. The TU-final consumer decides missing definitions and first use.
+static void check_input_internal_bound_use(CheckInputReader* reader, uint32_t token, uint32_t declaration)
+{
+    if (reader->warning_bound_open != BUSTER_CHECK_NONE && declaration < reader->parser->tokens.count &&
+        reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && reader->linkage[declaration] == 1 && reader->objects[declaration] != 0)
+    {
+        const uint32_t bound = check_input_warning_bound(reader, token);
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_UNDEFINED_INTERNAL,
+            .kind = CHECK_WARNING_EVENT_MESSAGE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = check_input_warning_bound_unevaluated(reader, token, bound) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token,
+            .payload = { .name = reader->parser->tokens.names[declaration], .token = bound, .data = reader->objects[declaration] },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// A selected overload is authoritative source-use identity, including a later-overwritten initializer. The
+// private KIND_COUNT key namespace keeps it distinct from an earlier raw bound witness at the same token.
+static void check_input_selected_overload_use(CheckInputReader* reader, uint32_t token, uint32_t completion, const CheckOverloadResult* selected)
+{
+    if (selected->status == CHECK_OVERLOAD_OK && selected->object != 0 && selected->type != 0)
+    {
+        const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_KIND_COUNT << 32 | ((uint64_t)token + 1);
+        if (!check_warning_set_contains(&reader->source_warning_keys, key))
+        {
+            const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+            reader->output->resource |= !retained;
+            if (retained)
+            {
+                const uint32_t bound = check_input_warning_bound(reader, token);
+                const CheckWarningEvent event = {
+                    .id = CHECK_WARNING_ID_UNDEFINED_INTERNAL,
+                    .kind = CHECK_WARNING_EVENT_MESSAGE,
+                    .token = token,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .flags = check_input_warning_bound_unevaluated(reader, token, bound) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = completion,
+                    .payload = { .first_type = selected->type, .token = bound, .data = selected->object },
+                };
+                check_input_warning_event(reader, &event, NULL, 0);
+            }
+        }
+    }
+}
+
 // A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
 static void check_input_lane_refuse(CheckInputReader* reader, bool refused, const char* reason)
 {
@@ -1163,7 +1317,7 @@ static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t tok
 {
     TypeId type = reader->declared_types[token];
     const uint32_t declaration = reader->output->declarations[token];
-    if (reader->output->kr_parameter_count != 0 && declaration < reader->parser->tokens.count &&
+    if (reader->output->kr_parameter_count != 0 && declaration < reader->parser->tokens.count && reader->output->function_flags != NULL &&
         (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
     {
         const TypeId function = type_strip_aligned(reader->types, type);
@@ -1342,6 +1496,33 @@ static uint32_t check_input_tag_body(const Parser* parser, uint32_t token, uint3
     position += position < end && parser->tokens.kinds[position] == PARSE_KIND_IDENTIFIER;
     position = check_input_skip_attributes(parser, position, end);
     return check_input_enum_base_end(parser, token, position, end);
+}
+
+// A directly written tag declaration can declare its tag without a declarator. A member without a declarator is
+// different: only a directly written untagged definition declares something (an anonymous struct or union member, or
+// an enum's enumerators). A typedef or typeof naming that same type still declares nothing. Skip complete
+// query/attribute groups so a tag written inside them cannot supply proof.
+static bool check_input_empty_declaration_tag(const Parser* parser, uint32_t first, uint32_t end, bool member)
+{
+    bool allowed = false;
+    for (uint32_t token = first; !allowed && token < end; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
+        {
+            const uint32_t next = check_input_skip_attributes(parser, token + 1, end);
+            const bool named = next < end && parser->tokens.kinds[next] == PARSE_KIND_IDENTIFIER;
+            const uint32_t body = check_input_tag_body(parser, token, end);
+            const bool definition = body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE;
+            allowed = member ? !named && definition : named || (kind == PARSE_KIND_ENUM && definition);
+        }
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            const uint32_t close = parser->tree.parents[token];
+            token = close > token && close < end ? close : end;
+        }
+    }
+    return allowed;
 }
 
 // These are the target's implicit typedefs, already classified by the parser. They have no source declaration
@@ -1766,6 +1947,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     uint32_t signedness = 0;
     uint32_t storage = 0;
     uint32_t restrict_token = BUSTER_CHECK_NONE;
+    uint32_t complex_token = BUSTER_CHECK_NONE;
     TypeId base = 0;
     uint8_t abi_origin = 0;
     bool integer_seen = false;
@@ -1798,6 +1980,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         signedness = job->signedness;
         storage = job->storage;
         restrict_token = job->restrict_token;
+        complex_token = job->complex_token;
         base = job->base;
         abi_origin = job->abi_origin;
         attributes = job->attributes;
@@ -1872,6 +2055,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         else if (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2)
         {
             complex = true;
+            complex_token = complex_token == BUSTER_CHECK_NONE ? i : complex_token;
         }
         else if (kind == PARSE_KIND_ATOMIC && (i + 1 >= end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
         {
@@ -1899,6 +2083,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                     {
                         .first = first, .keyword = i, .closing = close, .qualifiers = qualifiers,
                         .longs = longs, .shorts = shorts, .signedness = signedness, .storage = storage, .restrict_token = restrict_token,
+                        .complex_token = complex_token,
                         .base = base, .attributes = attributes, .abi_origin = abi_origin, .integer_seen = integer_seen, .saw = saw,
                         .thread_local = thread_local, .complex = complex, .atomic = atomic,
                         .auto_token = c23_auto, .constexpr_token = constexpr_token,
@@ -2083,6 +2268,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     valid &= saw && (base != 0 || integer_seen || longs || shorts || signedness || complex) && longs <= 2 && shorts <= 1 && !(longs && shorts);
     valid &= !*is_typedef || (storage == 0 && !*is_inline && !thread_local);
     valid &= !thread_local || (storage == 0 || storage == C_NAME_STATIC || storage == C_NAME_EXTERN);
+    const bool plain_complex = complex && base == 0 && !integer_seen && !longs && !shorts && !signedness;
     if (base == 0)
     {
         base = complex && !integer_seen && !longs && !shorts && !signedness ? BUSTER_TYPE_DOUBLE :
@@ -2164,6 +2350,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     reader->specifier_attributes = attributes;
     reader->specifier_abi_origin = abi_origin;
     reader->specifier_thread_local = thread_local;
+    if (valid && plain_complex)
+    {
+        check_input_warning(reader, CHECK_WARNING_ID_PLAIN_COMPLEX, CHECK_WARNING_EVENT_PLAIN_COMPLEX, complex_token, CHECK_WARNING_COMPLETE_AT_TOKEN, i);
+    }
     *cursor = i;
     *storage_class = storage;
     return valid ? type_qualify(reader->types, base, qualifiers) : 0;
@@ -2291,7 +2481,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                     .bytes = literal.bytes,
                     .byte_count = literal.byte_count,
                 };
-                reader->output->resource |= !check_const_append(&reader->const_values, object, &part, 1, NULL, 0);
+                reader->output->resource |= !check_const_append(&reader->const_values, object, &part, 1, NULL, 0, true);
                 reader->output->const_values = check_const_view(&reader->const_values);
             }
             else
@@ -2354,6 +2544,11 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
         result->valid = result->type != 0;
     }
     reader->output->resource |= result->resource;
+    CheckWarningEvent event;
+    if (check_literal_warning_event(result, token, &event))
+    {
+        check_input_warning_once(reader, &event);
+    }
     arena_pop_to(reader->scratch, mark);
 }
 
@@ -2362,6 +2557,19 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
 static CheckInputMessage check_input_literal_report(const CheckLiteral* literal)
 {
     return literal->bit_width > BUSTER_CHECK_LITERAL_BIT_WIDTH ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
+}
+
+// A numeric zero literal's source provenance: parentheses and selections keep it; a character, enum, object read,
+// cast or computed zero does not acquire it.
+static CheckValue check_input_literal_value(const CheckInputReader* reader, uint32_t token, CheckLiteral literal)
+{
+    CheckValue value = check_literal_value(literal);
+    if (literal.valid && reader->parser->tokens.kinds[token] == PARSE_KIND_NUMBER && reader->parser->tokens.names[token] == 0 &&
+        value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == 0)
+    {
+        value.flags |= BUSTER_CHECK_LITERAL_ZERO;
+    }
+    return value;
 }
 
 static CheckOp check_input_binary(uint8_t kind);
@@ -2539,6 +2747,7 @@ struct CheckDeclaratorParameter
 {
     TypeId type;
     uint32_t next;
+    uint32_t missing_name;
 };
 
 typedef struct CheckDeclaratorFrame CheckDeclaratorFrame;
@@ -2548,6 +2757,7 @@ struct CheckDeclaratorFrame
     uint32_t cursor;
     uint32_t end;
     uint32_t name;
+    uint32_t missing_name;
     uint32_t first;
     uint32_t last;
     uint32_t pointers;
@@ -2573,6 +2783,7 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
         .cursor = first,
         .end = end,
         .name = BUSTER_CHECK_NONE,
+        .missing_name = BUSTER_CHECK_NONE,
         .first = BUSTER_CHECK_NONE,
         .last = BUSTER_CHECK_NONE,
         .pointers = BUSTER_CHECK_NONE,
@@ -2629,6 +2840,7 @@ struct CheckDeclaratorRun
     uint32_t name;
     uint32_t names;
     uint32_t declarations;
+    uint32_t function_part;
     // The struct, union or enum keyword of a definition the run waits for, which ends before definition_end (a
     // parameter list's or an array bound's closing token), or BUSTER_CHECK_NONE.
     uint32_t definition;
@@ -2716,6 +2928,7 @@ static CheckDeclaratorRun* check_input_declarator_begin(CheckInputReader* reader
             .name = BUSTER_CHECK_NONE,
             .names = BUSTER_CHECK_NONE,
             .declarations = BUSTER_CHECK_NONE,
+            .function_part = BUSTER_CHECK_NONE,
             .definition = BUSTER_CHECK_NONE,
             .definition_end = BUSTER_CHECK_NONE,
             .overloadable = reader->declarator_overloadable,
@@ -2787,6 +3000,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 frame->pointers = part_count++;
             }
             frame->state = 1;
+            frame->missing_name = i;
             if (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_IDENTIFIER && parser->tree.roles[i] == PARSE_ROLE_OPERAND)
             {
                 frame->name = i;
@@ -3055,6 +3269,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             {
                 CheckDeclaratorFrame* parent = &frames[depth - 2];
                 parent->name = frame->name;
+                parent->missing_name = frame->missing_name;
                 parent->first = frame->first;
                 parent->last = frame->last;
                 parent->attributes = check_input_merge_attributes(reader, parent->attributes, frame->attributes);
@@ -3149,6 +3364,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             {
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
+                                .missing_name = frame->name == BUSTER_CHECK_NONE ? frame->missing_name : BUSTER_CHECK_NONE,
                             };
                             if (function->parameter_last != BUSTER_CHECK_NONE)
                             {
@@ -3227,6 +3443,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     run->identifier_list = function && parts[first].identifier_list;
                     run->attributes = frame->attributes;
                     run->declarations = function ? parts[first].declarations : BUSTER_CHECK_NONE;
+                    run->function_part = function ? first : BUSTER_CHECK_NONE;
                     run->abi_origin = abi_origin;
                     depth -= 1;
                 }
@@ -3259,6 +3476,20 @@ static TypeId check_input_declarator_end(CheckInputReader* reader, CheckDeclarat
     reader->declarator_abi_origin = complete ? run->abi_origin : 0;
     reader->declarator_identifier_list = complete && run->identifier_list;
     const TypeId result = complete ? run->result : 0;
+    if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
+        run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
+    {
+        const CheckDeclaratorPart* function = run->parts + run->function_part;
+        for (uint32_t parameter = function->parameter_first; parameter != BUSTER_CHECK_NONE; parameter = run->parameters[parameter].next)
+        {
+            const uint32_t token = run->parameters[parameter].missing_name;
+            if (token != BUSTER_CHECK_NONE)
+            {
+                check_input_warning(reader, CHECK_WARNING_ID_C23_PARAMETER, CHECK_WARNING_EVENT_C23_PARAMETER, token,
+                                    CHECK_WARNING_COMPLETE_AT_TOKEN, run->cursor);
+            }
+        }
+    }
     arena_pop_to(reader->scratch, run->mark);
     return result;
 }
@@ -3466,6 +3697,34 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     .alignment_log2 = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0,
                 };
                 valid = valid && type_complete_record(reader->types, frame->type, packed, frame->count, attributes);
+                bool variable_sized = false;
+                for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
+                {
+                    const TypeMember value = members[member].member;
+                    const TypeId type = type_strip_aligned(reader->types, value.type);
+                    const uint8_t member_kind = type_kind(reader->types, type);
+                    const bool record = member_kind == BUSTER_TYPE_KIND_STRUCT || member_kind == BUSTER_TYPE_KIND_UNION;
+                    const bool nested = record && check_warning_set_contains(&reader->variable_sized_records, type_index(type) + 1);
+                    variable_sized |= member_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || nested;
+                    if (nested && kind == BUSTER_TYPE_KIND_STRUCT && members[member].next != BUSTER_CHECK_NONE)
+                    {
+                        const CheckWarningEvent event = {
+                            .id = CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER,
+                            .kind = CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER,
+                            .token = members[member].token,
+                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                            .completion = after,
+                            .payload = { .first_type = value.type, .name = value.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                        };
+                        valid = check_input_warning_event(reader, &event, NULL, 0);
+                    }
+                }
+                if (valid && variable_sized)
+                {
+                    valid = check_warning_set_add(&reader->variable_sized_records, type_index(frame->type) + 1);
+                    reader->output->resource |= !valid;
+                }
                 arena_pop_to(reader->scratch, member_mark);
             }
             reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
@@ -3597,14 +3856,21 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     bool tag_only = false;
                     if (valid && name == BUSTER_CHECK_NONE && width == BUSTER_TYPE_NOT_BIT_FIELD)
                     {
-                        // A member of no declarator is an anonymous structure or union, or declares its tag or nothing,
-                        // which clang takes with a warning (-Wmissing-declarations), and this without one.
+                        // A member of no declarator is an anonymous structure or union, an enum's enumerators, or
+                        // declares its tag or nothing, which clang takes with a warning (-Wmissing-declarations), and
+                        // this without one.
                         const TypeId record = type_strip_aligned(reader->types, type);
                         const uint8_t kind = type_kind(reader->types, record);
-                        const bool anonymous = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                        const bool declares = check_input_empty_declaration_tag(parser, frame->cursor, frame->member_declarator, true);
+                        const bool anonymous = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && declares;
                         const uint32_t tag = anonymous ? reader->types->types.index[type_index(record)] : 0;
                         tag_only = !anonymous || reader->types->tags.name[tag] != 0;
                         valid &= tag_only || type_is_complete(reader->types, record);
+                        if (valid && tag_only && !declares)
+                        {
+                            check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION,
+                                                frame->cursor, CHECK_WARNING_COMPLETE_AT_TOKEN, i);
+                        }
                     }
                     if (valid && !tag_only)
                     {
@@ -3989,6 +4255,118 @@ static bool check_input_attribute_gnu_inline(const CheckInputAttributes* attribu
     return found;
 }
 
+// A declaration's first token as clang's FunctionDecl gives it: leading GNU __extension__ markers are transparent;
+// attributes before the specifiers are part of the declaration.
+static uint32_t check_input_declaration_start(const Parser* parser, uint32_t first, uint32_t end)
+{
+    uint32_t token = first;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return token < end ? token : first;
+}
+
+// The first token of the declaration whose declarator name is `name`. A declaration starts after the previous
+// terminator, block opening or body, but a struct or enum body among its own specifiers belongs to it.
+static uint32_t check_input_declaration_begin(const Parser* parser, uint32_t name)
+{
+    uint32_t begin = name;
+    uint32_t depth = 0;
+    for (uint32_t token = name; token != 0;)
+    {
+        token -= 1;
+        const uint8_t role = parser->tree.roles[token];
+        if (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM)
+        {
+            depth += 1;
+            continue;
+        }
+        if (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM)
+        {
+            depth -= depth != 0;
+            continue;
+        }
+        if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_CLOSE_BLOCK ||
+            role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BODY)
+        {
+            break;
+        }
+        if (depth == 0)
+        {
+            begin = token;
+        }
+    }
+    return begin;
+}
+
+// The note's declaration as clang's MaybeSuggestAddingStaticToDecl gives it: the first declaration of the function,
+// whose source range begins at its first token (leading __extension__ markers excepted).
+static uint32_t check_input_first_declaration(const CheckInputReader* reader, uint32_t function)
+{
+    const CBindings* bindings = &reader->bindings;
+    uint32_t first = function;
+    if (bindings->valid && reader->parser->tokens.names[function] < bindings->name_capacity)
+    {
+        const uint32_t head = c_bindings_lookup(bindings, C_BINDING_ORDINARY, reader->parser->tokens.names[function]);
+        bool found = false;
+        for (uint32_t event = head != 0 ? head - 1 : BUSTER_CHECK_NONE, steps = 0;
+             event != BUSTER_CHECK_NONE && event < bindings->count && steps < bindings->count; steps += 1)
+        {
+            found |= bindings->declaration[event] == function;
+            if (found)
+            {
+                first = bindings->declaration[event];
+            }
+            const uint32_t previous = bindings->previous[event];
+            event = previous != 0 ? previous - 1 : BUSTER_CHECK_NONE;
+        }
+    }
+    return first;
+}
+
+static void check_input_static_local_warning(CheckInputReader* reader, uint32_t token, TypeId type, uint32_t completion)
+{
+    const CheckInput* input = reader->output;
+    const uint32_t body = reader->function_body;
+    const uint32_t function = body < input->token_count ? input->body_declarations[body] : BUSTER_CHECK_NONE;
+    bool constant = (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
+    for (TypeId element = type; !constant && type_kind_is_array(type_kind(reader->types, element));)
+    {
+        element = reader->types->types.base[type_index(element)];
+        constant = (type_qualifiers(element) & BUSTER_TYPE_CONST) != 0;
+    }
+    if (!constant && function < input->token_count && input->function_flags != NULL && input->linkage[function] == 2 &&
+        (input->function_flags[function] & CHECK_INPUT_FUNCTION_INLINE) != 0)
+    {
+        bool gnu = reader->pp->options.language.standard < 1999;
+        gnu |= check_input_attribute_gnu_inline(input->attributes[function]);
+        const uint8_t flags = input->function_flags != NULL ? input->function_flags[function] : 0;
+        const bool warn = gnu ? (flags & CHECK_INPUT_FUNCTION_EXTERN) != 0 : (flags & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION) == 0;
+        if (warn)
+        {
+            const uint32_t first_declaration = check_input_first_declaration(reader, function);
+            const uint32_t declaration = check_input_declaration_start(reader->parser, check_input_declaration_begin(reader->parser, first_declaration), function);
+            const CheckWarningEvent event = {
+                .id = CHECK_WARNING_ID_STATIC_LOCAL_INLINE,
+                .kind = CHECK_WARNING_EVENT_STATIC_LOCAL_INLINE,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = completion,
+                .payload = { .name = reader->parser->tokens.names[function], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            const CheckWarningNote note = {
+                .kind = CHECK_WARNING_NOTE_INLINE_LINKAGE,
+                .token = declaration,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .name = event.payload.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, &note, !gnu && declaration < input->token_count ? 1 : 0);
+        }
+    }
+}
+
 // C23's auto declarator (#793), as clang reads it in C: a variable with an initializer; a typedef's and a function's
 // are errors at the keyword, an array's and an initializer list's at the initializer, and one without an initializer at
 // its name. Unlike __auto_type, a pointer declarator and a declaration's later declarators are the language's.
@@ -4028,6 +4406,80 @@ static __attribute__((noinline)) bool check_input_c23_auto_declarator(CheckInput
         check_input_report(reader, token, message);
     }
     return token == BUSTER_CHECK_NONE;
+}
+
+// Whether a declaration specifier token is one clang calls ignored on a declaration with no declarator: a storage
+// class, _Thread_local, or a qualifier. A typedef's storage classes are errors of their own, and _Atomic's type form
+// is a specifier, not a qualifier.
+static bool check_input_standalone_specifier(const Parser* parser, uint32_t token, uint32_t end, bool is_typedef)
+{
+    const uint32_t name = parser->tokens.names[token];
+    bool ignored = false;
+    switch (name)
+    {
+        case C_NAME_CONST: case C_NAME_VOLATILE:
+        case C_NAME_GNU_CONST: case C_NAME_GNU_CONST2: case C_NAME_GNU_VOLATILE: case C_NAME_GNU_VOLATILE2:
+            ignored = true;
+            break;
+        case C_NAME_ATOMIC:
+            ignored = token + 1 >= end || parser->tokens.kinds[token + 1] != PARSE_KIND_L_PAREN;
+            break;
+        case C_NAME_STATIC: case C_NAME_EXTERN: case C_NAME_AUTO: case C_NAME_REGISTER:
+        case C_NAME_THREAD_LOCAL: case C_NAME_THREAD_LOCAL_C11: case C_NAME_GNU_THREAD:
+            ignored = !is_typedef;
+            break;
+        default:
+            break;
+    }
+    return ignored;
+}
+
+// Each ignored specifier of a declaratorless declaration, once per spelling, at its own token as clang has it.
+static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t completion, bool is_typedef)
+{
+    const Parser* parser = reader->parser;
+    uint32_t seen[8] = { 0 };
+    uint32_t seen_count = 0;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (check_input_attribute_starts(parser, token, end))
+        {
+            const uint32_t open = kind == PARSE_KIND_L_SQUARE ? token : token + 1;
+            const uint32_t close = open < end ? parser->tree.parents[open] : end;
+            token = close > open && close < end ? close : end;
+            continue;
+        }
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            const uint32_t close = parser->tree.parents[token];
+            token = close > token && close < end ? close : end;
+            continue;
+        }
+        const uint32_t name = parser->tokens.names[token];
+        bool duplicate = false;
+        for (uint32_t i = 0; i < seen_count; i += 1)
+        {
+            duplicate |= seen[i] == name;
+        }
+        if (!duplicate && check_input_standalone_specifier(parser, token, end, is_typedef))
+        {
+            if (seen_count < BUSTER_ARRAY_LENGTH(seen))
+            {
+                seen[seen_count++] = name;
+            }
+            const CheckWarningEvent event = {
+                .id = CHECK_WARNING_ID_MISSING_DECLARATIONS,
+                .kind = CHECK_WARNING_EVENT_STANDALONE_SPECIFIER,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+                .completion = completion,
+                .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+    }
 }
 
 // Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
@@ -4114,6 +4566,24 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         {
             check_input_report(reader, specifier != BUSTER_CHECK_NONE ? specifier : first, CHECK_INPUT_DECLARATION);
             valid = false;
+        }
+        if (valid)
+        {
+            const bool tag = check_input_empty_declaration_tag(parser, first, i, false);
+            if (is_typedef)
+            {
+                check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_TYPEDEF_NAMELESS, first,
+                                    CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
+            }
+            else if (!tag)
+            {
+                check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION, first,
+                                    CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
+            }
+            if (is_typedef || tag)
+            {
+                check_input_standalone_specifiers(reader, first, i, i, is_typedef);
+            }
         }
     }
     bool more = valid && !declares_nothing;
@@ -4345,13 +4815,17 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->registers[name] = storage == C_NAME_REGISTER;
                 reader->output->thread_local[name] = thread_local;
                 reader->output->attributes[name] = attributes;
-                reader->output->function_flags[name] = function ? (is_inline ? CHECK_INPUT_FUNCTION_INLINE : 0) |
-                                                      (storage == C_NAME_EXTERN ? CHECK_INPUT_FUNCTION_EXTERN : 0) |
-                                                      (kr_definition ? CHECK_INPUT_FUNCTION_KR : 0) : 0;
-                if (function && !is_typedef && check_input_naked_attribute(attributes) != NULL)
+                if (reader->output->function_flags != NULL)
                 {
-                    reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
-                    reader->naked_functions = true;
+                    reader->output->function_flags[name] = function ? (is_inline ? CHECK_INPUT_FUNCTION_INLINE : 0) |
+                                                      (storage == C_NAME_EXTERN ? CHECK_INPUT_FUNCTION_EXTERN : 0) |
+                                                      (kr_definition ? CHECK_INPUT_FUNCTION_KR : 0) |
+                                                      (file && (!is_inline || storage == C_NAME_EXTERN) ? CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION : 0) : 0;
+                    if (function && !is_typedef && check_input_naked_attribute(attributes) != NULL)
+                    {
+                        reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
+                        reader->naked_functions = true;
+                    }
                 }
                 // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793).
                 reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2;
@@ -4415,6 +4889,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                             check_input_report(reader, parameter, CHECK_INPUT_DECLARATION);
                         }
                     }
+                }
+                if (!is_typedef && !function && !file && is_static)
+                {
+                    check_input_static_local_warning(reader, first, type, i);
                 }
                 if (kind == PARSE_KIND_EQUAL)
                 {
@@ -4587,6 +5065,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         else
         {
             reader->objects[token] = reader->objects[previous];
+            if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
+            {
+                reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
+            }
             check_input_naked_inherit(reader, token, previous);
             const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
                 check_input_type_result(reader, type_composite(reader->types, reader->declared_types[previous], reader->declared_types[token]));
@@ -4635,6 +5117,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     reader->definition_origins[token] = reader->definition_origins[previous];
                 }
                 reader->objects[token] = reader->objects[previous];
+                if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
+                {
+                    reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
+                }
                 check_input_naked_inherit(reader, token, previous);
                 if (library_redeclaration && compatible == TYPE_ANSWER_NO)
                 {
@@ -4670,13 +5156,14 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (reader->lane)
         {
             const bool replaced = linked != 0 && reader->linked_declarations[name] != linked;
-            const uint32_t flags = replaced ? reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
+            const uint32_t flags = replaced && reader->output->function_flags != NULL ?
+                                   reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
             check_input_lane_refuse(reader, linked == 0, "a body declares something with linkage first");
             check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
         reader->linked_types[name] = composite;
-        if (!reader->lane && reader->late_attribute_masks != NULL && reader->objects[token] != 0)
+        if (!reader->lane && reader->late_attribute_masks != NULL && reader->objects[token] != 0 && reader->output->function_flags != NULL)
         {
             reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(reader->output->attributes[token], reader->output->function_flags[token]);
         }
@@ -5996,7 +6483,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    *check_graph_leaf_of(graph, node) = check_literal_value(literal);
+                    *check_graph_leaf_of(graph, node) = check_input_literal_value(reader, token, literal);
                 }
             }
         }
@@ -6357,7 +6844,8 @@ static void check_input_expressions(CheckInputReader* reader)
                     }
                     const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
                     const uint32_t declaration = use < parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
-                    if (declaration < parser->tokens.count && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
+                    if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
+                        (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
                     {
                         // CALL's type is the known promoted signature, member its designator's source token plus one.
                         graph->types[node] = reader->declared_types[declaration];
@@ -7080,6 +7568,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .warning_events = { .arena = arena },
         .const_values = { .arena = arena },
         .literal_tables_disabled = !literal_tables,
+        .literal_warnings = { .arena = arena },
+        .source_warning_keys = { .arena = arena },
+        .variable_sized_records = { .arena = arena },
+        .warning_bound_open = BUSTER_CHECK_NONE,
+        .warning_query_arena = arena,
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },

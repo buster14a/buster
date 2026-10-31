@@ -149,10 +149,20 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
-        memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
-        memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
-        memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        // An empty column's producer may hold no pointer at all: copying nothing from null is still undefined behavior.
+        if (selected->count != 0)
+        {
+            memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
+        }
+        if (selected->branch_count != 0)
+        {
+            memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
+            memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
+        }
+        if (emitted.reference_count != 0)
+        {
+            memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        }
         *counts = (CheckTier1Counts){
             .records = selected->count,
             .spill_stores = emitted.spill_stores,

@@ -171,7 +171,7 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
             .type = initialized.type,
             .byte_size = initialized.object_size,
         };
-        valid = check_const_append(&reader->const_values, object, parts, kept, unions, union_count);
+        valid = check_const_append(&reader->const_values, object, parts, kept, unions, union_count, false);
         reader->output->resource |= !valid;
         reader->output->const_values = check_const_view(&reader->const_values);
     }

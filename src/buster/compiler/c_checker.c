@@ -1391,6 +1391,10 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
 static void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
     stream->values[node] = result->value;
+    if (stream->graph->ops[node] != CHECK_OP_VALUE && stream->graph->ops[node] != CHECK_OP_SELECT)
+    {
+        stream->values[node].flags &= ~BUSTER_CHECK_LITERAL_ZERO;
+    }
     memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
     stream->conversions[node].store = result->store_conversion;
     stream->diagnostics[node] = result->diagnostic;

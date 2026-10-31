@@ -20,6 +20,7 @@ struct CheckInitializers
     uint32_t warning_count;
     CheckInitStatus status;
     uint32_t token;
+    uint32_t completion;
 };
 
 // The plan's index plus one, or zero for a token with no explicit initializer. The producer writes declaration_tokens
@@ -248,6 +249,7 @@ struct CheckInitDiagnostic
 {
     CheckInitStatus status;
     uint32_t token;
+    uint32_t completion;
     uint32_t warning_count;
     uint32_t warning_token;
 };
@@ -275,6 +277,11 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     const uint64_t mark = output != 0 ? output->length : 0;
     const uint64_t temporary = scratch != 0 ? scratch->length : 0;
     const uint32_t warning_start = warnings != NULL ? warnings->count : 0;
+    CheckWarningBuffer* semantic = warnings != NULL ? warnings->events : NULL;
+    CheckWarningSet* semantic_keys = warnings != NULL ? warnings->event_keys : NULL;
+    const CheckWarningBuffer semantic_before = semantic != NULL ? *semantic : (CheckWarningBuffer){ 0 };
+    const CheckWarningSet keys_before = semantic_keys != NULL ? *semantic_keys : (CheckWarningSet){ 0 };
+    const uint64_t semantic_mark = semantic != NULL && semantic->arena != NULL ? semantic->arena->length : 0;
     bool valid = input != 0 && stream != 0 && parser != 0 && types != 0 && output != 0 && scratch != 0 && output != scratch;
     if (valid)
     {
@@ -394,6 +401,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             {
                 result->status = plan.status;
                 result->token = plan.failed_token;
+                result->completion = end;
             }
             arena_pop_to(output, mark);
         }
@@ -419,6 +427,18 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             result->warning_token = BUSTER_CHECK_NONE;
         }
     }
+    if (!valid && semantic != NULL)
+    {
+        if (semantic->arena != NULL)
+        {
+            arena_pop_to(semantic->arena, semantic_mark);
+        }
+        *semantic = semantic_before;
+        if (semantic_keys != NULL)
+        {
+            *semantic_keys = keys_before;
+        }
+    }
     return valid;
 }
 
@@ -428,12 +448,16 @@ static bool check_initializers_diagnose(CheckInitDiagnostic* result, const Check
     return check_initializers_diagnose_warnings(result, input, stream, parser, types, before_token, output, scratch, NULL);
 }
 
-static bool check_initializers_run(CheckInitializers* result, const CheckInput* input, const CheckStream* stream,
-                                   const Parser* parser, TypeTable* types, Arena* output, Arena* scratch)
+static bool check_initializers_run_events(CheckInitializers* result, const CheckInput* input, const CheckStream* stream,
+                                          const Parser* parser, TypeTable* types, Arena* output, Arena* scratch,
+                                          CheckWarningBuffer* semantic, CheckWarningSet* semantic_keys)
 {
     *result = (CheckInitializers){ .token = BUSTER_CHECK_NONE };
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
+    const CheckWarningBuffer semantic_before = semantic != NULL ? *semantic : (CheckWarningBuffer){ 0 };
+    const CheckWarningSet keys_before = semantic_keys != NULL ? *semantic_keys : (CheckWarningSet){ 0 };
+    const uint64_t semantic_mark = semantic != NULL && semantic->arena != NULL ? semantic->arena->length : 0;
     const uint32_t tokens = input->token_count;
     bool valid = output != scratch && tokens == parser->tokens.count && tokens < UINT32_MAX &&
                  stream->count == input->graph.count && (tokens == 0 ||
@@ -474,7 +498,12 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         valid = count == 0 || (result->plans != 0 && result->declaration_tokens != 0 && result->warning_tokens != 0);
         result->status = valid ? CHECK_INIT_OK : CHECK_INIT_RESOURCE;
     }
-    CheckInitWarningSink warnings = { .tokens = result->warning_tokens, .capacity = count != 0 ? tokens : 0 };
+    CheckInitWarningSink warnings = {
+        .tokens = result->warning_tokens,
+        .capacity = count != 0 ? tokens : 0,
+        .events = semantic,
+        .event_keys = semantic_keys,
+    };
     CheckInitWarningCollector collector = { 0 };
     if (valid && !check_init_warning_collector(&collector, &warnings, tokens, scratch))
     {
@@ -520,6 +549,7 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         {
             result->status = plan->status;
             result->token = plan->failed_token;
+            result->completion = input->initializer_ends[token];
 
         }
     }
@@ -534,10 +564,113 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
     {
         const CheckInitStatus status = result->status;
         const uint32_t token = result->token;
+        const uint32_t completion = result->completion;
         arena_pop_to(output, output_mark);
-        *result = (CheckInitializers){ .status = status, .token = token };
+        *result = (CheckInitializers){ .status = status, .token = token, .completion = completion };
+        if (semantic != NULL)
+        {
+            if (semantic->arena != NULL)
+            {
+                arena_pop_to(semantic->arena, semantic_mark);
+            }
+            *semantic = semantic_before;
+            if (semantic_keys != NULL)
+            {
+                *semantic_keys = keys_before;
+            }
+        }
     }
     arena_pop_to(scratch, scratch_mark);
+    return valid;
+}
+
+static bool check_initializers_run(CheckInitializers* result, const CheckInput* input, const CheckStream* stream,
+                                   const Parser* parser, TypeTable* types, Arena* output, Arena* scratch)
+{
+    return check_initializers_run_events(result, input, stream, parser, types, output, scratch, NULL, NULL);
+}
+
+// Finalize this caller-owned, still unpublished batch. Query indexing uses the diagnostic arena, disjoint from
+// both walker arenas; no token-sized warning state is retained. Prepare the query index before changing any
+// facts, so allocation failure leaves this still-unpublished view untouched.
+static bool check_initializers_warning_context(CheckWarningBuffer* events, const CheckInput* input, const Parser* parser,
+                                                TypeTable* types, Arena* scratch)
+{
+    CheckInput staged = *input;
+    CheckInputReader reader = {
+        .output = &staged,
+        .parser = parser,
+        .types = types,
+        .arena = events->arena,
+        .scratch = scratch,
+        .ends = parser->ends,
+        .warning_query_arena = events->arena,
+        .warning_bound_open = BUSTER_CHECK_NONE,
+    };
+    bool context = false;
+    for (uint32_t i = 0; !context && i < events->count; i += 1)
+    {
+        const CheckWarningEvent* event = events->events + i;
+        context = event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
+                  (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0);
+    }
+    const bool ready = !context || check_input_warning_queries(&reader);
+    for (uint32_t i = 0; ready && i < events->count; i += 1)
+    {
+        CheckWarningEvent* event = events->events + i;
+        const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
+        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || selected)
+        {
+            reader.warning_bound_open = BUSTER_CHECK_NONE;
+            for (uint32_t vla = 0; vla < input->vla_count; vla += 1)
+            {
+                const CheckInputVla* bound = input->vlas + vla;
+                if (bound->bound_begin <= event->token && event->token < bound->bound_end &&
+                    (reader.warning_bound_open == BUSTER_CHECK_NONE || reader.warning_bound_open < bound->bound_begin))
+                {
+                    reader.warning_bound_open = bound->bound_begin;
+                }
+            }
+            event->flags |= check_input_warning_unevaluated(&reader, event->token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
+            event->payload.token = reader.warning_bound_open;
+        }
+    }
+    return ready && !staged.resource;
+}
+
+// The TU-final use analysis sees source selections before initializer write pruning. Borrow the immutable
+// reader prefix and append only selected-identity witnesses; rendering keeps the original views unchanged.
+static bool check_initializers_warning_uses(CheckInput* result, const CheckInput* input, const CheckWarningEvents* initializers, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    const CheckWarningEvents prefix = input->warning_events;
+    CheckWarningBuffer uses = {
+        .arena = arena,
+        .events = (CheckWarningEvent*)prefix.events,
+        .count = prefix.count,
+        .capacity = prefix.count,
+        .notes = (CheckWarningNote*)prefix.notes,
+        .note_count = prefix.note_count,
+        .note_capacity = prefix.note_count,
+    };
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < initializers->count; i += 1)
+    {
+        const CheckWarningEvent* event = initializers->events + i;
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0)
+        {
+            valid = check_warning_append(&uses, event, NULL, 0);
+        }
+    }
+    if (valid)
+    {
+        *result = *input;
+        result->warning_events = check_warning_view(&uses);
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+    }
     return valid;
 }
 

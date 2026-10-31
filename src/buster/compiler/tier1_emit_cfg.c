@@ -1043,7 +1043,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     // with its immediate's request.
                     const Tier1SelectRecords selected_records = tier1_select_expand(&holes);
                     const uint32_t compares = selected_records.count >= 2 ? selected_records.count - 2u : 0;
-                    error = selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
+                    error = !selected_records.overflowed && selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
                     const uint32_t compare_first = buffer.count;
                     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < compares; r += 1)
                     {
@@ -1063,6 +1063,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             else if (error == TIER1_EMIT_OK && selected)
             {
                 Tier1SelectRecords selected_records = tier1_select_expand(&holes);
+                error = selected_records.overflowed ? TIER1_EMIT_INVALID : error;
                 // A frame object's address, from the frame's base at the object's offset.
                 int32_t object_offset = 0;
                 if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
@@ -1078,8 +1079,11 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     int32_t total = 0;
                     error = selected_records.count != 0 && tier1_emit_cfg_object(emitted, plan->patterns[node].stack_object, &object_offset) &&
                                     !__builtin_add_overflow(object_offset, plan->patterns[node].displacement, &total) ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
-                    selected_records.records[selected_records.count - 1].rm = (uint8_t)emitted->frame.base_register;
-                    selected_records.records[selected_records.count - 1].displacement = total;
+                    if (error == TIER1_EMIT_OK)
+                    {
+                        selected_records.records[selected_records.count - 1].rm = (uint8_t)emitted->frame.base_register;
+                        selected_records.records[selected_records.count - 1].displacement = total;
+                    }
                 }
                 // A symbol's address, its reference the record's: a lea of it, or a load of its GOT slot; a thread-local's
                 // is the driver's Tier 0's.
