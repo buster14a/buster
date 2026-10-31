@@ -198,21 +198,55 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
     return accepted;
 }
 
+// An argument as clang's evaluator reads it, converted to `destination`: the source argument read as in a constant
+// context, which reads a const object's constant initializer (`const long k = 9;`'s 9), where a call's runtime view of it
+// doesn't. An action that is constant evaluated already has it.
+static CheckValue check_builtin_misc_evaluated(TypeTable* table, const CheckBuiltinMiscAction* input, const CheckValue* value, uint32_t index, TypeId destination)
+{
+    CheckValue result = *value;
+    if (!input->constant_evaluated)
+    {
+        const CheckAction context = {
+            .operands = { input->arguments[index] },
+            .node = input->node,
+            .tag_completions = input->tag_completions,
+            .tag_completion_count = input->tag_completion_count,
+            .source_position = input->source_position,
+            .extensions = input->extensions,
+            .const_values = input->const_values,
+            .constant_evaluated = true,
+        };
+        CheckActionResult read = { 0 };
+        result = check_action_operand(table, &context, &read, 0);
+        if (read.diagnostic == CHECK_DIAG_NONE)
+        {
+            check_action_convert_value(table, &result, destination, input->node);
+        }
+        else
+        {
+            result.constant_kind = CHECK_CONSTANT_NONE;
+        }
+    }
+    return result;
+}
+
 // expect_with_probability's probability (clang's check after its prototype's conversion): converted to double, it must be
-// a constant floating expression without side effects or faults (a const variable's constant initializer is one, a variable
-// or a call isn't), in [0, 1], which a NaN isn't. It is never evaluated at run time.
+// a constant floating expression without side effects or faults (a const object's constant initializer is one, a variable
+// or a call isn't), in [0, 1], which a NaN isn't. Clang evaluates it as a constant expression, so its value is the
+// evaluator's view (check_builtin_misc_evaluated). It is never evaluated at run time.
 static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value)
 {
     bool accepted = check_builtin_misc_convert(table, input, output, value, 2, BUSTER_TYPE_DOUBLE);
-    const bool constant = value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
-                          value->constant_kind == CHECK_CONSTANT_FLOATING;
+    const CheckValue probability = accepted ? check_builtin_misc_evaluated(table, input, value, 2, BUSTER_TYPE_DOUBLE) : *value;
+    const bool constant = probability.fault == CHECK_FAULT_NONE && (probability.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                          probability.constant_kind == CHECK_CONSTANT_FLOATING;
     if (accepted && !constant)
     {
         output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT;
         check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 2);
         accepted = false;
     }
-    else if (accepted && !((double)value->floating >= 0.0 && (double)value->floating <= 1.0))
+    else if (accepted && !((double)probability.floating >= 0.0 && (double)probability.floating <= 1.0))
     {
         output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
         check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 2);
@@ -222,10 +256,11 @@ static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinM
 }
 
 // expect and expect_with_probability: their two longs, and the latter's probability (check_builtin_misc_probability).
-// Clang's evaluator visits the converted first argument alone, and its code generation emits a call that evaluates to a
-// constant as that constant: a first argument that is an integer constant without side effects is the call's value, and
-// neither argument runs, the expected value's effects (a call, a volatile read) dropped. Otherwise both run, in order,
-// and the first is the value. constant_value keeps the source evaluator's view, the first argument alone.
+// Clang's evaluator visits the converted first argument alone, reading a const object's constant initializer
+// (check_builtin_misc_evaluated), and its code generation emits a call that evaluates to a constant as that constant: a
+// first argument that the evaluator reads as an integer constant without side effects is the call's value, and neither
+// argument runs, the expected value's effects (a call, a volatile read) dropped. Otherwise both run, in order, and the
+// first is the value. constant_value is the evaluator's view, the first argument alone.
 static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
 {
     const bool first = check_builtin_misc_convert(table, input, output, values, 0, BUSTER_TYPE_LONG);
@@ -234,25 +269,25 @@ static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAc
     if (first && second && probability)
     {
         output->constant_evaluated_operands = 1;
-        output->constant_value = values[0];
+        output->constant_value = check_builtin_misc_evaluated(table, input, values, 0, BUSTER_TYPE_LONG);
         output->constant_value.category = CHECK_RVALUE;
         output->constant_value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER);
+        const bool folded = output->constant_value.constant_kind == CHECK_CONSTANT_INTEGER && output->constant_value.fault == CHECK_FAULT_NONE &&
+                            (output->constant_value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
         if (output->constant_value.fault != CHECK_FAULT_NONE)
         {
             output->constant_value.constant_kind = CHECK_CONSTANT_NONE;
         }
-        else if (output->constant_value.constant_kind == CHECK_CONSTANT_INTEGER && (output->constant_value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+        else if (folded)
         {
             output->constant_value.flags |= BUSTER_CHECK_ICE;
         }
-        const bool folded = values[0].constant_kind == CHECK_CONSTANT_INTEGER && values[0].fault == CHECK_FAULT_NONE &&
-                            (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
         output->action.value = folded ? output->constant_value : values[0];
         output->action.value.category = CHECK_RVALUE;
         if (!folded)
         {
-            // Both run, a folded first value's too: the expected value's effects, a nonconstant one's evaluation. The
-            // probability never runs. Neither parameter requires an ICE.
+            // Both run: the expected value's effects, a nonconstant one's evaluation. The probability never runs. Neither
+            // parameter requires an ICE.
             output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER);
             check_action_inherit(&output->action.value, values + 1);
             if (output->action.value.fault != CHECK_FAULT_NONE)

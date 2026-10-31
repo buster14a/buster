@@ -201,16 +201,15 @@ only the recipe expansion contract.
 without reading source memory. The result records converted arguments,
 evaluation masks, warnings, terminal effects, memory effects and explicit
 unsupported requirements. `__builtin_expect` converts both runtime arguments
-to `long` and evaluates each once, in order, unless its first argument is an
-integer constant without side effects: then, as clang's code generation emits
-a builtin call that evaluates to a constant, the call is that constant and
-neither argument runs, the expected value's effects (a call, a volatile read)
-dropped. (Clang's evaluator also reads a const object's constant initializer
-there, which the checker does in constant contexts alone: for
-`const long k = 9; __builtin_expect(k, f())` clang never calls `f`, and this
-compiler does.) Its separate `constant_value` and `constant_evaluated_operands`
-describe the source constant evaluator's first argument only. Neither argument
-has a general ICE requirement.
+to `long` and evaluates each once, in order, unless clang's evaluator reads its
+first argument as an integer constant without side effects, a const object's
+constant initializer among them (`const long k = 9; __builtin_expect(k, f())`):
+then, as clang's code generation emits a builtin call that evaluates to a
+constant, the call is that constant and neither argument runs, the expected
+value's effects (a call, a volatile read) dropped. Its separate
+`constant_value` and `constant_evaluated_operands` describe the source constant
+evaluator's first argument only. Neither argument has a general ICE
+requirement.
 
 Prefetch hints retain default promotions and bounded constant constraints;
 alignment hints retain the original pointer, requested alignment and optional
@@ -972,8 +971,8 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   bool;
 - `expect_with_probability` takes `expect`'s two longs and a probability that,
   converted to `double`, must be a constant floating expression without side
-  effects (a const variable with a constant initializer is one) in [0, 1]: a NaN
-  isn't. It never runs. Its call folds as `expect`'s, and otherwise its recipe
+  effects (a const variable with a constant initializer is one, read as clang's
+  evaluator reads it) in [0, 1]: a NaN isn't. It never runs. Its call folds as `expect`'s, and otherwise its recipe
   is `expect`'s.
 
 The alignment builtins fold, as integer constant expressions, where clang's

@@ -170,8 +170,8 @@ static __attribute__((noinline)) void check_test_align_programs(CheckTest* test,
         "return (int)r;}",
         "align-addresses-in-static-data-and-frames", clang);
     // expect's and expect_with_probability's arguments: each once, in order, where the first argument is unknown; neither
-    // where it folds, the expected value's call dropped, as clang's code drops it. (A const local's initializer, which
-    // clang's code generation reads, the checker reads in constant contexts alone: its call runs both arguments.)
+    // where it folds, a const local's constant initializer among them, the expected value's call dropped, as clang's code
+    // drops it.
     check_test_program_source(test,
         "static int calls,order;static long next(int tag){calls++;order=order*10+tag;return tag;}"
         "int tested(int n){calls=0;order=0;long r=0;"
@@ -179,6 +179,7 @@ static __attribute__((noinline)) void check_test_align_programs(CheckTest* test,
         "r+=__builtin_expect_with_probability(next(3),next(4),0.5);"
         "r+=__builtin_expect(7,next(5));"
         "r+=__builtin_expect_with_probability(8,next(6),1.0);"
+        "const long k=9;r+=__builtin_expect(k,next(7));"
                 "r+=__builtin_expect_with_probability(n,next(8),0.25f);"
         "if(__builtin_expect(n>3,0))r+=100;if(__builtin_expect_with_probability(n<0,1,0.9))r+=1000;"
         "return (int)r*1000+calls*100+order%97;}",
