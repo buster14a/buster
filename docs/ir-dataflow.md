@@ -172,3 +172,26 @@ manifest, complete stdout/stderr and exit status. Publish raw measurements in
 implementation and recipe alone do not establish #143's final performance
 acceptance. The PR/issue must cite the actual target run and explain its scope
 before closing that requirement or changing the solver's measured selection.
+
+## Measured result on the 9700X
+
+The first target run is
+[`dataflow-143-2026-10-31`](https://github.com/buster14a/buster-performance/tree/75397eb4cf2aa8e821ccec708599b9f508958c50/docs/measurements/dataflow-143-2026-10-31):
+code commit `787d1071`, the frozen c-testsuite subset, SQLite 3.53.2 and musl
+1.2.5 units, CPU 2 under the shared lock. Every run printed `qualified=1`,
+`left_out=0`, `dataflow_failed=0` and `vector_host=1`.
+
+- **Solve** was faster in aggregate on SQLite (1.32×) and musl (1.09×), and at
+  parity on c-testsuite (1.002×). The median per-form ratio was mixed (musl
+  0.83, SQLite 0.95, c-testsuite 1.04; below 1 favors the vector path), so the
+  gain is not uniform per function.
+- **Prepare-solve** was slower than its scalar twin in aggregate on all three
+  corpora (0.83×, 0.81× and 0.79×), with median per-form ratios of 1.29, 1.33
+  and 1.40. This run does not support selecting the vector construction; the
+  existing solver dispatch is unchanged. The adapter keeps both paths for
+  correctness and future consumers.
+
+The record covers the adapter's two operations, not whole-compiler time:
+frontend preparation, IR lowering, SSA promotion and output are outside every
+sample. It has one process for c-testsuite and two for SQLite and musl; its
+README lists the host, manifests, checksums and complete raw logs.
