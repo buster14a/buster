@@ -6,7 +6,7 @@
 // reparsing or dependence on target features. Unknown conditions retain both edges. Scratch has exactly one byte
 // and one u64 slot per control/node; no padding is read. Failure publishes no partially resolved events.
 // Code generation's check of target features walks the same way (#775, c_check_target_feature.c): with `calls`, the
-// walk also appends each call it reaches to that arena, a uint64_t each of its node in the low half and the walk's `tag`
+// walk also appends each call it reaches, and each x86 builtin's call (#148), to that arena, a uint64_t each of its node in the low half and the walk's `tag`
 // in the high, `call_count` of them, in a run nothing else pushes into while it walks; `call_room` turns false if one had
 // no room. Each item pushed carries `tag` in its high half too, for the check's loop to set it from (the statement whose
 // control reached an expression); this walk's is 0, so that its items are the bare indices. With `cleanup_tags` too, it
@@ -208,7 +208,7 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
     }
     else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
     {
-        if (op == CHECK_OP_CALL && walk->calls != NULL)
+        if ((op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86) && walk->calls != NULL)
         {
             uint64_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint64_t, 1) : NULL;
             walk->call_room = call != NULL;

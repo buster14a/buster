@@ -310,8 +310,10 @@ struct CheckProgram
     // or destructor attribute, both by the function's declarations up to the definition (check_program_body_eager),
     // not by the unit's final ones: a later declaration that makes an inline definition external (C99's
     // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
-    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775); null in
-    // a program that no selection made, or in a unit without a target attribute, which the check skips.
+    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
+    // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
+    // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
+    // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
     uint8_t* body_eager;
 };
 
@@ -1827,11 +1829,13 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         // Reference epochs are body identities, below token_count < 2^29. Temporarily OR the disjoint high bit
         // into their already initialized node marks, then restore every touched word before references consume it.
         // This avoids clearing the whole unit's graph for each small aggregate body. The task records are dead;
-        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16,
-        // so the u32 suffix is aligned and graph->count <= capacity bounds it within the existing allocation.
+        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16 plus
+        // the cleanups' room, so round its byte offset up to a u32's and keep graph->count <= capacity within the
+        // existing allocation.
         const uint32_t warning_mark = UINT32_C(1) << 31;
-        _Static_assert(sizeof(CheckControlTask) >= 5, "control tasks hold byte marks and a u32 visited list");
-        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + writer->capacity);
+        _Static_assert(sizeof(CheckControlTask) >= 8, "control tasks hold byte marks and an aligned u32 visited list");
+        const uint64_t touched_offset = ((uint64_t)writer->capacity + 3) & ~(uint64_t)3;
+        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + touched_offset);
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             bool warning_safe = graph->count <= writer->capacity;
