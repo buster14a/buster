@@ -7,10 +7,11 @@ needed by the dependency-output work in #805. It is **not yet called by the
 compiler driver**. This change does not make `-M`, `-MM`, `-MD`, `-MMD`, `-MF`,
 `-MT`, `-MQ`, or `-MP` accepted compiler options. It does not finish #805.
 
-The standalone C tests live in `tests/driver/dependency_rule.c`. They are not yet
-registered in the compiler's command table or its normal CI test manifest. No
-existing driver, preprocessor, build script, or workflow is changed by this
-prerequisite.
+The standalone C tests live in `tests/driver/dependency_rule.c`. They are
+registered in `tools/ci/correctness.tests`, which builds the scalar and native
+variants and runs both with `--oracle` against the environment's GCC and Clang;
+they are not in the compiler's command table. No existing driver, preprocessor,
+build script, or workflow step is changed by this prerequisite.
 
 ## Input ownership and collection contract
 
@@ -113,9 +114,10 @@ build, a CLI regression pass, or a performance qualification.
 3. Resolve default object/dependency names, explicit `-o`/`-MF`, stdout output,
    repeated targets and multi-translation-unit ownership. Publish dependency
    files without concurrent writes or destructive partial output on failure.
-4. Wire the serializer and end-to-end tests into the real driver and CI. Compare
+4. Wire the serializer and its end-to-end tests into the real driver. Compare
    emitted rules with GCC/Clang and consume them through Make/Ninja; test failure
-   paths and scalar/vector equality. Validate whole-driver overhead on the 9700X.
+   paths and scalar/vector equality end to end. Validate whole-driver overhead
+   on the 9700X.
 5. Complete the remaining #805 diagnostic, verbosity and linker options, and
    named, reasoned refusals for deliberately unsupported output/preprocessor
    modes. The existing #854 identification/`-pipe` behavior must be preserved.

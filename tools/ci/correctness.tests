@@ -293,6 +293,15 @@ clang -std=c17 -O2 -Wall -Wextra -Werror tests/peak-rss.c -o build/test-peak-rss
 ./build/compiler test-checker-driver --executable ./build/compiler
 == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
 ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
+== Test Make dependency-rule serialization
+# #805's serializer, standalone until the driver calls it: the x86-64 build's scalar classifier and the
+# native build's AVX-512BW path where the host supplies it, each over generated names against an
+# independent quoting implementation, guarded tails, malformed records and capacities, and --oracle's
+# -MT/-MQ target rules against the installed gcc and clang's -MM output.
+clang -std=c17 -O2 -march=x86-64 -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-scalar
+./build/test-dependency-rule-scalar --oracle
+clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-native
+./build/test-dependency-rule-native --oracle
 == Test DWARF source lines and late address finalization
 # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
 ./build/compiler test-debug --cross-check
