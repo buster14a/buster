@@ -1699,6 +1699,40 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             fprintf(stderr, "test-checker: program lower status=%u/%u token=%u/%u backend=%u/%u\n", lower[0].status, lower[1].status,
                     lower[0].token, lower[1].token, lower[0].backend_node, lower[1].backend_node);
             fprintf(stderr, "test-checker: lower reason=%s / %s\n", lower[0].reason != NULL ? lower[0].reason : "", lower[1].reason != NULL ? lower[1].reason : "");
+            for (uint32_t b = 0; lower[0].functions != NULL && b < lower[0].count; b += 1)
+            {
+                const Tier0Function* f = lower[0].functions + b;
+                for (uint32_t r = 0; r < f->operation_count; r += 1)
+                {
+                    const Tier0Operation* row = f->operations + r;
+                    if (!tier0_operation_valid(row))
+                    {
+                        fprintf(stderr, "test-checker: invalid row function=%u row=%u operands=%u result=%u/%u\n", b, r, row->operand_count, row->result_class, row->result_bytes);
+                        for (uint32_t i = 0; i < row->record_count; i += 1)
+                        {
+                            const X86Instruction x = row->records[i];
+                            fprintf(stderr, "  record %u valid-form=%u reg=%u rm=%u vvvv=%u mode=%u imm=%u\n", x.form, tier0_operation_form_valid(x.form), x.reg, x.rm, x.vvvv, x.mode, x.immediate);
+                        }
+                    }
+                }
+                if (f->count != 0 && (!tier0_frame_input_valid(f) || !tier0_calls_valid(f) || !tier0_parameters_valid(f)))
+                {
+                    fprintf(stderr, "test-checker: invalid metadata function=%u frame=%u calls=%u parameters=%u\n", b, tier0_frame_input_valid(f), tier0_calls_valid(f), tier0_parameters_valid(f));
+                    for (uint32_t c = 0; c < f->call_count; c += 1)
+                    {
+                        if (!tier0_call_valid(f, c))
+                        {
+                            const AbiReturn r = f->calls[c].result;
+                            fprintf(stderr, "  call %u stack=%u object=%u result=%u parts=%u registers=%u,%u,%u,%u\n", c, f->calls[c].stack_bytes, f->call_result_objects != NULL ? f->call_result_objects[c] : 0, r.kind, r.part_bytes, r.registers[0], r.registers[1], r.registers[2], r.registers[3]);
+                            for (uint32_t a = f->call_first[c]; a < f->call_first[c] + f->call_argument_counts[c]; a += 1)
+                            {
+                                const AbiLocation l = f->argument_locations[a];
+                                fprintf(stderr, "    argument %u size=%u class=%u kind=%u offset=%u flags=%u regs=%u,%u\n", a, f->argument_sizes != NULL ? f->argument_sizes[a] : 0, f->argument_classes[a], l.kind, l.stack_offset, l.flags, l.registers[0], l.registers[1]);
+                            }
+                        }
+                    }
+                }
+            }
         }
         if (lowered)
         {

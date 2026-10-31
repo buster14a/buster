@@ -8,8 +8,8 @@
 // realign its frame (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their
 // operators, calls, members, arrays, globals, casts to and from integers of their bytes and nontemporal stores, and their
 // divisions' floating-point flags under FENV_ACCESS; and _Atomic vectors of 4 to 64 bytes, their atomic loads, stores,
-// exchanges and compare-exchanges and calls both ways. Then what the lowering refuses by name: vectors on x86-64,
-// operators AVX-512 has no instruction for and other sizes. Include after c_check_program_test.c's runners.
+// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets.
+// Unsupported operations and widths are refused by name. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
     "typedef signed char v64qi __attribute__((vector_size(64),aligned(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
@@ -521,6 +521,20 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                 free(source);
             }
         }
+        if (parsed && level == 2)
+        {
+            const char* wide =
+                "typedef unsigned U __attribute__((vector_size(32)));typedef int I __attribute__((vector_size(32)));"
+                "typedef unsigned long long Q __attribute__((vector_size(32)));typedef float F __attribute__((vector_size(32)));"
+                "int tested(int n){U a,b;Q q,r;F f,g;unsigned h=2166136261u;fill(&a,32,n);fill(&b,32,n+1);fill(&q,32,n+2);fill(&r,32,n+3);fillf((float*)&f,8,n);fillf((float*)&g,8,n+2);g+=1.0f;"
+                "U z[]={a+b,a-b,a*b,a^b,~a,a<<((U)b&31),a>>((U)b&31),(U)(a<b),(U)(a>=b),a+3u};FOLD(z);"
+                "Q k[]={q+r,q-r,(Q)(q<r),(Q)(q>=r),q+(unsigned long long)n,q>>(r&63)};FOLD(k);"
+                "F v[]={f+g,f-g,f*g,f/g,-f,f+2.0f};FOLD(v);I c[]={f<g,f>=g};FOLD(c);return (int)h;}";
+            char source[4096];
+            snprintf(source, sizeof(source), "%s%s", check_test_vector_types, wide);
+            check_test_program_source_native_limits(test, source, "baseline-avx2-256", clang, false, -1, 0, &target,
+                                                     (native.features & target.features) == target.features);
+        }
         if (parsed)
         {
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a+b;}",
@@ -532,6 +546,21 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
     }
     check_test_program_build_release();
     check_test_program_march = "-march=x86-64";
+    X86Target baseline = { 0 };
+    x86_target_parse("x86-64", strlen("x86-64"), &baseline);
+    const char* avx =
+        "typedef float F __attribute__((vector_size(32)));typedef int I __attribute__((vector_size(32)));"
+        "__attribute__((target(\"avx,no-avx2\"))) int tested(int n){F f,g;unsigned h=2166136261u;fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);g+=1.0f;"
+        "F v[]={f+g,f-g,f*g,f/g,-f,f+2.5f};FOLD(v);I c[]={f<g,f>=g,f==g,f!=g};FOLD(c);"
+        "I a=(I)f,b=(I)g;I k[]={a&b,a|b,a^b};FOLD(k);return (int)h;}";
+    char source[4096];
+    snprintf(source, sizeof(source), "%s%s", check_test_vector_types, avx);
+    check_test_program_source_native_limits(test, source, "baseline-avx-without-avx2", clang, false, -1, 0, &baseline,
+                                             (native.features & BUSTER_X86_FEATURE(AVX)) != 0);
+    check_test_program_boundary_target(test,
+        "typedef int V __attribute__((vector_size(32)));__attribute__((target(\"avx,no-avx2\"))) V tested(V a,V b){return a+b;}",
+        "baseline-avx-rejects-avx2-arithmetic", true, false, 0, 0, "vector operator unavailable at this target", &baseline);
+    check_test_program_build_release();
 }
 
 static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test, const char* clang)
