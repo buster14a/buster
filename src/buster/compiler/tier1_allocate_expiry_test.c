@@ -87,15 +87,41 @@ static bool tier1_allocation_test_expiry_values(const Tier1AllocationInput* inpu
     return valid;
 }
 
+// The opmask class's values take k1 to k7, never k0 (BUSTER_TIER1_ALLOCATE_MASK_REGISTERS), so its run of a fixture
+// numbers the fixture's registers from k1: register r is k(r + 1), in the class, the masks and the expected fragments.
+static uint32_t tier1_allocation_test_expiry_shift(uint32_t class)
+{
+    return class == BUSTER_TIER1_ALLOCATE_MASK ? 1 : 0;
+}
+
 static void tier1_allocation_test_expiry_case(Tier1AllocationTestTally* tally, const Tier1AllocationExpiryCase* fixture, uint32_t class)
 {
     uint8_t classes[4] = { (uint8_t)class, (uint8_t)class, (uint8_t)class, (uint8_t)class };
     Tier1AllocationInput input = fixture->input;
     input.classes = classes;
     Tier1Allocation expected = fixture->expected;
+    const uint32_t shift = tier1_allocation_test_expiry_shift(class);
+    uint32_t allowed[4];
+    uint8_t fragment_registers[8];
+    uint8_t value_registers[4];
+    for (uint32_t i = 0; i < input.count && i < BUSTER_ARRAY_LENGTH(allowed); i += 1)
+    {
+        allowed[i] = fixture->input.allowed_registers[i] << shift;
+    }
+    for (uint32_t f = 0; f < expected.fragment_count && f < BUSTER_ARRAY_LENGTH(fragment_registers); f += 1)
+    {
+        fragment_registers[f] = fixture->expected.registers[f] == UINT8_MAX ? UINT8_MAX : (uint8_t)(fixture->expected.registers[f] + shift);
+    }
+    for (uint32_t v = 0; v < input.value_count && v < BUSTER_ARRAY_LENGTH(value_registers); v += 1)
+    {
+        value_registers[v] = fixture->expected.value_registers[v] == UINT8_MAX ? UINT8_MAX : (uint8_t)(fixture->expected.value_registers[v] + shift);
+    }
+    input.allowed_registers = allowed;
+    expected.registers = fragment_registers;
+    expected.value_registers = value_registers;
     for (uint32_t other = 0; other < BUSTER_TIER1_ALLOCATE_CLASSES; other += 1)
     {
-        input.registers[other] = other == class ? fixture->input.registers[0] : 0;
+        input.registers[other] = other == class ? fixture->input.registers[0] << shift : 0;
         expected.peak_pressure[other] = other == class ? fixture->expected.peak_pressure[0] : 0;
     }
     _Alignas(64) uint8_t memory[2][2048];
@@ -307,12 +333,13 @@ static void tier1_allocation_test_expiry(Tier1AllocationTestTally* tally)
         }
         Tier1AllocationInput impossible = fixtures[2].input;
         uint8_t classes[] = { (uint8_t)class, (uint8_t)class, (uint8_t)class };
-        const uint32_t allowed[] = { 1, 1, 1 };
+        const uint32_t one = UINT32_C(1) << tier1_allocation_test_expiry_shift(class);
+        const uint32_t allowed[] = { one, one, one };
         impossible.classes = classes;
         impossible.allowed_registers = allowed;
         for (uint32_t other = 0; other < BUSTER_TIER1_ALLOCATE_CLASSES; other += 1)
         {
-            impossible.registers[other] = other == class ? 1 : 0;
+            impossible.registers[other] = other == class ? one : 0;
         }
         for (uint32_t path = 0; path < 2; path += 1)
         {

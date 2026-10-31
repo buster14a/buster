@@ -30,7 +30,12 @@
 #define BUSTER_TIER1_ALLOCATE_GPR 0
 #define BUSTER_TIER1_ALLOCATE_VECTOR 1
 #define BUSTER_TIER1_ALLOCATE_MASK 2
-#define BUSTER_TIER1_ALLOCATE_MASK_REGISTERS 0xffu
+// The opmask class's value registers, k1 to k7. k0 can't be a write mask (an EVEX instruction's mask field of 0 means
+// no mask), so no mask value is ever allocated there: it is the class's scratch register (tier1_cfg.c's), and validation
+// refuses a class, an interval or a hint that would put a value in it. A fixed range may name all eight registers
+// (BUSTER_TIER1_ALLOCATE_MASK_FILE): a call clobbers k0 too.
+#define BUSTER_TIER1_ALLOCATE_MASK_REGISTERS 0xfeu
+#define BUSTER_TIER1_ALLOCATE_MASK_FILE 0xffu
 #define BUSTER_TIER1_ALLOCATE_REGISTER 0
 #define BUSTER_TIER1_ALLOCATE_SPILL 1
 #define BUSTER_TIER1_ALLOCATE_REMATERIALIZE 2
@@ -166,7 +171,7 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
     {
         valid = input->fixed.starts[i] < input->fixed.ends[i] && input->fixed.ends[i] <= input->position_count && input->fixed.classes[i] < BUSTER_TIER1_ALLOCATE_CLASSES;
         valid = valid && (input->fixed.classes[i] != BUSTER_TIER1_ALLOCATE_GPR || (input->fixed.registers[i] & 0xffff0000u) == 0);
-        valid = valid && (input->fixed.classes[i] != BUSTER_TIER1_ALLOCATE_MASK || (input->fixed.registers[i] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0);
+        valid = valid && (input->fixed.classes[i] != BUSTER_TIER1_ALLOCATE_MASK || (input->fixed.registers[i] & ~BUSTER_TIER1_ALLOCATE_MASK_FILE) == 0);
     }
     return valid;
 }

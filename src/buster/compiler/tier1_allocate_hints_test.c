@@ -215,7 +215,8 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         const uint32_t value_count = 1 + tier1_allocation_test_random(&seed) % 24;
         const uint32_t gpr_mask = (1u << (1 + iteration % 9)) - 1;
         const uint32_t vector_mask = (1u << (1 + iteration % 5)) - 1;
-        const uint32_t mask_mask = (1u << (1 + iteration % 7)) - 1;
+        // k1 up to k7: no mask value takes k0, the class's scratch register.
+        const uint32_t mask_mask = ((1u << (1 + iteration % 7)) - 1) << 1;
         const bool constrained = iteration % 4 == 0;
         uint8_t value_classes[24];
         uint32_t count = 0;

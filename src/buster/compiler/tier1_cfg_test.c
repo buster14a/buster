@@ -78,6 +78,13 @@ struct Tier1CfgTestTally
     // A required definition's register fragment made a slot's: every one must fail the checker.
     uint64_t definition_mutants;
     uint64_t definition_killed;
+    // #179's review: a split's move to a register given another register of its class, which leaves the value's piece
+    // without it whether or not a use reads the piece, and a mask's register fragment moved to k0, which no mask value
+    // may take: every one must fail the checker.
+    uint64_t destination_mutants;
+    uint64_t destination_killed;
+    uint64_t k0_mutants;
+    uint64_t k0_killed;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -454,6 +461,48 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                         tally->definition_mutants += 1;
                         tally->definition_killed += rejected;
                         tried += 1;
+                    }
+                }
+                // Destination: a split's move to a register sent to another of its class's registers, not the scratch.
+                tried = 0;
+                for (uint32_t m = result.edge_move_offsets[input->edge_count]; tried < 8 && m < result.move_count; m += 1)
+                {
+                    const uint32_t destination = result.move_destinations[m];
+                    const uint32_t class = input->classes[result.move_values[m]];
+                    const uint32_t others = destination < BUSTER_TIER1_CFG_SPILL && destination / 32 == class && destination % 32 != input->scratch_registers[class] ? input->registers[class] & ~(UINT32_C(1) << (destination % 32)) : 0;
+                    if (others != 0)
+                    {
+                        result.move_destinations[m] = class * 32 + (uint32_t)__builtin_ctz(others);
+                        Tier1CfgCheck mutated;
+                        const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                        result.move_destinations[m] = destination;
+                        tally->destination_mutants += 1;
+                        tally->destination_killed += rejected;
+                        tried += 1;
+                    }
+                }
+                // k0: a mask's register fragment moved to the class's k0.
+                tried = 0;
+                for (uint32_t f = 0; tried < 8 && f < allocation->fragment_count; f += 1)
+                {
+                    if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->registers[f] != 0)
+                    {
+                        uint32_t interval = 0;
+                        while (allocation->fragment_offsets[interval + 1] <= f)
+                        {
+                            interval += 1;
+                        }
+                        if (result.intervals.classes[interval] == BUSTER_TIER1_ALLOCATE_MASK)
+                        {
+                            const uint8_t kept = allocation->registers[f];
+                            allocation->registers[f] = 0;
+                            Tier1CfgCheck mutated;
+                            const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                            allocation->registers[f] = kept;
+                            tally->k0_mutants += 1;
+                            tally->k0_killed += rejected;
+                            tried += 1;
+                        }
                     }
                 }
                 Tier1CfgCheck again;
@@ -1077,6 +1126,23 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
         }
         arena_pop_to(output, saved);
     }
+    // #179's review: the mask phi swap with k0 among its class's registers and the scratch register elsewhere. No mask
+    // value may take k0, so both paths refuse the input, leaving the output arena as it was.
+    Tier1CfgTestBuilder* k0_swap = &builders[7];
+    k0_swap->registers[BUSTER_TIER1_ALLOCATE_MASK] = 0x07;
+    k0_swap->scratch[BUSTER_TIER1_ALLOCATE_MASK] = 3;
+    const uint64_t k0_saved = output->length;
+    Tier1CfgInput k0_input;
+    const bool k0_built = tier1_cfg_test_build(k0_swap, output, &k0_input);
+    tier1_cfg_test_expect(tally, k0_built, "the k0 fixture builds");
+    for (uint32_t path = 0; k0_built && path < 2; path += 1)
+    {
+        const uint64_t before = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&k0_input, output, scratch, &result) : tier1_cfg_allocate_scalar(&k0_input, output, scratch, &result);
+        tier1_cfg_test_expect(tally, error == TIER1_CFG_INVALID && output->length == before, "a mask class with k0 among its registers is refused");
+    }
+    arena_pop_to(output, k0_saved);
     (void)z;
     (void)i;
     (void)swap_b;
@@ -1144,10 +1210,11 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // Every mutant must fail the checker, and a full run must reach each kind of mutant, a split edge, a cycle or
         // slot-to-slot move through the scratch register and a temporary slot.
         tier1_cfg_test_expect(&tally, tally.interference_killed == tally.interference_mutants && tally.order_killed == tally.order_mutants && tally.definition_killed == tally.definition_mutants, "every mutant fails the checker");
+        tier1_cfg_test_expect(&tally, tally.destination_killed == tally.destination_mutants && tally.k0_killed == tally.k0_mutants, "every split destination and k0 mutant fails the checker");
         tier1_cfg_test_expect(&tally, tally.definition_mutants != 0, "the random programs' required definitions reach the definition mutant");
-        tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
+        tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.destination_mutants != 0 && tally.k0_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0 (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, seed, count);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);

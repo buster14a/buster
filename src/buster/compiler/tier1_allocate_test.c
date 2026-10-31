@@ -162,7 +162,8 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
         const bool constrained = (iteration % 3) == 0;
         const bool sparse = (iteration % 3) == 1;
         const uint32_t gpr_mask = sparse ? 0xaaaa : (1u << (1 + iteration % 8)) - 1;
-        const uint32_t mask_mask = gpr_mask & BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
+        // From k1: as many opmask registers as the general class has, up to seven (no mask value takes k0).
+        const uint32_t mask_mask = (gpr_mask << 1) & BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
         for (uint32_t i = 0; i < count; i += 1)
         {
             starts[i] = sparse ? i * 2 : tier1_allocation_test_random(&seed) % 96;
@@ -545,6 +546,96 @@ static void tier1_allocation_test_failures(Tier1AllocationTestTally* tally, Aren
         const Tier1AllocationError error = tier1_allocate(&input, &small, &output);
         tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_OK || (error == TIER1_ALLOCATION_CAPACITY && small.length == 0 && memcmp(&output, &before, sizeof(output)) == 0), "capacity transaction at every allocation boundary");
     }
+}
+
+// #179's review: no mask value in k0, which can't be a write mask. Validation refuses a class, an interval or a hint
+// that allows it, on both paths and without touching the arena or the result; a fixed range may name k0 (a call's
+// clobbers), and the interval verifier rejects an allocation whose mask fragment is moved there.
+static void tier1_allocation_test_mask_k0(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    uint32_t starts[] = { 0, 1, 2 };
+    uint32_t ends[] = { 6, 7, 8 };
+    uint32_t values[] = { 0, 1, 2 };
+    uint32_t allowed[] = { BUSTER_TIER1_ALLOCATE_MASK_REGISTERS, BUSTER_TIER1_ALLOCATE_MASK_REGISTERS, BUSTER_TIER1_ALLOCATE_MASK_REGISTERS };
+    uint8_t classes[] = { BUSTER_TIER1_ALLOCATE_MASK, BUSTER_TIER1_ALLOCATE_MASK, BUSTER_TIER1_ALLOCATE_MASK };
+    uint8_t hints[] = { UINT8_MAX, UINT8_MAX, UINT8_MAX };
+    const uint32_t fixed_starts[] = { 3 };
+    const uint32_t fixed_ends[] = { 4 };
+    uint32_t fixed_registers[] = { BUSTER_TIER1_ALLOCATE_MASK_FILE };
+    const uint8_t fixed_classes[] = { BUSTER_TIER1_ALLOCATE_MASK };
+    Tier1AllocationInput input = {
+        .starts = starts,
+        .ends = ends,
+        .values = values,
+        .allowed_registers = allowed,
+        .classes = classes,
+        .hints = hints,
+        .count = 3,
+        .value_count = 3,
+        .position_count = 8,
+        .registers = { 0, 0, BUSTER_TIER1_ALLOCATE_MASK_REGISTERS },
+    };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        const uint64_t saved = arena->length;
+        Tier1Allocation output = { 0 };
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scalar(&input, arena, &output);
+        bool k0 = false;
+        for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < output.fragment_count; f += 1)
+        {
+            k0 |= output.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && output.registers[f] == 0;
+        }
+        tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_OK && !k0 && tier1_allocation_verify(&input, &output), "masks allocate in k1 to k7");
+        // A mask fragment moved to k0: outside every mask value's registers.
+        for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < output.fragment_count; f += 1)
+        {
+            if (output.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER)
+            {
+                const uint8_t kept = output.registers[f];
+                output.registers[f] = 0;
+                tier1_allocation_test_expect(tally, !tier1_allocation_verify(&input, &output), "the interval verifier rejects a mask in k0");
+                output.registers[f] = kept;
+            }
+        }
+        arena_pop_to(arena, saved);
+    }
+    // A call's range over all eight registers, k0 among them: taken, and the masks over it leave their registers.
+    input.fixed = (Tier1FixedIntervals){
+        .starts = fixed_starts,
+        .ends = fixed_ends,
+        .registers = fixed_registers,
+        .classes = fixed_classes,
+        .count = 1,
+    };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        const uint64_t saved = arena->length;
+        Tier1Allocation output = { 0 };
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scalar(&input, arena, &output);
+        tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_OK && output.spill_count == 3 && tier1_allocation_verify(&input, &output), "a fixed range over every opmask register, k0 among them");
+        arena_pop_to(arena, saved);
+    }
+    // Each refusal: the class with k0, an interval allowed k0, a hint of k0, a fixed range past k7.
+    for (uint32_t failure = 0; failure < 4; failure += 1)
+    {
+        Tier1AllocationInput broken = input;
+        broken.registers[BUSTER_TIER1_ALLOCATE_MASK] = failure == 0 ? BUSTER_TIER1_ALLOCATE_MASK_FILE : BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
+        allowed[1] = failure == 1 ? 0x03 : BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
+        hints[2] = failure == 2 ? 0 : UINT8_MAX;
+        fixed_registers[0] = failure == 3 ? 0x1ff : BUSTER_TIER1_ALLOCATE_MASK_FILE;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint64_t saved = arena->length;
+            Tier1Allocation before;
+            memset(&before, 0xa5, sizeof(before));
+            Tier1Allocation output = before;
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&broken, arena, &output) : tier1_allocate_scalar(&broken, arena, &output);
+            tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_INVALID && arena->length == saved && memcmp(&output, &before, sizeof(output)) == 0, "a mask allowed k0 is refused");
+        }
+    }
+    allowed[1] = BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
+    hints[2] = UINT8_MAX;
+    fixed_registers[0] = BUSTER_TIER1_ALLOCATE_MASK_FILE;
 }
 
 static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
@@ -1213,6 +1304,7 @@ static int run_tier1_allocate_tests(int argc, char** argv)
         tier1_allocation_test_fixed(&tally, &arena, seed);
         tier1_allocation_test_fixed_sparse(&tally, &arena);
         tier1_allocation_test_failures(&tally, &arena);
+        tier1_allocation_test_mask_k0(&tally, &arena);
         tier1_allocation_test_moves(&tally, &arena, seed);
         tier1_allocation_test_move_scaling(&tally);
         tier1_allocation_test_required(&tally, &arena);

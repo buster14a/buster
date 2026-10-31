@@ -260,10 +260,11 @@ designs and the compilers already built this way.
   liveness with phi operands on their edges, hinted (`hint_values`) to keep one
   register, then each edge's parallel move, placed at a block's end or start or
   on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
-  is its independent checker, which simulates each block and edge. Its classes,
-  and `tier1_allocate.c`'s, are general, vector and AVX-512's opmask registers
-  (#179: k1 to k7 for values, k0 the class's scratch, every mask clobbered by a
-  call). `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
+  is its independent checker, which simulates each block and edge, and checks
+  each piece of a range cut at a split where its split's moves leave it. Its
+  classes, and `tier1_allocate.c`'s, are general, vector and AVX-512's opmask
+  registers (#179: k1 to k7 for values, a class with k0 refused, k0 the class's
+  scratch, every mask clobbered by a call). `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
   three classes with mutants; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`

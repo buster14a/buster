@@ -39,17 +39,20 @@
 // BUSTER_TIER1_CFG_SPILL + spill_count + class for the class's temporary slot, which temp_slots marks where a move
 // uses it. A move whose source is BUSTER_TIER1_CFG_REMATERIALIZE recomputes move_values[m] into its destination.
 //
-// The classes are tier1_allocate.c's: general, vector and opmask registers (#179). The mask class's scratch register
-// is one of k0 to k7 outside its `registers`: k0 for the producers here, since it can't be a write mask, which leaves
-// the seven others to the values. A consumer moves, spills and reloads a mask at its width; calls clobber every opmask
-// register (the System V convention passes none and preserves none), which the producer's fixed ranges say.
+// The classes are tier1_allocate.c's: general, vector and opmask registers (#179). A mask value takes one of k1 to k7
+// (BUSTER_TIER1_ALLOCATE_MASK_REGISTERS: k0 can't be a write mask, and validation refuses a class or a value that
+// allows it), and the class's scratch register is a k register outside its `registers`: k0 for the producers here,
+// which leaves the seven others to the values. A consumer moves, spills and reloads a mask at its width; calls clobber
+// every opmask register (the System V convention passes none and preserves none), which the producer's fixed ranges say.
 //
 // tier1_cfg_verify is an independent oracle for tests and qualification, not the production path. It computes
 // liveness its own way (each use walked back to its definition), simulates every block's locations as the emitter
 // would run the fragments and splits (stores, then a split's moves, then loads and rematerializations, at each
-// position; fixed ranges clobber their registers), checks that every use finds its value and that no write lands on
-// another value the allocation still keeps there, and applies each edge's moves in order to the predecessor's final
-// state, which must then hold every live-in value and each phi's operand where the successor expects them.
+// position; fixed ranges clobber their registers), checks that every use finds its value, that each piece of a range
+// cut inside a block finds its value where the piece keeps it once the split's moves have run (whether or not a use
+// reads it there), and that no write lands on another value the allocation still keeps there, and applies each edge's
+// moves in order to the predecessor's final state, which must then hold every live-in value and each phi's operand
+// where the successor expects them.
 //
 // This first form keeps interval construction, resolution and the oracle scalar, around the vector liveness solver and
 // the vector allocator: their share of the cost is to be measured on the 9700X before they get vector paths.
@@ -1453,7 +1456,8 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 event_fill[q] = event_offsets[q];
             }
         }
-        // Kinds: 0 transition (fragment f), 1 use (use u), 2 clobber (fixed range r), 3 definition (value v).
+        // Kinds: 0 transition (fragment f), 1 use (use u), 2 clobber (fixed range r), 3 definition (value v), 4 the
+        // start of a piece of a range cut inside its block (interval i).
         for (uint32_t i = 0; valid && i < intervals->count; i += 1)
         {
             for (uint32_t f = allocation->fragment_offsets[i] + 1; f < allocation->fragment_offsets[i + 1]; f += 1)
@@ -1514,6 +1518,25 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 events[(uint64_t)event_fill[q] * 2] = 3;
                 events[(uint64_t)event_fill[q] * 2 + 1] = v;
                 event_fill[q] += 1;
+            }
+        }
+        // An interval that starts neither at its value's definition nor at its block's start: a piece of a range cut
+        // around a fixed range, which a split's moves bring its value to.
+        for (uint32_t i = 0; valid && i < intervals->count; i += 1)
+        {
+            const uint32_t q = intervals->starts[i];
+            if (q != input->definitions[intervals->values[i]] && input->block_starts[tier1_cfg_block_of(input, q)] != q)
+            {
+                if (pass == 0)
+                {
+                    event_offsets[q + 1] += 1;
+                }
+                else
+                {
+                    events[(uint64_t)event_fill[q] * 2] = 4;
+                    events[(uint64_t)event_fill[q] * 2 + 1] = i;
+                    event_fill[q] += 1;
+                }
             }
         }
     }
@@ -1652,6 +1675,17 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                                 tier1_cfg_state_set(&state, class * 32 + r, BUSTER_TIER1_CFG_NONE - 1);
                             }
                         }
+                        check->checks += 1;
+                    }
+                    else if (kind == 4 && step == 1)
+                    {
+                        // A cut piece's value where the piece's first fragment keeps it, now that the split's moves
+                        // have run: no use may read that piece, which would leave a move to the wrong location unseen.
+                        const uint32_t v = intervals->values[item];
+                        uint32_t location = 0;
+                        uint8_t where = 0;
+                        valid = tier1_cfg_location(result, v, q, &location, &where) || tier1_cfg_fail(check, "a piece outside its value's intervals", b, v, q);
+                        valid = valid && (where == BUSTER_TIER1_ALLOCATE_REMATERIALIZE || tier1_cfg_state_get(&state, location) == v || tier1_cfg_fail(check, "a split that doesn't bring a value to its piece", b, v, q));
                         check->checks += 1;
                     }
                     else if (kind == 3 && step == 4)

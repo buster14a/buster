@@ -33,14 +33,17 @@ Allocating the unfused uses and then folding is unsound.
 | `use_required` | optional u8 | 1 requires a register at that use; 0 permits memory |
 
 `registers[3]` contains the allocatable physical masks. GPR bits are 0–15;
-vector bits are 0–31; opmask bits are 0–7, k0 to k7 (#179). The caller
+vector bits are 0–31; opmask bits are 1–7, k1 to k7 (#179,
+`BUSTER_TIER1_ALLOCATE_MASK_REGISTERS`): EVEX encodes "no mask" with k0, so no
+mask value is ever allocated there, and validation refuses a class, an interval
+or a hint that would put one in k0. A fixed range of the class may name all
+eight (`BUSTER_TIER1_ALLOCATE_MASK_FILE`), as a call clobbers k0 too. The caller
 restricts the vector and opmask masks to the generated-code target,
 independently of the host's AVX-512 capability: a target without AVX-512 has
 no opmask registers. The caller excludes RSP, reserved scratch registers, and
 frame bases selected by the frame planner. In particular, it applies the frame
-planner's RBP/R13 reservation before allocation. A value used as a write mask
-has k1 to k7 alone among its allowed registers, since EVEX encodes "no mask"
-with k0. Masks of zero are valid when memory operands are permitted.
+planner's RBP/R13 reservation before allocation. Masks of zero are valid when
+memory operands are permitted.
 
 A class without intervals is skipped: one pass over the intervals' classes
 finds the classes present, and an absent class's passes over the intervals and
@@ -359,10 +362,13 @@ Locations are `class * 32 + register` for registers,
 
 AVX-512's opmask registers are the third class, k0 to k7. Nothing moves a value
 between classes, so a mask is never reinterpreted as a general register's
-value. The producers here (`tier1_cfg_ir.c`, the tests) give the class k1 to k7
-and make k0 its scratch register: k0 can't be a write mask, and the class needs
-a register outside its own for cycles and slot-to-slot moves, which `kmov`
-makes through k0 as `mov` does through the general class's scratch. A mask's
+value. A mask value takes one of k1 to k7: k0 can't be a write mask, and both
+allocators refuse a class with k0 among its registers (`tier1_cfg_verify` too,
+whose input check is theirs, and it rejects a mask fragment in k0 as outside its
+value's registers). The producers here (`tier1_cfg_ir.c`, the tests) give the
+class k1 to k7 and make k0 its scratch register: the class needs a register
+outside its own for cycles and slot-to-slot moves, which `kmov` makes through
+k0 as `mov` does through the general class's scratch. A mask's
 slot and the class's temporary slot hold the mask at its width, which a
 consumer moves, spills and reloads with the `kmov` of that width. The System V
 convention passes nothing in the opmask registers and preserves none of them, so
@@ -383,7 +389,11 @@ entry state as the emitter runs the fragments (stores, then reloads and
 recomputations, at each transition; fixed ranges clobber their registers), and
 checks that every use finds its value and that no write lands on a value the
 allocation still keeps in that location; a split's moves run between the
-position's stores and its reloads. For each edge it applies the moves in order
+position's stores and its reloads. Once they have run, each piece of a range cut
+at that position must find its value where the piece's first fragment keeps it,
+whether or not a use reads the piece: a piece without uses (a mask's past a
+call, often) would otherwise leave a move to the wrong register unseen, which
+#997's review found. For each edge it applies the moves in order
 to the predecessor's final state: each must read the value it says it carries
 and write a location of that value's class, and the successor's entry state
 must then hold every live-in value and each phi's operand.
@@ -404,8 +414,11 @@ ranges a call's, over all of them, every use dominated by its definition
 checker and, up to 600 intervals, the interval verifier, and the two must agree
 on which cases they refuse. On every fixture and every eighth program, mutants
 must fail the checker: a register fragment given the register of another
-value's fragment that overlaps it, and an edge's or a split's move run before a
-move whose source it overwrites.
+value's fragment that overlaps it, an edge's or a split's move run before a
+move whose source it overwrites, a split's move to a register sent to another
+of its class's registers, and a mask's register fragment moved to k0. A mask
+class with k0 among its registers must be refused by both paths. Over seeds 1
+to 20 and the default, every mutant fails the checker.
 
 ### On real code
 
@@ -516,7 +529,8 @@ input and impossible register constraints.
 ## Validation and measurements
 
 `test-tier1-allocation [--seed N] [--count N]` checks arbitrary input order,
-the three classes including vector register 31 and k0 to k7, pressure boundaries, required
+the three classes including vector register 31 and k1 to k7 (a mask allowed k0 refused, a call's range over all
+eight taken), pressure boundaries, required
 operands, fixed clobbers, hints, deterministic output, repeated reload/resplit,
 compact spill identity, malformed/overflow inputs and arena rollback. One
 oracle compares interval fragments pairwise; another expands them into a
