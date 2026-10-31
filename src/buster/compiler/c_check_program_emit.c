@@ -8,7 +8,8 @@
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers, only
 // when the selected program has a body: its helpers also come only from those bodies. Data-only links need no tables.
-// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame), at
+// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame, and
+// its tail calls' teardowns with unwind_tier0_frame_tails, #147), at
 // its records' ends after branch sizing, written after the last function (unwind_write) as one EH_FRAME atom, a CIE
 // and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with `verify`,
 // each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
@@ -454,13 +455,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint64_t rows = run->sources ? (uint64_t)code->entry_count + 2 + BUSTER_CHECK_DEBUG_SLACK : 0;
     body->row_offsets = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
+    // Its tail calls' unwind events (#147, unwind_tier0_frame_tails), which the tables read once the lanes are done.
+    const uint64_t tail_room = run->unwind && naked == 0 && code->tail_count != 0 ? unwind_tier0_tail_room(code) : 0;
+    uint32_t* tails = tail_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, tail_room) : 0;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0));
+                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0)) &&
+                 (tail_room == 0 || tails != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     if (valid && run->verify && x86_validate(code->records, code->count) != code->count)
     {
@@ -499,7 +504,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // A prologue or epilogue that isn't the frame Tier 0 published is the compiler's own failure; and with --verify,
             // so is a frame the analyzer proves otherwise from the records, where it takes the function (a fixed frame's,
             // and not a computed goto's).
-            valid = length <= INT32_MAX && unwind_tier0_frame(code, offsets, (uint32_t)length, &run->frames[b]) == UNWIND_OK;
+            valid = length <= INT32_MAX && unwind_tier0_frame_tails(code, offsets, (uint32_t)length, &run->frames[b], tails) == UNWIND_OK;
             UnwindFunction proven;
             const UnwindError analyzed = !valid || !run->verify ? UNWIND_ERROR_UNSUPPORTED :
                                          run->scalar ? unwind_tier0_scalar(code, offsets, (uint32_t)length, &proven) :
@@ -1067,8 +1072,9 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
             const uint32_t symbol = lowered->runtime_symbols[runtime];
+            // The C library's and libm's functions are a shared library's, which the GOT reaches.
             access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ||
-                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX)
+                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX) || runtime >= BUSTER_CHECK_LOWER_LIBM_FIRST
                                  ? BUSTER_TIER0_ACCESS_GOT
                                  : BUSTER_TIER0_ACCESS_DIRECT;
         }

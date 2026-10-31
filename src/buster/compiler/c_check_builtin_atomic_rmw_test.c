@@ -392,6 +392,181 @@ static void check_builtin_atomic_rmw_test_orders(CheckBuiltinAtomicRmwTest* test
         result.atomic.store_value.integer == 1, "canonical bool exchange desired value uses truth conversion", 0);
 }
 
+// A source action of `count` arguments for an identity outside the shared fixture table.
+static CheckBuiltinAtomicRmwAction check_builtin_atomic_rmw_test_call(CBuiltinId id, const CheckValue* arguments, uint32_t count, uint8_t ice)
+{
+    const CheckBuiltinAtomicRmwAction result =
+    {
+        .source =
+        {
+            .id = id,
+            .arguments = arguments,
+            .argument_count = count,
+            .node = 148,
+            .source_position = UINT32_MAX,
+            .minimum_alignment = 16,
+            .alignment_known = true,
+        },
+        .order_ice_arguments = ice,
+    };
+    return result;
+}
+
+// #148's rules past the shared table: __sync_swap, clang's legacy minimum and maximum of their prototypes, the wrapping
+// increment and decrement, and GNU's byte flag.
+static void check_builtin_atomic_rmw_test_added(CheckBuiltinAtomicRmwTest* test, TypeTable* table)
+{
+    CheckValue arguments[BUSTER_CHECK_ATOMIC_RMW_TEST_ARGUMENTS];
+    for (uint32_t i = 0; i < BUSTER_CHECK_ATOMIC_RMW_TEST_ARGUMENTS; i += 1)
+    {
+        arguments[i] = check_test_integer(BUSTER_TYPE_INT, 5);
+    }
+    CheckBuiltinAtomicRmwResult result;
+    // __sync_swap is __sync_lock_test_and_set's exchange, protected variables and all.
+    arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_SHORT), 21, 0);
+    CheckBuiltinAtomicRmwAction input = check_builtin_atomic_rmw_test_call(CBUILTIN_SYNC_SWAP, arguments, 3, 0);
+    check_builtin_atomic_rmw_one(table, &input, &result);
+    check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.operation == CHECK_BUILTIN_ATOMIC_RMW_EXCHANGE &&
+        result.legacy && result.atomic.action.value.type == BUSTER_TYPE_SHORT && result.ignored_argument_count == 1 && result.atomic.success_order == 5 &&
+        (result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_WARN_IMPLICIT_SEQ_CST) != 0, "__sync_swap is a legacy exchange of its object's type", 0);
+    // The legacy minimum and maximum take their prototypes' int or unsigned int through volatile pointers to them, exactly
+    // two arguments, and order signed and unsigned values as their names say.
+    const CBuiltinId ordered[] = { CBUILTIN_SYNC_FETCH_AND_MIN, CBUILTIN_SYNC_FETCH_AND_MAX, CBUILTIN_SYNC_FETCH_AND_UMIN, CBUILTIN_SYNC_FETCH_AND_UMAX };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ordered); i += 1)
+    {
+        const TypeId own = i < 2 ? BUSTER_TYPE_INT : BUSTER_TYPE_UINT;
+        const TypeId other = i < 2 ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT;
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, own), 21, 0);
+        arguments[1] = check_test_integer(BUSTER_TYPE_LONG, 7);
+        input = check_builtin_atomic_rmw_test_call(ordered[i], arguments, 2, 0);
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.action.value.type == own &&
+            result.atomic.value_type == own && result.atomic.store_value.type == own && result.atomic.object_type == type_qualify(table, own, BUSTER_TYPE_VOLATILE) &&
+            result.operation == (i % 2 == 0 ? CHECK_BUILTIN_ATOMIC_RMW_MIN : CHECK_BUILTIN_ATOMIC_RMW_MAX) && result.atomic.success_order == 5 &&
+            (result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_WARN_IMPLICIT_SEQ_CST) == 0 && result.atomic.evaluated_operands == 3,
+            "legacy minimum and maximum of their prototype's value type", i);
+        input.source.argument_count = 3;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a prototype takes no protected variables", i);
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, other), 21, 0);
+        input.source.argument_count = 2;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.value_type == own &&
+            (result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN) != 0, "the other signedness's pointer converts with clang's pointer-sign warning", i);
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_LONG), 21, 0);
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.atomic.action.diagnostic_operand == 0,
+            "an incompatible pointer is clang's error", i);
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_VOID), 21, 0);
+        input.source.minimum_alignment = 1;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.alignment_known && result.atomic.minimum_alignment == 4 &&
+            result.atomic.unsupported == 0, "a void pointer's object has the prototype's alignment, as clang's code generation gives it", i);
+    }
+    // The wrapping increment and decrement take integers, bool among them, but no pointer or floating value.
+    const CBuiltinId wrapping[] = { CBUILTIN_ATOMIC_FETCH_UINC, CBUILTIN_ATOMIC_FETCH_UDEC };
+    const TypeId wrapped[] = { BUSTER_TYPE_BOOL, BUSTER_TYPE_SCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG, BUSTER_TYPE_FLOAT, type_pointer(table, BUSTER_TYPE_INT) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(wrapping); i += 1)
+    {
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(wrapped); t += 1)
+        {
+            arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, wrapped[t]), 21, 0);
+            arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+            arguments[2] = check_test_integer(BUSTER_TYPE_INT, 7);
+            input = check_builtin_atomic_rmw_test_call(wrapping[i], arguments, 3, 1u << 2);
+            check_builtin_atomic_rmw_one(table, &input, &result);
+            const bool integer = t < 5;
+            check_builtin_atomic_rmw_test_expect(test, integer ? result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.action.value.type == wrapped[t] &&
+                result.operation == (i == 0 ? CHECK_BUILTIN_ATOMIC_RMW_UINC : CHECK_BUILTIN_ATOMIC_RMW_UDEC) && result.atomic.unsupported == 0 && result.atomic.rmw &&
+                (result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_ORDER) != 0 :
+                result.atomic.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "wrapping increment and decrement of integers alone, an invalid order 7 warned", i * 8 + t);
+        }
+    }
+    // GNU's byte flag: any pointer to an object that isn't const, its first byte a char's, the order its second argument.
+    const TypeId flags[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_CHAR, BUSTER_TYPE_LONG, type_tag(table, BUSTER_TYPE_KIND_STRUCT, 151), type_bit_int(table, 32, false) };
+    const uint32_t orders[] = { 0, 1, 2, 3, 4, 5, 6 };
+    for (uint32_t clear = 0; clear < 2; clear += 1)
+    {
+        const CBuiltinId id = clear != 0 ? CBUILTIN_ATOMIC_CLEAR : CBUILTIN_ATOMIC_TEST_AND_SET;
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(flags); t += 1)
+        {
+            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(orders); o += 1)
+            {
+                arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, flags[t], BUSTER_TYPE_VOLATILE)), 21, 0);
+                arguments[1] = check_test_integer(BUSTER_TYPE_INT, orders[o]);
+                input = check_builtin_atomic_rmw_test_call(id, arguments, 2, 1u << 1);
+                input.source.alignment_known = false;
+                check_builtin_atomic_rmw_one(table, &input, &result);
+                const bool invalid = orders[o] > 5 || (clear != 0 && (orders[o] == 1 || orders[o] == 2 || orders[o] == 4));
+                check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.value_type == BUSTER_TYPE_CHAR &&
+                    result.atomic.object_type == type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_VOLATILE) && result.atomic.volatile_access &&
+                    result.atomic.object_size == 1 && result.atomic.alignment_known && result.atomic.unsupported == 0 &&
+                    result.atomic.action.value.type == (clear != 0 ? BUSTER_TYPE_VOID : BUSTER_TYPE_BOOL) && result.atomic.rmw == (clear == 0) &&
+                    result.atomic.reads_memory == (clear == 0) && result.atomic.evaluated_operands == 3 && result.atomic.success_order == orders[o] &&
+                    ((result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_ORDER) != 0) == invalid,
+                    "the byte flag of any non-const object, with its store's or any order", clear * 64 + t * 8 + o);
+            }
+        }
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, BUSTER_TYPE_VOID, BUSTER_TYPE_CONST)), 21, 0);
+        arguments[1] = check_test_integer(BUSTER_TYPE_INT, 5);
+        input = check_builtin_atomic_rmw_test_call(id, arguments, 2, 1u << 1);
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED, "a const object's byte flag is clang's error", clear);
+        input.order_ice_arguments = 1u << 2;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "the byte flag's order proof is its second argument's", clear);
+        arguments[0] = check_test_integer(BUSTER_TYPE_INT, 0);
+        input = check_builtin_atomic_rmw_test_call(id, arguments, 2, 0);
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_POINTER_REQUIRED, "the byte flag takes a pointer", clear);
+    }
+    // clang's IEEE maximum and minimum take its floating types alone, complex ones among them, but long double: a float's
+    // and a double's with leaves (F32 and F64), the others' valid but refused at runtime; the operand converts to the
+    // object's type, an invalid order is warned, and a const object is clang's error.
+    const CBuiltinId ieee[] = { CBUILTIN_ATOMIC_FETCH_FMAXIMUM, CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM, CBUILTIN_ATOMIC_FETCH_FMINIMUM, CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM };
+    const CheckBuiltinAtomicRmwOperation ieee_operations[] = { CHECK_BUILTIN_ATOMIC_RMW_FMAXIMUM, CHECK_BUILTIN_ATOMIC_RMW_FMAXIMUM_NUM, CHECK_BUILTIN_ATOMIC_RMW_FMINIMUM,
+                                                               CHECK_BUILTIN_ATOMIC_RMW_FMINIMUM_NUM };
+    const TypeId floating[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_FLOAT16, BUSTER_TYPE_BF16, BUSTER_TYPE_FLOAT128, type_complex(table, BUSTER_TYPE_FLOAT),
+                                type_complex(table, BUSTER_TYPE_LONG_DOUBLE), BUSTER_TYPE_LONG_DOUBLE, BUSTER_TYPE_INT, BUSTER_TYPE_BOOL, type_pointer(table, BUSTER_TYPE_FLOAT),
+                                type_atomic(table, BUSTER_TYPE_FLOAT) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ieee); i += 1)
+    {
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(floating); t += 1)
+        {
+            arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, floating[t], BUSTER_TYPE_VOLATILE)), 21, 0);
+            arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+            arguments[2] = check_test_integer(BUSTER_TYPE_INT, 7);
+            input = check_builtin_atomic_rmw_test_call(ieee[i], arguments, 3, 1u << 2);
+            check_builtin_atomic_rmw_one(table, &input, &result);
+            const bool valid = t < 7;
+            const bool leaf = t < 2;
+            check_builtin_atomic_rmw_test_expect(test, valid ? result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.action.value.type == floating[t] &&
+                result.operation == ieee_operations[i] && result.atomic.store_value.type == floating[t] && result.atomic.rmw && result.atomic.volatile_access &&
+                result.reads_fp_environment && result.may_raise_fp_exceptions && (result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_ORDER) != 0 &&
+                (leaf ? result.atomic.unsupported == 0 && result.format == (t == 0 ? CHECK_BUILTIN_ATOMIC_RMW_F32_BITS : CHECK_BUILTIN_ATOMIC_RMW_F64_BITS) :
+                        result.atomic.unsupported != 0 && (result.atomic.unsupported & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW) == 0) :
+                result.atomic.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.atomic.action.diagnostic_operand == 0,
+                "the IEEE maximum and minimum of floating values alone but long double, a float's and a double's with leaves", i * 16 + t);
+        }
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_CONST)), 21, 0);
+        input = check_builtin_atomic_rmw_test_call(ieee[i], arguments, 3, 1u << 2);
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED, "a const object's IEEE maximum is clang's error", i);
+        arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_DOUBLE), 21, 0);
+        input.source.argument_count = 2;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "the IEEE maximum takes its arguments exactly", i);
+        input.source.argument_count = 4;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "the IEEE maximum takes no fourth argument", i);
+        arguments[1] = check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_DOUBLE), 22, 0);
+        input.source.argument_count = 3;
+        check_builtin_atomic_rmw_one(table, &input, &result);
+        check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic != CHECK_DIAG_NONE && result.atomic.action.diagnostic_operand == 1,
+            "a pointer operand doesn't convert to the floating value", i);
+    }
+}
+
 static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test, TypeTable* table)
 {
     const long page_value = sysconf(_SC_PAGESIZE);
@@ -830,6 +1005,7 @@ static int run_check_builtin_atomic_rmw_tests(int argc, char** argv)
             check_builtin_atomic_rmw_test_values(&test, &types.table);
             check_builtin_atomic_rmw_test_constraints(&test, &types.table);
             check_builtin_atomic_rmw_test_orders(&test, &types.table);
+            check_builtin_atomic_rmw_test_added(&test, &types.table);
             check_builtin_atomic_rmw_test_pages(&test, &types.table);
         }
         check_test_types_close(&types);

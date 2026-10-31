@@ -400,6 +400,11 @@ struct CheckBuiltinAtomicEffect
     bool writes_memory;
     bool rmw;
     bool compiler_barrier;
+    // A lock-free query whose answer in code is its function's emission's (CheckBuiltinAtomicResult.late_completion).
+    bool late_completion;
+    int8_t answers[2];
+    uint64_t query_size;
+    TypeId query_pointer;
 };
 
 typedef struct CheckStream CheckStream;
@@ -696,8 +701,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_QUERY;
     }
-    else if (check_builtin_atomic_c11(id) || id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N || id == CBUILTIN_SYNC_SYNCHRONIZE ||
-             id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE || check_builtin_atomic_rmw_rule(id) != NULL)
+    else if (check_builtin_atomic_checked(id))
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
     }
@@ -705,7 +709,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_OVERFLOW;
     }
-    else if (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_NONTEMPORAL_STORE)
+    else if (cbuiltin_vector(id))
     {
         op = CHECK_OP_BUILTIN_VECTOR;
     }
@@ -1850,31 +1854,15 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .extensions = action->extensions,
             .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
             .alignment_known = walked < 64,
+            .constant_evaluated = action->constant_evaluated,
         };
+        // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what the
+        // effect records.
         CheckBuiltinAtomicResult checked;
-        if (check_builtin_atomic_c11(input.id))
-        {
-            check_builtin_atomic_c11_one(types, &input, &checked);
-        }
-        else if (check_builtin_atomic_rmw_rule(input.id) != NULL)
-        {
-            // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what
-            // the effect records.
-            const CheckBuiltinAtomicRmwAction rmw = {
-                .source = input,
-                .order_ice_arguments = check_builtin_atomic_rmw_order_ice(input.id, action->arguments, action->argument_count),
-            };
-            CheckBuiltinAtomicRmwResult full;
-            check_builtin_atomic_rmw(types, &rmw, &full, 1);
-            checked = full.atomic;
-        }
-        else
-        {
-            check_builtin_atomic(types, &input, &checked, 1);
-        }
+        check_builtin_atomic_family(types, &input, &checked);
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        for (uint32_t i = 0; i < action->argument_count && i < 6; i += 1)
+        for (uint32_t i = 0; i < action->argument_count && i < BUSTER_ARRAY_LENGTH(checked.argument_conversions); i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }
@@ -1902,6 +1890,10 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .rmw = checked.rmw,
             .compiler_barrier = checked.compiler_barrier,
+            .late_completion = checked.late_completion,
+            .answers = { checked.answers[0], checked.answers[1] },
+            .query_size = checked.query_size,
+            .query_pointer = checked.query_pointer,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_VECTOR)
@@ -1924,7 +1916,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         check_builtin_vector(types, &input, &checked, 1);
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        for (uint32_t i = 0; i < action->argument_count && i < 3; i += 1)
+        for (uint32_t i = 0; i < action->argument_count && i < BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }

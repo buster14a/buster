@@ -1298,8 +1298,9 @@ decisions in #154 and on #117's configuration):
   Builtins use the shared catalog's explicit source and constant-expression
   capabilities, plus the preprocessor's four `__is_target_*` builtins. Native
   intrinsic names come from the actual x86 lowering rows/leaves, intersected
-  with the checker's frozen source scope; the full Clang recognition catalog
-  is not an implementation list. The fourteen fortified libc builtins reuse
+  with the checker's source scope (the frozen inventory and its sorted
+  supplementary names, `c_builtin_supplementary_scope.inc`); the full Clang
+  recognition catalog is not an implementation list. The fourteen fortified libc builtins reuse
   the checker's separate exact-name admission table and ordinary native call
   path (#803); none has a source constant-expression capability. An
   implemented builtin answers 1 only where clang 23 makes it one, as clang's
@@ -1340,11 +1341,13 @@ Accepted but unimplemented attributes remain zero, including `always_inline`,
 implemented diagnostic consumer; reporting their C23 date codes would falsely
 advertise that consumer. The unpublished common symbols' effect also
 remains zero. Generic GNU atomic load/store/exchange/compare-exchange,
-GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
-unadvertised; scalar GNU atomics and implemented C11 atomics are advertised.
+GNU lock-free queries and test-and-set/clear remain unadvertised, and so do
+the vector builtins the checker checks but no lowering takes (elementwise
+clmul, the masked memory builtins and the matrix ones); scalar GNU atomics and
+implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
 
-`test-preprocessor` checks an independent 181-name generic builtin inventory,
+`test-preprocessor` checks an independent 233-name generic builtin inventory,
 the fourteen fortified names and their source/constexpr/refusal boundaries, old and
 new language modes, scoped/underscore/macro spellings, oracle isolation and
 protected input tails. `test-checker` compares intrinsic answers against the

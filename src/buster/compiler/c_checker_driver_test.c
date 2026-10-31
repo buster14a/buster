@@ -4201,6 +4201,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
+#include "c_check_musttail_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -5443,6 +5444,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
         check_test_driver_cleanup_errors(&test, clang, executable, directory);
+        check_test_driver_musttail_errors(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);

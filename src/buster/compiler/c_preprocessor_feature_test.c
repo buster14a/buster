@@ -104,7 +104,7 @@ static bool pp_test_source_feature_matrix(void)
         { "__builtin_assume", true }, { "__builtin_unpredictable", true }, { "__builtin_ia32_selectd_512", true },
         { "__builtin_ia32_palignr256", true }, { "__builtin_ia32_pblendw128", true }, { "__builtin_ia32_permdi256", true },
         { "__builtin_ia32_pshufd256", true }, { "__builtin_ia32_shufpd", true },
-        { "__builtin_ia32_pblendw256", false }, { "__builtin_ia32_pshufd257", false },
+        { "__builtin_ia32_pblendw256", true }, { "__builtin_ia32_pshufd257", false },
         // EMMS has both a shared SYSTEM lowering row and a declaration in the frozen source scope.
         { "__builtin_ia32_emms", true }, { "__builtin_ia32_tilezero", false }, { "__rdtscx", false },
     };
@@ -242,8 +242,8 @@ static bool pp_test_builtin_targets(const char* directory)
         free(clang_text);
         arena_release(&arena);
     }
-    // The gates' facts against clang's table: each source scope's row (the frozen inventory's and the immediate names',
-    // whose features c_builtin_immediate_scope.inc writes out) and each catalog name's language modes.
+    // The gates' facts against clang's table: each source scope's row (the frozen inventory's and the supplementary
+    // names', whose features c_builtin_supplementary_scope.inc writes out) and each catalog name's language modes.
     uint32_t facts = 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
