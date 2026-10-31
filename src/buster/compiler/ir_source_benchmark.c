@@ -4,18 +4,18 @@
 // #131's measurement on real C (benchmark-ir-source): the IR's bytes per source token of the functions the driver's -c
 // compiles of a set of files, with the largest function's share (#15: sqlite3.c's sqlite3VdbeExec, 5.0% of its -O0
 // code), and the time per typed entry of lowering them (ir_lower_typed and its scalar twin), of verifying the result
-// (ir_verify and ir_verify_scalar) and of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
-// promotion's phis (#134). Include after ir_source_test.c and tier0_benchmark_measure.c, whose clock, counters and
-// medians it takes.
+// (ir_verify and ir_verify_scalar), of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
+// promotion's phis (#134), and of #866's two GVN paths on the lowered IR. Include after ir_source_test.c and
+// tier0_benchmark_measure.c, whose clock, counters and medians it takes.
 //
 //   build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [--functions] [preprocessor options] file...
 //
 // The files' functions are prepared as test-ir-source prepares them (ir_source_prepare), each lowered once by both
-// paths, which must agree, into the IR the verifier and promotion variants read, and promoted once by both, outside
-// the time. Any file that fails or is left out, and any function either path refuses, fails the benchmark, which then
-// reports no time: its corpus would be less than the files'. The bytes are the function arenas' (IrFunction.arena_bytes:
-// every column and side table, with their alignment gaps, each function in an arena of its own), lowered and promoted;
-// the tokens the parser's. Each variant's
+// paths, which must agree, into the IR the verifier, promotion and GVN variants read, and promoted once by both (and
+// given to GVN once by both), outside the time. Any file that fails or is left out, and any function either path
+// refuses, fails the benchmark, which then reports no time: its corpus would be less than the files'. The bytes are
+// the function arenas' (IrFunction.arena_bytes: every column and side table, with their alignment gaps, each function
+// in an arena of its own), lowered and promoted; the tokens the parser's. Each variant's
 // run takes every function once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of each
 // pair runs first; --only times one alone, back to back, and --after-scalar MS runs a vector variant's scalar twin, untimed,
 // for MS ms before each of its passes. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
@@ -26,7 +26,9 @@
 #define BUSTER_IR_SOURCE_VERIFY_SCALAR 3
 #define BUSTER_IR_SOURCE_PROMOTE 4
 #define BUSTER_IR_SOURCE_PROMOTE_SCALAR 5
-#define BUSTER_IR_SOURCE_VARIANTS 6
+#define BUSTER_IR_SOURCE_GVN 6
+#define BUSTER_IR_SOURCE_GVN_SCALAR 7
+#define BUSTER_IR_SOURCE_VARIANTS 8
 #define BUSTER_IR_SOURCE_LARGEST 10
 
 static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
@@ -36,6 +38,8 @@ static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
     "verify-scalar",
     "promote",
     "promote-scalar",
+    "gvn",
+    "gvn-scalar",
 };
 
 // The corpus: every file's functions (their streams in `lowered`, their table in `table`), each one's IR as the vector
@@ -56,6 +60,12 @@ struct IrSourceCorpus
     uint64_t promoted_bytes;
     // Each promotion's phis (#134): the vector path's (ssa_ir_promote), then its twin's.
     uint64_t phis[2];
+    // #866's GVN on the lowered IR, run once by each path outside the time: the instructions it removed, its
+    // refinement rounds, key comparisons and collision-budget sort completions.
+    uint64_t gvn_changed[2];
+    uint64_t gvn_rounds;
+    uint64_t gvn_probes;
+    uint64_t gvn_sort_fallbacks;
     // The lowered IR's bytes of its side tables, without the alignment gaps (ir_source_payload).
     uint64_t tables;
     // Functions a path refused or the paths lowered apart, and files that failed or were left out.
@@ -90,6 +100,15 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
         case BUSTER_IR_SOURCE_VERIFY: check = ir_verify(lowered, scratch, 0); break;
         case BUSTER_IR_SOURCE_VERIFY_SCALAR: check = ir_verify_scalar(lowered, scratch, 0); break;
         case BUSTER_IR_SOURCE_PROMOTE: check = ssa_ir_promote(lowered, output, scratch, &result); break;
+        case BUSTER_IR_SOURCE_GVN:
+        case BUSTER_IR_SOURCE_GVN_SCALAR:
+        {
+            IrGvnOptions options = ir_gvn_options();
+            options.scalar = variant == BUSTER_IR_SOURCE_GVN_SCALAR;
+            IrGvnResult run = { 0 };
+            check = ir_optimize_gvn(lowered, output, scratch, options, &run);
+        }
+        break;
         default: check = ssa_ir_promote_scalar(lowered, output, scratch, &result); break;
         }
         failures += check.error != IR_OK;
@@ -140,7 +159,19 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         arena_pop_to(output, mark);
         const IrCheck promotion_twin = lowers ? ssa_ir_promote_scalar(vector, output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         const uint32_t twin_phis = promotion_twin.error == IR_OK ? ssa_ir_phis(&promoted_twin, &trivial) : 0;
-        joined = promotion.error == IR_OK && promotion_twin.error == IR_OK;
+        arena_pop_to(output, mark);
+        // #866: both GVN paths on the lowered IR, once, outside the time. GVN verifies its output; the scalar
+        // available-expression path must accept the function too, and its removal count is the cyclic-quality control
+        // against the vector congruence solver's.
+        IrGvnOptions gvn_options = ir_gvn_options();
+        IrGvnResult gvn = { 0 };
+        const IrCheck gvn_check = lowers ? ir_optimize_gvn(vector, output, scratch, gvn_options, &gvn) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        arena_pop_to(output, mark);
+        gvn_options.scalar = true;
+        IrGvnResult gvn_twin = { 0 };
+        const IrCheck gvn_twin_check = lowers ? ir_optimize_gvn(vector, output, scratch, gvn_options, &gvn_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        arena_pop_to(output, mark);
+        joined = promotion.error == IR_OK && promotion_twin.error == IR_OK && gvn_check.error == IR_OK && gvn_twin_check.error == IR_OK;
         if (joined)
         {
             corpus->functions[corpus->count] = *source;
@@ -153,12 +184,18 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
             corpus->promoted_bytes += promoted_bytes;
             corpus->phis[0] += phis;
             corpus->phis[1] += twin_phis;
+            corpus->gvn_changed[0] += gvn.removed;
+            corpus->gvn_changed[1] += gvn_twin.removed;
+            corpus->gvn_rounds += gvn.rounds;
+            corpus->gvn_probes += gvn.partition_probes;
+            corpus->gvn_sort_fallbacks += gvn.partition_sort_fallbacks;
             bytes += vector->arena_bytes;
             instructions += vector->instruction_count;
         }
         else
         {
-            printf("benchmark-ir-source: file=%s function=%s failed=\"%s\"\n", name, source->name, lowers ? "a promotion refused it" : "a lowering refused it, or the paths disagree");
+            const char* reason = !lowers ? "a lowering refused it, or the paths disagree" : promotion.error != IR_OK || promotion_twin.error != IR_OK ? "a promotion refused it" : "GVN refused it";
+            printf("benchmark-ir-source: file=%s function=%s failed=\"%s\"\n", name, source->name, reason);
         }
         arena_pop_to(output, mark);
     }
@@ -195,6 +232,8 @@ static void ir_source_bytes(const IrSourceCorpus* corpus)
            (double)corpus->promoted_instructions / tokens, corpus->promoted_bytes, (double)corpus->promoted_bytes / tokens);
     printf("benchmark-ir-source: phis: %" PRIu64 " by promote (%.4f per lowered instruction), %" PRIu64 " by promote-scalar (%.4f)\n", corpus->phis[0],
            (double)corpus->phis[0] / (double)corpus->instructions, corpus->phis[1], (double)corpus->phis[1] / (double)corpus->instructions);
+    printf("benchmark-ir-source: GVN removed %" PRIu64 " instructions by gvn and %" PRIu64 " by gvn-scalar; %" PRIu64 " refinement rounds, %" PRIu64 " key comparisons, %" PRIu64 " collision-budget sort completions\n",
+           corpus->gvn_changed[0], corpus->gvn_changed[1], corpus->gvn_rounds, corpus->gvn_probes, corpus->gvn_sort_fallbacks);
     // The largest functions, by insertion into a short list sorted by bytes, the first function of equal bytes first.
     uint32_t largest[BUSTER_IR_SOURCE_LARGEST];
     uint32_t kept = 0;

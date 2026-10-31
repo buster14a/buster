@@ -94,6 +94,17 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
         case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_INITIALIZER: result = "declaration with deduced type 'auto' requires an initializer"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_SELF: result = "variable declared with deduced type 'auto' cannot appear in its own initializer"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_CONTEXT: result = "'auto' not allowed here"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_LIST: result = "cannot use 'auto' with initializer list in C"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_ARRAY: result = "cannot use 'auto' with array in C"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_BIT_FIELD: result = "cannot pass bit-field as auto initializer in C"; break;
+        case CHECK_INPUT_AUTO_DEDUCED_MISMATCH: result = "'auto' deduced types differ within one declaration"; break;
+        case CHECK_INPUT_CONSTEXPR_INITIALIZER: result = "constexpr variable must be initialized by a constant expression"; break;
+        case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
+        case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
+        case CHECK_INPUT_CONSTEXPR_CONTEXT: result = "constexpr can only be used in variable declarations"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
@@ -953,6 +964,27 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  "variable '%.*s' declared with deduced type '__auto_type' cannot appear in its own initializer",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_DEDUCED_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_DEDUCED_SELF) &&
+                                 token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // C23's auto variable's errors name it too (#793).
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                 input->reports[index].message == CHECK_INPUT_AUTO_DEDUCED_INITIALIZER ?
+                                                 "declaration of variable '%.*s' with deduced type 'auto' requires an initializer" :
+                                                 "variable '%.*s' declared with deduced type 'auto' cannot appear in its own initializer",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_CONSTEXPR_INITIALIZER && input->reports[index].subject != 0 &&
+                                 input->reports[index].subject - 1 < count)
+                        {
+                            // A constexpr variable's initializer error names it, as clang's does (#793).
+                            const uint32_t name = parser->tokens.names[input->reports[index].subject - 1];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                 "constexpr variable '%.*s' must be initialized by a constant expression",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_KR_IMPLICIT_INT && token < count)
                         {
                             const uint32_t name = parser->tokens.names[token];
@@ -1133,7 +1165,8 @@ static const uint8_t* check_driver_function_name(const CheckProgram* program, co
 
 // Code generation's check of target features (#775, check_program_target_features): clang's errors, at -c and when it
 // links but not at -fsyntax-only, for the calls of always_inline functions, and a flatten function's calls, whose callees
-// need features their callers lack, in clang's words. Clang reports them as it emits their function: after its closing
+// need features their callers lack, and the x86 builtins' calls whose callers lack their features (#148), in clang's
+// words. Clang reports them as it emits their function: after its closing
 // brace and the lookahead past it (as the x86 builtins' deferred range errors, from `original`'s tree), or at the
 // unit's end for a function it defers. Returns false after an error.
 static bool check_driver_target_features(CheckProgram* program, const Parser* parser, const Parser* original, Preprocessor* pp, const PredefinesOptions* predefines,
@@ -1156,7 +1189,15 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
         const uint8_t* callee = check_driver_function_name(program, parser, pp->table, error->callee, &callee_length);
         const char* feature = predefines_features[error->feature].name;
         char message[1024];
-        if (error->flatten)
+        if (error->builtin != NULL)
+        {
+            // An SSE compare's predicate past 7 needs AVX (check_target_feature_predicate), else the builtin's features.
+            const char* features = error->predicate ? "avx" : error->builtin->features;
+            const uint32_t features_length = error->predicate ? 3u : error->builtin->features_length;
+            snprintf(message, sizeof(message), "'%.*s' needs target feature %.*s", (int)error->builtin->name_length, error->builtin->name,
+                     (int)features_length, features);
+        }
+        else if (error->flatten)
         {
             snprintf(message, sizeof(message), "flatten function '%.*s' calls '%.*s' which requires target feature '%s', but the caller is compiled without support for '%s'",
                      (int)caller_length, (const char*)caller, (int)callee_length, (const char*)callee, feature, feature);
