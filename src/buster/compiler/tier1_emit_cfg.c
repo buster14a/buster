@@ -1249,7 +1249,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     tier1_select_requests_add(&requests, &selected_records, record_first, buffer.records);
                 }
             }
-            if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected && tier1_emit_cfg_register(transitions.registers[node]))
+            // A definition left out writes no register, so nothing saves one for it around a call or a fixed sequence.
+            if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected && dropped[node] == 0 && tier1_emit_cfg_register(transitions.registers[node]))
             {
                 transitions.owners[transitions.registers[node]] = node;
             }
