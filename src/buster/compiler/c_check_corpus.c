@@ -723,6 +723,7 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
 {
     path->first_warning_token = BUSTER_CHECK_NONE;
     path->first_warning_line = 0;
+    uint32_t first_boundary = UINT32_MAX;
     const CheckWarningEvents views[3] = { path->input.warning_events, check_warning_view(&path->warning_events),
                                           path->undefined_checked ? check_warning_view(&path->undefined_warnings) : (CheckWarningEvents){ 0 } };
     for (uint32_t v = 0; v < 3; v += 1)
@@ -741,10 +742,16 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
                 continue;
             }
             const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
-            if (source >= pp->output.count || (path->first_warning_token != BUSTER_CHECK_NONE && event->token >= path->first_warning_token))
+            // The first warning as the diagnostic stream publishes it, not the earliest token: a translation-unit-final
+            // warning (its primary on an earlier line) completes after an ordinary one on a later line, and the driver
+            // orders by publication. Ties keep the earlier view's, as the driver's insertion order does.
+            const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? pp->output.count + 1 :
+                check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), pp->output.count);
+            if (source >= pp->output.count || boundary >= first_boundary)
             {
                 continue;
             }
+            first_boundary = boundary;
             const uint32_t location = pp->output.locations[source];
             const char* name = NULL;
             uint32_t length = 0;

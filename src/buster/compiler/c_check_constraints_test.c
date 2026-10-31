@@ -113,6 +113,19 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "double b = 1e300;\n", 2
     },
     {
+        // The first warning as the diagnostic stream publishes it: the literal-range warning on line 2 completes
+        // before the translation-unit-final undefined-internal warning whose primary is on line 1.
+        "6.4.4p2", "a floating constant too large beside a translation-unit-final internal-linkage use", CHECK_CONSTRAINT_WARNING, 0,
+        "static int missing(void);\n"
+        "double b = 1e400;\n"
+        "int f(void)\n"
+        "{\n"
+        "return missing();\n"
+        "}\n",
+        "int a;\n"
+        "double b = 1e300;\n", 2
+    },
+    {
         "6.4.4p2", "a floating constant too small for its type", CHECK_CONSTRAINT_WARNING, 0,
         "int a;\n"
         "float b = 1e-50f;\n",
