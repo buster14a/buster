@@ -54,8 +54,10 @@
 // builtins (their masks are vectors of bools, which the lowering has no class for) and the matrix ones (every call an
 // error: no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
-// published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, and its floating builtins past
-// the first ones (c_check_builtin_float.c: isnormal to isfpclass, signbitf and signbitl, canonicalize) take 0x3d0 to 0x3d9.
+// published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
+// take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
+// stdc ones and the carry chains) 0x3a0 to 0x3c7, and its floating builtins past the first ones (c_check_builtin_float.c:
+// isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -135,6 +137,63 @@
     X(STRLEN, 0x164u, "__builtin_strlen", BUSTER_CBUILTIN_CONSTANT) \
     X(ALLOCA, 0x165u, "__builtin_alloca", BUSTER_CBUILTIN_SOURCE) \
     X(UMULL_OVERFLOW, 0x170u, "__builtin_umull_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SADD_OVERFLOW, 0x380u, "__builtin_sadd_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SADDL_OVERFLOW, 0x381u, "__builtin_saddl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SADDLL_OVERFLOW, 0x382u, "__builtin_saddll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SSUB_OVERFLOW, 0x383u, "__builtin_ssub_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SSUBL_OVERFLOW, 0x384u, "__builtin_ssubl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SSUBLL_OVERFLOW, 0x385u, "__builtin_ssubll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SMUL_OVERFLOW, 0x386u, "__builtin_smul_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SMULL_OVERFLOW, 0x387u, "__builtin_smull_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SMULLL_OVERFLOW, 0x388u, "__builtin_smulll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UADD_OVERFLOW, 0x389u, "__builtin_uadd_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UADDL_OVERFLOW, 0x38au, "__builtin_uaddl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UADDLL_OVERFLOW, 0x38bu, "__builtin_uaddll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(USUB_OVERFLOW, 0x38cu, "__builtin_usub_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(USUBL_OVERFLOW, 0x38du, "__builtin_usubl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(USUBLL_OVERFLOW, 0x38eu, "__builtin_usubll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UMUL_OVERFLOW, 0x38fu, "__builtin_umul_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UMULLL_OVERFLOW, 0x390u, "__builtin_umulll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(BITREVERSE8, 0x3a0u, "__builtin_bitreverse8", BUSTER_CBUILTIN_CONSTANT) \
+    X(BITREVERSE16, 0x3a1u, "__builtin_bitreverse16", BUSTER_CBUILTIN_CONSTANT) \
+    X(BITREVERSE32, 0x3a2u, "__builtin_bitreverse32", BUSTER_CBUILTIN_CONSTANT) \
+    X(BITREVERSE64, 0x3a3u, "__builtin_bitreverse64", BUSTER_CBUILTIN_CONSTANT) \
+    X(BITREVERSEG, 0x3a4u, "__builtin_bitreverseg", BUSTER_CBUILTIN_CONSTANT) \
+    X(BSWAPG, 0x3a5u, "__builtin_bswapg", BUSTER_CBUILTIN_CONSTANT) \
+    X(CLRSB, 0x3a6u, "__builtin_clrsb", BUSTER_CBUILTIN_CONSTANT) \
+    X(CLRSBL, 0x3a7u, "__builtin_clrsbl", BUSTER_CBUILTIN_CONSTANT) \
+    X(CLRSBLL, 0x3a8u, "__builtin_clrsbll", BUSTER_CBUILTIN_CONSTANT) \
+    X(CLZS, 0x3a9u, "__builtin_clzs", BUSTER_CBUILTIN_CONSTANT) \
+    X(CTZS, 0x3aau, "__builtin_ctzs", BUSTER_CBUILTIN_CONSTANT) \
+    X(POPCOUNTG, 0x3abu, "__builtin_popcountg", BUSTER_CBUILTIN_CONSTANT) \
+    X(CLZG, 0x3acu, "__builtin_clzg", BUSTER_CBUILTIN_CONSTANT) \
+    X(CTZG, 0x3adu, "__builtin_ctzg", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_LEADING_ZEROS, 0x3aeu, "__builtin_stdc_leading_zeros", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_LEADING_ONES, 0x3afu, "__builtin_stdc_leading_ones", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_TRAILING_ZEROS, 0x3b0u, "__builtin_stdc_trailing_zeros", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_TRAILING_ONES, 0x3b1u, "__builtin_stdc_trailing_ones", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_FIRST_LEADING_ZERO, 0x3b2u, "__builtin_stdc_first_leading_zero", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_FIRST_LEADING_ONE, 0x3b3u, "__builtin_stdc_first_leading_one", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_FIRST_TRAILING_ZERO, 0x3b4u, "__builtin_stdc_first_trailing_zero", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_FIRST_TRAILING_ONE, 0x3b5u, "__builtin_stdc_first_trailing_one", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_COUNT_ZEROS, 0x3b6u, "__builtin_stdc_count_zeros", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_COUNT_ONES, 0x3b7u, "__builtin_stdc_count_ones", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_HAS_SINGLE_BIT, 0x3b8u, "__builtin_stdc_has_single_bit", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_BIT_WIDTH, 0x3b9u, "__builtin_stdc_bit_width", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_BIT_FLOOR, 0x3bau, "__builtin_stdc_bit_floor", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_BIT_CEIL, 0x3bbu, "__builtin_stdc_bit_ceil", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_ROTATE_LEFT, 0x3bcu, "__builtin_stdc_rotate_left", BUSTER_CBUILTIN_CONSTANT) \
+    X(STDC_ROTATE_RIGHT, 0x3bdu, "__builtin_stdc_rotate_right", BUSTER_CBUILTIN_CONSTANT) \
+    X(ADDCB, 0x3beu, "__builtin_addcb", BUSTER_CBUILTIN_SOURCE) \
+    X(ADDCS, 0x3bfu, "__builtin_addcs", BUSTER_CBUILTIN_SOURCE) \
+    X(ADDC, 0x3c0u, "__builtin_addc", BUSTER_CBUILTIN_SOURCE) \
+    X(ADDCL, 0x3c1u, "__builtin_addcl", BUSTER_CBUILTIN_SOURCE) \
+    X(ADDCLL, 0x3c2u, "__builtin_addcll", BUSTER_CBUILTIN_SOURCE) \
+    X(SUBCB, 0x3c3u, "__builtin_subcb", BUSTER_CBUILTIN_SOURCE) \
+    X(SUBCS, 0x3c4u, "__builtin_subcs", BUSTER_CBUILTIN_SOURCE) \
+    X(SUBC, 0x3c5u, "__builtin_subc", BUSTER_CBUILTIN_SOURCE) \
+    X(SUBCL, 0x3c6u, "__builtin_subcl", BUSTER_CBUILTIN_SOURCE) \
+    X(SUBCLL, 0x3c7u, "__builtin_subcll", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_LOAD, 0x180u, "__atomic_load", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_LOAD_N, 0x181u, "__atomic_load_n", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_STORE, 0x182u, "__atomic_store", BUSTER_CBUILTIN_SOURCE) \
@@ -401,12 +460,15 @@ _Static_assert(CBUILTIN_BSWAP16 == 1 && CBUILTIN_FFSLL == 18 && CBUILTIN_ADD_OVE
                "integer builtin action identities remain stable");
 _Static_assert(CBUILTIN_VA_START == 0x100 && CBUILTIN_VA_END == 0x104, "special builtin identities remain outside integer actions");
 
-// The catalog's entry of an exact spelling, or null. A name's bytes are inspected only after its length matches.
+// The catalog's entry of an exact spelling, or null. A name's bytes are inspected only after its length matches. clang's
+// x86 builtins (__builtin_ia32_ and on) are the intrinsic catalog's, none of this one's (test-preprocessor checks it):
+// such a name is no entry without a scan, which stb_image's intrinsic headers would pay for 120 names.
 static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_entry(const char* name, uint32_t length)
 {
     const CBuiltinCatalogEntry* result = NULL;
     const uint32_t count = sizeof(cbuiltin_catalog) / sizeof(cbuiltin_catalog[0]);
-    for (uint32_t i = 0; i < count && result == NULL; i += 1)
+    const bool x86 = length > 15 && memcmp(name, "__builtin_ia32_", 15) == 0;
+    for (uint32_t i = 0; !x86 && i < count && result == NULL; i += 1)
     {
         if (length == cbuiltin_catalog[i].length && memcmp(name, cbuiltin_catalog[i].name, length) == 0)
         {
@@ -501,6 +563,30 @@ static __attribute__((unused)) bool cbuiltin_float_canonicalize(uint32_t id)
 {
     const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEL;
     return result;
+}
+
+// Whether an identity is one of the bit builtins c_check_builtin_bits.c checks, which the checker's graph takes as
+// miscellaneous builtins (their arguments a list), and whether it is one of their carry chains, which store a carry.
+static __attribute__((unused)) bool cbuiltin_bits(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_BITREVERSE8 && id <= CBUILTIN_SUBCLL;
+    return result;
+}
+
+static __attribute__((unused)) bool cbuiltin_carry(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ADDCB && id <= CBUILTIN_SUBCLL;
+    return result;
+}
+
+// The fewest and the most arguments of a bit builtin: a carry chain's four, a rotation's two, and clzg's and ctzg's one
+// or two.
+static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* minimum, uint32_t* maximum)
+{
+    const bool fallback = id == CBUILTIN_CLZG || id == CBUILTIN_CTZG;
+    const bool rotate = id == CBUILTIN_STDC_ROTATE_LEFT || id == CBUILTIN_STDC_ROTATE_RIGHT;
+    *minimum = cbuiltin_carry(id) ? 4 : rotate ? 2 : 1;
+    *maximum = cbuiltin_carry(id) ? 4 : rotate || fallback ? 2 : 1;
 }
 
 // The language modes' token of clang 23.1.1's table for a catalog name, which the preprocessor's __has_builtin reads

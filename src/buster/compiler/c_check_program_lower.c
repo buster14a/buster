@@ -6676,7 +6676,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else if (count > 3 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
+    else if (count > 4 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
     {
         check_lower_unsupported(writer, "this builtin");
     }
@@ -6691,6 +6691,30 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
         *call = (CBuiltinMiscLowerCall){ .id = runtime, .argument_count = evaluated };
+        if (cbuiltin_bits(call->id))
+        {
+            // A bit builtin's recipe (c_builtin_bits_lower.c) takes its arguments' and result's descriptors, of up to 128
+            // bits (the checker refuses wider _BitInts), and a result past 64 bits' frame object, whose value it is.
+            const TypeId result_type = stream->values[node].type;
+            const uint32_t result = check_lower_builtin_type(program->types, result_type);
+            bool described = cbuiltin_carry(call->id) || result != 0;
+            for (uint32_t i = 0; i < evaluated; i += 1)
+            {
+                const bool pointer = cbuiltin_carry(call->id) && i == 3;
+                const uint32_t type = pointer ? 0 : check_lower_builtin_type(program->types, stream->argument_conversions[first + i].type);
+                described = described && (pointer || type != 0);
+                call->argument_types[i] = type;
+            }
+            call->result_type = result;
+            if (!described)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else if (!cbuiltin_carry(call->id) && cbuiltin_bits_width(result) > 64)
+            {
+                call->result_object = check_lower_temporary(writer, check_lower_class(writer, result_type));
+            }
+        }
         if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
         {
             const uint32_t size_node = graph->argument_nodes[first + 2];
@@ -6708,8 +6732,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         }
         for (uint32_t i = 0; i < evaluated; i += 1)
         {
+            // A bit builtin's 128-bit integer is a frame object of its own (check_lower_temporary's), whose limbs its
+            // recipe loads.
             const TypeId type = stream->argument_conversions[first + i].type;
-            if (check_lower_memory(writer, type))
+            if (check_lower_memory(writer, type) && !cbuiltin_bits(call->id))
             {
                 check_lower_unsupported(writer, "builtins of long double and __int128 operands");
             }
@@ -6718,8 +6744,9 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = stream->values[node].type });
         for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
+            // A frame object's value is its value class's (a 128-bit integer's), as SET_LOCAL writes it.
             const uint32_t local = call->arguments[i];
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[local], local);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->value_classes[local], local);
             check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
         }
     }

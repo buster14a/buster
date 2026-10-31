@@ -71,6 +71,11 @@ unset CPATH C_INCLUDE_PATH
 # then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
 # clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Test c-testsuite's programs with Tier 1's code [4 CPUs]
+# #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
+# others by Tier 0), by both paths, whose allocators assign registers differently, both programs run; the scalar
+# path's executable the same bytes with the ids in source order and in another (#153). The declared subset must pass.
+./build/compiler test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
@@ -251,6 +256,7 @@ fi
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-check-builtins-atomic-rmw
 ./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-bits
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-lower
 ./build/compiler test-builtin-varargs-lower

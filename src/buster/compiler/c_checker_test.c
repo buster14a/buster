@@ -5599,6 +5599,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
+#include "c_check_program_bits_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -5686,6 +5687,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_vectors = false;
     bool program_amx = false;
     bool program_asm = false;
+    bool program_bits = false;
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
@@ -5729,6 +5731,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_asm = true;
         }
+        else if (strcmp(argv[i], "--program-bits") == 0)
+        {
+            program_bits = true;
+        }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
@@ -5748,7 +5754,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5802,6 +5808,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_asm)
         {
             check_test_program_asm(&test, clang);
+        }
+        else if (initialized && program_bits)
+        {
+            check_test_bits(&test, clang);
         }
         else if (initialized)
         {
@@ -5893,6 +5903,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_programs(&test, clang);
             check_test_cleanups(&test, clang);
             check_test_musttails(&test, clang);
+            check_test_bits(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_library(&test, clang);
             check_test_classify(&test, clang);

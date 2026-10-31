@@ -245,15 +245,81 @@ struct CheckEmitBoard
 // (check_program_emit_follow) until lane 0 ends the flow (lane_flow_end).
 #define BUSTER_CHECK_EMIT_ROUND_BODIES 1u
 
+// The C driver's --tier1 (c_check_tier1.c, #138's piece for #140): each body Tier 1's pipeline takes compiled by it,
+// every other by Tier 0. A lane's arenas for the pipeline: each step's output and the steps' scratch, reserved at the
+// lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
+#define BUSTER_CHECK_TIER1_STEPS 6
+typedef struct CheckTier1Lane CheckTier1Lane;
+struct CheckTier1Lane
+{
+    Arena steps[BUSTER_CHECK_TIER1_STEPS];
+    Arena scratch;
+    Arena forms;
+    uint8_t* allowed;
+    X86Target target;
+    bool reserved;
+    bool targeted;
+};
+
+// What became of a body under --tier1: Tier 1's code, or the step that refused it, whose body Tier 0 compiled. A
+// selection's refusal also names the IR operation it refused, or the function (IR_OP_COUNT) where it refused no
+// operation, or its error past that (CheckTier1Report.operations); an emission's, its error (.emission).
+typedef enum CheckTier1Stage
+{
+    CHECK_TIER1_COMPILED,
+    CHECK_TIER1_NAKED,
+    CHECK_TIER1_LOWERING,
+    CHECK_TIER1_PROMOTION,
+    CHECK_TIER1_OPTIMIZATION,
+    CHECK_TIER1_ANALYSIS,
+    CHECK_TIER1_SELECTION,
+    CHECK_TIER1_EMISSION,
+    CHECK_TIER1_RESOURCE,
+    CHECK_TIER1_STAGE_COUNT,
+} CheckTier1Stage;
+
+// What Tier 1's code of a body holds: its records, and the allocation's traffic, its spills' stores and reloads, the
+// saves and restores around its calls and fixed registers' sequences, its recomputed constants and its edges' moves.
+typedef struct CheckTier1Counts CheckTier1Counts;
+struct CheckTier1Counts
+{
+    uint32_t records;
+    uint32_t spill_stores;
+    uint32_t spill_loads;
+    uint32_t call_stores;
+    uint32_t call_loads;
+    uint32_t rematerializations;
+    uint32_t edge_moves;
+};
+
+#define BUSTER_CHECK_TIER1_OPERATIONS 256
+typedef struct CheckTier1Report CheckTier1Report;
+struct CheckTier1Report
+{
+    uint32_t functions;
+    uint32_t stages[CHECK_TIER1_STAGE_COUNT];
+    uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
+    uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
+    // The counts of Tier 1's bodies, summed.
+    uint64_t records;
+    uint64_t spill_stores;
+    uint64_t spill_loads;
+    uint64_t call_stores;
+    uint64_t call_loads;
+    uint64_t rematerializations;
+    uint64_t edge_moves;
+};
+
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
-// functions' bytes (`bytes`).
+// functions' bytes (`bytes`); and with --tier1, every lane's (the first's too) for Tier 1's pipeline.
 typedef struct CheckProgramLaneArenas CheckProgramLaneArenas;
 struct CheckProgramLaneArenas
 {
     Arena output;
     Arena scratch;
     Arena bytes;
+    CheckTier1Lane tier1;
 };
 
 // How check_program_emit_lanes runs a unit's functions on lanes, and what it ran. The caller keeps it until it is done
@@ -306,8 +372,31 @@ struct CheckProgramLanes
     uint64_t prepare_ns;
     uint64_t lanes_ns;
     uint64_t merge_ns;
+    // --tier1, and what became of the emissions' bodies, summed over them; with --tier1-refusals, the stream that each
+    // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal).
+    bool tier1;
+    CheckTier1Report tier1_report;
+    FILE* tier1_refusals;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
+
+// Whether --tier1's tables are built (check_program_emit_timed), once per process.
+static bool check_tier1_ready = false;
+
+// Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
+// typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
+// branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns the body's stage:
+// CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
+// `output` as it was.
+static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
+                                           Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
+// Releases a lane's arenas for the pipeline.
+static void check_tier1_lane_release(CheckTier1Lane* lane);
+// Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
+static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
+// Prints a line on `stream` for a function Tier 1 refused: its name, `length` bytes at `name`, and its outcome's step and
+// IR operation or error.
+static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome);
 
 // CLOCK_MONOTONIC, for CheckProgramLanes.timing.
 static uint64_t check_program_lanes_now(void)
@@ -325,6 +414,7 @@ static void check_program_lanes_release(CheckProgramLanes* lanes)
         arena_release(&lanes->arenas[lane].output);
         arena_release(&lanes->arenas[lane].scratch);
         arena_release(&lanes->arenas[lane].bytes);
+        check_tier1_lane_release(&lanes->arenas[lane].tier1);
     }
 }
 
@@ -373,6 +463,8 @@ struct CheckEmitLane
     Arena* bytes;
     // The arena of its writer's columns (check_lower_writer_begin): its scratch, but lane 0's (CheckEmitRun.columns).
     Arena* columns;
+    // With --tier1, its arenas for Tier 1's pipeline (CheckProgramLaneArenas.tier1); null without.
+    CheckTier1Lane* tier1;
     bool prepared;
     bool ready;
 };
@@ -406,6 +498,10 @@ struct CheckEmitRun
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
+    // With --tier1, what became of each body: its CheckTier1Stage, and a refused selection's IR operation in bits 8 up;
+    // and Tier 1's code's counts, for the bodies it compiled.
+    uint32_t* tier1_outcomes;
+    CheckTier1Counts* tier1_counts;
     uint64_t* costs;
     uint64_t* boundaries;
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -416,6 +512,25 @@ struct CheckEmitRun
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
 };
+
+// The typed class of body `b`'s result, as Tier 1's lowering takes it: its RETURNs' class, or for a function without one
+// (a void function's, or one that never returns) its declared result's, UINT8_MAX for none (a naked function's).
+static uint8_t check_program_result_class(const Tier0Function* function, const CheckProgram* program, uint32_t b, bool naked)
+{
+    uint8_t class = UINT8_MAX;
+    for (uint32_t i = 0; class == UINT8_MAX && i < function->count; i += 1)
+    {
+        class = function->kinds[i] == BUSTER_TYPED_RETURN ? function->classes[i] : class;
+    }
+    if (class == UINT8_MAX && !naked)
+    {
+        const TypeTable* types = program->types;
+        const TypeId result = type_return(types, program->input->declared_types[program->bodies[b].declaration]);
+        class = check_lower_type_class(types, result);
+        class = class != UINT8_MAX ? class : type_size(types, result) == 0 ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64;
+    }
+    return class;
+}
 
 // Body `b`'s raw source rows (c_check_debug.c), from where each entry's code starts now that the branches are sized: the
 // record count's offset is the end. Only -g reaches it, out of line so that the plain emission carries none of it.
@@ -545,6 +660,23 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     return valid;
 }
 
+// Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
+// the code in its lane's scratch as Tier 0's is: true if the pipeline took it, and its outcome either way. A naked
+// function's code is its templates'. Out of line, so that the plain emission carries none of it.
+static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, bool naked)
+{
+    const CheckProgram* program = run->program;
+    const Tier0Function* function = &run->lowered->functions[b];
+    const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
+    const X86Target* target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? &program->target : &program->targets[body_target - 1];
+    uint32_t operation = 0;
+    const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
+                                          check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
+                                                              lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
+    run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
+    return stage == CHECK_TIER1_COMPILED;
+}
+
 // A part of the bodies on lane `lane`: their lowering (check_lower_part), then each one's Tier 0 code, the lane's
 // function access column given, and its code after Tier 0 (check_program_emit_code) until one of them fails.
 static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
@@ -570,7 +702,12 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         function->entry_records = run->sources;
         // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's.
         const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
-        run->codes[b] = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+        // With --tier1, Tier 1's code where its pipeline takes the body (check_program_emit_tier1).
+        const bool tier1 = lane->tier1 != NULL && check_program_emit_tier1(run, lane, b, naked != 0);
+        if (!tier1)
+        {
+            run->codes[b] = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+        }
         check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
         if (run->codes[b].error != TIER0_OK)
         {
@@ -618,6 +755,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->bytes = &arenas->bytes;
         lane->columns = &arenas->scratch;
     }
+    lane->tier1 = run->tier1_outcomes != NULL ? &run->lanes->arenas[index].tier1 : NULL;
     return valid;
 }
 
@@ -1305,7 +1443,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     run.bodies = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitBody, count) : 0;
     run.frames = valid && frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, UnwindFunction, frames) : 0;
     run.costs = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
-    valid = valid && (count == 0 || (run.codes != 0 && run.bodies != 0)) && (frames == 0 || run.frames != 0) && run.costs != 0;
+    // --tier1's outcomes, and its tables, once: the cost model's (x86_zen5.c), which its selection reads.
+    const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
+    run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
+    run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
+    if (run.tier1_outcomes != 0)
+    {
+        // A body a failure before it left unreached has none (an outcome past the stages).
+        memset(run.tier1_outcomes, 0xff, (uint64_t)count * sizeof(uint32_t));
+    }
+    if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
+    {
+        check_tier1_ready = x86_zen5_initialize();
+        result->status = check_tier1_ready ? result->status : CHECK_PROGRAM_BACKEND;
+    }
+    valid = valid && (count == 0 || (run.codes != 0 && run.bodies != 0)) && (frames == 0 || run.frames != 0) && run.costs != 0 &&
+            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready));
     uint64_t total = 0;
     uint64_t largest = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
@@ -1427,6 +1580,24 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->again = again;
         lanes->prepare_ns = lanes_begin - started;
         lanes->lanes_ns = lanes_end - lanes_begin;
+    }
+    for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && b < count; b += 1)
+    {
+        const uint32_t outcome = run.tier1_outcomes[b];
+        const uint32_t stage = outcome & 0xff;
+        lanes->tier1_report.functions += stage < CHECK_TIER1_STAGE_COUNT;
+        lanes->tier1_report.stages[stage < CHECK_TIER1_STAGE_COUNT ? stage : 0] += stage < CHECK_TIER1_STAGE_COUNT;
+        lanes->tier1_report.operations[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_SELECTION;
+        lanes->tier1_report.emission[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_EMISSION;
+        const CheckTier1Counts* counts = &run.tier1_counts[b];
+        const bool compiled = stage == CHECK_TIER1_COMPILED;
+        lanes->tier1_report.records += compiled ? counts->records : 0;
+        lanes->tier1_report.spill_stores += compiled ? counts->spill_stores : 0;
+        lanes->tier1_report.spill_loads += compiled ? counts->spill_loads : 0;
+        lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
+        lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
+        lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
+        lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.
@@ -2328,6 +2499,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             arena_pop_to(&lanes->arenas[lane].output, 0);
             arena_pop_to(&lanes->arenas[lane].scratch, 0);
             arena_pop_to(&lanes->arenas[lane].bytes, 0);
+        }
+    }
+    // With --tier1-refusals, each body Tier 0 compiled, in source order, by its symbol's name.
+    for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && lanes->tier1_refusals != NULL && b < count; b += 1)
+    {
+        const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+        const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
+        if ((run.tier1_outcomes[b] & 0xff) != CHECK_TIER1_COMPILED && (run.tier1_outcomes[b] & 0xff) < CHECK_TIER1_STAGE_COUNT && name != 0)
+        {
+            check_tier1_print_refusal(lanes->tier1_refusals, result->link.names.bytes[name], result->link.names.length[name], run.tier1_outcomes[b]);
         }
     }
     arena_pop_to(scratch, temporary);
