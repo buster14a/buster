@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Declaration-time builtin evaluation uses the same typed modules as runtime graphs. Their source constant
-// contracts may visit fewer operands than runtime execution; in particular expect preserves both runtime
-// argument evaluations while its constant evaluator returns only the converted first argument.
+// contracts may visit fewer operands than runtime execution; in particular expect's constant evaluator returns only
+// the converted first argument, where its runtime call evaluates both unless that argument folds.
 
 static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uint32_t closing, CBuiltinId builtin,
                                 TypeId destination_type, const CheckValue* arguments, uint32_t count, CheckValue* value)
@@ -53,6 +53,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
             .const_values = &reader->output->const_values, .constant_evaluated = true,
+            .pointer_object = evidence.base_object, .pointer_alignment = evidence.base_alignment,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

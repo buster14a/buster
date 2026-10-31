@@ -16,10 +16,12 @@
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_FUNCTION_POINTER 0x04u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNMENT 0x08u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_FRAME_LEVEL 0x10u
+#define BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNED_TO_ONE 0x20u
 
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_FRAME_LEVEL 0x01u
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_ALIGNMENT 0x02u
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_COMPLEX 0x04u
+#define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE 0x08u
 
 typedef enum CheckBuiltinMiscConstraint
 {
@@ -42,6 +44,10 @@ struct CheckBuiltinMiscAction
     uint32_t extensions;
     const CheckConstValues* const_values;
     bool constant_evaluated;
+    // An alignment builtin's first argument's object, where its source names one (CheckBuiltinCall.base_object), and that
+    // object's declaration alignment as clang gives it, its log2 plus 1, 0 when unknown: what folds an address.
+    uint32_t pointer_object;
+    uint8_t pointer_alignment;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -192,14 +198,41 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
     return accepted;
 }
 
+// expect_with_probability's probability (clang's check after its prototype's conversion): converted to double, it must be
+// a constant floating expression without side effects or faults (a const variable's constant initializer is one, a variable
+// or a call isn't), in [0, 1], which a NaN isn't. It is never evaluated at run time.
+static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value)
+{
+    bool accepted = check_builtin_misc_convert(table, input, output, value, 2, BUSTER_TYPE_DOUBLE);
+    const bool constant = value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                          value->constant_kind == CHECK_CONSTANT_FLOATING;
+    if (accepted && !constant)
+    {
+        output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT;
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 2);
+        accepted = false;
+    }
+    else if (accepted && !((double)value->floating >= 0.0 && (double)value->floating <= 1.0))
+    {
+        output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 2);
+        accepted = false;
+    }
+    return accepted;
+}
+
+// expect and expect_with_probability: their two longs, and the latter's probability (check_builtin_misc_probability).
+// Clang's evaluator visits the converted first argument alone, and its code generation emits a call that evaluates to a
+// constant as that constant: a first argument that is an integer constant without side effects is the call's value, and
+// neither argument runs, the expected value's effects (a call, a volatile read) dropped. Otherwise both run, in order,
+// and the first is the value. constant_value keeps the source evaluator's view, the first argument alone.
 static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
 {
     const bool first = check_builtin_misc_convert(table, input, output, values, 0, BUSTER_TYPE_LONG);
     const bool second = check_builtin_misc_convert(table, input, output, values + 1, 1, BUSTER_TYPE_LONG);
-    if (first && second)
+    const bool probability = input->id != CBUILTIN_EXPECT_WITH_PROBABILITY || check_builtin_misc_probability(table, input, output, values + 2);
+    if (first && second && probability)
     {
-        // Clang's source constant evaluator visits only the converted first argument. Type checking and both
-        // conversions still apply. Keep this result separate from the runtime action, which evaluates both.
         output->constant_evaluated_operands = 1;
         output->constant_value = values[0];
         output->constant_value.category = CHECK_RVALUE;
@@ -212,19 +245,25 @@ static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAc
         {
             output->constant_value.flags |= BUSTER_CHECK_ICE;
         }
-        output->action.value = values[0];
+        const bool folded = values[0].constant_kind == CHECK_CONSTANT_INTEGER && values[0].fault == CHECK_FAULT_NONE &&
+                            (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        output->action.value = folded ? output->constant_value : values[0];
         output->action.value.category = CHECK_RVALUE;
-        output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER);
-        // Both expressions execute, including a nonconstant/effectful expected value. Returning a folded first
-        // value must never remove the second expression or its volatile read. Neither parameter requires ICE.
-        check_action_inherit(&output->action.value, values + 1);
-        if (output->action.value.fault != CHECK_FAULT_NONE)
+        if (!folded)
         {
-            output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+            // Both run, a folded first value's too: the expected value's effects, a nonconstant one's evaluation. The
+            // probability never runs. Neither parameter requires an ICE.
+            output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER);
+            check_action_inherit(&output->action.value, values + 1);
+            if (output->action.value.fault != CHECK_FAULT_NONE)
+            {
+                output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+            }
+            output->evaluated_operands = 3;
         }
-        else if (output->action.value.constant_kind == CHECK_CONSTANT_INTEGER && (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+        else
         {
-            output->action.value.flags |= BUSTER_CHECK_ICE;
+            output->evaluated_operands = 0;
         }
     }
 }
@@ -312,6 +351,123 @@ static void check_builtin_misc_assume_aligned(TypeTable* table, const CheckBuilt
     }
     // A pointer identity is not enough to prove its asserted alignment during source constant evaluation.
     // Keep the runtime identity and promise metadata; no memory bytes or symbolic-object alignment are invented.
+}
+
+// Whether an alignment builtin's operand type is one of clang's (BuiltinAlignment's IsValidIntegerType): an integer type,
+// _BitInt's among them, but bool and the enumerations; an _Atomic one isn't.
+static bool check_builtin_misc_align_integer(const TypeTable* table, TypeId type)
+{
+    const uint8_t kind = type_kind(table, type_strip_aligned(table, type));
+    const bool result = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) &&
+                        type_unqualified(type_strip_aligned(table, type)) != BUSTER_TYPE_BOOL;
+    return result;
+}
+
+// The alignment builtins (cbuiltin_align, clang's BuiltinAlignment), of the raw arguments' types, before their lvalue
+// conversions: a source of an integer type (check_builtin_misc_align_integer) or an object pointer, an array decayed to its
+// element's pointer, a function and a function pointer neither, of up to 128 bits; then an alignment of such an integer
+// type. A constant alignment, which clang evaluates past its side effects, must be at least 1, at most 2 to the source's
+// width less 1 (a pointer's 64), and a power of 2, in that order; 1 draws -Wtautological-compare (recorded, not
+// reported). align_up and align_down are of the source's type, its qualifiers kept, and is_aligned is a bool. Each folds,
+// as an integer constant expression, where clang's evaluator does: of a source and an alignment that are constants without
+// side effects, in the source's width ((x + (a - 1)) & ~(a - 1), x & ~(a - 1) and (x & (a - 1)) == 0); and of an address
+// constant: with an alignment of 1, the same address or 1; else where the call's evidence gives its object's declaration
+// alignment (CheckBuiltinMiscAction.pointer_alignment), the same address or 1 where its alignment at the offset is at least
+// the alignment, the offset rounded or 0 where the object's is, and not at all otherwise. A folded integer evaluates
+// neither argument, as clang's code doesn't; an address still evaluates both, as clang computes it at run time.
+static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
+{
+    const CheckValue* raw = input->arguments;
+    const bool decayed = type_kind_is_array(check_action_kind(table, raw[0].type));
+    const TypeId source = decayed ? values[0].type : raw[0].type;
+    const uint8_t kind = check_action_kind(table, source);
+    const bool pointer = kind == BUSTER_TYPE_KIND_POINTER &&
+                         check_action_kind(table, type_element(table, type_strip_aligned(table, source))) != BUSTER_TYPE_KIND_FUNCTION;
+    const bool integer = check_builtin_misc_align_integer(table, source);
+    uint32_t width = 64;
+    bool is_signed = false;
+    uint32_t alignment_width = 0;
+    bool alignment_signed = false;
+    unsigned __int128 alignment = 0;
+    bool known = false;
+    if (!pointer && !integer)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_SCALAR_REQUIRED, 0);
+    }
+    else if (!check_builtin_misc_align_integer(table, raw[1].type))
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INTEGER_REQUIRED, 1);
+    }
+    else if ((integer && !check_action_integer_type(table, source, &width, &is_signed)) ||
+             !check_action_integer_type(table, raw[1].type, &alignment_width, &alignment_signed))
+    {
+        // A _BitInt past 128 bits, which the checker's constants don't hold.
+        output->unsupported |= BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE;
+        check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, integer ? 0 : 1);
+    }
+    else if (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE)
+    {
+        const unsigned __int128 bits = values[1].integer & check_action_mask(alignment_width);
+        const bool negative = alignment_signed && (bits >> (alignment_width - 1)) != 0;
+        if (negative || bits == 0 || bits > (unsigned __int128)1 << (width - 1))
+        {
+            output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else if ((bits & (bits - 1)) != 0)
+        {
+            output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT;
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else
+        {
+            alignment = bits;
+            known = (values[1].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+            output->warnings |= bits == 1 ? BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNED_TO_ONE : 0;
+            output->warning_operands |= bits == 1 ? 2 : 0;
+        }
+    }
+    const bool aligned = input->id == CBUILTIN_IS_ALIGNED;
+    output->action.value.type = aligned ? BUSTER_TYPE_BOOL : source;
+    output->action.value.category = CHECK_RVALUE;
+    const bool clean = known && output->action.diagnostic == CHECK_DIAG_NONE && values[0].fault == CHECK_FAULT_NONE &&
+                       (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+    const unsigned __int128 mask = alignment - 1;
+    if (clean && integer && values[0].constant_kind == CHECK_CONSTANT_INTEGER)
+    {
+        const unsigned __int128 all = check_action_mask(width);
+        const unsigned __int128 x = values[0].integer & all;
+        output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
+        output->action.value.integer = aligned ? (x & mask) == 0 : input->id == CBUILTIN_ALIGN_UP ? (x + mask) & ~mask & all : x & ~mask;
+        output->action.value.flags |= BUSTER_CHECK_ICE;
+        output->evaluated_operands = 0;
+    }
+    else if (clean && pointer && values[0].constant_kind == CHECK_CONSTANT_ADDRESS && values[0].object != 0)
+    {
+        // Clang's getBaseAlignment and alignmentAtOffset: the object's declaration alignment, and the lowest set bit of it
+        // and the offset.
+        const bool witnessed = input->pointer_alignment != 0 && input->pointer_object == values[0].object;
+        const uint64_t base = alignment == 1 ? 1 : witnessed ? UINT64_C(1) << (input->pointer_alignment - 1) : 0;
+        const uint64_t offset = (uint64_t)values[0].offset;
+        const uint64_t at = base == 0 ? 0 : (base | offset) & (0 - (base | offset));
+        const bool same = base != 0 && at >= alignment;
+        const bool rounded = !same && base >= alignment;
+        if (aligned && (same || rounded))
+        {
+            output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
+            output->action.value.integer = same;
+            output->action.value.flags |= BUSTER_CHECK_ICE;
+            output->evaluated_operands = 0;
+        }
+        else if (same || rounded)
+        {
+            const uint64_t step = (uint64_t)mask;
+            output->action.value.constant_kind = CHECK_CONSTANT_ADDRESS;
+            output->action.value.object = values[0].object;
+            output->action.value.flags |= values[0].flags & BUSTER_CHECK_STATIC_OBJECT;
+            output->action.value.offset = same ? values[0].offset : (int64_t)(input->id == CBUILTIN_ALIGN_UP ? (offset + step) & ~step : offset & ~step);
+        }
+    }
 }
 
 static void check_builtin_misc_prefetch(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
@@ -452,6 +608,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
     switch (input->id)
     {
         case CBUILTIN_EXPECT: minimum = maximum = 2; break;
+        case CBUILTIN_EXPECT_WITH_PROBABILITY: minimum = maximum = 3; break;
         case CBUILTIN_UNREACHABLE:
         case CBUILTIN_TRAP: minimum = maximum = 0; break;
         case CBUILTIN_ASSUME_ALIGNED: minimum = 2; maximum = 3; break;
@@ -470,6 +627,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
             if (cbuiltin_bits(input->id))
             {
                 cbuiltin_bits_arity(input->id, &minimum, &maximum);
+            }
+            else if (cbuiltin_align(input->id))
+            {
+                minimum = maximum = 2;
             }
             else
             {
@@ -499,7 +660,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         {
             switch (input->id)
             {
-                case CBUILTIN_EXPECT: check_builtin_misc_expect(table, input, output, values); break;
+                case CBUILTIN_EXPECT:
+                case CBUILTIN_EXPECT_WITH_PROBABILITY: check_builtin_misc_expect(table, input, output, values); break;
                 case CBUILTIN_UNREACHABLE:
                 case CBUILTIN_TRAP:
                     output->action.value.type = BUSTER_TYPE_VOID;
@@ -522,6 +684,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                     if (cbuiltin_bits(input->id))
                     {
                         check_builtin_bits(table, input, output, values);
+                    }
+                    else if (cbuiltin_align(input->id))
+                    {
+                        check_builtin_misc_align(table, input, output, values);
                     }
                     break;
             }

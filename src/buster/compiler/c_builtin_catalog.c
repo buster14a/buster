@@ -56,7 +56,9 @@
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
 // take 0x380 to 0x390, and its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
-// stdc ones and the carry chains) 0x3a0 to 0x3c7.
+// stdc ones and the carry chains) 0x3a0 to 0x3c7, and the alignment builtins and __builtin_expect_with_probability
+// 0x3e0 to 0x3e3, the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
+// least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -393,7 +395,11 @@
     X(OPENCL_ATOMIC_FETCH_XOR, 0x439u, "__opencl_atomic_fetch_xor", BUSTER_CBUILTIN_SOURCE) \
     X(OPENCL_ATOMIC_INIT, 0x43au, "__opencl_atomic_init", BUSTER_CBUILTIN_SOURCE) \
     X(OPENCL_ATOMIC_LOAD, 0x43bu, "__opencl_atomic_load", BUSTER_CBUILTIN_SOURCE) \
-    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE)
+    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE) \
+    X(ALIGN_UP, 0x3e0u, "__builtin_align_up", BUSTER_CBUILTIN_CONSTANT) \
+    X(ALIGN_DOWN, 0x3e1u, "__builtin_align_down", BUSTER_CBUILTIN_CONSTANT) \
+    X(IS_ALIGNED, 0x3e2u, "__builtin_is_aligned", BUSTER_CBUILTIN_CONSTANT) \
+    X(EXPECT_WITH_PROBABILITY, 0x3e3u, "__builtin_expect_with_probability", BUSTER_CBUILTIN_CONSTANT)
 
 typedef enum CBuiltinId
 {
@@ -554,6 +560,14 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
     const bool rotate = id == CBUILTIN_STDC_ROTATE_LEFT || id == CBUILTIN_STDC_ROTATE_RIGHT;
     *minimum = cbuiltin_carry(id) ? 4 : rotate ? 2 : 1;
     *maximum = cbuiltin_carry(id) ? 4 : rotate || fallback ? 2 : 1;
+}
+
+// Whether an identity is one of clang's alignment builtins, which c_check_builtin_misc.c checks (align_up, align_down
+// and is_aligned).
+static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_IS_ALIGNED;
+    return result;
 }
 
 // The language modes' token of clang 23.1.1's table for a catalog name, which the preprocessor's __has_builtin reads

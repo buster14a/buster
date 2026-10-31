@@ -295,7 +295,10 @@ designs and the compilers already built this way.
   the carry chains: `c_check_builtin_bits.c`, `c_builtin_bits_lower.c`) are the
   graph's miscellaneous builtins; `test-check-builtins-bits` checks their folds
   against the host compiler's builtins, and `test-checker --program-bits` runs
-  them natively against clang -O0's build.
+  them natively against clang -O0's build. So are the alignment builtins
+  (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
+  as clang folds them) and `expect_with_probability`, whose recipes reuse the
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus

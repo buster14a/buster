@@ -16,7 +16,8 @@
 // All loops preserve the enclosing value stack, use absolute enclosing-stream branch destinations and initialize
 // their U64 temporaries before use. Return values have their declared machine classes. No helper allocation occurs.
 //
-// The bit builtins (cbuiltin_bits) are c_builtin_bits_lower.c's recipes, of their arguments' and result's descriptors.
+// The bit builtins (cbuiltin_bits) are c_builtin_bits_lower.c's recipes, of their arguments' and result's descriptors,
+// and so are the alignment builtins' (cbuiltin_align, cbuiltin_misc_align), a pointer's descriptor its 64 bits.
 //
 // ALLOCA is Tier 0's ALLOCA of its U64 size, and FRAME_ADDRESS and RETURN_ADDRESS take no arguments: they are level 0's
 // (the producer refuses any other level and evaluates none), Tier 0's FRAME_ADDRESS and the word 8 bytes above it. Each
@@ -46,6 +47,118 @@ struct CBuiltinMiscLowerCall
 };
 
 #include "c_builtin_bits_lower.c"
+
+// An alignment builtin (cbuiltin_align) as clang's code computes it, of its descriptors (CBuiltinMiscLowerCall's
+// argument_types and result_type, a pointer's 64 bits): the source's bits zero-extended from its width, the alignment's
+// zero-extended or truncated to that width, and the mask the alignment less 1 in it, all ones for an alignment that
+// truncates to 0. align_up is (x + mask) & ~mask, align_down x & ~mask, each its result's value, and is_aligned
+// (x & mask) == 0, a bool's 0 or 1. A source of 65 to 128 bits goes limb by limb, the mask's borrow and the sum's carry
+// crossing between them, its result written to its frame object (CBuiltinMiscLowerCall.result_object) and read back.
+static void cbuiltin_misc_align(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call)
+{
+    const uint32_t source = call->argument_types[0];
+    const uint32_t alignment = call->argument_types[1];
+    const uint32_t width = cbuiltin_bits_width(source);
+    const uint32_t alignment_width = cbuiltin_bits_width(alignment);
+    const bool aligned = call->id == CBUILTIN_IS_ALIGNED;
+    const bool up = call->id == CBUILTIN_ALIGN_UP;
+    uint32_t a_low = 0;
+    uint32_t a_high = 0;
+    if (alignment_width <= 64)
+    {
+        a_low = cbuiltin_bits_load(recipe, call->arguments[1], alignment);
+        a_high = cbuiltin_lower_temporary(recipe);
+        cbuiltin_lower_constant(recipe, 0);
+        cbuiltin_lower_set(recipe, a_high);
+    }
+    else
+    {
+        cbuiltin_bits_load_wide(recipe, call->arguments[1], alignment_width, false, &a_low, &a_high);
+    }
+    if (width <= 64)
+    {
+        const uint32_t x = cbuiltin_bits_load(recipe, call->arguments[0], source);
+        const uint32_t mask = a_low;
+        cbuiltin_lower_local(recipe, mask);
+        cbuiltin_bits_mask(recipe, width);
+        cbuiltin_lower_constant(recipe, 1);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+        cbuiltin_lower_set(recipe, mask);
+        cbuiltin_lower_local(recipe, x);
+        cbuiltin_lower_local(recipe, mask);
+        if (aligned)
+        {
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+            cbuiltin_lower_constant(recipe, 0);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, cbuiltin_lower_type_class(call->result_type), 0);
+        }
+        else
+        {
+            if (up)
+            {
+                cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+                cbuiltin_lower_local(recipe, mask);
+            }
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_NOT);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+            cbuiltin_lower_set(recipe, x);
+            cbuiltin_bits_result(recipe, x, call->result_type);
+        }
+    }
+    else
+    {
+        // The alignment truncated to the source's width, then the mask's limbs: the low one less 1, the high one less the
+        // low one's borrow.
+        uint32_t x_low = 0;
+        uint32_t x_high = 0;
+        cbuiltin_bits_load_wide(recipe, call->arguments[0], width, false, &x_low, &x_high);
+        const uint32_t borrow = cbuiltin_lower_temporary(recipe);
+        cbuiltin_lower_local(recipe, a_high);
+        cbuiltin_bits_mask(recipe, width - 64);
+        cbuiltin_lower_set(recipe, a_high);
+        cbuiltin_lower_local(recipe, a_low);
+        cbuiltin_lower_constant(recipe, 0);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        cbuiltin_lower_set(recipe, borrow);
+        cbuiltin_lower_local(recipe, a_low);
+        cbuiltin_lower_constant(recipe, 1);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+        cbuiltin_lower_set(recipe, a_low);
+        cbuiltin_lower_binary(recipe, a_high, BUSTER_TYPED_SUB, a_high, borrow);
+        if (aligned)
+        {
+            cbuiltin_lower_binary(recipe, x_low, BUSTER_TYPED_AND, x_low, a_low);
+            cbuiltin_lower_binary(recipe, x_high, BUSTER_TYPED_AND, x_high, a_high);
+            cbuiltin_lower_local(recipe, x_low);
+            cbuiltin_lower_local(recipe, x_high);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_OR);
+            cbuiltin_lower_constant(recipe, 0);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, cbuiltin_lower_type_class(call->result_type), 0);
+        }
+        else
+        {
+            if (up)
+            {
+                // The sum's low limb, and its carry into the high one: the wrapped sum below an addend.
+                const uint32_t carry = cbuiltin_lower_temporary(recipe);
+                cbuiltin_lower_binary(recipe, x_low, BUSTER_TYPED_ADD, x_low, a_low);
+                cbuiltin_lower_binary(recipe, carry, BUSTER_TYPED_LT, x_low, a_low);
+                cbuiltin_lower_binary(recipe, x_high, BUSTER_TYPED_ADD, x_high, a_high);
+                cbuiltin_lower_binary(recipe, x_high, BUSTER_TYPED_ADD, x_high, carry);
+            }
+            cbuiltin_bits_invert(recipe, a_low, 64);
+            cbuiltin_bits_invert(recipe, a_high, 64);
+            cbuiltin_lower_binary(recipe, x_low, BUSTER_TYPED_AND, x_low, a_low);
+            cbuiltin_lower_binary(recipe, x_high, BUSTER_TYPED_AND, x_high, a_high);
+            cbuiltin_bits_store_wide(recipe, call->result_object, x_low, x_high, call->result_type);
+        }
+    }
+}
 
 static bool cbuiltin_misc_lower_local_class(const CBuiltinLowerBuffer* buffer, uint32_t local, uint32_t class)
 {
@@ -486,12 +599,20 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_FRAME_ADDRESS:
         case CBUILTIN_RETURN_ADDRESS: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
         default:
-            if (cbuiltin_bits(call->id))
+            if (cbuiltin_bits(call->id) || cbuiltin_align(call->id))
             {
-                // A result past 64 bits is its frame object's value (c_builtin_bits_lower.c).
-                const bool wide = !cbuiltin_carry(call->id) && cbuiltin_bits_width(call->result_type) > 64;
-                cbuiltin_bits_arity(call->id, &minimum, &maximum);
-                result_class = cbuiltin_bits_class(cbuiltin_carry(call->id) ? call->argument_types[0] : call->result_type);
+                // A result past 64 bits is its frame object's value (c_builtin_bits_lower.c, cbuiltin_misc_align).
+                const bool carry = cbuiltin_carry(call->id);
+                const bool wide = !carry && cbuiltin_bits_width(call->result_type) > 64;
+                if (cbuiltin_align(call->id))
+                {
+                    minimum = maximum = 2;
+                }
+                else
+                {
+                    cbuiltin_bits_arity(call->id, &minimum, &maximum);
+                }
+                result_class = cbuiltin_bits_class(carry ? call->argument_types[0] : call->result_type);
                 result.error = result_class == BUSTER_TYPED_CLASS_VOID || (wide && !cbuiltin_misc_lower_object(buffer, call->result_object)) ?
                                CBUILTIN_LOWER_ARGUMENT : CBUILTIN_LOWER_OK;
             }
@@ -508,7 +629,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         for (uint32_t i = 0; result.error == CBUILTIN_LOWER_OK && i < call->argument_count; i += 1)
         {
             // A bit builtin's argument is of its descriptor's class, one past 64 bits a frame object, and a carry's pointer U64.
-            const bool bits = cbuiltin_bits(call->id) && !(cbuiltin_carry(call->id) && i == 3);
+            const bool bits = (cbuiltin_bits(call->id) && !(cbuiltin_carry(call->id) && i == 3)) || cbuiltin_align(call->id);
             const bool wide = bits && cbuiltin_bits_width(call->argument_types[i]) > 64;
             const uint32_t class = bits ? cbuiltin_lower_type_class(call->argument_types[i]) : call->id == CBUILTIN_EXPECT ? BUSTER_TYPED_CLASS_I64 :
                                    call->id == CBUILTIN_MEMSET && i == 1 ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64;
@@ -587,6 +708,10 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         else if (cbuiltin_bits(call->id))
         {
             cbuiltin_bits_recipe(&recipe, call->id, call->arguments, call->argument_types, call->argument_count, call->result_type, call->result_object);
+        }
+        else if (cbuiltin_align(call->id))
+        {
+            cbuiltin_misc_align(&recipe, call);
         }
         else if (call->id != CBUILTIN_PREFETCH)
         {

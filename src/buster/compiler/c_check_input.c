@@ -6465,7 +6465,7 @@ static void check_input_expressions(CheckInputReader* reader)
                         }
                     }
                     if (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-                        (op == CHECK_OP_BUILTIN_VECTOR && reader->builtins[token] == CBUILTIN_SHUFFLEVECTOR))
+                        (op == CHECK_OP_BUILTIN_VECTOR && reader->builtins[token] == CBUILTIN_SHUFFLEVECTOR) || cbuiltin_align(reader->builtins[token]))
                     {
                         if (graph->builtin_count < graph->builtin_capacity)
                         {
@@ -6656,7 +6656,7 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
 {
     const CheckOp op = check_graph_builtin_op((CBuiltinId)builtin);
     return op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-           (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_SHUFFLEVECTOR);
+           (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_SHUFFLEVECTOR) || cbuiltin_align(builtin);
 }
 
 // The graph's builtin call records the reader's `builtins` (a builtin per token of `count`, 0 for none) need. Nearly

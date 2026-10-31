@@ -58,6 +58,8 @@ struct CheckBuiltinCall
     // atomic's address takes it where its lvalue path starts at that identifier (check_graph_atomic_alignment).
     uint32_t base_token;
     uint8_t base_alignment;
+    // That declaration's object, which an address constant of the argument names (the alignment builtins' folds).
+    uint32_t base_object;
 };
 
 typedef struct CheckGraph CheckGraph;
@@ -694,7 +696,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id))
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY)
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -979,7 +981,8 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
         const CheckBuiltinCall* call = graph->builtin_calls + state->builtin_calls;
         result = call->node == node &&
                  (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-                  op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST);
+                  op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST ||
+                  (op == CHECK_OP_BUILTIN_MISC && graph->members != NULL && cbuiltin_align(graph->members[node])));
         const bool shuffle = op == CHECK_OP_BUILTIN_VECTOR && graph->members != NULL && graph->members[node] == CBUILTIN_SHUFFLEVECTOR;
         result = result && (call->shuffle_index_ice != NULL ? shuffle && count >= 2 && call->shuffle_index_ice_count == count - 2 : call->shuffle_index_ice_count == 0);
         for (uint32_t i = 0; result && i < call->shuffle_index_ice_count; i += 1)
@@ -1711,6 +1714,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .extensions = action->extensions,
             .const_values = action->const_values,
             .constant_evaluated = action->constant_evaluated,
+            .pointer_object = witness != NULL ? witness->base_object : 0,
+            .pointer_alignment = witness != NULL ? witness->base_alignment : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
