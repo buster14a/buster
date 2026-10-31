@@ -471,7 +471,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "v16qu c[]={q+r,q-r,~q,(v16qu)(q<r),(v16qu)(q<=r),(v16qu)(q>r),(v16qu)(q>=r),(v16qu)(q==r),(v16qu)(q!=r),q+(unsigned char)n};FOLD(c);\n"
           "v8hu j[]={w+x,w*x,(v8hu)(w<x),(v8hu)(w<=x),(v8hu)(w>x),(v8hu)(w>=x),w+(unsigned short)n};FOLD(j);\n"
           "H m[]={k+l,k*l,k<l,k<=l,k>l,k>=l,k==l,k!=l};FOLD(m);v2di ll[]={d+e,d-e,-e,~d,d+(long long)n};FOLD(ll);\n"
-          "global=calc(a,b);v4si mem[3]={a,b,{0}};mem[n%3]=global;v4si out=*mem;out[2]=n;mem[1]+=out;FOLD(mem);FOLD(global);return (int)h;}\n"
+          "global=calc(a,b);v4si mem[3]={a,b,{0}};mem[(unsigned)n%3]=global;v4si out=*mem;out[2]=n;mem[1]+=out;FOLD(mem);FOLD(global);return (int)h;}\n"
         },
         { "baseline-floating",
           "int tested(int n){unsigned h=2166136261u;v4sf a,b;v2df d,e;fillf((float*)&a,4,n);fillf((float*)&b,4,n+1);filld((double*)&d,2,n);filld((double*)&e,2,n+2);b+=1.0f;e+=1.0;\n"

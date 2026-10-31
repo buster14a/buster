@@ -629,9 +629,8 @@ struct CheckLowerWriter
     uint8_t* vector_constant_bytes;
     uint32_t vector_constant_count;
     uint32_t vector_constant_capacity;
-    // The classes check_lower_emit takes, those below this: BUSTER_TYPED_CLASSES, or BUSTER_TYPED_CLASS_VECTOR where the
-    // unit's target or the function's has no AVX-512F and AVX-512VL, whose EVEX forms Tier 0's vector entries are
-    // (check_lower_vector_target): the unit's decides the convention, as clang's x86-64 ABI does.
+    // The classes check_lower_emit takes, those below this: BUSTER_TYPED_CLASSES. SSE2 belongs to every
+    // supported x86-64 target; vector rows and transport select legal forms from the function's target.
     uint32_t class_limit;
     // The function's instruction set (#180), by its target attribute (check_program_targets): which instructions the x86
     // builtins' rows and leaves and the vector builtins' and operators' rows use.
@@ -750,13 +749,6 @@ static bool check_lower_tile_type(const TypeTable* types, TypeId type)
 static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, TypeId type)
 {
     return class == BUSTER_TYPED_CLASS_VECTOR ? check_lower_vector_bytes(types, type) : 0;
-}
-
-// Whether the target takes Tier 0's vector values: their entries are EVEX forms through zmm16 (AVX-512F), of 16 and 32
-// bytes too (AVX-512VL).
-static bool check_lower_vector_target(uint64_t features)
-{
-    return (features & BUSTER_X86_FEATURE(SSE2)) != 0;
 }
 
 // The widest vector register the convention passes a vector in (abi_initialize's vector_bytes), as clang's x86-64 ABI
@@ -2947,8 +2939,7 @@ static void check_lower_wide_from_floating(CheckLowerWriter* writer, uint8_t sou
 #include "c_check_program_half.c"
 
 // check_lower_emit's entry of a class past the function's (CheckLowerWriter.class_limit), out of line: a half-precision
-// class's, which check_lower_half_entry writes as Tier 0's; any other is refused, a vector's where the function's target
-// hasn't AVX-512F and AVX-512VL.
+// class's, which check_lower_half_entry writes as Tier 0's; any other class is refused.
 static __attribute__((noinline)) void check_lower_emit_classless(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
     if (check_lower_class_half(class) != CHECK_HALF_NONE)
@@ -2957,9 +2948,7 @@ static __attribute__((noinline)) void check_lower_emit_classless(CheckLowerWrite
     }
     else
     {
-        check_lower_unsupported(writer, class != BUSTER_TYPED_CLASS_VECTOR ? "values of this type" :
-                                        check_lower_vector_target(writer->program->target.features) ? "vector types in a function whose target attribute turns off SSE2" :
-                                        "vector types without SSE2");
+        check_lower_unsupported(writer, "values of this type");
     }
 }
 
@@ -10927,7 +10916,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .sources = sources,
         .x87_constant_capacity = shared->x87_constant_capacity,
         .label_symbol_capacity = shared->label_symbol_capacity,
-        .class_limit = check_lower_vector_target(program->target.features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR,
+        .class_limit = BUSTER_TYPED_CLASSES,
         .target = program->target,
         .bit_ints = shared->bit_ints,
         .abi_table = &shared->table,
@@ -11125,7 +11114,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
         const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
         writer->target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? program->target : program->targets[body_target - 1];
-        writer->class_limit = check_lower_vector_target(program->target.features & writer->target.features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR;
+        writer->class_limit = BUSTER_TYPED_CLASSES;
         writer->result = result;
         writer->token = body.declaration;
         check_lower_source(writer, body.declaration);
