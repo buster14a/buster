@@ -4,7 +4,8 @@
 // Promote the shared IR's typed, private stack slots through ssa.c. Include after ir.c and ssa.c. All instruction
 // operands remain visible to the IR verifier: the local-promotion view hides them only while constructing phis.
 // The completed entry block must have no incoming edges; ir_lower.c supplies a separate parameter preheader.
-// Untyped slots, volatile accesses and every observed escape stay in memory. A TEMPORARY flag alone is harmless.
+// An untyped temporary (a depth slot) whose accesses all agree on one scalar type promotes with it; other untyped
+// slots, volatile accesses and every observed escape stay in memory. A TEMPORARY flag alone is harmless.
 // Calls, existing phis and switches receive independent extra slices, even when their input slices overlapped.
 //
 // Input and result descriptors are distinct; input columns are immutable. Output and scratch must be distinct,
@@ -108,8 +109,10 @@ static IrError ssa_ir_error(SsaError error)
 }
 
 // A stack address may have several definitions, and a later use may escape an address first used by a load.
-// Classify every use before exposing any READ/WRITE to SSA; an indirect or differently typed access excludes the
-// whole slot. No alias inference is needed: an address used through COPY, ADDRESS, a phi or a call stays memory.
+// Classify every use before exposing any READ/WRITE to SSA; an indirect, volatile or differently typed access excludes
+// the whole slot, unless the slot is an untyped temporary whose accesses so far agree on one scalar type, which the
+// first access adopts. No alias inference is needed: an address used through COPY, ADDRESS, a phi or a call stays
+// memory.
 static IrError ssa_ir_classify(SsaIrWork* work)
 {
     const IrFunction* f = work->input;
@@ -135,8 +138,13 @@ static IrError ssa_ir_classify(SsaIrWork* work)
         for (uint32_t slot = 0; slot < local_count; slot += 1)
         {
             const IrSlot local = f->slots[slot];
-            work->local_types[slot] = local.type == IR_VOID ? BUSTER_SSA_TYPE_AGGREGATE : local.type;
-            work->local_flags[slot] = local.type == IR_VOID || (local.flags & (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE)) != 0 ? BUSTER_SSA_LOCAL_ADDRESS_TAKEN : 0;
+            // An untyped temporary (a depth slot) stays VOID until its first access adopts one scalar type; any other
+            // untyped slot is an aggregate. A slot the loop leaves VOID is finalized as an aggregate after it, since
+            // ssa_prepare refuses VOID standing types.
+            const bool temporary = local.type == IR_VOID && (local.flags & BUSTER_IR_SLOT_TEMPORARY) != 0 &&
+                                   (local.flags & (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE)) == 0;
+            work->local_types[slot] = temporary ? BUSTER_SSA_TYPE_VOID : local.type == IR_VOID ? BUSTER_SSA_TYPE_AGGREGATE : local.type;
+            work->local_flags[slot] = !temporary && (local.type == IR_VOID || (local.flags & (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE)) != 0) ? BUSTER_SSA_LOCAL_ADDRESS_TAKEN : 0;
         }
         for (uint32_t i = 0; i < f->instruction_count; i += 1)
         {
@@ -147,13 +155,35 @@ static IrError ssa_ir_classify(SsaIrWork* work)
                 if (f->op[operand.value] == IR_STACK_ADDR)
                 {
                     const uint32_t slot = f->a[operand.value];
-                    const bool load = f->op[i] == IR_LOAD && operand.position == 0 && f->type[i] == f->slots[slot].type;
-                    const bool store = f->op[i] == IR_STORE && operand.position == 0 && f->type[f->b[i]] == f->slots[slot].type;
-                    if ((!load && !store) || (f->flags[i] & BUSTER_IR_VOLATILE) != 0)
+                    const bool load = f->op[i] == IR_LOAD && operand.position == 0;
+                    const bool store = f->op[i] == IR_STORE && operand.position == 0;
+                    if (work->local_types[slot] == BUSTER_SSA_TYPE_VOID)
+                    {
+                        const uint8_t access = load ? f->type[i] : store ? f->type[f->b[i]] : (uint8_t)IR_VOID;
+                        if ((load || store) && (f->flags[i] & BUSTER_IR_VOLATILE) == 0 && access != BUSTER_SSA_TYPE_VOID && access < BUSTER_SSA_TYPE_AGGREGATE)
+                        {
+                            work->local_types[slot] = access;
+                        }
+                        else
+                        {
+                            work->local_types[slot] = BUSTER_SSA_TYPE_AGGREGATE;
+                            work->local_flags[slot] |= BUSTER_SSA_LOCAL_ADDRESS_TAKEN;
+                        }
+                    }
+                    const bool agreed_load = load && f->type[i] == work->local_types[slot];
+                    const bool agreed_store = store && f->type[f->b[i]] == work->local_types[slot];
+                    if ((!agreed_load && !agreed_store) || (f->flags[i] & BUSTER_IR_VOLATILE) != 0)
                     {
                         work->local_flags[slot] |= BUSTER_SSA_LOCAL_ADDRESS_TAKEN;
                     }
                 }
+            }
+        }
+        for (uint32_t slot = 0; slot < local_count; slot += 1)
+        {
+            if (work->local_types[slot] == BUSTER_SSA_TYPE_VOID)
+            {
+                work->local_types[slot] = BUSTER_SSA_TYPE_AGGREGATE;
             }
         }
         work->source = (SsaInput){
