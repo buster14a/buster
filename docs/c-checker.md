@@ -2378,7 +2378,9 @@ What the lowering covers past scalars (#145's programs):
   each instead of all earlier records (#611); the small, ordered span updates
   retain the existing scalar record layout and stable bound identities.
   Empty ranges still validate variably modified declarations and retain their
-  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  jump-scope metadata. A variably modified `typeof` operand is evaluated where its
+   declaration is executed, after the type's bounds and before the declaration's
+   initializers; a fixed-type `typeof` operand is not evaluated. In eleven paired fresh-process runs on the locked
   9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
   34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
   instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
@@ -3827,6 +3829,46 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+**C23 `auto` and `constexpr` (#793).** In C23 a declaration's `auto`, when no
+other type specifier is beside it, is a type specifier rather than the storage
+class (`check_input_specifiers`, `check_input_declaration`). Its declared type
+is deduced from its initializer as clang deduces it: the initializer is
+lvalue-converted and decayed at the top, then each pointer, array, function and
+aligned level of the declarator matches its own operands, an array's extent and
+a function's parameters must be the same, and the placeholder takes the type
+there with the specifiers' `const` and `volatile`. Unlike `__auto_type`, a
+pointer declarator (`auto *p = &x`) and a declaration's later declarators
+(`auto a = 1, b = 2`) are the language's, and each later declarator must
+deduce the same type; file scope and `static`, `extern` and `register` are
+C23's. `auto` with another type specifier (`auto int x`) keeps its storage-class
+meaning, so `auto` and no initializer there is C's existing storage-class rule,
+not a deduction. Deduced declarations are refused by name where clang refuses
+them: a typedef's, a function's, a parameter's and a member's `auto` (a
+parameter's and a member's where the parser's own grammar reaches them), one
+without an initializer or with an array at its initializer, and an initializer
+list. A deduced type that is incomplete, variably modified, or a
+bit-field's value is refused as `__auto_type`'s is.
+
+A C23 `constexpr` declaration declares an initialized object whose type is
+const-qualified at its top level (`constexpr int *p` is `int *const`) and whose
+initializer must be a constant expression; a pointer's must be null (or
+`nullptr`), and its value exactly representable in the declared type (clang's
+refusal of `constexpr char c = 300`, `constexpr unsigned u = -1` and
+`constexpr float f = 0.1`). The reader evaluates the initializer once
+(`check_input_constexpr_finish`) and keeps an integer, floating, complex or
+null-pointer value for the object's uses' constant readings, so that an array
+bound, `case`, `static_assert` or another constant expression takes it. An
+aggregate's initializer is left to the initializer walk. At file scope a
+`constexpr` object has internal linkage, as clang gives it. Refused by name:
+`constexpr` with `typedef`, `extern`, `_Thread_local`, `inline`, a function
+type, a volatile type or an atomic type, without an initializer, a pointer
+whose initializer isn't null, and one whose initializer isn't a constant
+expression or isn't exactly representable.
+
+`test-checker`'s gnu23 source fixtures compare both forms with clang and check
+their deduced and const types; `test-checker-driver` checks the driver accepts
+the issue's original files and refuses the same places as clang in C23.
 
 ## Tail calls (#147)
 

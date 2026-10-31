@@ -203,6 +203,24 @@ static __attribute__((unused)) CBuiltinIntrinsicFeatureStatus c_builtin_intrinsi
     return status;
 }
 
+// Whether a table is one c_builtin_intrinsic_features_evaluate takes, which a caller that evaluates many expressions
+// against tables of the same names establishes once (code generation's check of target features, #148).
+static __attribute__((unused)) bool c_builtin_intrinsic_features_table_valid(const CBuiltinIntrinsicFeature* features, uint32_t feature_count)
+{
+    return cbuiltin_intrinsic_feature_table_valid(features, feature_count);
+}
+
+// c_builtin_intrinsic_features_evaluate of a table its caller found valid (c_builtin_intrinsic_features_table_valid),
+// whose availabilities may have changed since: its status without the table's quadratic validation.
+static __attribute__((unused)) CBuiltinIntrinsicFeatureStatus c_builtin_intrinsic_features_evaluate_valid(const char* expression, uint32_t expression_length,
+                                                                                                        const CBuiltinIntrinsicFeature* features,
+                                                                                                        uint32_t feature_count,
+                                                                                                        CBuiltinIntrinsicFeatureFrame* frames,
+                                                                                                        uint32_t frame_capacity)
+{
+    return cbuiltin_intrinsic_feature_expression(expression, expression_length, features, feature_count, frames, frame_capacity);
+}
+
 static __attribute__((unused)) CBuiltinIntrinsicFeatureStatus c_builtin_intrinsic_features_evaluate_batch(const CBuiltinIntrinsicFeatureExpression* expressions,
                                                                                                         uint32_t expression_count,
                                                                                                         const CBuiltinIntrinsicFeature* features,

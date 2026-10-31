@@ -71,6 +71,11 @@ unset CPATH C_INCLUDE_PATH
 # then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
 # clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Test c-testsuite's programs with Tier 1's code [4 CPUs]
+# #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
+# others by Tier 0), by both paths, whose allocators assign registers differently, both programs run; the scalar
+# path's executable the same bytes with the ids in source order and in another (#153). The declared subset must pass.
+./build/compiler test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
@@ -123,6 +128,9 @@ mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZAT
   BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
 test "${#flags[@]}" -gt 0
 ./build/compiler test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" src/buster/compiler/main.c
+else
+printf 'SKIP: main.c checking comparison (sanitizer memory budget; docs/ci.md)\n'
+exit 77
 fi
 == Test the C lexer as C++
 ./build/compiler test-lexer --cplusplus
@@ -187,8 +195,8 @@ rm "$flags_file" "$sources_file"
 # reach, and by --lower-all, which lowers every definition but C's inline-only ones, the header intrinsics of
 # features znver5 lacks among them; each with --verify's checks of every function's records. The scalar path's
 # --lower-all object must be the vector path's, byte for byte. A compile takes 10 GiB under TSan and 6.6 GiB under
-# MSan, so those rows skip it here with the main.c checking comparison above (docs/ci.md); every other row and the
-# 9700X still run it.
+# MSan, so those rows skip it here and run it alone after the suite (the workflow's "Compile main.c alone under TSan
+# or MSan" step); every other row and the 9700X still run it here.
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
@@ -200,6 +208,9 @@ objects=$(mktemp -d)
 ./build/compiler --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" src/buster/compiler/main.c
 cmp "$objects/all.o" "$objects/all-scalar.o"
 rm -r "$objects"
+else
+printf 'SKIP: main.c -c compiles (the TSan/MSan rows run them alone after the suite; docs/ci.md)\n'
+exit 77
 fi
 == Test the object writer
 # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
@@ -245,6 +256,7 @@ fi
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-check-builtins-atomic-rmw
 ./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-bits
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-lower
 ./build/compiler test-builtin-varargs-lower
@@ -344,6 +356,18 @@ musl="$corpus/libc/musl"
 ./build/compiler test-ir-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 ./build/compiler test-ir-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 ./build/compiler test-ir-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
+# #140: each function -c compiles, lowered and promoted as test-ir-source does, adapted to an allocation problem
+# (tier1_cfg_ir.c's machine model), allocated by both of tier1_cfg.c's paths and checked by tier1_cfg_verify.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+./build/compiler test-tier1-cfg-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-tier1-cfg-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+./build/compiler test-tier1-cfg-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
@@ -483,6 +507,8 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 ./build/compiler test-ir-inline
 == Test Tier 1 allocation, reload splitting and rematerialization
 ./build/compiler test-tier1-allocation
+== Test Tier 1 allocation over CFGs, edge moves and the independent checker
+./build/compiler test-tier1-cfg
 == Test dataflow bitsets
 ./build/compiler test-dataflow
 == Test the partial Zen 5 model and instruction harness

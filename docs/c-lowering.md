@@ -148,9 +148,12 @@ definition. Its flags and edges:
   declaration of that function is plain `inline`; a plain inline definition is
   emitted. Inline-only calls and addresses go to the external symbol. Like Clang,
   `-fno-gnu89-inline` turns the option off in C99 and later modes but does not
-  change C89's GNU inline semantics. The checker currently rejects a GNU
-  `extern inline` definition followed by an ordinary definition of the same
-  function in one translation unit; this selection change does not accept it.
+  change C89's GNU inline semantics. A GNU `extern inline` definition followed
+  by an ordinary definition of the same function in one translation unit is
+  GNU89's idiom: the `extern inline` definition stays inline-only and the
+  ordinary one is the external definition, as Clang accepts it. Where a plain
+  inline declaration makes the `extern inline` body external, Clang emits that
+  body and ignores the later ordinary one; this selection does the same.
 - **Edges:** each body's evaluated references (calls, addresses and reads of
   static objects, from the checked expression walk: not `sizeof`, `alignof` or a
   `_Generic` association it doesn't select, and not the operands of `&&`, `||`
@@ -300,12 +303,13 @@ none of its subset's programs makes a name twice in clang's objects.
   compares too: at `d12fd583`, with one difference, inlined.
 - **`main.c`**, the compiler's own unit, with `build.sh`'s flags for a plain
   `-march=znver5` build, whatever the run's host, sanitizer and fuzzing: every
-  correctness run but the TSan and MSan rows (`tools/ci/correctness.tests`,
-  whose 6,323,682-token unit exceeds their hosted runner's memory: docs/ci.md)
-  compiles it by `-c` and by `--lower-all`, each with `--verify`, the scalar
-  path's `--lower-all` object byte for byte the vector path's, and compares
-  its checking, by both paths, and its `-c` object with clang's
-  (`test-checker-corpus --symbols-minimum 1`).
+  correctness run compiles it by `-c` and by `--lower-all`, each with
+  `--verify`, the scalar path's `--lower-all` object byte for byte the vector
+  path's, and compares its checking, by both paths, and its `-c` object with
+  clang's (`test-checker-corpus --symbols-minimum 1`). The TSan and MSan rows
+  run the compiles in a separate step after the suite, and leave out only the
+  checking comparison, whose 6,323,682-token unit exceeds their hosted
+  runner's memory (docs/ci.md).
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined.
 

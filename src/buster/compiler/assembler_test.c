@@ -871,6 +871,8 @@ static void asm_test_code(AsmTest* test)
     asm_test_code_pair(test, "  # a comment, %eax\n\n", 0, "inline code: a comment alone");
     asm_test_code_pair(test, "pause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n", 6, "inline code: spin hints, fences and timestamp counters");
     asm_test_code_pair(test, "rep nop\nrep; nop\n.intel_syntax noprefix\nrep nop\nrep; nop", 4, "inline code: rep nop spin hints");
+    asm_test_code_pair(test, "rep ret\nrepz ret\nrep; ret\nrepz; ret\nrep retq\nrepz; retq\nrepne ret\nrepnz; ret", 8,
+                       "inline code: rep ret return-stack hints");
     // The newly admitted processor-state instructions, each a record.
     asm_test_code_pair(test, "cpuid\nxgetbv\nxchgq %rbx,%rsi\nfnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\npcmpeqd %xmm1,%xmm2\n"
                              "bswapl %eax\nbswapq %r9\nfxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)", 16,
@@ -973,6 +975,8 @@ static void asm_test_code(AsmTest* test)
         "rep ;\n.intel_syntax noprefix",
         "repne bsr %rax, %rcx",
         "rep bsrb %al, %cl",
+        "rep retl",
+        "repne retl",
         "bogus %eax",
         "pause %eax",
         "rdtsc %eax",
@@ -1096,7 +1100,7 @@ static bool asm_test_gas_pads_like_2_47(AsmTest* test, const char* directory)
 static void asm_test_reader(AsmTest* test, const char* directory)
 {
     static const char text[] = "nop\nret\n";
-    Arena arena = arena_reserve(1ull << 26);
+    Arena arena = arena_reserve(1ull << 30);
     int ends[2];
     bool okay = pipe(ends) == 0;
     if (okay)
@@ -1150,6 +1154,34 @@ static void asm_test_reader(AsmTest* test, const char* directory)
     const uint64_t before = arena.length;
     okay = okay && !asm_read_file(large, &arena, &source) && arena.length == before && source.pointer == 0;
     asm_test_check(test, okay, "assembly input past the limit refused", 0);
+    unlink(large);
+    // A source past the former 16 MiB bound reaches the parser and assembles. One comment line keeps its token table
+    // small; the source itself proves the read and lexer bounds.
+    const int big_fd = open(large, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    uint8_t chunk[1u << 16];
+    memset(chunk, 'x', sizeof(chunk));
+    uint64_t left = 17u << 20;
+    okay = big_fd >= 0 && write(big_fd, "#", 1) == 1;
+    while (okay && left != 0)
+    {
+        const uint64_t count = left < sizeof(chunk) ? left : sizeof(chunk);
+        okay = write(big_fd, chunk, count) == (ssize_t)count;
+        left -= count;
+    }
+    okay = okay && write(big_fd, "\nret\n", 5) == 5;
+    if (big_fd >= 0)
+    {
+        close(big_fd);
+    }
+    arena.length = 0;
+    source = (String8){0};
+    okay = okay && asm_read_file(large, &arena, &source) && source.length > (16u << 20) && source.length < BUSTER_ASM_MAX_SOURCE;
+    if (okay)
+    {
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &arena);
+        okay = assembled.error == 0 && assembled.link.atoms.count > 1;
+    }
+    asm_test_check(test, okay, "assembly input past 16 MiB assembles", 0);
     unlink(large);
     arena_release(&arena);
 }
@@ -1496,6 +1528,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: pause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n.intel_syntax noprefix\npause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".text\nf: rep nop\nrep; nop\n.intel_syntax noprefix\nrep nop\nrep; nop\n", directory, 0);
+                asm_test_oracle(&test, ".text\nf: rep ret\nrepz ret\nrep; ret\nrepz; ret\nrep retq\nrepz; retq\nrepne ret\nrepnz; ret\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
                 // The processor-state instructions C's inline assembly reaches (#147).
                 asm_test_oracle(&test, ".text\nstate: cpuid\nxgetbv\nxchgq %rbx,%rsi\nxchgq %rsi,%rbx\nxchgl %ecx,(%rdi)\nxchgb %al,%bl\n"

@@ -1302,7 +1302,18 @@ decisions in #154 and on #117's configuration):
   supplementary names, `c_builtin_supplementary_scope.inc`); the full Clang
   recognition catalog is not an implementation list. The fourteen fortified libc builtins reuse
   the checker's separate exact-name admission table and ordinary native call
-  path (#803); none has a source constant-expression capability. An
+  path (#803); none has a source constant-expression capability. The library
+  builtins (#148, `c_builtin_library.c`) answer 1 where they compile: the 352
+  `__builtin_X` that are calls of their functions and `powi`'s three, and the
+  354 plain names of C's library (`sin`, `strlen`, `printf`) that clang makes
+  builtins of the unit: not with `-fno-builtin` (the last of it and
+  `-fbuiltin`), `-ffreestanding` or `-fno-builtin-NAME` for the name, and those
+  of GNU's languages (`alloca`, `bzero`, `strdup`) in GNU's modes alone
+  (`pp_library_builtin`). `__has_constexpr_builtin` answers 1 for the catalog's
+  constant capability and the library builtins this folds as clang does
+  (`strcmp`, `strlen`, `memcmp` and their kin, `abs`, the `fmax` family,
+  `copysignl`; the [builtin integration guide](c-builtins-integration.md)'s
+  "Library builtins"), the plain ones where the name is a builtin. An
   implemented builtin answers 1 only where clang 23 makes it one, as clang's
   `__has_builtin` decides (#148): the language modes of its row in clang's
   table (`__builtin_c23_va_start` in C23 alone; a GNU mode's, Microsoft's and
@@ -1312,8 +1323,12 @@ decisions in #154 and on #117's configuration):
   (`pp_builtin_features`, with `c_builtin_intrinsic_features.c`'s evaluator).
   So `__builtin_ia32_aadd32` answers 0 at `-march=znver5`, which lacks
   RAO-INT, as clang's does. `test-preprocessor --clang` compares every one of
-  clang's 3,775 builtin names with `clang -E`'s answer in eleven target and
-  language configurations, and the gates' facts with clang's table.
+  clang's 3,775 builtin names with `clang -E`'s answers in seventeen target,
+  language and `-f` option configurations (`-fno-builtin`, `-fbuiltin`,
+  `-fno-builtin-NAME`, `-ffreestanding` and `-fhosted` among them): its
+  `__has_builtin` for every builtin buster implements, and 0 for the others,
+  and its `__has_constexpr_builtin` wherever buster's answers 1; and the gates'
+  facts with clang's table.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.

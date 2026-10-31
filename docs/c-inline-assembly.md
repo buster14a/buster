@@ -379,6 +379,10 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   with one of the unit's symbols' names, which GNU as and clang reject;
 - a label in a template of no instructions, which would be a place in its
   function's code;
+- a template that returns before any branch (`ret`, `rep ret`, a `leave` and
+  `ret`), which would leave the helper's frame reserved; a template that jumps
+  over its return, as a called snippet's label does, stays admitted. The
+  assembler takes these instructions in `.s` files and file-scope assembly;
 - in a naked function, statements other than `asm` statements, which clang
   rejects, operands other than integer constants, and a body of no
   instructions.
@@ -509,6 +513,8 @@ What the lowering still refuses of what GCC and clang take:
 
 - labels in templates of no instructions (a place in the caller's code), and
   numeric labels or `.` as data;
+- inline emission of a template that returns, which clang places in its
+  function's own code; this compiler's helper design refuses it by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
 - the matcher's gaps: `fstp` without a suffix (GNU as assumes `fstps`), Intel's

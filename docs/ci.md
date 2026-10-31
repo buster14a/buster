@@ -97,8 +97,8 @@ diagnostic-friendly coverage without substituting it for production optimization
 | `none` (default) | Ordinary optimized build |
 | `address` | ASan, UBSan, bounds, leaks, stack use after scope and return |
 | `undefined` | Independent UBSan and bounds run |
-| `thread` | TSan across the correctness inventory, but the compiler's own `main.c` self-check |
-| `memory` | MSan with level-two origin tracking across the correctness inventory, but the compiler's own `main.c` self-check |
+| `thread` | TSan across the correctness inventory, but the compiler's own `main.c` checking comparison |
+| `memory` | MSan with level-two origin tracking across the correctness inventory, but the compiler's own `main.c` checking comparison |
 
 ASan, UBSan and leak checking share a process. TSan and MSan have separate
 builds because their runtimes cannot be combined with ASan. The independent
@@ -134,17 +134,19 @@ UBSan and ordinary builds still run it. TSan also kills a child that starts a
 thread after a fork from a process of several threads, so under it
 `test-lanes`' child forked from a session's lane 0 (#905) runs a group of one.
 
-The TSan and MSan rows leave out the two commands that compile and check the
-compiler's own `main.c` (#129, `tools/ci/correctness.tests`). The unit's
-6,323,682 preprocessed tokens make the checking comparison's two paths hold
-7.5 GiB resident unsanitized (measured with an `-O3` UBSan build on the
-7940HS), and TSan's shadow took the same check past 20 GiB before it was
-stopped. The `-c` commands peak at 10 GiB under TSan and 6.6 GiB under MSan
-(`-O3`, `--lanes 1`), too much of a shared 16 GiB hosted runner to leave the
-commands `parallel` schedules beside them safe. The plain, ASan and UBSan rows,
-both host architectures, and the 9700X run both commands, so the self-check
-remains required wherever the runner has the memory. Every other command runs
-in every row.
+The TSan and MSan rows leave out the checking comparison of the compiler's own
+`main.c` (#129, `tools/ci/correctness.tests`). The unit's 6,323,682
+preprocessed tokens make the comparison's two paths hold 7.5 GiB resident
+unsanitized (measured with an `-O3` UBSan build on the 7940HS), and TSan's
+shadow took the same check past 20 GiB before it was stopped; that cannot share
+a 16 GiB hosted runner with any other command. The `-c` commands peak at
+10 GiB under TSan and 6.6 GiB under MSan (`-O3`, `--lanes 1`), so those rows
+run them in the workflow's separate "Compile main.c alone under TSan or MSan"
+step after the suite, where the runner is otherwise idle; the plain, ASan and
+UBSan rows, both host architectures, and the 9700X run them in the suite. The
+plain, ASan and UBSan rows and the 9700X also run the checking comparison, so
+the self-check remains required wherever the runner has the memory. Every other
+command runs in every row.
 
 `tools/ci/sanitizers.sh` replaces inherited runtime options with a fixed fatal
 policy and matching symbolizer. Deliberate faults prove each enabled detector,
@@ -153,9 +155,10 @@ These proofs use a separate directory. An unconditional report audit rejects
 diagnostics from the actual suite even when a negative test expected its child
 to fail. The libFuzzer crash-replay proof's planted abort writes its stack traces
 to a directory of its own, and each one must name the probe's source. No
-suppression file is used, and the only commands a row leaves out are the
-`main.c` self-check above, for its measured memory. Reports, detector proofs
-and compile commands are retained as workflow artifacts.
+suppression file is used, and the only command a row leaves out is the `main.c`
+checking comparison above, for its measured memory; `parallel` reports it as
+skipped and counts it apart. Reports, detector proofs and compile commands are
+retained as workflow artifacts.
 
 For example, on a supported Linux host:
 

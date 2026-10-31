@@ -84,6 +84,54 @@ link set. Timings are pinned to CPU 2. Repeat frozen-input comparisons in
 alternating order across fresh processes; measure sustained vector execution
 and execution following lighter work. CI retains priority between runs.
 
+## The C driver's `--tier1`
+
+`./build/compiler --tier1 -fno-asynchronous-unwind-tables [options] file.c...`
+compiles each function the pipeline takes by Tier 1 and every other function by
+Tier 0, as without the option, into one System V program
+(`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
+lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code and CFG
+cleanup), its CFG and dominators analyzed, selected and emitted, the CFG
+consumer allocating it over its CFG (`tier1_cfg.c`); with `--scalar`, every step
+by its scalar twin. Its records, branch columns and references take Tier 0's
+place in the emission (`check_program_emit_tier1`), on the emission's lanes,
+each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
+standard error after the command, how many functions each tier compiled and the
+step, and for the selector the IR operation, that refused each of the others,
+and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
+that step (`tier1-refused	NAME	selection	call`):
+
+```text
+tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
+```
+
+The driver refuses what Tier 1's code can't carry yet: unwind tables (Tier 1's
+frames save registers with stores, which the push-based unwind descriptor doesn't
+describe), hence the required `-fno-asynchronous-unwind-tables`, and `-g`'s
+rows. Several source files compile as without the option, each unit's report
+added to the command's.
+
+Beyond the straight-line subset, the CFG consumer takes frame objects'
+addresses (each object a frame slot live throughout, its `lea` re-based on the
+frame's layout), symbols' addresses (`lea` from `rip`, or a load of the GOT slot
+where the emission's access column says so; thread-locals are Tier 0's),
+parameters anywhere in the entry block and narrow ones (zero-extended into
+their canonical storage at the entry), variadic calls of integer arguments (`al`
+zero), calls through a pointer (the callee moved into `r10` with the
+arguments), narrow call results and returns, and division, remainder and shifts
+by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
+the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
+read, and any other value live past the node there saved around it in a
+call-save row). A parameter's register binds its definition's interval alone
+(`Tier1CfgInput.definition_registers`). Still refused: floating point, narrow
+call arguments (the IR doesn't keep their signedness, which the callee's
+extension needs), stack arguments, labels, switches, aggregates by value and
+variadic definitions.
+
+`test-c-testsuite --tier1` runs c-testsuite's programs so, and
+`test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
+#142's campaigns.
+
 ## Current integration boundary
 
 The implementation now consumes the shared IR and the upstream local-SSA
@@ -100,10 +148,13 @@ scalar values in straight-line block chains, plus byte/word memory and integer
 conversions with canonical 32-bit storage. It emits actual spill stores,
 reloads, constant rematerialization and stack probes. A chain may end in a
 return, explicit unreachable, or an empty self-loop sink retaining its actual
-branch. General CFG fragment
-reconciliation, phis, indirect/variadic/wide-ABI calls and floating-point emission remain outside this
-bounded consumer. The selector's uniform-register API has its own broader
-branch subset and explicitly refuses unsupported allocations.
+branch. Every other CFG, with loops and phis, goes through its CFG path
+(`tier1_emit_cfg.c`, #140): [`tier1_cfg.c`](tier1-allocation.md) allocates the
+selected uses over the CFG, and the records carry each edge's moves, critical
+edges' in stubs. Indirect/variadic/wide-ABI calls and floating-point emission
+remain outside this bounded consumer. The selector's uniform-register API has
+its own broader branch subset and explicitly refuses unsupported allocations
+and phis.
 
 Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
 arguments and a void or matching scalar result. The native consumer preserves
@@ -116,11 +167,12 @@ requires integrating the source owner's exact helper and checked-call path.
 fixtures and runs ABI assignment, lowering, SSA promotion, optimization,
 selection, liveness, allocation, frame emission, branch sizing and encoding.
 It freezes interpreter expectations before compilation and also compares
-Clang-built C formulas. A complete cross-check expects 1,024 native results,
-512 Clang results, eight emitted direct calls and eight explicit unsupported
-refusals. These are bounded integration fixtures, described in
+Clang-built C formulas. A complete cross-check expects 1,920 native results,
+960 Clang results, twelve emitted direct calls, 28 functions through the CFG
+path and two explicit unsupported refusals. These are bounded integration fixtures, described in
 the [pipeline guide](tier1-pipeline.md), not a source-corpus campaign.
-Source byte loops still need a CFG/phi consumer. Source floating-point helper
+Source byte loops now have a CFG/phi consumer, but no source corpus is compiled
+through it yet. Source floating-point helper
 adapters additionally need addressable frame locals, stack addresses, FP value
 transport/conversions and their ABI. Raw integer-bit helper-call acceptance
 does not establish those producer paths.

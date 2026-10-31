@@ -3398,6 +3398,195 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // C23's `auto` (#793): an initializer's type, lvalue-converted and decayed, through a pointer declarator and
+        // for each of a declaration's later declarators too, with an explicit type still the storage class.
+        {
+            "C23 auto: lvalue conversion, decay, pointer declarators and later declarators",
+            "int g(void);\n"
+            "const char *h(void) {\n"
+            "    const int c = 1;\n"
+            "    int a[3] = { 0 };\n"
+            "    auto x = c;\n"
+            "    auto p = a;\n"
+            "    auto q = g;\n"
+            "    auto s = \"abc\";\n"
+            "    auto *t = &a[0];\n"
+            "    auto **u = &t;\n"
+            "    auto v = 1, w = 2;\n"
+            "    auto *i = &a[0], *j = &a[1];\n"
+            "    static auto k = 3;\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(x), int), \"lvalue conversion\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(p), int *), \"array decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(q), int (*)(void)), \"function decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(s), char *), \"string decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(t), int *), \"pointer declarator\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(u), int **), \"two pointers\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(v), int), \"a later declarator\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(i), int *), \"each declarator's\");\n"
+            "    x = 3;\n"
+            "    p[0] = x + q() + w + (int)k + *t + **u;\n"
+            "    return s;\n"
+            "}\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 auto: file scope, a loop's, a parenthesized declarator and the storage class with a type",
+            "auto g = 1L;\n"
+            "int f(void) {\n"
+            "    int sum = 0;\n"
+            "    for (auto i = 0u; i < 2; i++) sum += (int)i;\n"
+            "    auto (p) = &sum;\n"
+            "    auto int n = 3;\n"
+            "    auto int o;\n"
+            "    o = n;\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(g), long), \"file scope\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(p), int *), \"parentheses\");\n"
+            "    return *p + o;\n"
+            "}\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 auto: without an initializer",
+            "void f(void) {\n"
+            "    auto\n"
+            "        x;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 auto: an initializer list",
+            "void f(void) {\n"
+            "    auto x =\n"
+            "        { 1 };\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 auto: an array",
+            "void f(void) {\n"
+            "    auto a[] =\n"
+            "        { 1, 2 };\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 auto: two declarators of different types",
+            "void f(void) {\n"
+            "    auto x = 1, y = 2.0;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        // C23's constexpr (#793): an initialized object whose value is a constant expression, const-qualified, and
+        // usable where an integer constant expression is required. A pointer's initializer must be null.
+        {
+            "C23 constexpr: objects in constant expressions",
+            "constexpr int n = 2;\n"
+            "struct S { int a; };\n"
+            "int main(void) {\n"
+            "    constexpr int y = 1 + 1;\n"
+            "    constexpr double d = 2.5;\n"
+            "    constexpr int *p = 0;\n"
+            "    constexpr int *q = nullptr;\n"
+            "    constexpr char c = 'x';\n"
+            "    constexpr auto z = 3;\n"
+            "    constexpr struct S s = { 1 };\n"
+            "    int a[y];\n"
+            "    switch (y) { case n: break; default: break; }\n"
+            "    _Static_assert(y == 2, \"an integer constant expression\");\n"
+            "    _Static_assert(n == 2, \"file scope\");\n"
+            "    _Static_assert(z == 3, \"with auto\");\n"
+            "    return (int)sizeof a - 8 + (int)d + (p != 0) + (q != 0) + (c - 'x') + s.a - 1;\n"
+            "}\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: not a constant expression",
+            "void g(int x) {\n"
+            "    constexpr int y =\n"
+            "        x + 1;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: a pointer that isn't null",
+            "int x;\n"
+            "constexpr int *p =\n"
+            "    &x;\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: an integer not exactly representable",
+            "constexpr char c =\n"
+            "    300;\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: a negative value in an unsigned type",
+            "constexpr unsigned u =\n"
+            "    -1;\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: a floating value not exactly representable",
+            "constexpr float f =\n"
+            "    0.1;\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: an aggregate's initializer isn't constant",
+            "struct S { int a; };\n"
+            "int f(void);\n"
+            "int main(void) {\n"
+            "    constexpr struct S s =\n"
+            "        { f() };\n"
+            "    return s.a;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: without an initializer",
+            "void f(void) {\n"
+            "    constexpr int\n"
+            "        x;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: a typedef",
+            "typedef constexpr int\n"
+            "    T;\n",
+            true,
+            false,
+            .standard = 2023
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {
@@ -5407,8 +5596,10 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
+#include "c_check_program_bits_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -5418,6 +5609,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_input_scan_test.c"
 #include "c_check_warning_input_test.c"
 #include "c_check_selection_test.c"
+#include "c_check_program_library_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -5494,7 +5686,9 @@ static int run_checker_tests(int argc, char** argv)
     bool program_vectors = false;
     bool program_amx = false;
     bool program_asm = false;
+    bool program_bits = false;
     bool program_overloads = false;
+    bool program_library = false;
     bool embed_initializers = false;
     bool sizeof_only = false;
     bool options = true;
@@ -5520,6 +5714,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_overloads = true;
         }
+        else if (strcmp(argv[i], "--program-library") == 0)
+        {
+            program_library = true;
+        }
         else if (strcmp(argv[i], "--program-vectors") == 0)
         {
             program_vectors = true;
@@ -5531,6 +5729,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--program-asm") == 0)
         {
             program_asm = true;
+        }
+        else if (strcmp(argv[i], "--program-bits") == 0)
+        {
+            program_bits = true;
         }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
@@ -5551,7 +5753,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-overloads|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5584,6 +5786,10 @@ static int run_checker_tests(int argc, char** argv)
             check_test_program_overloads(&test, clang);
             check_test_data_sources(&test);
         }
+        else if (initialized && program_library)
+        {
+            check_test_library(&test, clang);
+        }
         else if (initialized && program_amx)
         {
             check_test_program_amx(&test, clang);
@@ -5601,6 +5807,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_asm)
         {
             check_test_program_asm(&test, clang);
+        }
+        else if (initialized && program_bits)
+        {
+            check_test_bits(&test, clang);
         }
         else if (initialized)
         {
@@ -5635,6 +5845,7 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&output);
             arena_release(&storage);
             check_test_sources(&test, clang);
+            check_test_typeof_compounds(&test, clang);
             check_test_constraints(&test, clang);
             check_test_initializer_nesting(&test, clang);
             check_test_member_scaling(&test, clang);
@@ -5691,7 +5902,9 @@ static int run_checker_tests(int argc, char** argv)
             check_test_programs(&test, clang);
             check_test_cleanups(&test, clang);
             check_test_musttails(&test, clang);
+            check_test_bits(&test, clang);
             check_test_program_initializers(&test, clang);
+            check_test_library(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);

@@ -3,6 +3,8 @@
 // Original declaration-time expression fixtures, checked by both parser/checker paths and installed Clang.
 // The FILE-sized arithmetic is authored from the target sizes; no system header or external fixture is copied.
 
+static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
+
 static void check_test_constant_parameter_names(CheckTest* test)
 {
     enum { COUNT = 1024 };
@@ -423,6 +425,35 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
         {
             .name = "declaration typeof preserves array",
             .source = "int a[3]; enum { N=sizeof(__typeof__(a)) }; _Static_assert(N==12, \"typeof array\");\n",
+        },
+        {
+            .name = "declaration typeof compound literal immediate queries",
+            .source = "typedef float vf __attribute__((vector_size(16)));\n"
+                      "_Static_assert(__builtin_types_compatible_p(__typeof__((vf){0}), vf), \"vector\");\n"
+                      "struct S { int x; };\n"
+                      "_Static_assert(__builtin_types_compatible_p(typeof((struct S){0}), struct S), \"record\");\n"
+                      "enum { N=sizeof(__typeof__((int[2]){0})) }; _Static_assert(N==2*sizeof(int), \"array\");\n",
+        },
+        {
+            .name = "declaration typeof nested in a compound literal type",
+            .source = "struct S { int x; };\n"
+                      "int f(void) { __typeof__((__typeof__((struct S){0})){1}) s = {2}; return s.x; }\n"
+                      "int g(void) { __typeof__((__typeof__((int){0})){1}) x = 1; return x; }\n",
+        },
+        {
+            .name = "declaration typeof compound literal member query",
+            .source = "struct S { long x; };\n"
+                      "enum { N=sizeof(__typeof__(((struct S){0}).x)) }; _Static_assert(N==sizeof(long), \"compound member\");\n",
+        },
+        {
+            .name = "declaration typeof compound literal function type rejected",
+            .source = "enum { N=sizeof(__typeof__((int(void)){0})) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration typeof compound literal variable array rejected",
+            .source = "int f(int n) { return sizeof(__typeof__((int[n]){0})); }\n",
+            .rejected = true,
         },
         {
             .name = "typeof statement expression effects are unevaluated",
@@ -888,4 +919,12 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     {
         rmdir(directory);
     }
+    check_test_program_source(test,
+        "int tested(int n) { int x=n; int y=__builtin_types_compatible_p(__typeof__((int){++x}), int);"
+        "return x*100 + y*10 + (int)sizeof(__typeof__((int){x+=5})); }",
+        "typeof-compound-immediate-unevaluated-call-and-update", clang);
+    check_test_program_source(test,
+        "struct S { int x; }; int tested(int n) { int x=n;"
+        "__typeof__((__typeof__((struct S){++x})){++x}) s={3}; return x*10 + s.x; }",
+        "typeof-compound-nested-type-unevaluated-record", clang);
 }
