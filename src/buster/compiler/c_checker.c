@@ -1398,9 +1398,9 @@ static void check_graph_store(CheckStream* stream, uint32_t node, const CheckAct
 
 // Whether the vector path completes `node` as a leaf (check_graph_leaf): a VALUE without an overload set, about 45% of
 // sqlite3.c's body nodes.
-static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
+static bool check_graph_is_leaf(const CheckOp* ops, const CheckValue* leaves, const uint32_t* leaf_slots, uint32_t node)
 {
-    return graph->ops[node] == CHECK_OP_VALUE && check_graph_leaf_of(graph, node)->overload_head == 0;
+    return ops[node] == CHECK_OP_VALUE && leaves[leaf_slots[node]].overload_head == 0;
 }
 
 // Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
@@ -1408,16 +1408,16 @@ static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 // invalid type, that type's diagnostic and a zero value (check_action_compute skips the operator then); its diagnostic
 // operand is the run's zero. The vector path writes it in node order, beside its neighbours' records, whose cache lines a
 // separate pass of leaves would write a second time (on sqlite3.c, a sixth of the graph's time).
-static void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+static void check_graph_leaf(const TypeTable* types, const CheckValue* leaf, CheckValue* values, CheckNodeConversions* conversions, CheckDiagnostic* diagnostics, uint32_t* warnings, uint64_t* member_offsets, uint32_t node)
 {
-    const CheckValue* leaf = check_graph_leaf_of(graph, node);
-    const bool valid = type_is_valid(types, leaf->type);
-    stream->values[node] = valid ? *leaf : (CheckValue){ 0 };
-    stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
-    stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
-    stream->warnings[node] = 0;
-    stream->member_offsets[node] = 0;
-    stream->statistics.vector_nodes += 1;
+    const TypeId type = leaf->type;
+    // Type interning in earlier nodes may have grown the table: only the leaf's type is fixed here.
+    const bool valid = type_is_valid(types, type);
+    values[node] = valid ? *leaf : (CheckValue){ 0 };
+    conversions[node] = (CheckNodeConversions){ .operands = { { .type = type } } };
+    diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
+    warnings[node] = 0;
+    member_offsets[node] = 0;
 }
 
 static const CheckBuiltinCall* check_graph_builtin_call(const CheckGraph* graph, uint32_t node)
@@ -2218,13 +2218,22 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
 static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* marks, uint32_t begin, uint32_t end, uint32_t batch_size,
                                uint32_t* levels, uint32_t* counts, uint32_t* order)
 {
+    const CheckOp* const ops = graph->ops;
+    const CheckValue* const leaves = graph->leaves;
+    const uint32_t* const leaf_slots = graph->leaf_slots;
+    CheckValue* const values = stream->values;
+    CheckNodeConversions* const conversions = stream->conversions;
+    CheckDiagnostic* const diagnostics = stream->diagnostics;
+    uint32_t* const warnings = stream->warnings;
+    uint64_t* const member_offsets = stream->member_offsets;
     uint32_t maximum = 0;
     for (uint32_t node = begin; node < end; node += 1)
     {
         // A pure leaf has no overload set (check_graph_pure).
-        if (graph->ops[node] == CHECK_OP_VALUE)
+        if (ops[node] == CHECK_OP_VALUE)
         {
-            check_graph_leaf(types, graph, stream, node);
+            check_graph_leaf(types, leaves + leaf_slots[node], values, conversions, diagnostics, warnings, member_offsets, node);
+            stream->statistics.vector_nodes += 1;
             marks[node] |= BUSTER_CHECK_MARK_DONE;
         }
         uint32_t level = 0;
@@ -2314,11 +2323,20 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
 static void check_graph_region_postorder(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* marks, uint32_t begin, uint32_t end,
                                          uint32_t batch_size)
 {
+    const CheckOp* const ops = graph->ops;
+    const CheckValue* const leaves = graph->leaves;
+    const uint32_t* const leaf_slots = graph->leaf_slots;
+    CheckValue* const values = stream->values;
+    CheckNodeConversions* const conversions = stream->conversions;
+    CheckDiagnostic* const diagnostics = stream->diagnostics;
+    uint32_t* const warnings = stream->warnings;
+    uint64_t* const member_offsets = stream->member_offsets;
     for (uint32_t node = begin; node < end; node += 1)
     {
-        if (graph->ops[node] == CHECK_OP_VALUE)
+        if (ops[node] == CHECK_OP_VALUE)
         {
-            check_graph_leaf(types, graph, stream, node);
+            check_graph_leaf(types, leaves + leaf_slots[node], values, conversions, diagnostics, warnings, member_offsets, node);
+            stream->statistics.vector_nodes += 1;
             marks[node] |= BUSTER_CHECK_MARK_DONE;
         }
     }
@@ -2745,6 +2763,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     };
     const uint32_t count = graph->count;
     const uint32_t batch_size = options->batch_size == 0 ? BUSTER_CHECK_BATCH : options->batch_size;
+    const bool scalar = BUSTER_SCALAR_PATH(options->scalar);
+    const bool level_order = options->level_order;
     bool result = output != scratch && count <= graph->capacity && count <= (1u << 30) && batch_size <= BUSTER_CHECK_BATCH;
     stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
     // The scheduler's marks (BUSTER_CHECK_MARK_PURE and _DONE), with check_graph_validate_vector's absent operand after them.
@@ -2773,7 +2793,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         else
         {
-            result = BUSTER_SCALAR_PATH(options->scalar) ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
+            result = scalar ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
                                        check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
             if (result && recorded)
             {
@@ -2852,19 +2872,30 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
+        // Graph columns are immutable after validation; output columns are fully allocated before the walk.
+        // Cache their bases, not the type table's growing count or the stream's mutable effect/report counts.
+        const CheckOp* const ops = graph->ops;
+        const CheckValue* const leaves = graph->leaves;
+        const uint32_t* const leaf_slots = graph->leaf_slots;
+        CheckValue* const values = stream->values;
+        CheckNodeConversions* const conversions = stream->conversions;
+        CheckDiagnostic* const diagnostics = stream->diagnostics;
+        uint32_t* const warnings = stream->warnings;
+        uint64_t* const member_offsets = stream->member_offsets;
         // In node order: the vector path's impure leaves without their actions, its other impure nodes one at a time, and each
         // run of pure nodes as a region; the scalar path's nodes one at a time.
         uint32_t node = 0;
         while (node < count)
         {
-            if (!BUSTER_SCALAR_PATH(options->scalar) && pure[node] == 0 && check_graph_is_leaf(graph, node))
+            if (!scalar && pure[node] == 0 && check_graph_is_leaf(ops, leaves, leaf_slots, node))
             {
-                check_graph_leaf(types, graph, stream, node);
+                check_graph_leaf(types, leaves + leaf_slots[node], values, conversions, diagnostics, warnings, member_offsets, node);
+                stream->statistics.vector_nodes += 1;
                 node += 1;
             }
-            else if (BUSTER_SCALAR_PATH(options->scalar) || pure[node] == 0)
+            else if (scalar || pure[node] == 0)
             {
-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_scalar_node(types, graph, stream, node, arguments, scratch, scalar);
                 node += 1;
             }
             else
@@ -2874,7 +2905,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 {
                     node += 1;
                 }
-                if (options->level_order)
+                if (level_order)
                 {
                     check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
                 }
@@ -2886,7 +2917,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
-            const uint32_t exhausted = check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));
+            const uint32_t exhausted = check_graph_resource_node(stream, count, scalar);
             if (exhausted != BUSTER_CHECK_NONE)
             {
                 result = false;
@@ -2895,7 +2926,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             }
             if (result && pass == 0)
             {
-                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, BUSTER_SCALAR_PATH(options->scalar));
+                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, scalar);
             }
         }
         if (stream->statistics.scratch_bytes < scratch->length)
@@ -2907,12 +2938,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             if (count != 0)
             {
-                check_graph_warning_contexts(types, graph, stream, pure, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_warning_contexts(types, graph, stream, pure, scalar);
             }
             result = check_graph_const_warnings(types, graph, stream, output);
             if (result)
             {
-                check_graph_reports(types, graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_reports(types, graph, stream, reports, scalar);
             }
         }
     }
