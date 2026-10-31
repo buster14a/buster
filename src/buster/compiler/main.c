@@ -542,7 +542,6 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 #include "buster/compiler/ir_source_test.c"
-#include "buster/compiler/ir_source_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -562,6 +561,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_licm_test.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
+// #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
+#include "buster/compiler/ir_source_benchmark.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
 #include "buster/compiler/ir_metamorphic.c"
 
