@@ -3796,6 +3796,314 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // #148: the atomics clang has past the _n forms, as clang checks them.
+        {
+            "sized legacy atomics, the legacy minimum and maximum, and their result types",
+            "int f(short* s, long* l, int* i, unsigned* u, void* v, _Bool* b)\n{\n    _Static_assert(_Generic(__sync_fetch_and_add_4(s, 1), short: 1, default: 0), \"sized by the object\");\n    _Static_assert(_Generic(__sync_val_compare_and_swap_1(l, 1, 2), long: 1, default: 0), \"val cas\");\n    _Static_assert(_Generic(__sync_bool_compare_and_swap_16(i, 1, 2), _Bool: 1, default: 0), \"bool cas\");\n    _Static_assert(_Generic(__sync_swap(l, 3), long: 1, default: 0), \"swap\");\n    _Static_assert(_Generic(__sync_fetch_and_umax(i, 1), unsigned: 1, default: 0), \"umax\");\n    __sync_lock_release_8(b);\n    return __sync_fetch_and_max(i, 5) + (int)__sync_fetch_and_umin(u, 2) + __sync_fetch_and_min(v, 3) + (int)__sync_swap_2(s, 1);\n}\n",
+            false,
+            false
+        },
+        {
+            "a legacy maximum of a long refused",
+            "long l;\nint f(void) { return __sync_fetch_and_max(&l, 5); }\n",
+            true,
+            false
+        },
+        {
+            "a legacy minimum with a protected variable refused",
+            "int i;\nint f(void) { return __sync_fetch_and_min(&i, 5, i); }\n",
+            true,
+            false
+        },
+        {
+            "wrapping atomics, the byte flag and the lock-free queries",
+            "struct Opaque;\nlong cell;\nenum { E = __atomic_always_lock_free(8, &cell) + __atomic_is_lock_free(2, 0) };\n_Static_assert(!__atomic_always_lock_free(3, 0), \"odd\");\nint f(unsigned char* c, _Bool* b, void* v, struct Opaque* o)\n{\n    _Static_assert(_Generic(__atomic_fetch_uinc(c, 3, __ATOMIC_SEQ_CST), unsigned char: 1, default: 0), \"uinc\");\n    _Static_assert(_Generic(__atomic_test_and_set(v, __ATOMIC_ACQUIRE), _Bool: 1, default: 0), \"tas\");\n    __atomic_clear(o, __ATOMIC_RELEASE);\n    return __atomic_fetch_udec(b, 1, __ATOMIC_RELAXED) + E + __atomic_is_lock_free(16, v);\n}\n",
+            false,
+            false
+        },
+        {
+            // #932's review: a function's pointee is complete and aligned to 4 bytes, and a tag is complete where the query's
+            // constant context reads it, not at the unit's end.
+            "the lock-free queries of a function's pointee and of a tag completed after them",
+            "struct Late;\nint late(struct Late* p) { _Static_assert(!__atomic_always_lock_free(8, p), \"incomplete here\"); return 0; }\n"
+            "struct Late { long x; };\nint early(struct Late* p) { _Static_assert(__atomic_always_lock_free(8, p), \"complete here\"); return 0; }\n"
+            "int function(void (*p)(void))\n{\n    _Static_assert(__atomic_always_lock_free(4, p) && __atomic_is_lock_free(4, p), \"function alignment\");\n"
+            "    _Static_assert(!__atomic_always_lock_free(8, p), \"past it\");\n    return 0;\n}\n",
+            false,
+            false
+        },
+        {
+            "an atomic wrapping increment of a float refused",
+            "float f(float* p) { return __atomic_fetch_uinc(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "the byte flag of a const object refused",
+            "void f(const void* p) { __atomic_clear(p, 5); }\n",
+            true,
+            false
+        },
+        {
+            "generic atomics of records, arrays and long double",
+            "struct S { char c[3]; };\nint f(struct S* s, int (*a)[3], long double* d)\n{\n    struct S r, v = { { 1, 2, 3 } };\n    int x[3], y[3] = { 1, 2, 3 };\n    long double e = 1.0L, n = 2.0L;\n    __atomic_load(s, &r, __ATOMIC_SEQ_CST);\n    __atomic_store(a, &y, __ATOMIC_RELEASE);\n    __atomic_exchange(s, &v, &r, __ATOMIC_ACQ_REL);\n    __atomic_load(a, &x, __ATOMIC_ACQUIRE);\n    return __atomic_compare_exchange(d, &e, &n, 1, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED) + r.c[0] + x[1];\n}\n",
+            false,
+            false
+        },
+        {
+            "a generic atomic load of an _Atomic object refused",
+            "_Atomic int x;\nint f(int* r) { __atomic_load(&x, r, 5); return *r; }\n",
+            true,
+            false
+        },
+        {
+            "a generic atomic store's incompatible value pointer refused",
+            "int x;\nvoid f(long* v) { __atomic_store(&x, v, 5); }\n",
+            true,
+            false
+        },
+        {
+            "scoped, HIP and OpenCL atomics",
+            "_Atomic int a;\nint f(int* p, int* e, int s)\n{\n    __scoped_atomic_thread_fence(__ATOMIC_SEQ_CST, 9);\n    __opencl_atomic_init(&a, 1);\n    return __scoped_atomic_fetch_add(p, 1, __ATOMIC_SEQ_CST, s) + __scoped_atomic_compare_exchange_n(p, e, 2, 0, 5, 5, __MEMORY_SCOPE_DEVICE) +\n           __hip_atomic_load(p, 5, 1) + __hip_atomic_compare_exchange_strong(p, e, 3, 5, 5, 6) + __opencl_atomic_fetch_add(&a, 1, 5, 4);\n}\n",
+            false,
+            false
+        },
+        {
+            "a scoped atomic's invalid scope refused",
+            "int f(int* p) { return __scoped_atomic_load_n(p, 5, 6); }\n",
+            true,
+            false
+        },
+        {
+            "a HIP atomic's invalid scope refused",
+            "int f(int* p) { return __hip_atomic_load(p, 5, 0); }\n",
+            true,
+            false
+        },
+        {
+            "an OpenCL atomic of a plain object refused",
+            "int f(int* p) { return __opencl_atomic_load(p, 5, 2); }\n",
+            true,
+            false
+        },
+        {
+            "a HIP atomic of an _Atomic object refused",
+            "_Atomic int a;\nint f(void) { return __hip_atomic_load(&a, 5, 1); }\n",
+            true,
+            false
+        },
+        // #148: clang's atomic IEEE maximum and minimum, as clang checks them (of floating objects alone, complex ones
+        // too, but not long double's).
+        {
+            "an atomic IEEE maximum of a _Complex float",
+            "_Complex float z; int f(void){ __atomic_fetch_fmaximum(&z, 1.0f, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a _Float16",
+            "_Float16 h; int f(void){ __atomic_fetch_fmaximum(&h, 1.0f, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE minimum of a __bf16",
+            "__bf16 b; int f(void){ __atomic_fetch_fminimum(&b, 1.0f, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum_num of a __float128",
+            "__float128 q; int f(void){ __atomic_fetch_fmaximum_num(&q, 1.0, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a long double refused",
+            "long double l; int f(void){ __atomic_fetch_fmaximum(&l, 1.0, 5); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a double by an int",
+            "double d; int f(void){ return __atomic_fetch_fmaximum(&d, 1, 5); }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum with an argument too many refused",
+            "float x; int f(void){ return __atomic_fetch_fmaximum(&x, 1.0, 5, 6); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a const float refused",
+            "const float x; int f(void){ return __atomic_fetch_fmaximum(&x, 1.0, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE minimum_num with an order past seq_cst",
+            "float x; int f(void){ return __atomic_fetch_fminimum_num(&x, 1.0, 7); }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum of an int refused",
+            "int x; int f(void){ return __atomic_fetch_fmaximum(&x, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE minimum of a pointer refused",
+            "int *p; int f(void){ __atomic_fetch_fminimum(&p, 0, 5); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum_num of a _Bool refused",
+            "_Bool b; int f(void){ return __atomic_fetch_fmaximum_num(&b, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a struct refused",
+            "struct S { float f; } s; int f(void){ __atomic_fetch_fmaximum(&s, s, 5); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a value, not its address, refused",
+            "float x; int f(void){ return __atomic_fetch_fmaximum(x, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a float by an int",
+            "float x; int f(void){ return __atomic_fetch_fmaximum(&x, 1, 5); }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum by a pointer refused",
+            "float x; int f(void){ return __atomic_fetch_fmaximum(&x, &x, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE minimum_num with arguments too few refused",
+            "float x; int f(void){ return __atomic_fetch_fminimum_num(&x); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of an _Atomic float refused",
+            "_Atomic float x; int f(void){ return __atomic_fetch_fmaximum(&x, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE minimum of a volatile double by a float",
+            "volatile double x; double f(void){ return __atomic_fetch_fminimum(&x, 2.0f, 2); }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum with its order known at run time",
+            "float x; int f(int o){ return __atomic_fetch_fmaximum(&x, 1, o); }\n",
+            false,
+            false
+        },
+        {
+            "a scoped atomic IEEE maximum's invalid scope refused",
+            "float x; int f(void){ return __scoped_atomic_fetch_fmaximum(&x, 1, 5, 7); }\n",
+            true,
+            false
+        },
+        {
+            "a scoped atomic IEEE minimum_num without its scope refused",
+            "float x; int f(void){ return __scoped_atomic_fetch_fminimum_num(&x, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic minimum of a long double refused",
+            "long double l; int f(void){ __atomic_fetch_min(&l, 1.0, 5); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of an int by a float refused",
+            "int x; int f(void){ return __atomic_fetch_fmaximum(&x, 1.0f, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a _Complex long double",
+            "_Complex long double z; int f(void){ __atomic_fetch_fmaximum(&z, 1.0, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE minimum_num of a _Complex double",
+            "_Complex double z; int f(void){ __atomic_fetch_fminimum_num(&z, 1.0, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic minimum of a _Complex long double",
+            "_Complex long double z; int f(void){ __atomic_fetch_min(&z, 1.0, 5); return 0; }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum of an over-aligned float",
+            "typedef float __attribute__((aligned(16))) F; F x; int f(void){ return __atomic_fetch_fmaximum(&x, 1, 5); }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE maximum of a vector refused",
+            "typedef float V __attribute__((vector_size(16))); V v; int f(void){ __atomic_fetch_fmaximum(&v, v, 5); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum of an enum refused",
+            "enum E { A } e; int f(void){ return __atomic_fetch_fmaximum(&e, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum with two arguments too many refused",
+            "float x; void f(void){ (void)__atomic_fetch_fmaximum(&x, 1, 5, 6, 7); }\n",
+            true,
+            false
+        },
+        {
+            "a scoped atomic IEEE maximum_num",
+            "float x; int f(void){ return __scoped_atomic_fetch_fmaximum_num(&x, 1, 5, 3); }\n",
+            false,
+            false
+        },
+        {
+            "an atomic IEEE minimum of a const volatile float refused",
+            "const volatile float x; int f(void){ return __atomic_fetch_fminimum(&x, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE minimum by a null pointer refused",
+            "float x; int f(void){ return __atomic_fetch_fminimum(&x, (void*)0, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic IEEE maximum through a void pointer refused",
+            "float x; int f(void){ return __atomic_fetch_fmaximum((void*)&x, 1, 5); }\n",
+            true,
+            false
+        },
         {
             "128-bit operands of the overflow builtins",
             "int f(__int128 a, unsigned __int128 b, long c)\n{\n    __int128 r = 0;\n    unsigned __int128 u = 0;\n    return __builtin_mul_overflow(a, b, &r) + __builtin_add_overflow(c, a, &u) + __builtin_sub_overflow(b, c, &r);\n}\n",

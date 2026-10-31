@@ -61,9 +61,13 @@ static void check_lower_atomic_buffer_value(CheckLowerWriter* writer, const Chec
 static void check_lower_atomic_order(CheckLowerWriter* writer, const CheckLowerAtomic* plan, bool failure)
 {
     const bool init = plan->id == CBUILTIN_C11_ATOMIC_INIT;
-    const uint32_t index = plan->operation == BUSTER_CHECK_ATOMIC_COMPARE ? failure ? 4 : 3
-                           : plan->operation == BUSTER_CHECK_ATOMIC_LOAD  ? 1
-                                                                          : 2;
+    // A generic form's orders come after its result pointer (a load's and an exchange's) and its weak flag (a
+    // compare-exchange's): one argument later than C11's but for a store's.
+    const uint32_t later = plan->by_pointer && plan->operation != BUSTER_CHECK_ATOMIC_STORE;
+    const uint32_t index = (plan->operation == BUSTER_CHECK_ATOMIC_COMPARE ? failure ? 4 : 3
+                            : plan->operation == BUSTER_CHECK_ATOMIC_LOAD  ? 1
+                                                                           : 2) +
+                           later;
     if (!plan->builtin || init || plan->operation == BUSTER_CHECK_ATOMIC_UPDATE)
     {
         check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, init ? 0 : 5);
@@ -429,6 +433,13 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
     {
         const CheckInitPart clear = {.kind = CHECK_INIT_CLEAR, .byte_count = plan->size};
         check_lower_fill(writer, &clear, plan->expected, BUSTER_CHECK_NONE);
+        if (plan->by_pointer)
+        {
+            // A generic compare-exchange's desired value is where its third argument points.
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[2]);
+            check_lower_copy(writer, plan->size, false, false);
+        }
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
         check_lower_copy(writer, type_size(types, plan->value_type), false, false);
@@ -444,6 +455,24 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
         check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
     }
+    else if (plan->by_pointer)
+    {
+        // A generic store's and exchange's value is where their second argument points, and a load's and an exchange's
+        // result goes where their last pointer points, through the plan's buffers; they have no value.
+        if (plan->operation != BUSTER_CHECK_ATOMIC_LOAD)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
+            check_lower_copy(writer, plan->size, false, false);
+        }
+        check_lower_atomic_call(writer, plan, plan->operation);
+        if (plan->operation != BUSTER_CHECK_ATOMIC_STORE)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[plan->operation == BUSTER_CHECK_ATOMIC_LOAD ? 1 : 2]);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->result);
+            check_lower_copy(writer, plan->size, false, false);
+        }
+    }
     else
     {
         check_lower_atomic_call(writer, plan, plan->operation);
@@ -454,6 +483,65 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         else if (!plan->builtin && !plan->discard)
         {
             check_lower_atomic_buffer_value(writer, plan, plan->desired);
+        }
+    }
+}
+
+// A GNU lock-free query that clang doesn't fold (check_builtin_atomic_query, whose constant ones the lowering emits as
+// constants): __atomic_is_lock_free's call of libatomic's __atomic_is_lock_free (size, pointer), its arguments evaluated
+// in order; __atomic_always_lock_free's, of a size that isn't a constant, is refused, as clang's code generation refuses it.
+// A query whose answer is its function's emission's (late_completion) takes the unit end's answer in a function clang
+// defers there (CheckProgram.body_eager), and in one it emits where the unit defines it, the answer once the unit has read
+// its whole definition, at its closing brace (#932's review: a block-scope tag completed later in the same body is
+// complete then); a program no selection made has no body_eager, whose functions are taken as eager. A constant, its
+// arguments never evaluated, or libatomic's query.
+static void check_lower_atomic_query(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t index = check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node);
+    const CheckBuiltinAtomicEffect* effect = index != BUSTER_CHECK_NONE ? stream->atomics + index : NULL;
+    const uint32_t body = (uint32_t)(writer->body - program->bodies);
+    const bool late = effect != NULL && effect->late_completion;
+    const bool deferred = program->body_eager != NULL && body < program->body_count && program->body_eager[body] == 0;
+    int32_t answer = late && deferred ? effect->answers[1] : -1;
+    if (late && !deferred)
+    {
+        // The size and the pointer's type that check_builtin_atomic_query read, after their value conversion (an _Atomic
+        // pointer's lvalue is its pointer's value: #932's review), and no constant: a late query's answers differ by its
+        // pointee's completeness alone, as a constant address answers alike at either cut.
+        const CBuiltinId id = (CBuiltinId)graph->members[node];
+        const CheckValue pointer = { .type = effect->query_pointer, .category = CHECK_RVALUE };
+        const CheckBuiltinAtomicAction cut = {
+            .id = id,
+            .tag_completions = graph->tag_completions,
+            .tag_completion_count = graph->tag_completion_count,
+            .source_position = program->parser->tree.parents[writer->body->opening],
+        };
+        answer = check_builtin_atomic_lock_free(program->types, &cut, id, effect->query_size, &pointer, false);
+    }
+    if (answer >= 0)
+    {
+        const CheckValue constant = { .type = stream->values[node].type, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = (unsigned)answer };
+        check_lower_constant(writer, &constant);
+    }
+    else if ((CBuiltinId)graph->members[node] == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE)
+    {
+        check_lower_unsupported(writer, "__atomic_always_lock_free of a size that isn't a constant, which clang doesn't compile either");
+    }
+    else
+    {
+        const TypeId arguments[2] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG };
+        const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_ATOMIC_IS_LOCK_FREE, BUSTER_TYPE_BOOL, arguments, 2, BUSTER_CHECK_NONE);
+        const uint32_t first = graph->argument_offsets[node];
+        check_lower_convert(writer, BUSTER_TYPE_BOOL, stream->values[node].type);
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, BUSTER_TYPE_BOOL), call);
+        for (uint32_t a = 2; a-- > 0;)
+        {
+            const TypeId converted = stream->argument_conversions[first + a].type;
+            check_lower_convert(writer, converted, BUSTER_TYPE_ULONG);
+            check_lower_operand(writer, node, a + 3, false, converted);
         }
     }
 }
@@ -498,13 +586,16 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         builtin ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node)
                 : BUSTER_CHECK_NONE;
     const CheckBuiltinAtomicEffect* effect = selected != BUSTER_CHECK_NONE ? stream->atomics + selected : NULL;
-    const CBuiltinId id = builtin ? (CBuiltinId)graph->members[node] : CBUILTIN_NONE;
+    // A scoped family's builtin is its base's (check_builtin_atomic_base), its scope its last argument.
+    const CBuiltinId id = builtin ? check_builtin_atomic_base((CBuiltinId)graph->members[node]) : CBUILTIN_NONE;
+    const uint32_t scoped = builtin && check_builtin_atomic_scope((CBuiltinId)graph->members[node]) != CHECK_BUILTIN_ATOMIC_SCOPE_NONE;
     const uint8_t operation = builtin
-                                  ? id == CBUILTIN_C11_ATOMIC_IS_LOCK_FREE                              ? BUSTER_CHECK_ATOMIC_LOCK_FREE
-                                    : id == CBUILTIN_C11_ATOMIC_LOAD                                    ? BUSTER_CHECK_ATOMIC_LOAD
-                                    : id == CBUILTIN_C11_ATOMIC_STORE || id == CBUILTIN_C11_ATOMIC_INIT ? BUSTER_CHECK_ATOMIC_STORE
-                                    : id == CBUILTIN_C11_ATOMIC_EXCHANGE                                ? BUSTER_CHECK_ATOMIC_EXCHANGE
-                                    : id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK
+                                  ? id == CBUILTIN_C11_ATOMIC_IS_LOCK_FREE                                                       ? BUSTER_CHECK_ATOMIC_LOCK_FREE
+                                    : id == CBUILTIN_C11_ATOMIC_LOAD || id == CBUILTIN_ATOMIC_LOAD                               ? BUSTER_CHECK_ATOMIC_LOAD
+                                    : id == CBUILTIN_C11_ATOMIC_STORE || id == CBUILTIN_C11_ATOMIC_INIT || id == CBUILTIN_ATOMIC_STORE ? BUSTER_CHECK_ATOMIC_STORE
+                                    : id == CBUILTIN_C11_ATOMIC_EXCHANGE || id == CBUILTIN_ATOMIC_EXCHANGE                       ? BUSTER_CHECK_ATOMIC_EXCHANGE
+                                    : id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK ||
+                                            id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE
                                         ? BUSTER_CHECK_ATOMIC_COMPARE
                                         : BUSTER_CHECK_ATOMIC_UPDATE
                               : op == CHECK_OP_ASSIGN ? BUSTER_CHECK_ATOMIC_STORE
@@ -525,6 +616,7 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         .id = id,
         .operation = operation,
         .builtin = builtin,
+        .by_pointer = check_builtin_atomic_generic(id),
         .postfix = builtin || op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT,
         .discard = discard,
         .address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64),
@@ -546,12 +638,18 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
     check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_ATOMIC, .node = index});
     if (builtin)
     {
-        const uint32_t count = graph->argument_counts[node];
+        const uint32_t count = graph->argument_counts[node] - scoped;
         const uint32_t first = graph->argument_offsets[node];
+        if (scoped != 0)
+        {
+            check_lower_operand(writer, node, count + 3, false, BUSTER_TYPE_VOID);
+        }
         for (uint32_t a = count; a-- > 0;)
         {
+            // A generic form's values are pointers, which its buffers copy (check_lower_atomic_emit).
             const TypeId converted = stream->argument_conversions[first + a].type;
-            const bool desired = (operation == BUSTER_CHECK_ATOMIC_STORE || operation == BUSTER_CHECK_ATOMIC_EXCHANGE) ? a == 1
+            const bool desired = plan->by_pointer                                                                      ? false
+                                 : (operation == BUSTER_CHECK_ATOMIC_STORE || operation == BUSTER_CHECK_ATOMIC_EXCHANGE) ? a == 1
                                  : operation == BUSTER_CHECK_ATOMIC_COMPARE                                            ? a == 2
                                                                                                                        : false;
             if (desired)
