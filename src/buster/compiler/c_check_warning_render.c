@@ -149,6 +149,12 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
             result = payload->data != 0 ? "initializer partially overrides prior initialization of this subobject" :
                                         "initializer overrides prior initialization of this subobject";
             break;
+        case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
+            result = "typedef requires a name";
+            break;
+        case CHECK_WARNING_EVENT_STANDALONE_SPECIFIER:
+            result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
+            break;
         default: break;
     }
     return result;

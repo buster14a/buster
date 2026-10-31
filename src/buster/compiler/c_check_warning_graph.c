@@ -70,9 +70,9 @@ static void check_warning_graph_null(CheckInputReader* reader, const CheckStream
         {
             const CheckInputVla* bound = reader->output->vlas + vla;
             if (bound->bound_begin <= first && end <= bound->bound_end &&
-                (reader->warning_bound_open == BUSTER_CHECK_NONE || reader->warning_bound_open < bound->scope_begin))
+                (reader->warning_bound_open == BUSTER_CHECK_NONE || reader->warning_bound_open < bound->bound_begin))
             {
-                reader->warning_bound_open = bound->scope_begin;
+                reader->warning_bound_open = bound->bound_begin;
             }
         }
         check_input_null_warning(reader, destination, stream->values + source, first, end, completion);

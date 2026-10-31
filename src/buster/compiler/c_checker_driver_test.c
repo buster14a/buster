@@ -5646,6 +5646,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_const(&test, clang, executable, directory);
         check_test_driver_initializer_warnings(&test, clang, executable, directory);
         check_test_driver_default_warnings(&test, clang, executable, directory);
+        check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);

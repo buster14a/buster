@@ -626,9 +626,9 @@ static bool check_initializers_warning_context(CheckWarningBuffer* events, const
             {
                 const CheckInputVla* bound = input->vlas + vla;
                 if (bound->bound_begin <= event->token && event->token < bound->bound_end &&
-                    (reader.warning_bound_open == BUSTER_CHECK_NONE || reader.warning_bound_open < bound->scope_begin))
+                    (reader.warning_bound_open == BUSTER_CHECK_NONE || reader.warning_bound_open < bound->bound_begin))
                 {
-                    reader.warning_bound_open = bound->scope_begin;
+                    reader.warning_bound_open = bound->bound_begin;
                 }
             }
             event->flags |= check_input_warning_unevaluated(&reader, event->token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;

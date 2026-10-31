@@ -2475,7 +2475,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // bodies deferred (check_input_selected) or the whole unit (check_input).
             const bool input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                          repairing ? repair.original_end : checking->tokens.count,
-                                                         lazy_system_headers && !prefix_only ? lazy.deferred_tokens : 0);
+                                                         lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0);
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             if (input.resource)
             {

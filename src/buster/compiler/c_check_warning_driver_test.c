@@ -59,6 +59,54 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 1,
     },
     {
+        .name = "untagged enum member declares its enumerators",
+        .source = "struct S{enum{E};};union U{enum{A};};struct T{struct{enum{B};};};int main(void){return E+A+B;}\n",
+    },
+    {
+        .name = "anonymous union member declares a member",
+        .source = "struct S{union{int x;};int y;};int main(void){struct S s;s.x=1;return s.x;}\n",
+    },
+    {
+        .name = "named tag member declares nothing",
+        .source = "struct S{struct Named{int x;};};\n",
+        .warnings = 1,
+    },
+    {
+        .name = "typedef without a declarator requires a name",
+        .source = "typedef int;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "typedef of a named record without a declarator requires a name",
+        .source = "typedef struct S{int x;};\n",
+        .warnings = 1,
+    },
+    {
+        .name = "typedef of a named enum without a declarator requires a name",
+        .source = "typedef enum E{A};\n",
+        .warnings = 1,
+    },
+    {
+        .name = "extern on a tag declaration is ignored",
+        .source = "extern struct S;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "static on a tag declaration is ignored",
+        .source = "static union U;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "const on a tag declaration is ignored",
+        .source = "const struct S;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "qualified ordinary declaration declares nothing",
+        .source = "const int;\n",
+        .warnings = 1,
+    },
+    {
         .name = "flexible record member is not last",
         .source = "struct S{int n;int a[];};struct P{struct S s;int after;};\n",
         .warnings = 1,
@@ -70,8 +118,62 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
+        .name = "leading attribute keeps the inline note at the declaration",
+        .source = "__attribute__((unused)) inline int g(void){static int value;return value;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "leading extension keeps the inline note after it",
+        .source = "__extension__ inline int g(void){static int value;return value;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "trailing attribute keeps the inline note at its first declaration",
+        .source = "inline int g(void) __attribute__((unused));\ninline int g(void){static int value;return value;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
         .name = "used internal function has no definition",
         .source = "static int missing(void);int f(void){return missing();}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "evaluated sizeof VLA bound use precedes a later call",
+        .source = "static int m(void);void f(void){int a[sizeof(int[m()])];a[0]=m();(void)a;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "evaluated sizeof VLA bound use is a use alone",
+        .source = "static int m(void);void f(void){int a[sizeof(int[m()])];(void)a;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "evaluated sizeof VLA bound use in an addition",
+        .source = "static int m(void);int f(void){return sizeof(int[m()])+1;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "evaluated alignof VLA bound use",
+        .source = "static int m(void);int f(void){return _Alignof(int[m()]);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "evaluated conditional VLA bound use",
+        .source = "static int m(void);int f(void){return sizeof(int[1?m():2]);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "evaluated comma VLA bound use",
+        .source = "static int m(void);int f(int n){return sizeof(int[(m(),n)]);}\n",
         .warnings = 1,
         .notes = 1,
     },
@@ -310,5 +412,38 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
             }
         }
     }
+    unlink(source);
+}
+
+// -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its
+// translation-unit-final warnings, exactly as a run without the flag does.
+static void check_test_driver_lazy_final_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] = "static int missing(void);int f(void){return missing();}\n";
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/lazy-final-warning.c", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    char* expected = NULL;
+    char* arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", source, NULL };
+    const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
+    const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
+    check_test_expect(test, oracle == 0 && expected != NULL && counts.warnings == 1 && counts.notes == 1,
+                      "a lazy-system-header run without a deferred body has Clang's final warning oracle");
+    for (uint32_t route = 0; written && route < 2; route += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char* run[] = { (char*)(executable != NULL && route != 0 ? executable : "/proc/self/exe"), "-std=gnu17",
+                            "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", "-flazy-system-headers", source,
+                            scalar != 0 ? "--scalar" : NULL, NULL };
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(run, &actual);
+            check_test_expect(test, status == oracle && actual != NULL && expected != NULL && strcmp(actual, expected) == 0,
+                              scalar != 0 ? "lazy-system-headers scalar run publishes the same final warning" :
+                              "lazy-system-headers vector run publishes the same final warning");
+            free(actual);
+        }
+    }
+    free(expected);
     unlink(source);
 }

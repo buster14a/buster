@@ -803,8 +803,14 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             {
                 CheckValue bound = { 0 };
                 int64_t extent = 0;
+                // The bound is an evaluated expression, not a language query's operand. Opening it here reopens a
+                // variably modified sizeof or _Alignof whose operand contains this type name, while a query nested
+                // inside the bound starts after it and stays unevaluated.
+                const uint32_t previous_warning_bound = reader->warning_bound_open;
+                reader->warning_bound_open = i;
                 valid = check_constant_range_value(input, i + 1, close, &bound) && check_input_const_rvalue(reader, close, &bound) &&
                         check_action_is_integer(reader->types, bound.type);
+                reader->warning_bound_open = previous_warning_bound;
                 if (valid && (check_input_integer_attribute(reader, &bound) || (bound.flags & BUSTER_CHECK_ICE) != 0))
                 {
                     valid = check_action_i64(reader->types, &bound, &extent) && extent >= 0;
@@ -3176,7 +3182,17 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             const bool query = kind == PARSE_KIND_SIZEOF;
             const uint32_t open = query ? token + 1 : token;
             const uint32_t close = open < end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN ? parser->tree.parents[open] : BUSTER_CHECK_NONE;
-            const TypeId type = close > open && close < end ? input->queries[close - input->first] : 0;
+            TypeId type = close > open && close < end ? input->queries[close - input->first] : 0;
+            if (query && type == 0 && close > open + 1 && close < input->end && check_constant_raw_type_start(input, open + 1))
+            {
+                // A type-name query read here before its source-order pass: form it now, so that a variably modified
+                // operand's bounds are evaluated rather than taken for a discarded zero-arity operand.
+                type = check_constant_type(input, open + 1, close);
+                if (type != 0)
+                {
+                    input->queries[close - input->first] = type;
+                }
+            }
             if (type != 0)
             {
                 operators[operator_count++] = (CheckConstantOperator)

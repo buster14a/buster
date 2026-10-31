@@ -298,9 +298,9 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
                     {
                         const CheckInputVla* entry = input->vlas + vla;
                         if (entry->bound_begin <= token && token < entry->bound_end &&
-                            (bound == BUSTER_CHECK_NONE || entry->scope_begin > bound))
+                            (bound == BUSTER_CHECK_NONE || entry->bound_begin > bound))
                         {
-                            bound = entry->scope_begin;
+                            bound = entry->bound_begin;
                         }
                     }
                     check_warning_undefined_use(&reader, functions + index, token, bound, order);
