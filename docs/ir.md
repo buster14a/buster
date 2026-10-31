@@ -33,7 +33,8 @@ The explicit-target adapter admits #732's bounded 128/256/512-bit `VECTOR`
 transports and #717's exact i32 arithmetic/bitwise/comparison `X86` rows. The
 [SIMD contract](ir-simd.md) specifies widths, mask expansion, required output
 features and transactional refusal of other forms. Legacy entry points grant
-no target features. `FRAME_ADDRESS` still refuses with `IR_ERROR_OPCODE`.
+no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
+with `IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c` checks actual C
@@ -348,7 +349,7 @@ as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
-refused, as `X86` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
+refused, as #147's `TAIL_CALL` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -375,9 +376,11 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`VECTOR` values are refused with `IR_ERROR_TYPE`, and `X86` rows and
-`FRAME_ADDRESS` with `IR_ERROR_OPCODE`, at their entry, after validation and
-before anything is allocated: no function of the corpora has one. A static
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_OPCODE`, and the
+vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
+for the output target (any, through the old entry points) with
+`IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything
+is allocated: no function of the scalar corpora has one. A static
 assertion pins the typed kinds' count, `X86` the last, so that a new kind fails to
 build until this adapter lowers or refuses it, since the plan and the emitter
 would take an unnamed kind for a binary operation.
@@ -499,8 +502,8 @@ The typed endpoint becomes a void return for a void function and an `undef`
 return for nonvoid fallthrough, whose value the existing stream leaves unspecified.
 The caller must diagnose source-language constraints before lowering. The adapter
 handles the scalar corpus and the explicit-target SIMD subset described above,
-while refusing other `X86` rows and `FRAME_ADDRESS`; it does not invent missing
-volatile or prototype information. In particular,
+while refusing other `X86` rows, `FRAME_ADDRESS` and `TAIL_CALL`; it does not
+invent missing volatile or prototype information. In particular,
 the stream provides argument classes and a variadic bit but no
 named-parameter count: this adapter checks all supplied classes as
 fixed parameters. A source producer must preserve the effective call-site

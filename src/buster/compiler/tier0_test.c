@@ -5774,6 +5774,7 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
+#include "buster/compiler/tier0_tail_test.c"
 
 // The form choice's inc and dec (#181): Tier 0 asks for them where the Zen 5 model's observations of inc and dec at 32 and
 // 64 bits cost no more than add's and sub's with an imm8, as today's do: then a request for add of 1 with CF dead takes
@@ -6057,6 +6058,20 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_aggregate_functions(&tally);
                 tier0_test_report("aggregate functions", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_tail_errors(&tally);
+                tier0_test_report("tail errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_tail_calls(&tally);
+                tier0_test_report("tail calls", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

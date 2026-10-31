@@ -93,27 +93,141 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
     return valid;
 }
 
+// A musttail return statement's record (CheckInput.musttails), in source order.
+static bool check_input_musttail_record(CheckInputReader* reader, CheckInputMusttail musttail)
+{
+    CheckInput* input = reader->output;
+    bool valid = true;
+    if (input->musttail_count == input->musttail_capacity)
+    {
+        const uint32_t capacity = input->musttail_capacity != 0 ? input->musttail_capacity * 2 : 16;
+        CheckInputMusttail* grown = capacity > input->musttail_capacity ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputMusttail, capacity) : NULL;
+        valid = grown != NULL;
+        if (valid && input->musttail_count != 0)
+        {
+            memcpy(grown, input->musttails, (uint64_t)input->musttail_count * sizeof(CheckInputMusttail));
+        }
+        input->musttails = valid ? grown : input->musttails;
+        input->musttail_capacity = valid ? capacity : input->musttail_capacity;
+    }
+    if (valid)
+    {
+        input->musttails[input->musttail_count++] = musttail;
+    }
+    input->resource |= !valid;
+    return valid;
+}
+
+// Whether attributes from `first` to `after` name clang's musttail, by their names alone, without reading them: the one
+// attribute a statement other than a null one or a return has here (check_input_statement_attributes).
+static bool check_input_names_musttail(CheckInputReader* reader, uint32_t first, uint32_t after)
+{
+    const Parser* parser = reader->parser;
+    bool found = false;
+    for (uint32_t token = first; !found && token < after; token += 1)
+    {
+        found = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && check_input_attribute_equal(check_input_attribute_name(reader, parser->tokens.names[token]), "musttail");
+    }
+    return found;
+}
+
+// Whether the token after a block item's attributes starts a declaration, as the parser read it: a specifier's keyword,
+// or a typedef's name (the parser's specifier role), rather than a statement's.
+static bool check_input_declaration_after(const Parser* parser, uint32_t token)
+{
+    const uint8_t kind = parser->tokens.kinds[token];
+    return kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_ATOMIC ||
+           kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_ALIGNAS ||
+           kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_LABEL ||
+           (kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
+}
+
+// A block item's attributes before a statement rather than a declaration, read as the statement's, which check_input's
+// walk then takes no declaration for (their tokens ignored):
+//   - a null statement's: fallthrough's, which its consumer checks, and musttail's, clang's error;
+//   - a return's: musttail's alone (#147), recorded for c_check_musttail.c and check_program, the return's other
+//     attributes refused (clang's error, that they don't apply to a statement);
+//   - another statement's with musttail among them: clang's error.
+// GNU attributes right after a named label are the label's, as clang reads them, which their reading as a
+// declaration's (check_input_declaration) refuses musttail on; C23's there are the statement's.
 static void check_input_statement_attributes(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
-    const uint32_t after = check_input_skip_attributes(parser, first, parser->tokens.count);
-    if (after < parser->tokens.count && parser->tokens.kinds[after] == PARSE_KIND_SEMI)
+    const uint32_t count = parser->tokens.count;
+    const uint32_t after = check_input_skip_attributes(parser, first, count);
+    const uint8_t next = after < count ? parser->tokens.kinds[after] : PARSE_KIND_SEMI;
+    const bool label = first != 0 && parser->tree.roles[first - 1] == PARSE_ROLE_LABEL && parser->tokens.kinds[first] == PARSE_KIND_ATTRIBUTE;
+    const bool returns = after < count && next == PARSE_KIND_RETURN && !label;
+    const bool named = after < count && !returns && !label && check_input_names_musttail(reader, first, after);
+    const bool other = named && next != PARSE_KIND_SEMI && !check_input_declaration_after(parser, after);
+    if (after < count && next == PARSE_KIND_SEMI)
     {
         uint32_t cursor = first;
         CheckInputAttributes* attributes = 0;
-        bool valid = check_input_read_attributes(reader, &cursor, parser->tokens.count, &attributes) && cursor == after &&
-                     attributes != 0 && reader->function_body < parser->tokens.count;
+        reader->statement_attributes = true;
+        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after && attributes != 0 &&
+                     reader->function_body < count;
+        reader->statement_attributes = false;
+        uint32_t musttail = BUSTER_CHECK_NONE;
         for (uint32_t i = 0; valid && i < attributes->count; i += 1)
         {
+            musttail = attributes->records[i].kind == CHECK_ATTRIBUTE_MUSTTAIL ? attributes->records[i].first : BUSTER_CHECK_NONE;
             valid = attributes->records[i].kind == CHECK_ATTRIBUTE_FALLTHROUGH;
         }
         if (valid)
         {
             reader->output->attributes[after] = attributes->count != 0 ? attributes : 0;
         }
+        else if (named)
+        {
+            // musttail's, which no declaration then reads again: clang's error at it, unless its reading reported one.
+            if (musttail != BUSTER_CHECK_NONE)
+            {
+                check_input_report(reader, musttail, CHECK_INPUT_MUSTTAIL_STATEMENT);
+            }
+            for (uint32_t token = first; token < after; token += 1)
+            {
+                reader->ignored[token] = true;
+            }
+        }
         else
         {
             check_input_report(reader, first, CHECK_INPUT_DECLARATION);
+        }
+    }
+    else if (returns || other)
+    {
+        uint32_t cursor = first;
+        CheckInputAttributes* attributes = 0;
+        reader->statement_attributes = true;
+        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after && attributes != 0 &&
+                     reader->function_body < count;
+        reader->statement_attributes = false;
+        uint32_t musttail = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; valid && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            musttail = musttail == BUSTER_CHECK_NONE && attribute->kind == CHECK_ATTRIBUTE_MUSTTAIL ? attribute->first : musttail;
+            valid = attribute->kind == CHECK_ATTRIBUTE_MUSTTAIL;
+            if (!valid)
+            {
+                check_input_report(reader, attribute->first, CHECK_INPUT_UNSUPPORTED);
+            }
+        }
+        if (valid && returns)
+        {
+            const CheckInputMusttail record = { .statement = after, .attributes = first, .name = musttail, .body = reader->function_body };
+            valid = check_input_musttail_record(reader, record);
+            // Its function's own type and its scopes' cleanups, which the check reads, are source order's.
+            check_input_lane_refuse(reader, reader->lane, "a body has a musttail return");
+        }
+        else if (valid)
+        {
+            check_input_report(reader, musttail, CHECK_INPUT_MUSTTAIL_STATEMENT);
+        }
+        for (uint32_t token = first; token < after; token += 1)
+        {
+            reader->ignored[token] = true;
         }
     }
 }

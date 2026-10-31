@@ -101,6 +101,7 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_REGPARM,
     CHECK_ATTRIBUTE_ALIGN_VALUE,
     CHECK_ATTRIBUTE_NO_BUILTIN,
+    CHECK_ATTRIBUTE_MUSTTAIL,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -316,6 +317,9 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "naked", CHECK_ATTRIBUTE_NAKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_stack_protector", CHECK_ATTRIBUTE_NO_STACK_PROTECTOR, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "fallthrough", CHECK_ATTRIBUTE_FALLTHROUGH, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
+    // clang::'s scope.
+    { "musttail", CHECK_ATTRIBUTE_MUSTTAIL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "unsequenced", CHECK_ATTRIBUTE_UNSEQUENCED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "reproducible", CHECK_ATTRIBUTE_REPRODUCIBLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
 };
@@ -846,6 +850,28 @@ static uint8_t check_input_attribute_late_mask(const CheckInputAttributes* attri
     return mask;
 }
 
+// clang's musttail attribute (#147) as its attribute's reading has it, clang's errors at the attribute (its scope's name
+// for clang::musttail): one of arguments, which it takes none of, and one of its place anywhere but a statement's
+// attributes (CheckInputReader.statement_attributes), a declaration's (a label's among them). Its statement is a return's,
+// or another's (check_input_statement_attributes). Whether it is valid; an error reported is the attributes' (no second
+// one for them).
+static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const bool arguments = attribute->argument_end > attribute->argument_first;
+    const bool valid = !arguments && reader->statement_attributes;
+    if (!valid)
+    {
+        check_input_report(reader, attribute->first, arguments ? CHECK_INPUT_MUSTTAIL_ARGUMENTS : CHECK_INPUT_MUSTTAIL_DECLARATION);
+        if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+        {
+            attributes->error = arguments ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : CHECK_ATTRIBUTE_ERROR_SUBJECT;
+            attributes->error_first = attribute->first;
+            attributes->error_end = attribute->end;
+        }
+    }
+    return valid;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;
@@ -854,10 +880,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     bool valid = i < end && parser->tokens.names[i] != 0;
     bool namespace_known = true;
     bool scoped = false;
+    bool clang_scope = false;
     if (valid && standard && i + 2 < end && parser->tokens.kinds[i + 1] == PARSE_KIND_COLON && parser->tokens.kinds[i + 2] == PARSE_KIND_COLON)
     {
         const String8 scope = check_input_attribute_name(reader, parser->tokens.names[i]);
-        namespace_known = check_input_attribute_equal(scope, "gnu") || check_input_attribute_equal(scope, "clang");
+        clang_scope = check_input_attribute_equal(scope, "clang");
+        namespace_known = check_input_attribute_equal(scope, "gnu") || clang_scope;
         scoped = true;
         i += 3;
         attribute.name_token = i;
@@ -883,6 +911,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                                        check_input_attribute_equal(name, "unsequenced") || check_input_attribute_equal(name, "reproducible");
             rule = standard_name ? rule : 0;
         }
+        // musttail is clang's own: GNU's spelling and clang::'s, but no gnu::musttail, which clang ignores as an unknown
+        // attribute and this refuses as one.
+        rule = rule != 0 && rule->kind == CHECK_ATTRIBUTE_MUSTTAIL && scoped && !clang_scope ? 0 : rule;
         attribute.argument_first = i;
         attribute.argument_end = i;
         if (i < end && parser->tokens.kinds[i] == PARSE_KIND_L_PAREN)
@@ -905,7 +936,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             reader->late_attributes |= late_kind;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
-            valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
+            if (rule->kind == CHECK_ATTRIBUTE_MUSTTAIL)
+            {
+                valid = check_input_attribute_musttail(reader, attributes, &attribute);
+            }
+            else
+            {
+                valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
+            }
         }
         else if (valid)
         {

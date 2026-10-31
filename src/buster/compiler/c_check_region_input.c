@@ -169,6 +169,26 @@ static uint32_t check_region_input_keyword(const CheckRegionInput* writer, uint3
     return keyword;
 }
 
+// A terminator's child `child` when it is the closer of a chain of attribute specifiers over a return, a musttail
+// return's (#147, check_input_statement_attributes): each closer's last child after it is the next closer, or the
+// return, which is then a return as any other here. BUSTER_CHECK_NONE for any other child.
+static uint32_t check_region_input_attributed(const CheckRegionInput* writer, uint32_t child)
+{
+    const CheckInputReader* reader = writer->reader;
+    const Parser* parser = reader->parser;
+    uint32_t at = child;
+    for (uint32_t steps = 0; at != BUSTER_CHECK_NONE && steps < parser->tokens.count && parser->tree.roles[at] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER; steps += 1)
+    {
+        uint32_t next = BUSTER_CHECK_NONE;
+        for (uint32_t inner = reader->first_child[at]; inner != BUSTER_CHECK_NONE; inner = reader->next_child[inner])
+        {
+            next = inner > at ? inner : next;
+        }
+        at = next;
+    }
+    return at != child && at != BUSTER_CHECK_NONE && parser->tree.roles[at] == PARSE_ROLE_RETURN && parser->tokens.kinds[at] == PARSE_KIND_RETURN ? at : BUSTER_CHECK_NONE;
+}
+
 // Discover case labels with the same statement traversal used below. Arrays indexed by source position are
 // only read for visited switches/cases, and are initialized at those visits; nested expression spans are not scanned.
 static void check_region_input_cases(CheckRegionInput* writer)
@@ -374,7 +394,9 @@ static void check_region_input_expand(CheckRegionInput* writer, CheckRegionInput
         for (uint32_t child = reader->first_child[token]; child != none; child = reader->next_child[child])
         {
             const uint8_t child_role = parser->tree.roles[child];
-            jump = child_role == PARSE_ROLE_RETURN ? child : jump;
+            // A musttail return's attributes' closers are its parents (check_region_input_attributed).
+            const uint32_t attributed = child_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? check_region_input_attributed(writer, child) : none;
+            jump = attributed != none ? attributed : child_role == PARSE_ROLE_RETURN ? child : jump;
             body = child_role == PARSE_ROLE_DO ? child : body;
             condition = child_role == PARSE_ROLE_CLOSE_CONDITION ? child : condition;
             writer->unsupported |= child_role == PARSE_ROLE_CLOSE_ASM;

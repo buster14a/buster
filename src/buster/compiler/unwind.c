@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Native fixed-frame unwind descriptions (#88). The producer proves an ordered subset of six pushes, an optional
-// fixed allocation, its matching release and reverse pops, and supplies their instruction-end PCs after branch sizing.
+// fixed allocation, its matching release and reverse pops (and the same release and pops before each tail call's jump,
+// #147), and supplies their instruction-end PCs after branch sizing.
 // A function with a frame pointer (UnwindFunction.pointer, #395) pushes rbp and points it at the push first, then an
 // ordered subset of the other five, and its frame and anything its body allocates are below them, so its CFA is rbp's
 // until its last pop, rbp's, whatever rsp does. unwind_write consumes that trusted description; unwind_check is the
@@ -22,7 +23,8 @@
 // ULEBs and shape indices in lanes, then expands original templates of FDEs with byte permutations. Fourteen PC
 // deltas, the function range, the CIE pointer and five CFA bytes are the only holes; the CIE is the same bytes for
 // every function (unwind_cie). A function with a frame pointer, the rare shape (a C function that allocates on the
-// stack as it runs), the vector path leaves to the exact writer, lane by lane. Neither inputs nor outputs need
+// stack as it runs), and one with tail calls (#147's musttail), rarer, the vector path leaves to the exact writer, lane by
+// lane. Neither inputs nor outputs need
 // padding; masked tails touch only their slices. Input, byte output and location output must be disjoint. Output
 // sizes and every representability limit are checked before stores. CAPACITY publishes the required size but
 // preserves bytes/locations; other errors preserve the output descriptor too. Empty batches need no byte or location
@@ -49,6 +51,14 @@
 // frame pointer: each push of `saved`'s registers, the allocation, its release and each pop, the allocation's two
 // events only when frame_size isn't 0 (2n + 2 or 2n events). With one (`pointer`, saved without RBP's bit and frame_size
 // 0, which no transition moves): rbp's push, its mov from rsp, each other push, each pop and rbp's pop (2n + 3).
+//
+// Its tail calls (#147's musttail), `tail_count` of them, 0 for none: each one's teardown, the epilogue's release and
+// pops (with a frame pointer, rbp's last) before a jump to its callee rather than the ret, somewhere in its body, after
+// which the body's frame holds again. `tails` has, for each in order, the instruction-end PCs of its teardown's
+// transitions as the epilogue's are (without a frame pointer the release, when frame_size isn't 0, and each pop; with
+// one each pop and rbp's) and of its jump: unwind_tail_events of them each, all after the prologue's last transition
+// and before the epilogue's first (or the size). Their CFI remembers the body's rules before the teardown and restores
+// them after the jump (DW_CFA_remember_state and DW_CFA_restore_state); the exact writer writes such a function's FDE.
 typedef struct UnwindFunction UnwindFunction;
 struct UnwindFunction
 {
@@ -59,6 +69,8 @@ struct UnwindFunction
     uint8_t event_count;
     uint8_t pointer;
     uint8_t reserved;
+    uint32_t tail_count;
+    const uint32_t* tails;
 };
 
 typedef enum UnwindError
@@ -89,8 +101,24 @@ static __attribute__((unused)) bool unwind_initialize(void);
 static __attribute__((unused)) UnwindError unwind_check(const UnwindFunction* functions, uint32_t count);
 static __attribute__((unused)) UnwindError unwind_write(const UnwindFunction* functions, uint32_t count, UnwindOutput* output, bool exact);
 
+// How many of a function's transitions its prologue makes (its pushes, and the allocation or rbp's push and mov): its
+// offsets' first, before its tail calls' and its epilogue's.
+static uint32_t unwind_prologue_events(const UnwindFunction* function)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
+    return function->pointer != 0 ? 2 + pushes : pushes + (function->frame_size != 0 ? 1 : 0);
+}
+
+// The events of each of a function's tail calls (UnwindFunction.tails): its epilogue's transitions, and its jump's end.
+static uint32_t unwind_tail_events(const UnwindFunction* function)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
+    return (function->pointer != 0 ? pushes + 1 : pushes + (function->frame_size != 0 ? 1 : 0)) + 1;
+}
+
 // The checker is intentionally outside the trusted writer's hot path. Function ranges use signed four-byte FDE
 // fields, and this producer's positive stack allocation is a signed immediate. Each transition precedes the final RET.
+// A tail call's events are distinct PCs within the function, so that there are fewer tail calls than bytes.
 static UnwindError unwind_check(const UnwindFunction* functions, uint32_t count)
 {
     UnwindError result = count != 0 && functions == 0 ? UNWIND_ERROR_INVALID : UNWIND_OK;
@@ -101,7 +129,8 @@ static UnwindError unwind_check(const UnwindFunction* functions, uint32_t count)
         const uint32_t events = function->pointer != 0 ? 2 * pushes + 3 : 2 * pushes + 2 * (function->frame_size != 0);
         // With a frame pointer, rbp is its push and the allocation moves no CFA: RBP's bit (1) and frame_size are 0.
         const bool pointer_valid = function->pointer == 0 || (function->pointer == 1 && (function->saved & 2) == 0 && function->frame_size == 0);
-        if (function->size == 0 || function->saved >= 64 || function->reserved != 0 || function->event_count != events || !pointer_valid)
+        const bool tails_valid = function->tail_count == 0 ? function->tails == 0 : function->tails != 0 && function->tail_count < function->size;
+        if (function->size == 0 || function->saved >= 64 || function->reserved != 0 || function->event_count != events || !pointer_valid || !tails_valid)
         {
             result = UNWIND_ERROR_INVALID;
         }
@@ -122,6 +151,17 @@ static UnwindError unwind_check(const UnwindFunction* functions, uint32_t count)
             {
                 result = UNWIND_ERROR_INVALID;
             }
+        }
+        // The tail calls' events, in order, between the prologue's last and the epilogue's first.
+        const uint32_t prologue = unwind_prologue_events(function);
+        const uint64_t tail_events = result == UNWIND_OK ? (uint64_t)function->tail_count * unwind_tail_events(function) : 0;
+        const uint32_t bound = events > prologue ? function->offsets[prologue] : function->size;
+        previous = prologue != 0 ? function->offsets[prologue - 1] : 0;
+        for (uint64_t event = 0; result == UNWIND_OK && event < tail_events; event += 1)
+        {
+            const uint32_t offset = function->tails[event];
+            result = offset > previous && offset < bound ? UNWIND_OK : UNWIND_ERROR_INVALID;
+            previous = offset;
         }
     }
     return result;
@@ -165,13 +205,16 @@ static uint32_t unwind_uleb_size(uint32_t value)
 }
 
 // A function's FDE's bytes as the exact writer writes them: its header and its transitions, to a multiple of 8; its
-// pair's are BUSTER_UNWIND_CIE_BYTES more. The batch writer works the same sizes out in lanes (unwind_batch).
-static uint32_t unwind_fde_bytes(const UnwindFunction* function)
+// pair's are BUSTER_UNWIND_CIE_BYTES more. The batch writer works the same sizes out in lanes (unwind_batch), but for a
+// function with tail calls, each of which adds its remembered state, its teardown's transitions as the epilogue's and its
+// jump's restored state (unwind_tails_scalar).
+static uint64_t unwind_fde_bytes(const UnwindFunction* function)
 {
     const uint32_t saved = (uint32_t)__builtin_popcount(function->saved);
     const uint32_t cfa = 8 + 8 * saved + function->frame_size;
-    const uint32_t bytes = function->pointer != 0 ? 42 + 13 * saved : 17 + 17 * saved + (function->frame_size != 0 ? 13 + unwind_uleb_size(cfa) : 0);
-    return (bytes + 7) & ~7u;
+    const uint64_t bytes = function->pointer != 0 ? 42 + 13 * saved : 17 + 17 * saved + (function->frame_size != 0 ? 13 + unwind_uleb_size(cfa) : 0);
+    const uint64_t tail = function->pointer != 0 ? 16 + 6 * saved : 7 + 8 * saved + (function->frame_size != 0 ? 7 : 0);
+    return (bytes + tail * function->tail_count + 7) & ~UINT64_C(7);
 }
 
 static void unwind_advance(UnwindWriter* writer, uint32_t offset, uint32_t* previous)
@@ -209,6 +252,55 @@ static void unwind_cie_scalar(UnwindWriter* writer)
     while (writer->size < begin + BUSTER_UNWIND_CIE_BYTES)
     {
         unwind_integer(writer, 0, 1); // DW_CFA_nop
+    }
+}
+
+// A function's tail calls' CFI (UnwindFunction.tails), between its prologue's and its epilogue's: for each, the body's
+// rules remembered, its teardown's transitions as the epilogue's (the CFA back to rsp + 8, each register restored by
+// its pop), and after its jump the body's rules again, which hold from there on.
+static void unwind_tails_scalar(UnwindWriter* writer, const UnwindFunction* function, uint32_t* previous)
+{
+    const uint32_t per = unwind_tail_events(function);
+    const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
+    for (uint32_t tail = 0; tail < function->tail_count; tail += 1)
+    {
+        const uint32_t* events = function->tails + (uint64_t)tail * per;
+        uint32_t event = 0;
+        unwind_integer(writer, 0x0a, 1); // DW_CFA_remember_state
+        uint32_t cfa = 8 + 8 * pushes;
+        if (function->pointer == 0 && function->frame_size != 0)
+        {
+            unwind_advance(writer, events[event], previous);
+            event += 1;
+            unwind_integer(writer, 0x0e, 1); // DW_CFA_def_cfa_offset
+            unwind_uleb(writer, cfa);
+        }
+        for (uint32_t reg = BUSTER_UNWIND_SAVED; reg > 0; reg -= 1)
+        {
+            if ((function->saved & (1u << (reg - 1))) != 0)
+            {
+                unwind_advance(writer, events[event], previous);
+                event += 1;
+                if (function->pointer == 0)
+                {
+                    cfa -= 8;
+                    unwind_integer(writer, 0x0e, 1);
+                    unwind_uleb(writer, cfa);
+                }
+                unwind_integer(writer, 0xc0 | unwind_registers[reg - 1], 1); // DW_CFA_restore
+            }
+        }
+        if (function->pointer != 0)
+        {
+            unwind_advance(writer, events[event], previous);
+            event += 1;
+            unwind_integer(writer, 0x0c, 1); // DW_CFA_def_cfa rsp, 8
+            unwind_uleb(writer, 7);
+            unwind_uleb(writer, 8);
+            unwind_integer(writer, 0xc0 | unwind_registers[1], 1);
+        }
+        unwind_advance(writer, events[event], previous);
+        unwind_integer(writer, 0x0b, 1); // DW_CFA_restore_state
     }
 }
 
@@ -250,6 +342,7 @@ static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* functi
                 unwind_uleb(writer, slot);
             }
         }
+        unwind_tails_scalar(writer, function, &previous);
         for (uint32_t reg = BUSTER_UNWIND_SAVED; reg > 0; reg -= 1)
         {
             if ((function->saved & (1u << (reg - 1))) != 0)
@@ -285,6 +378,13 @@ static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* functi
         event += 1;
         unwind_integer(writer, 0x0e, 1);
         unwind_uleb(writer, cfa + function->frame_size);
+    }
+    if (function->pointer == 0)
+    {
+        unwind_tails_scalar(writer, function, &previous);
+    }
+    if (function->pointer == 0 && function->frame_size != 0)
+    {
         unwind_advance(writer, function->offsets[event], &previous);
         event += 1;
         unwind_integer(writer, 0x0e, 1);
@@ -450,7 +550,7 @@ struct UnwindBatch
     // Each FDE's bytes, and all of them.
     uint32_t sizes[BUSTER_UNWIND_BATCH];
     uint64_t lebs[BUSTER_UNWIND_BATCH];
-    uint32_t bytes;
+    uint64_t bytes;
     bool limited;
 };
 
@@ -461,9 +561,11 @@ static UnwindBatch unwind_batch(const UnwindFunction* functions, uint32_t count)
     const uint32_t stride = sizeof(UnwindFunction);
     const __m256i positions = _mm256_setr_epi32(0, stride, 2 * stride, 3 * stride, 4 * stride, 5 * stride, 6 * stride, 7 * stride);
     const __m512i heads = _mm512_mask_i32gather_epi64(zero, lanes, positions, functions, 1);
-    const __m512i metadata_positions = _mm512_add_epi32(_mm512_castsi256_si512(positions), _mm512_set1_epi32(offsetof(UnwindFunction, saved)));
-    const __m512i metadata = _mm512_mask_i32gather_epi32(zero, lanes, metadata_positions, functions, 1);
-    const __m512i saved = _mm512_and_si512(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(metadata)), _mm512_set1_epi64(63));
+    // Each function's saved, event_count, pointer and reserved bytes, and its tail_count above them.
+    _Static_assert(offsetof(UnwindFunction, tail_count) == offsetof(UnwindFunction, saved) + 4, "the metadata's 8 bytes");
+    const __m256i metadata_positions = _mm256_add_epi32(positions, _mm256_set1_epi32(offsetof(UnwindFunction, saved)));
+    const __m512i metadata = _mm512_mask_i32gather_epi64(zero, lanes, metadata_positions, functions, 1);
+    const __m512i saved = _mm512_and_si512(metadata, _mm512_set1_epi64(63));
     const __m512i frame = _mm512_srli_epi64(heads, 32);
     const __m512i range = _mm512_and_si512(heads, _mm512_set1_epi64(UINT32_MAX));
     const __m512i cfa = _mm512_add_epi64(frame, _mm512_add_epi64(_mm512_set1_epi64(8), _mm512_slli_epi64(_mm512_popcnt_epi64(saved), 3)));
@@ -474,14 +576,18 @@ static UnwindBatch unwind_batch(const UnwindFunction* functions, uint32_t count)
     }
     width = _mm512_maskz_mov_epi64(_mm512_cmpneq_epi64_mask(frame, zero), width);
     const __m512i shapes = _mm512_add_epi64(_mm512_mullo_epi64(saved, _mm512_set1_epi64(BUSTER_UNWIND_SHAPE_WIDTHS)), width);
-    // A function with a frame pointer: the exact writer's FDE, 42 + 13n bytes to a multiple of 8 (unwind_fde_bytes).
-    const __m512i flags = _mm512_and_si512(_mm512_srli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(metadata)), 16), _mm512_set1_epi64(0xff));
+    // A function with a frame pointer: the exact writer's FDE, 42 + 13n bytes to a multiple of 8 (unwind_fde_bytes). One
+    // with tail calls (#147) is the exact writer's too, its size the scalar pass's below.
+    const __m512i flags = _mm512_and_si512(_mm512_srli_epi64(metadata, 16), _mm512_set1_epi64(0xff));
     const __mmask8 pointers = _mm512_mask_cmpneq_epi64_mask(lanes, flags, zero);
+    const __mmask8 tails = _mm512_mask_cmpneq_epi64_mask(lanes, _mm512_srli_epi64(metadata, 32), zero);
+    const __mmask8 exact = pointers | tails;
     const __m512i pointer_bytes = _mm512_and_si512(_mm512_add_epi64(_mm512_mullo_epi64(_mm512_popcnt_epi64(saved), _mm512_set1_epi64(13)), _mm512_set1_epi64(42 + 7)),
                                                    _mm512_set1_epi64(~7ll));
-    const __m256i shape_indices = _mm256_mask_mov_epi32(_mm512_cvtepi64_epi32(shapes), pointers, _mm256_set1_epi32(BUSTER_UNWIND_SHAPE_POINTER));
-    const __m512i sizes = _mm512_mask_mov_epi32(_mm512_mask_i32gather_epi32(zero, lanes & ~pointers, _mm512_castsi256_si512(shape_indices), unwind_sizes, 4),
-                                                pointers, _mm512_castsi256_si512(_mm512_cvtepi64_epi32(pointer_bytes)));
+    const __m256i shape_indices = _mm256_mask_mov_epi32(_mm512_cvtepi64_epi32(shapes), exact, _mm256_set1_epi32(BUSTER_UNWIND_SHAPE_POINTER));
+    const __m512i sizes = _mm512_maskz_mov_epi32((__mmask16)(lanes & ~tails),
+                                                 _mm512_mask_mov_epi32(_mm512_mask_i32gather_epi32(zero, lanes & ~exact, _mm512_castsi256_si512(shape_indices), unwind_sizes, 4),
+                                                                       pointers, _mm512_castsi256_si512(_mm512_cvtepi64_epi32(pointer_bytes))));
     const __m512i byte_positions = _mm512_set1_epi64(0x0706050403020100ull);
     const __m512i widths = _mm512_mullo_epi64(width, _mm512_set1_epi64(0x0101010101010101ull));
     const __mmask64 continuation = _mm512_cmplt_epu8_mask(_mm512_add_epi8(byte_positions, _mm512_set1_epi8(1)), widths);
@@ -494,6 +600,17 @@ static UnwindBatch unwind_batch(const UnwindFunction* functions, uint32_t count)
     batch.bytes = (uint32_t)_mm512_reduce_add_epi32(sizes);
     batch.limited = ((_mm512_cmpgt_epu64_mask(range, _mm512_set1_epi64(INT32_MAX)) |
                       _mm512_cmpgt_epu64_mask(frame, _mm512_set1_epi64(INT32_MAX))) & lanes) != 0;
+    // The tail calls' functions, rare: each one's FDE's bytes, counted as the exact writer writes them, in a scalar pass.
+    for (uint32_t lane = 0; tails != 0 && lane < count; lane += 1)
+    {
+        if ((tails >> lane & 1) != 0)
+        {
+            const uint64_t bytes = unwind_fde_bytes(functions + lane);
+            batch.sizes[lane] = bytes <= UINT32_MAX ? (uint32_t)bytes : 0;
+            batch.limited |= bytes > UINT32_MAX;
+            batch.bytes += bytes;
+        }
+    }
     return batch;
 }
 

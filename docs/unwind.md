@@ -84,6 +84,30 @@ take in lanes. It refuses a frame its records aren't (`UNSUPPORTED`), invalid
 inputs (`INVALID`) and sizes past the format's (`LIMIT`), each leaving the
 descriptor alone.
 
+### Tail calls (#147)
+
+A function with tail calls (clang's `musttail`, the Tier 0 guide's "Tail calls")
+releases its frame before each tail call's jump as its epilogue does before its
+ret, somewhere in its body, after which the body's frame holds again.
+`UnwindFunction.tails` gives, for each of its `tail_count` tail calls in order,
+the instruction-end PCs of its teardown's transitions (without a frame pointer
+the release, when `frame_size` isn't 0, and each pop; with one each pop and
+rbp's) and of its jump: `unwind_tail_events` of them each, all after the
+prologue's last transition and before the epilogue's first, which
+`unwind_check` checks. Their CFI remembers the body's rules before the teardown
+(`DW_CFA_remember_state`), follows the teardown as the epilogue's does, and
+restores the rules after the jump (`DW_CFA_restore_state`), where the body's
+code goes on. The vector writer leaves a function with tail calls to the exact
+writer, lane by lane, as it leaves a frame pointer's: tail calls are rarer.
+
+`unwind_tier0_frame_tails` reads them from Tier 0's published frame and its
+`Tier0Code.tail_records`: each teardown's records are checked as the epilogue's
+are, and each jump must be a direct `jmp` or one through r11. Their ends go into
+a column of `unwind_tier0_tail_room`'s room, which the C driver's emission takes
+from the lane's scratch for a function with tail calls. Without that column,
+such a function is `UNWIND_ERROR_INVALID`; `unwind_tier0_frame` is the reader of
+a function without tail calls.
+
 ## Format and linker handoff
 
 Every function gets an original eight-byte-aligned CIE/FDE pair. The CIE uses
