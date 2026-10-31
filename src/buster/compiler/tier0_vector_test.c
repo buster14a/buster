@@ -1268,6 +1268,17 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                                   branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "vectors", "%s: an invalid record or an invalid branch column", name);
+    if (ready && function->vector_bytes != 0)
+    {
+        const X86Target target = { .features = function->vector_bytes == 32 ? BUSTER_X86_FEATURE(AVX) : 0 };
+        uint8_t* allowed_forms = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, X86_FORM_COUNT);
+        if (allowed_forms != NULL)
+        {
+            x86_target_forms_scalar(&target, allowed_forms);
+        }
+        ready = tier0_test_expect(tally, allowed_forms != NULL && x86_target_validate(allowed_forms, scalar.records, scalar.count) == scalar.count,
+                                  "vectors", "%s: target-illegal emitted instruction", name);
+    }
     ready = ready && tier0_test_covered(tally, "vectors", name, &scalar);
     uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
     const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
@@ -1287,7 +1298,8 @@ static bool tier0_test_vector_check(Tier0TestTally* tally, const char* name, con
 {
     uint8_t* visited = calloc(1, (size_t)function->count + 1);
     memset(shared->out, 0xa5, sizeof(shared->out));
-    const bool native = tier0_test_vector_can_run();
+    const bool native = function->vector_bytes == 0 ? tier0_test_vector_can_run() :
+                        function->vector_bytes == 16 || (x86_target_native().features & BUSTER_X86_FEATURE(AVX)) != 0;
     const bool ran = !native || tier0_test_expect(tally, tier0_test_vector_native(image, length, tier0_test_vector_run_body, shared), "vectors", "%s: the native run failed", name);
     uint8_t expected[sizeof(shared->out)] __attribute__((aligned(64)));
     memset(expected, 0xa5, sizeof(expected));
@@ -2528,6 +2540,8 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
 // ---------------------------------------------------------------------------------------------------------------------
 // The check
 
+#include "tier0_vector_baseline_test.inc"
+
 // The vectors check: the rules, the placements, the aggregates, then `count` random programs.
 static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, uint32_t* too_deep, uint64_t* entries)
 {
@@ -2545,6 +2559,7 @@ static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint6
         {
             printf("  vectors: native wide-vector ABI calls skipped (scalar host build); other native runs execute\n");
         }
+        tier0_test_vector_baselines(tally, shared, seed);
         tier0_test_vector_rules(tally);
         tier0_test_vector_placement(tally, seed, shared);
         tier0_test_vector_aggregates(tally, &abi, shared, seed);
