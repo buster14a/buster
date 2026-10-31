@@ -39,7 +39,7 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
         effects |= op == CHECK_OP_STATEMENT_VALUE && (graph->members[node] & BUSTER_CHECK_SIDE_EFFECT) != 0;
         effects |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP ||
                    builtin == CBUILTIN_PREFETCH || builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET ||
-                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA);
+                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA || cbuiltin_carry(builtin));
         effects |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
                                                      builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
         const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||

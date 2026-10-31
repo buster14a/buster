@@ -1495,12 +1495,28 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .board = run->board,
             .board_lane = (uint32_t)(lane - run->lanes),
             .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
+            .tier1 = command->tier1,
+            .tier1_refusals = command->tier1_refusals,
         };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
                                          &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true);
         arena_small_floor = 0;
+        // The unit's --tier1 outcomes into the command's report, which the other lanes' units add to too.
+        for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_STAGE_COUNT; k += 1)
+        {
+            __atomic_fetch_add(&command->tier1_report->stages[k], lane->functions.tier1_report.stages[k], __ATOMIC_RELAXED);
+        }
+        for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < BUSTER_CHECK_TIER1_OPERATIONS; k += 1)
+        {
+            __atomic_fetch_add(&command->tier1_report->operations[k], lane->functions.tier1_report.operations[k], __ATOMIC_RELAXED);
+            __atomic_fetch_add(&command->tier1_report->emission[k], lane->functions.tier1_report.emission[k], __ATOMIC_RELAXED);
+        }
+        if (command->tier1 && command->tier1_report != NULL)
+        {
+            __atomic_fetch_add(&command->tier1_report->functions, lane->functions.tier1_report.functions, __ATOMIC_RELAXED);
+        }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
         for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arenas); a += 1)

@@ -488,6 +488,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_atomic_test.c"
 #include "buster/compiler/c_check_builtin_atomic_rmw_test.c"
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
+#include "buster/compiler/c_check_builtin_bits_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
 #pragma clang optimize off
@@ -580,6 +581,10 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
 #include "buster/compiler/tier1_pipeline_benchmark.c"
+// The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
+#pragma clang section text = ".text.buster_checker"
+#include "buster/compiler/c_check_tier1.c"
+#pragma clang section text = ""
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
@@ -1209,6 +1214,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-typed-overflow") == 0)
     {
         result = run_check_builtin_typed_overflow_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-bits") == 0)
+    {
+        result = run_check_builtin_bits_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-rounds") == 0)
     {
