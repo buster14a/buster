@@ -23,6 +23,13 @@ struct CheckCorpusPath
     Arena index_arena;
     Arena input_arena;
     Arena output_arena;
+    // Sparse initializer warning facts, apart from the plan's output and the walk's scratch, whose suffixes roll back.
+    Arena warning_arena;
+    CheckWarningBuffer warning_events;
+    CheckWarningSet warning_keys;
+    // The translation-unit-final undefined-internal facts, after initializer uses are appended.
+    CheckWarningBuffer undefined_warnings;
+    bool undefined_checked;
     Arena scratch;
     Arena prefix_arena;
     CheckPrefix* prefix;
@@ -54,6 +61,9 @@ struct CheckCorpusPath
     bool suppress_warnings;
     uint32_t warning_token;
     uint32_t warning_source;
+    // The first sparse semantic warning the checker kept, independent of promotion: its token and presumed line.
+    uint32_t first_warning_token;
+    uint32_t first_warning_line;
     uint32_t token;
     uint32_t position;
     uint32_t pragma;
@@ -129,6 +139,10 @@ struct CheckCorpusOracle
     bool suppress_warnings;
     uint32_t line;
     uint32_t column;
+    // The first warning clang gave, by its presumed line, or 0: the constraint catalogue's expected warning.
+    bool check_warning;
+    uint32_t warning;
+    uint32_t warning_column;
     char file[512];
     char message[256];
 };
@@ -196,6 +210,27 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
         if (end != 0)
         {
             *end = 0;
+        }
+        char* warning_marker = strstr(at, ": warning: ");
+        if (warning_marker != 0 && result->warning == 0)
+        {
+            char* column = warning_marker;
+            while (column > at && column[-1] >= '0' && column[-1] <= '9')
+            {
+                column -= 1;
+            }
+            char* line = column > at && column[-1] == ':' ? column - 1 : column;
+            while (line > at && line[-1] >= '0' && line[-1] <= '9')
+            {
+                line -= 1;
+            }
+            const bool located = column > at && column < warning_marker && line < column - 1 && line > at && line[-1] == ':';
+            // A driver warning (an unused argument, say) has no presumed source location and is not a source fact.
+            if (located)
+            {
+                result->warning = (uint32_t)strtoul(line, 0, 10);
+                result->warning_column = (uint32_t)strtoul(column, 0, 10);
+            }
         }
         char* marker = strstr(at, ": error: ");
         char* fatal = strstr(at, ": fatal error: ");
@@ -364,6 +399,7 @@ static void check_corpus_release(CheckCorpusPath* path)
         check_deferred_release(path->deferred);
     }
     arena_release(&path->deferred_arena);
+    arena_release(&path->warning_arena);
     arena_release(&path->scratch);
     arena_release(&path->output_arena);
     arena_release(&path->input_arena);
@@ -594,6 +630,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
                 result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
+                result->checked = result->checked && check_input_warning_graph(&result->input, &repair->parser, &result->types, &result->stream, &result->output_arena, &result->scratch);
                 result->resource |= result->input.resource || result->stream.status == CHECK_STATUS_RESOURCE;
                 for (uint32_t report = 0; report < result->stream.report_count; report += 1)
                 {
@@ -680,6 +717,43 @@ static bool check_corpus_deferred_same_memory(const CheckDeferredMemory* before,
     return same;
 }
 
+// The first sparse semantic warning a checked path keeps, by token and presumed line. The constraint catalogue's
+// warning fixtures compare it with clang's. Only the events' source policy is read; no dense warning column grows.
+static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp)
+{
+    path->first_warning_token = BUSTER_CHECK_NONE;
+    path->first_warning_line = 0;
+    const CheckWarningEvents views[3] = { path->input.warning_events, check_warning_view(&path->warning_events),
+                                          path->undefined_checked ? check_warning_view(&path->undefined_warnings) : (CheckWarningEvents){ 0 } };
+    for (uint32_t v = 0; v < 3; v += 1)
+    {
+        for (uint32_t i = 0; i < views[v].count; i += 1)
+        {
+            const CheckWarningEvent* event = views[v].events + i;
+            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0);
+            if (command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0)
+            {
+                continue;
+            }
+            const CheckWarningSeverity severity = check_diagnostic_severity_id_from(&path->input, event->token, event->source, event->id, command.severity);
+            if (severity == CHECK_WARNING_IGNORE || event->token >= parser->tokens.count)
+            {
+                continue;
+            }
+            const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+            if (source >= pp->output.count || (path->first_warning_token != BUSTER_CHECK_NONE && event->token >= path->first_warning_token))
+            {
+                continue;
+            }
+            const uint32_t location = pp->output.locations[source];
+            const char* name = NULL;
+            uint32_t length = 0;
+            path->first_warning_token = event->token;
+            path->first_warning_line = pp_presumed(pp, location, &name, &length);
+        }
+    }
+}
+
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
     (void)scalar;
@@ -731,6 +805,10 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         path->index_arena = arena_reserve(type_index_capacity_bytes(capacity));
         path->input_arena = arena_reserve(UINT64_C(1) << 36);
         path->output_arena = arena_reserve(UINT64_C(1) << 36);
+        path->warning_arena = arena_reserve(UINT64_C(1) << 24);
+        path->warning_events = (CheckWarningBuffer){ .arena = &path->warning_arena };
+        path->warning_keys = (CheckWarningSet){ .arena = &path->warning_arena };
+        path->undefined_warnings = (CheckWarningBuffer){ .arena = &path->warning_arena };
         if (path->scratch.base == 0)
         {
             path->scratch = arena_reserve(UINT64_C(1) << 36);
@@ -817,6 +895,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
         path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
+        path->checked = path->checked && check_input_warning_graph(&path->input, view, &path->types, &path->stream, &path->output_arena, &path->scratch);
         path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
@@ -844,8 +923,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     if (assemblies)
     {
         path->phase = "initializer";
-        path->initialized = check_initializers_run(&path->initializers, &path->input, &path->stream, view, &path->types,
-                                                   &path->output_arena, &path->scratch);
+        path->initialized = check_initializers_run_events(&path->initializers, &path->input, &path->stream, view, &path->types,
+                                                          &path->output_arena, &path->scratch, &path->warning_events, &path->warning_keys);
         path->resource |= path->initializers.status == CHECK_INIT_RESOURCE;
         if (!path->initialized)
         {
@@ -957,6 +1036,19 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             check_corpus_location(path, parser, pp);
         }
     }
+    if (path->initialized)
+    {
+        path->resource |= !check_initializers_warning_context(&path->warning_events, &path->input, parser, &path->types, &path->scratch);
+        if (path->parsed && path->adapted && path->checked && path->stream.report_count == 0 && path->initializers.status == CHECK_INIT_OK)
+        {
+            CheckInput uses;
+            const CheckWarningEvents initializers = check_warning_view(&path->warning_events);
+            path->undefined_checked = check_initializers_warning_uses(&uses, &path->input, &initializers, &path->warning_arena) &&
+                                      check_warning_undefined_internal(&path->undefined_warnings, &uses, parser, &path->types, &path->stream, &path->scratch);
+            path->resource |= !path->undefined_checked;
+        }
+    }
+    check_corpus_first_warning(path, parser, pp);
     return path->parsed && path->adapted && path->programmed && path->warning_token == BUSTER_CHECK_NONE && !path->resource;
 }
 
@@ -2411,6 +2503,8 @@ struct CheckCorpusOutcome
     bool equal;
     bool resource;
     uint32_t lines[2];
+    // The checker's first kept sparse warning's presumed line, 0 for none.
+    uint32_t first_warning_line;
     uint32_t token;
     uint32_t column;
     uint32_t tokens;
@@ -2530,6 +2624,7 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->accepted[1] = both ? outcome->accepted[1] : outcome->accepted[0];
     outcome->lines[0] = paths[0].line;
     outcome->lines[1] = both ? paths[1].line : paths[0].line;
+    outcome->first_warning_line = paths[0].first_warning_line;
     outcome->token = paths[0].token;
     outcome->column = paths[0].column;
     outcome->tokens = parsers[0].tokens.count;
@@ -2596,6 +2691,7 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     const bool acceptance = prepared && outcome.accepted[0] != oracle->rejected;
     const bool line = !oracle->rejected || outcome.accepted[0] || outcome.lines[0] == oracle->line;
     const bool diagnostic_path = !oracle->rejected || outcome.accepted[0] || strcmp(outcome.file, oracle->file) == 0;
+    const bool warning = !oracle->check_warning || (!oracle->rejected && outcome.first_warning_line == oracle->warning);
     const bool resource = outcome.resource;
     tally->files += 1;
     tally->oracle_accepted += !oracle->rejected;
@@ -2603,6 +2699,7 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     tally->acceptance_differences += !acceptance;
     tally->line_differences += !line;
     tally->diagnostic_path_differences += !diagnostic_path;
+    tally->line_differences += !warning;
     tally->path_differences += prepared && !equal;
     tally->resource_failures += resource;
     tally->preprocessing_failures += !prepared;
@@ -2620,7 +2717,7 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     {
         check_corpus_tally_reason(tally, outcome.deferred_reason, 1);
     }
-    const bool different = !acceptance || !line || !diagnostic_path || !equal || resource;
+    const bool different = !acceptance || !line || !diagnostic_path || !warning || !equal || resource;
     if (report != 0)
     {
         fprintf(report, "%s\t", kind);

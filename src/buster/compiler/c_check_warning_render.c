@@ -145,6 +145,10 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
         case CHECK_WARNING_EVENT_UNDEFINED_INTERNAL:
             result = check_warning_text(scratch, "function '%.*s' has internal linkage but is not defined", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_EVENT_INITIALIZER_OVERRIDES:
+            result = payload->data != 0 ? "initializer partially overrides prior initialization of this subobject" :
+                                        "initializer overrides prior initialization of this subobject";
+            break;
         default: break;
     }
     return result;
@@ -156,7 +160,10 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
     const char* result = NULL;
     switch (note->kind)
     {
-        case CHECK_WARNING_NOTE_PRIOR_INITIALIZATION: result = "previous initialization is here"; break;
+        case CHECK_WARNING_NOTE_PRIOR_INITIALIZATION:
+            result = note->payload.data != 0 ? "previous initialization with side effects is here (side effects will not occur at run time)" :
+                                              "previous initialization is here";
+            break;
         case CHECK_WARNING_NOTE_INLINE_LINKAGE:
             result = check_warning_text(scratch, "use 'static' to give inline function '%.*s' internal linkage", (int)name.length, name.pointer);
             break;
