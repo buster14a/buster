@@ -3527,12 +3527,16 @@ static __attribute__((unused)) ParseTestProbe parse_test_probe(char** arguments,
     return result;
 }
 
-// Checks a run with a limit, in which a reservation failed: it must fail with status 1 having said why (one fatal error),
-// before its address space reached the limit, and leave the address space and the descriptors as they were.
-static __attribute__((unused)) uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t limit, const char* name)
+// Checks a run with a limit: it either does the unlimited run's work (the compact fallbacks admit smaller address
+// spaces) or refuses it with status 1 having said why (one fatal error), stays within the limit, and leaves the
+// address space and the descriptors as they were.
+static __attribute__((unused)) uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t limit, const char* name, int status,
+                                                             const char* expected)
 {
     const char* fatal = strstr(probe->text, "fatal error: ");
-    const bool failed = probe->status == 1 && fatal != 0 && strstr(fatal + 1, "fatal error: ") == 0 && probe->peak <= limit;
+    const bool admitted = probe->status == status && strcmp(probe->text, expected) == 0;
+    const bool refused = probe->status == 1 && fatal != 0 && strstr(fatal + 1, "fatal error: ") == 0;
+    const bool failed = (admitted || refused) && probe->peak <= limit;
     const uint32_t result = !failed || !probe->clean;
     if (result != 0)
     {
@@ -3574,15 +3578,17 @@ static uint32_t parse_test_driver_limits(char** arguments, int count, int captur
     failures += !same;
     uint32_t runs = 0;
     uint64_t peak = whole.peak;
-    while (failures == 0 && peak != 0 && runs < 10000)
+    while (failures == 0 && peak > page && runs < 4096)
     {
+        // A refused run's peak steps the limit below the reservation that failed; an admitted one (a refused
+        // reservation can retry compact, so the run can still finish) halves it, which reaches each tier in turn.
         const uint64_t limit = peak - page;
         const ParseTestProbe probe = parse_test_probe(arguments, count, capture, base, limit, shared, preprocess);
-        failures += parse_test_check_probe(&probe, limit, name);
-        peak = probe.peak;
+        failures += parse_test_check_probe(&probe, limit, name, status, text);
+        peak = strstr(probe.text, "fatal error: ") != 0 ? probe.peak : (probe.peak + 1) / 2;
         runs += 1;
     }
-    failures += runs >= 10000;
+    failures += runs >= 4096;
     printf("driver: %s: %u reservations and mappings failed in turn, each reported and released\n", name, runs);
 #endif
     return failures;
