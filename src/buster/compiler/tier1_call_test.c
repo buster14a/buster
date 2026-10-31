@@ -36,6 +36,8 @@ struct Tier1CallObserved
     uint64_t alignment[BUSTER_TIER1_CALL_HELPERS];
     uint64_t count[BUSTER_TIER1_CALL_HELPERS];
     uint64_t result[BUSTER_TIER1_CALL_HELPERS];
+    // RAX at each callee's entry: a variadic call's AL counts the vector registers its arguments take.
+    uint64_t al[BUSTER_TIER1_CALL_HELPERS];
     uint64_t trace;
 };
 
@@ -56,6 +58,15 @@ struct Tier1CallFixture
     bool void_return;
     bool mixed;
     bool narrow_return;
+    // The calls variadic, each named on its first argument; a narrow return's type (I32, I8 or I16); a function of one
+    // narrow parameter (I8 or I16, else none) that returns it zero-extended, without calls.
+    bool variadic;
+    IrType narrow_type;
+    IrType parameter_type;
+    // A call through its first parameter, the helper's address, of the next three, whose second it adds after the call.
+    bool indirect;
+    // A function that returns its parameter truncated to this narrow type (I8 or I16, else none), without calls.
+    IrType return_type;
 };
 
 static X86Instruction tier1_call_constant(uint32_t reg, uint64_t value)
@@ -155,6 +166,11 @@ static bool tier1_call_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
         tier1_emit_test_node(function, node, IR_CALL, type, 1, 0);
         tier1_call_descriptor(function, 1, fixture->arguments, fixture->arguments, type);
         tier1_emit_test_node(function, node + 1, IR_CALL, type, 2, 1);
+        for (uint32_t call = 0; fixture->variadic && call < 2; call += 1)
+        {
+            function->calls[call].variadic = true;
+            function->calls[call].parameter_count = fixture->arguments != 0 ? 1 : 0;
+        }
         tier1_emit_test_node(function, node + 2, IR_ADD, type, node, node + 1);
         uint32_t sum = node + 2;
         node += 3;
@@ -351,16 +367,108 @@ static bool tier1_call_narrow_fixture(Tier1EmitTest* test, Tier1CallFixture* fix
     bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
     if (ready)
     {
+        const IrType narrow = fixture->narrow_type != 0 ? fixture->narrow_type : IR_I32;
         function->result_type = IR_I64;
         function->symbol_count = 2;
         function->block_offsets[1] = 3;
-        tier1_call_descriptor(function, 0, 0, 0, IR_I32);
-        tier1_emit_test_node(function, 0, IR_CALL, IR_I32, 1, 0);
+        tier1_call_descriptor(function, 0, 0, 0, narrow);
+        tier1_emit_test_node(function, 0, IR_CALL, narrow, 1, 0);
         tier1_emit_test_node(function, 1, IR_ZEXT, IR_I64, 0, BUSTER_IR_NONE);
         tier1_emit_test_node(function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
         fixture->width = 4;
         fixture->helper_count = 1;
         fixture->narrow_return = true;
+    }
+    return ready;
+}
+
+// A function of one narrow parameter that returns it zero-extended: its caller passes the parameter's register with
+// dirty bits past its width, which the function's canonical storage must clear (the CFG consumer's entry).
+static bool tier1_call_parameter_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+{
+    const IrSizes sizes = {
+        .instruction_count = 3,
+        .block_count = 1,
+        .parameter_count = 1,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 1;
+        function->block_offsets[1] = 3;
+        function->parameter_types[0] = (uint8_t)fixture->parameter_type;
+        tier1_emit_test_node(function, 0, IR_PARAM, fixture->parameter_type, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(function, 1, IR_ZEXT, IR_I64, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
+        fixture->width = 8;
+        fixture->helper_count = 0;
+    }
+    return ready;
+}
+
+// A function that returns its parameter truncated to a narrow type: its result's canonical zero-extended 32 bits, which
+// the caller reads as RAX (a 32-bit move's clears the rest).
+static bool tier1_call_return_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+{
+    const IrSizes sizes = {
+        .instruction_count = 3,
+        .block_count = 1,
+        .parameter_count = 1,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = (uint8_t)fixture->return_type;
+        function->symbol_count = 1;
+        function->block_offsets[1] = 3;
+        function->parameter_types[0] = IR_I64;
+        tier1_emit_test_node(function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(function, 1, IR_TRUNC, fixture->return_type, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
+        fixture->width = 8;
+        fixture->helper_count = 0;
+    }
+    return ready;
+}
+
+// A call through a pointer: the first parameter is the helper's address, the next three its arguments, and the first of
+// them lives past the call, added to its result. The CFG consumer moves the callee into R10 with the arguments.
+static bool tier1_call_indirect_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+{
+    const IrSizes sizes = {
+        .instruction_count = 7,
+        .block_count = 1,
+        .extra_count = 3,
+        .call_count = 1,
+        .call_type_count = 3,
+        .parameter_count = 4,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 1;
+        function->block_offsets[1] = 7;
+        function->parameter_types[0] = IR_PTR;
+        tier1_emit_test_node(function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+        for (uint32_t argument = 1; argument < 4; argument += 1)
+        {
+            function->parameter_types[argument] = IR_I64;
+            tier1_emit_test_node(function, argument, IR_PARAM, IR_I64, argument, BUSTER_IR_NONE);
+            function->extra[argument - 1] = argument;
+        }
+        tier1_call_descriptor(function, 0, 0, 3, IR_I64);
+        tier1_emit_test_node(function, 4, IR_CALL_INDIRECT, IR_I64, 0, 0);
+        tier1_emit_test_node(function, 5, IR_ADD, IR_I64, 4, 1);
+        tier1_emit_test_node(function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE);
+        fixture->width = 8;
+        fixture->arguments = 3;
+        fixture->helper_count = 1;
+        fixture->indirect = true;
     }
     return ready;
 }
@@ -377,6 +485,7 @@ static uint32_t tier1_call_helper(const Tier1CallFixture* fixture, uint32_t help
     const uint32_t result = (uint32_t)offsetof(Tier1CallObserved, result) + helper * 8;
     const uint32_t trace = (uint32_t)offsetof(Tier1CallObserved, trace);
     tier1_frame_emit_add(&buffer, tier1_call_constant(X86_REGISTER_R11, (uintptr_t)observed));
+    tier1_frame_emit_add(&buffer, tier1_frame_emit_memory(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_R11, (int32_t)(offsetof(Tier1CallObserved, al) + helper * 8)));
     for (uint32_t argument = 0; argument < 6; argument += 1)
     {
         tier1_frame_emit_add(&buffer, tier1_frame_emit_memory(X86_FORM_MOV_RM64_R64, abi_integer_arguments[argument], X86_REGISTER_R11, (int32_t)(arguments + argument * 8)));
@@ -468,8 +577,9 @@ static uint32_t tier1_call_helper(const Tier1CallFixture* fixture, uint32_t help
 }
 
 // A local TEXT-only loader. Encoder offsets independently identify the five-byte E8 instruction and its rel32;
-// references must occur in marked-record order and preserve the original source's symbol identity.
-static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fixture, Tier1EmitResult* emitted, Tier1CallObserved* observed, uint8_t* mapping)
+// references must occur in marked-record order and preserve the original source's symbol identity. Each helper's address
+// goes in `addresses`, for an indirect call's caller to pass.
+static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fixture, Tier1EmitResult* emitted, Tier1CallObserved* observed, uint8_t* mapping, uint64_t* addresses)
 {
     Tier1SelectCode* code = &emitted->code;
     bool native = tier1_emit_test_native(test, code->records, code->count);
@@ -512,6 +622,7 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
         const int64_t helper_length = ready ? x86_encode(records, count, mapping + used, helper_capacity, 0, 0) : -1;
         ready = helper_length > 0;
         targets[helper] = used;
+        addresses[helper] = (uintptr_t)(mapping + used);
         used = ready ? (used + (uint32_t)helper_length + 15) & ~15u : used;
         tier1_emit_test_expect(test, ready, "independent hostile helper encodes within local TEXT image");
     }
@@ -557,7 +668,8 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
             ready = false;
         }
     }
-    ready = ready && reference == emitted->reference_count && reference == fixture->helper_count;
+    // An indirect call has no reference.
+    ready = ready && reference == emitted->reference_count && reference == (fixture->indirect ? 0 : fixture->helper_count);
     tier1_emit_test_expect(test, ready, "CALL fixups bijectively name original symbols and checked E8 rel32 fields");
     if (ready)
     {
@@ -590,7 +702,8 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
     Tier1CallObserved observed = {0};
     uint8_t* mapping = mmap(0, BUSTER_TIER1_CALL_CODE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     tier1_emit_test_expect(test, mapping != MAP_FAILED, "direct-call executable mapping");
-    const uint8_t* entry = mapping != MAP_FAILED ? tier1_call_load(test, fixture, emitted, &observed, mapping) : 0;
+    uint64_t addresses[BUSTER_TIER1_CALL_HELPERS] = { 0 };
+    const uint8_t* entry = mapping != MAP_FAILED ? tier1_call_load(test, fixture, emitted, &observed, mapping, addresses) : 0;
     uint64_t random = UINT64_C(0xd8f164712353a675);
     for (uint32_t sample = 0; entry && sample < BUSTER_TIER1_CALL_SAMPLES; sample += 1)
     {
@@ -620,7 +733,29 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
         }
         else if (fixture->narrow_return)
         {
-            expected = (uint32_t)UINT64_C(0x1367136713671367);
+            // The helper's RAX is the poison above 0x13671367: the result keeps the type's bits alone.
+            const IrType narrow = fixture->narrow_type != 0 ? fixture->narrow_type : IR_I32;
+            expected = narrow == IR_I8 ? 0x67 : narrow == IR_I16 ? 0x1367 : (uint32_t)UINT64_C(0x1367136713671367);
+        }
+        else if (fixture->return_type != 0)
+        {
+            expected = arguments[0] & (fixture->return_type == IR_I8 ? 0xff : 0xffff);
+        }
+        else if (fixture->indirect)
+        {
+            arguments[0] = addresses[0];
+            for (uint32_t argument = 0; argument < 3; argument += 1)
+            {
+                passed[0][argument] = arguments[argument + 1];
+            }
+            counts[0] = 3;
+            expected = tier1_call_mix(passed[0], 3, 8) + arguments[1];
+        }
+        else if (fixture->parameter_type != 0)
+        {
+            // Dirty bits past the parameter's width, as a caller of another type's extension leaves them.
+            arguments[0] |= UINT64_C(0xfedcba9876540000);
+            expected = arguments[0] & (fixture->parameter_type == IR_I8 ? 0xff : 0xffff);
         }
         else if (fixture->memory)
         {
@@ -691,6 +826,7 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
                 const uint64_t mask = narrow ? UINT32_MAX : UINT64_MAX;
                 tier1_emit_test_expect(test, (observed.arguments[helper][argument] & mask) == (passed[helper][argument] & mask), "ordered call arguments retain cycles, duplicates and semantic widths");
             }
+            tier1_emit_test_expect(test, !fixture->variadic || (observed.al[helper] & 0xff) == 0, "a variadic call's AL says no vector register holds an argument");
             if (fixture->width == 4 && fixture->kind[helper] == TIER1_CALL_MIX)
             {
                 tier1_emit_test_expect(test, (observed.result[helper] & UINT64_C(0xffffffff00000000)) == BUSTER_TIER1_CALL_RETURN_POISON, "I32 helper really returns noncanonical upper RAX bits");
@@ -736,15 +872,46 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
         tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "direct-call emission restores scratch");
         if (error == TIER1_EMIT_OK)
         {
-            tier1_emit_test_expect(test, !emitted.frame.red_zone && emitted.reference_count == fixture->helper_count, "calls force a real non-red-zone frame and retain every symbolic target");
-            tier1_emit_test_expect(test, tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation), "direct-call allocation passes independent interference verification");
+            tier1_emit_test_expect(test, (fixture->helper_count == 0 || !emitted.frame.red_zone) && emitted.reference_count == (fixture->indirect ? 0 : fixture->helper_count),
+                                   "calls force a real non-red-zone frame and retain every symbolic target");
+            // A narrow parameter's function goes through the CFG consumer, whose allocation its own checker proves.
+            Tier1CfgCheck check;
+            const bool verified = emitted.general ? tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check) : tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation);
+            tier1_emit_test_expect(test, verified, "direct-call allocation passes independent interference verification");
             if (fixture->narrow_return)
             {
+                // An I32 result's immediate MOV32 self-capture, and a narrow one's zero extension, before any later ZEXT.
+                const IrType narrow = fixture->narrow_type != 0 ? fixture->narrow_type : IR_I32;
+                const uint16_t form = narrow == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : narrow == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
                 const uint32_t capture = emitted.references[0].instruction + 1;
                 const bool within_call = capture < emitted.code.node_first[1] && capture < emitted.code.count;
-                tier1_emit_test_expect(test, within_call && emitted.code.records[capture].form == X86_FORM_MOV_R32_RM32 &&
+                tier1_emit_test_expect(test, within_call && emitted.code.records[capture].form == form &&
                     emitted.code.records[capture].reg == X86_REGISTER_RAX && emitted.code.records[capture].rm == X86_REGISTER_RAX,
-                    "I32 result in RAX has its own immediate MOV32 self-capture before any later ZEXT");
+                    "a narrow result in RAX has its own immediate capture to its canonical storage before any later ZEXT");
+            }
+            else if (fixture->return_type != 0)
+            {
+                tier1_emit_test_expect(test, emitted.reference_count == 0, "a narrow return's function has no call");
+            }
+            else if (fixture->indirect)
+            {
+                bool through = false;
+                for (uint32_t r = 0; r < emitted.code.count; r += 1)
+                {
+                    through |= emitted.code.records[r].form == X86_FORM_CALL_RM64 && emitted.code.records[r].rm == X86_REGISTER_R10;
+                }
+                tier1_emit_test_expect(test, emitted.general && through && emitted.call_stores != 0, "an indirect call goes through R10, its live value saved around it");
+            }
+            else if (fixture->parameter_type != 0)
+            {
+                // The entry's zero extension of the parameter in its incoming register.
+                bool extended = false;
+                for (uint32_t r = 0; r < emitted.code.count; r += 1)
+                {
+                    const X86Instruction* record = &emitted.code.records[r];
+                    extended |= record->form == (fixture->parameter_type == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16) && record->reg == X86_REGISTER_RDI && record->rm == X86_REGISTER_RDI;
+                }
+                tier1_emit_test_expect(test, emitted.general && extended, "a narrow parameter is zero-extended in its incoming register");
             }
             else if (fixture->mixed)
             {
@@ -858,8 +1025,11 @@ static void tier1_call_failures(Tier1EmitTest* test)
     }
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->input, 0);
-    for (uint32_t failure = 0; failure < 6; failure += 1)
+    // Past six arguments, and I128 and F64 results; variadic calls, calls through a pointer and narrow results are taken.
+    static const uint32_t failures[] = { 0, 4, 5 };
+    for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
+        const uint32_t failure = failures[index];
         const uint32_t arguments = failure == 0 ? 7 : failure < 3 ? 1 : 0;
         const IrType parameter = failure == 2 ? IR_PTR : IR_I64;
         const IrType result = failure == 3 ? IR_I8 : failure == 4 ? IR_I128 : failure == 5 ? IR_F64 : IR_I64;
@@ -899,7 +1069,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             const uint64_t mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
             const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &rejected, &node);
-            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "wide/stack/variadic/indirect calls explicitly refuse");
+            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "stack arguments and wide or floating results explicitly refuse");
             tier1_emit_test_expect(test, test->output.length == mark && test->scratch.length == scratch_mark && memcmp(&before, &rejected, sizeof(rejected)) == 0, "unsupported-call selection is transactional");
         }
         arena_pop_to(&test->input, 0);
@@ -921,17 +1091,22 @@ static void tier1_call_cases(Tier1EmitTest* test)
                 .permutation = shape < 7 ? 0 : shape - 6,
                 .terms = shape % 3 == 0 ? 0 : shape % 3 == 1 ? 1 : 17,
             };
-            const bool ready = tier1_call_fixture(test, &fixture);
-            tier1_emit_test_expect(test, ready, "construct direct-call shuffle and pressure fixture");
-            for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+            // Every other shape's calls variadic too.
+            for (uint32_t variadic = 0; variadic < 1 + (shape & 1); variadic += 1)
             {
-                for (uint32_t rematerialize = 0; rematerialize < 2; rematerialize += 1)
+                fixture.variadic = variadic != 0;
+                const bool ready = tier1_call_fixture(test, &fixture);
+                tier1_emit_test_expect(test, ready, "construct direct-call shuffle and pressure fixture");
+                for (uint32_t vector = 0; ready && vector < 2; vector += 1)
                 {
-                    const uint32_t flags = shape % 3 == 0 ? 0 : shape % 3 == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK;
-                    tier1_call_compile(test, &fixture, vector != 0, rematerialize != 0, flags);
+                    for (uint32_t rematerialize = 0; rematerialize < 2; rematerialize += 1)
+                    {
+                        const uint32_t flags = shape % 3 == 0 ? 0 : shape % 3 == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK;
+                        tier1_call_compile(test, &fixture, vector != 0, rematerialize != 0, flags);
+                    }
                 }
+                arena_pop_to(&test->input, 0);
             }
-            arena_pop_to(&test->input, 0);
         }
     }
     for (uint32_t shape = 0; shape < 4; shape += 1)
@@ -948,11 +1123,19 @@ static void tier1_call_cases(Tier1EmitTest* test)
         }
         arena_pop_to(&test->input, 0);
     }
-    for (uint32_t shape = 0; shape < 3; shape += 1)
+    // The mixed cycles, the dirty I32, I8 and I16 call results, the I8 and I16 parameters, the indirect call, and the I8
+    // and I16 returns.
+    for (uint32_t shape = 0; shape < 10; shape += 1)
     {
-        Tier1CallFixture fixture = {0};
-        const bool ready = shape < 2 ? tier1_call_mixed_fixture(test, &fixture, shape != 0) : tier1_call_narrow_fixture(test, &fixture);
-        tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle or dirty I32 return fixture");
+        Tier1CallFixture fixture = {
+            .narrow_type = shape == 3 ? IR_I8 : shape == 4 ? IR_I16 : 0,
+            .parameter_type = shape == 5 ? IR_I8 : shape == 6 ? IR_I16 : 0,
+            .return_type = shape == 8 ? IR_I8 : shape == 9 ? IR_I16 : 0,
+        };
+        const bool ready = shape < 2 ? tier1_call_mixed_fixture(test, &fixture, shape != 0) : shape < 5 ? tier1_call_narrow_fixture(test, &fixture) :
+                           shape < 7 ? tier1_call_parameter_fixture(test, &fixture) : shape == 7 ? tier1_call_indirect_fixture(test, &fixture) :
+                           tier1_call_return_fixture(test, &fixture);
+        tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle, dirty narrow return or narrow parameter fixture");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             for (uint32_t frame = 0; frame < 2; frame += 1)

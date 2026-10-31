@@ -51,9 +51,16 @@ static bool tier1_emit_cfg_chain(const IrFunction* function)
         const bool terminal = function->op[last] == IR_RET || function->op[last] == IR_UNREACHABLE || sink;
         chain = final ? terminal : function->op[last] == IR_BR && function->a[last] == block + 1;
     }
+    // A phi needs edge moves, a frame object's address the frame's layout of it, a symbol's its reference, and a narrow
+    // parameter or one after other instructions the entry's definitions: the CFG consumer's.
+    bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
-        chain = function->op[node] != IR_PHI;
+        const uint32_t op = function->op[node];
+        const uint32_t type = function->type[node];
+        const bool narrow = type == IR_I1 || type == IR_I8 || type == IR_I16;
+        chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow));
+        prefix &= op == IR_PARAM;
     }
     return chain;
 }
@@ -107,6 +114,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t phi_count = 0;
     uint32_t operand_count = 0;
     uint32_t returns = 0;
+    uint32_t symbols = 0;
     Tier1EmitPrepared* prepared = &emitted->prepared;
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
@@ -117,7 +125,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         phi_count += function->op[node] == IR_PHI;
         operand_count += function->op[node] == IR_PHI ? function->b[node] : 0;
         returns += function->op[node] == IR_RET;
-        if (function->op[node] == IR_CALL)
+        symbols += function->op[node] == IR_SYMBOL_ADDR;
+        if (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT)
         {
             prepared->call_count += 1;
             const uint32_t arguments = function->calls[function->b[node]].argument_count;
@@ -125,10 +134,17 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         }
     }
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
+    // A reference for each call and each symbol's address, and how the symbols are reached.
+    emitted->reference_capacity = prepared->call_count + symbols;
+    emitted->symbol_access = options->symbol_access;
+    emitted->symbol_access_count = options->symbol_access != 0 ? options->symbol_count : 0;
     prepared->call_abi.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     prepared->call_save_mask = prepared->call_count != 0 ? options->register_mask : 0;
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
-    prepared->slot_columns = count + call_slots + 1;
+    // The slots' columns: a value's at its node, the caller-save rows', the temporary slot's, then each frame object's,
+    // live throughout (tier1_emit_cfg_object).
+    const uint32_t objects = function->slot_count;
+    prepared->slot_columns = count + call_slots + 1 + objects;
     ok = error == TIER1_EMIT_OK;
     prepared->starts = ok ? ir_allocate(output, prepared->slot_columns, 4, &ok) : 0;
     prepared->ends = ok ? ir_allocate(output, prepared->slot_columns, 4, &ok) : 0;
@@ -139,7 +155,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint8_t* flags = ok ? ir_allocate(output, count, 1, &ok) : 0;
     uint8_t* marks = ok ? ir_allocate(output, count, 1, &ok) : 0;
     uint64_t* constants = ok ? ir_allocate(output, count, 8, &ok) : 0;
-    uint32_t* prospective = ok ? ir_allocate(scratch, (uint64_t)value_count + call_slots + 1, 4, &ok) : 0;
+    uint32_t* prospective = ok ? ir_allocate(scratch, (uint64_t)value_count + call_slots + 1 + objects, 4, &ok) : 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK)
     {
@@ -149,6 +165,12 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             prepared->ends[column] = (uint32_t)positions;
             prepared->sizes[column] = 8;
             prepared->alignments[column] = 8;
+        }
+        for (uint32_t o = 0; o < objects; o += 1)
+        {
+            const IrSlot* slot = &function->slots[o];
+            prepared->sizes[count + call_slots + 1 + o] = slot->size != 0 ? (uint32_t)slot->size : 1;
+            prepared->alignments[count + call_slots + 1 + o] = slot->alignment != 0 ? slot->alignment : 1;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -179,7 +201,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         {
             prospective[v] = value_nodes[v];
         }
-        for (uint32_t slot = 0; slot <= call_slots; slot += 1)
+        for (uint32_t slot = 0; slot <= call_slots + objects; slot += 1)
         {
             prospective[value_count + slot] = count + slot;
         }
@@ -190,7 +212,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                 .size = prepared->sizes,
                 .alignment = prepared->alignments,
                 .indices = prospective,
-                .count = value_count + call_slots + 1,
+                .count = value_count + call_slots + 1 + objects,
                 .column_count = prepared->slot_columns,
             },
             .calls = &prepared->call_abi,
@@ -210,6 +232,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t* predecessors = ok ? ir_allocate(output, (uint64_t)edges + 1, 4, &ok) : 0;
     uint8_t* classes = ok ? ir_allocate(output, (uint64_t)value_count + 1, 1, &ok) : 0;
     uint32_t* allowed = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
+    uint32_t* defined = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint32_t* definitions = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint8_t* rematerializable = ok ? ir_allocate(output, (uint64_t)value_count + 1, 1, &ok) : 0;
     uint32_t* use_offsets = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
@@ -263,15 +286,16 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             }
         }
         predecessor_offsets[blocks] = edge;
-        // Values: a parameter in its incoming register from position 0, a phi at its block's start, any other at its
-        // node's definition phase.
+        // Values: a parameter in its incoming register from position 0 (its definition's interval alone: elsewhere it may
+        // be in any register), a phi at its block's start, any other at its node's definition phase.
         use_offsets[0] = 0;
         for (uint32_t v = 0; v < value_count; v += 1)
         {
             const uint32_t node = value_nodes[v];
             const uint32_t op = function->op[node];
             classes[v] = 0;
-            allowed[v] = op == IR_PARAM ? tier1_liveness_parameter_mask(function->a[node]) & registers : registers;
+            allowed[v] = registers;
+            defined[v] = op == IR_PARAM ? tier1_liveness_parameter_mask(function->a[node]) & registers : 0;
             definitions[v] = op == IR_PARAM ? 0 : op == IR_PHI ? block_starts[cfg.instruction_blocks[node] + added] : base + 2 * node + 1;
             rematerializable[v] = marks[node];
             use_offsets[v + 1] = op != IR_PHI;
@@ -361,6 +385,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .predecessors = predecessors,
             .classes = classes,
             .allowed_registers = allowed,
+            .definition_registers = defined,
             .definitions = definitions,
             .rematerializable = rematerializable,
             .use_offsets = use_offsets,
@@ -405,7 +430,8 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
     const uint32_t temporary = (cfg->temp_slots & 1u) != 0;
     bool ok = true;
-    uint32_t* indices = ir_allocate(scratch, (uint64_t)spills + call_slots + 1, 4, &ok);
+    const uint32_t objects = plan->function->slot_count;
+    uint32_t* indices = ir_allocate(scratch, (uint64_t)spills + call_slots + 1 + objects, 4, &ok);
     uint8_t* phis = ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok);
     Tier1EmitError error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK)
@@ -443,6 +469,11 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     {
         indices[spills + slot] = count + slot;
     }
+    // The frame objects' rows last, each its column past the temporary slot's.
+    for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
+    {
+        indices[spills + call_slots + temporary + o] = count + call_slots + 1 + o;
+    }
     if (error == TIER1_EMIT_OK)
     {
         const Tier1FrameRequest request = {
@@ -452,7 +483,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
                 .size = prepared->sizes,
                 .alignment = prepared->alignments,
                 .indices = indices,
-                .count = spills + call_slots + temporary,
+                .count = spills + call_slots + temporary + objects,
                 .column_count = prepared->slot_columns,
             },
             .calls = &prepared->call_abi,
@@ -472,6 +503,16 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
     const uint32_t index = location - BUSTER_TIER1_CFG_SPILL;
     const uint32_t row = index < spills ? index : spills + (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
     const bool found = location >= BUSTER_TIER1_CFG_SPILL && index <= spills && row < emitted->frame.count;
+    *offset = found ? emitted->frame.offset[row] : 0;
+    return found;
+}
+
+// The frame offset of frame object `object`: its row, the last ones (tier1_emit_cfg_frame).
+static bool tier1_emit_cfg_object(const Tier1EmitResult* emitted, uint32_t object, int32_t* offset)
+{
+    const uint32_t temporary = (emitted->cfg.temp_slots & 1u) != 0;
+    const uint32_t row = emitted->cfg.allocation.spill_count + (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask) + temporary + object;
+    const bool found = row < emitted->frame.count;
     *offset = found ? emitted->frame.offset[row] : 0;
     return found;
 }
@@ -642,7 +683,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     code->node_first = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
     code->branches = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     code->targets = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
-    emitted->references = ok && emitted->prepared.call_count != 0 ? ir_allocate(output, emitted->prepared.call_count, sizeof(LinkReference), &ok) : 0;
+    emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
     transitions.offsets = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 2, 4, &ok) : 0;
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.values = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
@@ -739,6 +780,19 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         error = TIER1_EMIT_FRAME;
     }
+    // A narrow parameter into its canonical 32-bit storage, in its register before anything reads it: its caller
+    // extends it by its own type (sign or zero), which the canonical form doesn't keep.
+    for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
+    {
+        const uint32_t type = function->type[node];
+        const uint32_t narrow = type == IR_I1 || type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
+        if (function->op[node] == IR_PARAM && narrow != 0 && emitted->node_values[node] != BUSTER_TIER1_CFG_NONE)
+        {
+            const uint8_t reg = (uint8_t)tier1_select_parameter_registers[function->a[node]];
+            const X86Instruction extend = { .form = narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
+            error = tier1_emit_append(&buffer, extend) ? error : TIER1_EMIT_MEMORY;
+        }
+    }
     for (uint32_t b = 0; error == TIER1_EMIT_OK && b < blocks; b += 1)
     {
         block_first[b] = b == 0 ? 0 : buffer.count;
@@ -794,9 +848,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 error = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == use + 1 ? error : TIER1_EMIT_ALLOCATION;
                 transitions.registers[node] = error == TIER1_EMIT_OK ? allocation->registers[allocation->fragment_offsets[interval]] : UINT8_MAX;
             }
-            const bool calls = op == IR_CALL;
+            const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
             Tier1SelectHoles holes = { 0 };
-            uint32_t argument_registers[BUSTER_ABI_INTEGER_ARGUMENTS] = { 0 };
+            // The arguments' registers, and an indirect call's callee's after them.
+            uint32_t argument_registers[BUSTER_ABI_INTEGER_ARGUMENTS + 1] = { 0 };
             if (error == TIER1_EMIT_OK && selected)
             {
                 const Tier1SelectPattern* pattern = &plan->patterns[node];
@@ -871,7 +926,35 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             }
             else if (error == TIER1_EMIT_OK && selected)
             {
-                const Tier1SelectRecords selected_records = tier1_select_expand(&holes);
+                Tier1SelectRecords selected_records = tier1_select_expand(&holes);
+                // A frame object's address, from the frame's base at the object's offset.
+                int32_t object_offset = 0;
+                if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
+                {
+                    error = selected_records.count == 1 && tier1_emit_cfg_object(emitted, (uint32_t)plan->patterns[node].immediate, &object_offset) ? error : TIER1_EMIT_FRAME;
+                    selected_records.records[0].rm = (uint8_t)emitted->frame.base_register;
+                    selected_records.records[0].displacement = object_offset;
+                }
+                // A symbol's address, its reference the record's: a lea of it, or a load of its GOT slot; a thread-local's
+                // is the driver's Tier 0's.
+                if (plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS && error == TIER1_EMIT_OK)
+                {
+                    const uint32_t symbol = (uint32_t)plan->patterns[node].immediate;
+                    const uint8_t access = symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
+                    error = selected_records.count == 1 && emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;
+                    error = error != TIER1_EMIT_OK || access == BUSTER_TIER1_ACCESS_DIRECT || access == BUSTER_TIER1_ACCESS_GOT ? error : TIER1_EMIT_UNSUPPORTED;
+                    selected_records.records[0].form = access == BUSTER_TIER1_ACCESS_GOT ? X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP : selected_records.records[0].form;
+                    if (error == TIER1_EMIT_OK)
+                    {
+                        emitted->references[emitted->reference_count++] = (LinkReference){
+                            .instruction = buffer.count,
+                            .field = X86_FIXUP_DISPLACEMENT,
+                            .kind = access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
+                            .target = symbol,
+                            .addend = 0,
+                        };
+                    }
+                }
                 const bool returns_here = op == IR_RET;
                 error = !returns_here || (selected_records.count != 0 && selected_records.records[selected_records.count - 1].form == X86_FORM_RET) ? error : TIER1_EMIT_INVALID;
                 // A return's epilogue goes before its ret, the last record, after any request's record.
