@@ -533,7 +533,8 @@ recipe, the lane loaded into the recipe's argument, storing its 1 or 0 into
 the result's frame object as an `int` or a `long long`, as clang's zero
 extension of `llvm.is.fpclass`'s lanes gives (`check_lower_floating_lanes`);
 a vector of half-precision or `__bf16` lanes stays refused, as their scalars
-are.
+are, and so does one of `long double` elements, whose 16-byte lanes clang
+gives a vector of `__int128` results.
 
 `test-check-builtins-float` checks each fold against the host compiler's own
 builtins in each format (`isfpclass`'s with every mask), the mask's rules and

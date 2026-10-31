@@ -7047,28 +7047,38 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         }
         else if (classify && vector)
         {
-            // isfpclass of a vector of floats or doubles: the vector stored into a frame object, then each lane classified
-            // by the scalar recipe and stored into the result's frame object (check_lower_floating_lanes).
-            const uint32_t index = writer->floating_count++;
             const CheckVectorShape shape = check_vector_builtin_shape(program->types, operand);
-            const uint8_t class = check_lower_class(writer, effect->floating_type);
-            const uint32_t vector_local = check_lower_temporary_of(writer, operand);
-            const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
-            writer->floating[index] = (CBuiltinFloatLowerCall){
-                .id = id,
-                .argument_local = check_lower_temporary(writer, class),
-                .argument_class = class,
-                .fenv_access = fenv_access,
-                .class_mask = effect->class_mask,
-                .vector_local = vector_local,
-                .result_local = check_lower_temporary_of(writer, stream->values[node].type),
-                .lanes = shape.lanes,
-                .lane_bytes = shape.element,
-            };
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = stream->values[node].type });
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector_local);
-            check_lower_operand(writer, node, 3, false, operand);
-            writer->vectors = true;
+            if (shape.element != 4 && shape.element != 8)
+            {
+                // A long double's 16-byte element takes a vector of __int128 results (clang's signed vector of its
+                // elements' width), whose lanes these int and long long stores don't hold. Refuse, rather than write
+                // each lane's int at an offset no element stride gives.
+                check_lower_unsupported(writer, "isfpclass of a vector whose elements are not 4 or 8 bytes");
+            }
+            else
+            {
+                // isfpclass of a vector of floats or doubles: the vector stored into a frame object, then each lane
+                // classified by the scalar recipe and stored into the result's frame object (check_lower_floating_lanes).
+                const uint32_t index = writer->floating_count++;
+                const uint8_t class = check_lower_class(writer, effect->floating_type);
+                const uint32_t vector_local = check_lower_temporary_of(writer, operand);
+                const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+                writer->floating[index] = (CBuiltinFloatLowerCall){
+                    .id = id,
+                    .argument_local = check_lower_temporary(writer, class),
+                    .argument_class = class,
+                    .fenv_access = fenv_access,
+                    .class_mask = effect->class_mask,
+                    .vector_local = vector_local,
+                    .result_local = check_lower_temporary_of(writer, stream->values[node].type),
+                    .lanes = shape.lanes,
+                    .lane_bytes = shape.element,
+                };
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = stream->values[node].type });
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector_local);
+                check_lower_operand(writer, node, 3, false, operand);
+                writer->vectors = true;
+            }
         }
         else if (classify)
         {
