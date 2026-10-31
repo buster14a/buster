@@ -7,6 +7,33 @@
 
 static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
 
+// A tree-only parse omits derived ends, and a fixed-bound query can have no retained graph node. Its operand
+// still occupies a contiguous parser subtree. Inspect that exceptional subtree's parent paths without retaining
+// a token-sized end column; the normal reader and graph paths supply their already proven exclusive end.
+static uint32_t check_warning_query_end(const Parser* parser, uint32_t query)
+{
+    uint32_t end = query + 1;
+    while (end < parser->tokens.count)
+    {
+        uint32_t parent = end;
+        for (uint32_t steps = 0; parent < parser->tokens.count && parent != query && steps < parser->tokens.count; steps += 1)
+        {
+            const uint32_t next = parser->tree.parents[parent];
+            if (next == parent)
+            {
+                break;
+            }
+            parent = next;
+        }
+        if (parent != query)
+        {
+            break;
+        }
+        end += 1;
+    }
+    return end;
+}
+
 static void check_warning_query_point(CheckWarningQueryPoint* points, uint32_t* count, uint32_t token, uint32_t query)
 {
     if (*count != 0 && points[*count - 1].token == token)
@@ -51,7 +78,7 @@ static bool check_input_warning_queries(CheckInputReader* reader)
                 first = token + 1;
                 const uint32_t node = reader->output->token_nodes != NULL ? reader->output->token_nodes[token] : BUSTER_CHECK_NONE;
                 end = reader->ends != NULL ? reader->ends[token] + 1 : node < reader->output->graph.count ? reader->output->graph.source_positions[node] :
-                      first < count && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN ? parser->tree.parents[first] + 1 : first;
+                      check_warning_query_end(parser, token);
             }
             else if (kind == PARSE_KIND_TYPEOF && token + 1 < count &&
                      (name == C_NAME_TYPEOF || name == C_NAME_GNU_TYPEOF || name == C_NAME_GNU_TYPEOF2 ||

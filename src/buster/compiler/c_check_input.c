@@ -1031,39 +1031,61 @@ static void check_input_warning_once(CheckInputReader* reader, const CheckWarnin
 static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
                                       uint32_t first, uint32_t end, uint32_t completion)
 {
-    const Parser* parser = reader->parser;
-    if (check_warning_null_integer(reader->types, destination, value) && first < end && end <= parser->tokens.count)
+    CheckWarningEvent event;
+    if (check_warning_null_event(reader->parser, reader->types, destination, value, first, end, completion, &event))
     {
-        while (first + 1 < end && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == end - 1)
+        event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
+        event.payload.token = reader->warning_bound_open;
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// MESSAGE/id30 is a source-use witness, never an emitted diagnostic: a fixed or dependent bound remains
+// independently checked across an outer query. The TU-final consumer decides missing definitions and first use.
+static void check_input_internal_bound_use(CheckInputReader* reader, uint32_t token, uint32_t declaration)
+{
+    if (reader->warning_bound_open != BUSTER_CHECK_NONE && declaration < reader->parser->tokens.count &&
+        reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && reader->linkage[declaration] == 1 && reader->objects[declaration] != 0)
+    {
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_UNDEFINED_INTERNAL,
+            .kind = CHECK_WARNING_EVENT_MESSAGE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = check_input_warning_unevaluated(reader, token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token,
+            .payload = { .name = reader->parser->tokens.names[declaration], .token = reader->warning_bound_open, .data = reader->objects[declaration] },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// A selected overload is authoritative source-use identity, including a later-overwritten initializer. The
+// private KIND_COUNT key namespace keeps it distinct from an earlier raw bound witness at the same token.
+static void check_input_selected_overload_use(CheckInputReader* reader, uint32_t token, uint32_t completion, const CheckOverloadResult* selected)
+{
+    if (selected->status == CHECK_OVERLOAD_OK && selected->object != 0 && selected->type != 0)
+    {
+        const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_KIND_COUNT << 32 | ((uint64_t)token + 1);
+        if (!check_warning_set_contains(&reader->source_warning_keys, key))
         {
-            first += 1;
-            end -= 1;
-        }
-        const bool literal = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_NUMBER && parser->tokens.names[first] == 0;
-        if (!literal)
-        {
-            uint32_t token = first;
-            for (uint32_t steps = 0; steps < end - first; steps += 1)
+            const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+            reader->output->resource |= !retained;
+            if (retained)
             {
-                const uint32_t parent = parser->tree.parents[token];
-                if (parent < first || parent >= end)
-                {
-                    break;
-                }
-                token = parent;
+                const CheckWarningEvent event = {
+                    .id = CHECK_WARNING_ID_UNDEFINED_INTERNAL,
+                    .kind = CHECK_WARNING_EVENT_MESSAGE,
+                    .token = token,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .flags = check_input_warning_unevaluated(reader, token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = completion,
+                    .payload = { .first_type = selected->type, .token = reader->warning_bound_open, .data = selected->object },
+                };
+                check_input_warning_event(reader, &event, NULL, 0);
             }
-            token = parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST || parser->tokens.kinds[first] == PARSE_KIND_GENERIC ? first : token;
-            const CheckWarningEvent event = {
-                .id = CHECK_WARNING_ID_NON_LITERAL_NULL,
-                .kind = CHECK_WARNING_EVENT_NON_LITERAL_NULL,
-                .token = token,
-                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                .flags = check_input_warning_unevaluated(reader, token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
-                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = completion,
-                .payload = { .first_type = destination, .token = reader->warning_bound_open },
-            };
-            check_input_warning_once(reader, &event);
         }
     }
 }
@@ -1197,7 +1219,7 @@ static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t tok
 {
     TypeId type = reader->declared_types[token];
     const uint32_t declaration = reader->output->declarations[token];
-    if (reader->output->kr_parameter_count != 0 && declaration < reader->parser->tokens.count &&
+    if (reader->output->kr_parameter_count != 0 && declaration < reader->parser->tokens.count && reader->output->function_flags != NULL &&
         (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
     {
         const TypeId function = type_strip_aligned(reader->types, type);
@@ -2373,6 +2395,19 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
 static CheckInputMessage check_input_literal_report(const CheckLiteral* literal)
 {
     return literal->bit_width > BUSTER_CHECK_LITERAL_BIT_WIDTH ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
+}
+
+// A numeric zero literal's source provenance: parentheses and selections keep it; a character, enum, object read,
+// cast or computed zero does not acquire it.
+static CheckValue check_input_literal_value(const CheckInputReader* reader, uint32_t token, CheckLiteral literal)
+{
+    CheckValue value = check_literal_value(literal);
+    if (literal.valid && reader->parser->tokens.kinds[token] == PARSE_KIND_NUMBER && reader->parser->tokens.names[token] == 0 &&
+        value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == 0)
+    {
+        value.flags |= BUSTER_CHECK_LITERAL_ZERO;
+    }
+    return value;
 }
 
 static CheckOp check_input_binary(uint8_t kind);
@@ -4041,7 +4076,7 @@ static void check_input_static_local_warning(CheckInputReader* reader, uint32_t 
         element = reader->types->types.base[type_index(element)];
         constant = (type_qualifiers(element) & BUSTER_TYPE_CONST) != 0;
     }
-    if (!constant && function < input->token_count && input->linkage[function] == 2 &&
+    if (!constant && function < input->token_count && input->function_flags != NULL && input->linkage[function] == 2 &&
         (input->function_flags[function] & CHECK_INPUT_FUNCTION_INLINE) != 0)
     {
         bool gnu = reader->pp->options.language.standard < 1999;
@@ -4050,7 +4085,7 @@ static void check_input_static_local_warning(CheckInputReader* reader, uint32_t 
         {
             gnu |= !attributes->records[i].ignored && attributes->records[i].kind == CHECK_ATTRIBUTE_GNU_INLINE;
         }
-        const uint8_t flags = input->function_flags[function];
+        const uint8_t flags = input->function_flags != NULL ? input->function_flags[function] : 0;
         const bool warn = gnu ? (flags & CHECK_INPUT_FUNCTION_EXTERN) != 0 : (flags & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION) == 0;
         if (warn)
         {
@@ -4564,7 +4599,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         else
         {
             reader->objects[token] = reader->objects[previous];
-            if (kind == C_BINDING_FUNCTION)
+            if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
             {
                 reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
             }
@@ -4616,7 +4651,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     reader->definition_origins[token] = reader->definition_origins[previous];
                 }
                 reader->objects[token] = reader->objects[previous];
-                if (kind == C_BINDING_FUNCTION)
+                if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
                 {
                     reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
                 }
@@ -4655,7 +4690,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (reader->lane)
         {
             const bool replaced = linked != 0 && reader->linked_declarations[name] != linked;
-            const uint32_t flags = replaced ? reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
+            const uint32_t flags = replaced && reader->output->function_flags != NULL ?
+                                   reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
             check_input_lane_refuse(reader, linked == 0, "a body declares something with linkage first");
             check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
@@ -5728,7 +5764,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    *check_graph_leaf_of(graph, node) = check_literal_value(literal);
+                    *check_graph_leaf_of(graph, node) = check_input_literal_value(reader, token, literal);
                 }
             }
         }

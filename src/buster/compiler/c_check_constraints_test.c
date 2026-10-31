@@ -35,6 +35,8 @@ struct CheckConstraintFixture
     uint32_t difference;
     const char* violation;
     const char* valid;
+    // Clang's warning line on the violation, 0 when it gives none.
+    uint32_t warning;
 };
 
 static const CheckConstraintFixture check_constraint_fixtures[] =
@@ -107,14 +109,14 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a;\n"
         "double b = 1e400;\n",
         "int a;\n"
-        "double b = 1e300;\n",
+        "double b = 1e300;\n", 2
     },
     {
         "6.4.4p2", "a floating constant too small for its type", CHECK_CONSTRAINT_WARNING, 0,
         "int a;\n"
         "float b = 1e-50f;\n",
         "int a;\n"
-        "float b = 1e-30f;\n",
+        "float b = 1e-30f;\n", 2
     },
     {
         "6.4.4.4p9", "a hexadecimal escape past unsigned char", CHECK_CONSTRAINT_ERROR, 0,
@@ -638,7 +640,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int *p;\n"
         "void f(void) { (void)(p < 1); }\n",
         "int *p;\n"
-        "void f(void) { (void)(p < p + 1); }\n",
+        "void f(void) { (void)(p < p + 1); }\n", 2
     },
     {
         "6.5.8p2", "a relational comparison of pointers to incompatible types", CHECK_CONSTRAINT_WARNING, 0,
@@ -993,14 +995,14 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a;\n"
         "int;\n",
         "int a;\n"
-        "struct S { int x; };\n",
+        "struct S { int x; };\n", 2
     },
     {
         "6.7p2", "an untagged structure that declares nothing", CHECK_CONSTRAINT_WARNING, 0,
         "int a;\n"
         "struct { int x; };\n",
         "int a;\n"
-        "struct { int x; } b;\n",
+        "struct { int x; } b;\n", 2
     },
     {
         "6.7p3", "one declaration of an identifier without linkage", CHECK_CONSTRAINT_ERROR, 0,
@@ -1154,14 +1156,14 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a;\n"
         "_Complex c;\n",
         "int a;\n"
-        "_Complex double c;\n",
+        "_Complex double c;\n", 2
     },
     {
         "6.7.2.1p2", "a member declaration has a declarator", CHECK_CONSTRAINT_WARNING, 0,
         "int a;\n"
         "struct S { int; int x; };\n",
         "int a;\n"
-        "struct S { struct { int y; }; int x; };\n",
+        "struct S { struct { int y; }; int x; };\n", 2
     },
     {
         "6.7.2.1p3", "a member of incomplete type", CHECK_CONSTRAINT_ERROR, 0,
@@ -1217,7 +1219,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "struct S { int n; int x[]; };\n"
         "struct T { struct S s; int y; };\n",
         "struct S { int n; int x[]; };\n"
-        "struct T { struct S *s; int y; };\n",
+        "struct T { struct S *s; int y; };\n", 2
     },
     {
         "6.7.2.1p3", "a structure with a flexible array member as an element", CHECK_CONSTRAINT_ACCEPT, 0,
@@ -1413,7 +1415,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a;\n"
         "inline int f(void) { static int x; return x; }\n",
         "int a;\n"
-        "inline int f(void) { static const int x = 1; return x; }\n",
+        "inline int f(void) { static const int x = 1; return x; }\n", 2
     },
     {
         "6.7.4p3", "an external inline definition refers to an internal identifier", CHECK_CONSTRAINT_ACCEPT, 0,
@@ -1780,14 +1782,14 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a;\n"
         "int b = { { 1 } };\n",
         "int a;\n"
-        "int b = { 1 };\n",
+        "int b = { 1 };\n", 2
     },
     {
         "6.7.9p19", "a designator overrides an earlier initializer", CHECK_CONSTRAINT_WARNING, 0,
         "int a;\n"
         "int b[2] = { [0] = 1, [0] = 2 };\n",
         "int a;\n"
-        "int b[2] = { [0] = 1, [1] = 2 };\n",
+        "int b[2] = { [0] = 1, [1] = 2 };\n", 2
     },
     {
         "6.7.9p17", "nested designators and brace elision", CHECK_CONSTRAINT_ACCEPT, 0,
@@ -2050,7 +2052,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "static int g(void);\n"
         "int f(void) { return g(); }\n",
         "static int g(void);\n"
-        "int f(void) { return sizeof(g()); }\n",
+        "int f(void) { return sizeof(g()); }\n", 1
     },
     {
         "6.9.1p2", "a function definition's identifier has function type", CHECK_CONSTRAINT_ERROR, 0,
@@ -2087,7 +2089,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a;\n"
         "int g(int) { return 1; }\n",
         "int a;\n"
-        "int g(void) { return 1; }\n",
+        "int g(void) { return 1; }\n", 2
     },
     {
         "6.9.1p5", "no declaration list after a parameter type list", CHECK_CONSTRAINT_ERROR, 0,
@@ -2408,7 +2410,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int *p = 1 - 1;\n",
         "int a;\n"
         "int *p = 0;\n"
-        "int *q = (void *)0;\n",
+        "int *q = (void *)0;\n", 2
     },
     {
         "6.3.2.3p5", "an integer converts to a pointer with a cast", CHECK_CONSTRAINT_ERROR, 0,
@@ -2540,11 +2542,18 @@ static void check_test_constraints(CheckTest* test, const char* clang)
         snprintf(description, sizeof(description), "constraint %s: clang %s, the fixture records %s", name, ready && oracle.rejected ? "rejects" : "accepts",
                  expected ? "an error" : "acceptance");
         check_test_expect(test, ready && oracle.rejected == expected, description);
+        if (violation && fixture->warning != 0)
+        {
+            snprintf(description, sizeof(description), "constraint %s: clang warns at line %u, the fixture records %u", name, ready ? oracle.warning : 0, fixture->warning);
+            check_test_expect(test, ready && oracle.warning == fixture->warning, description);
+        }
         errors += expected;
         if (ready)
         {
             // A difference the checker keeps: it must reject the violation at its recorded line, where clang takes it.
             CheckCorpusOracle checked = oracle;
+            checked.check_warning = violation && fixture->warning != 0;
+            checked.warning = violation ? fixture->warning : 0;
             if (violation && fixture->difference != 0)
             {
                 checked.rejected = true;

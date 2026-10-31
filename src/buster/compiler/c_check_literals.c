@@ -40,11 +40,12 @@ struct CheckLiteral
     bool valid;
     bool resource;
     bool bit_unsigned;
+    // CHECK_LITERAL_RANGE_*: whether the spelling's magnitude is past its type's largest or below its smallest, in
+    // what was the literal's padding before `high`, so that every literal keeps its 48 bytes.
+    uint8_t range;
     // A bit-precise constant's bits past 64, 0 for every other literal: in what was the literal's padding, so that it
     // keeps its 48 bytes, which every literal is zeroed and copied in.
     uint64_t high;
-    // CHECK_LITERAL_RANGE_*: whether the spelling's magnitude is past its type's largest or below its smallest.
-    uint8_t range;
 };
 
 // The widest bit-precise constant the checker takes: its values (CheckValue.integer) hold 128 bits.

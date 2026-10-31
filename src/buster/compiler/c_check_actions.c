@@ -64,6 +64,9 @@ typedef enum CheckFault
 // A known value read from a completed const object's initializer. It can be a GNU constant without being an ICE
 // or an ICE-form null pointer constant. An enumerator declared from it receives its own ordinary ICE provenance.
 #define BUSTER_CHECK_GNU_OBJECT_READ 0x10000u
+// Source provenance, not constant-expression eligibility: numeric zero literals survive only transparent
+// parentheses/selections. A character, enum, object read, cast or computed zero does not acquire this proof.
+#define BUSTER_CHECK_LITERAL_ZERO 0x20000u
 // The designator names an inactive member of a known const union. Its address remains valid; value conversion
 // cannot use the initializer receipt. Runtime union access keeps its ordinary semantics.
 #define BUSTER_CHECK_INACTIVE_UNION_READ 0x40000u
@@ -2788,6 +2791,10 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
     if ((action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
     {
         check_action_fp_environment(table, action, result);
+    }
+    if (action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT)
+    {
+        result->value.flags &= ~BUSTER_CHECK_LITERAL_ZERO;
     }
     if (result->diagnostic != CHECK_DIAG_NONE)
     {

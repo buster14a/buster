@@ -3173,9 +3173,12 @@ record of them. A fixture records clang's verdict on its violation:
 - acceptance with a warning clang gives by default, for 33;
 - acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
 
-Every valid twin is accepted.
+Every valid twin is accepted. A warning fixture also records the line clang's warning has (`warning`), and the
+catalogue requires it from clang and from the checker: `CheckCorpusOracle.check_warning` makes
+`check_corpus_file_outcome` compare the checker's first kept sparse warning's presumed line (`CheckCorpusPath.first_warning_line`,
+from the reader's and the initializer walk's events and the translation unit's final undefined-internal analysis) with it.
 
-The first survey of the catalogue (main at `321f597`) found 14 of the 644 sources differing from clang, each
+The first survey of the catalogue (main at `321f597`) found 14 of the first 644 sources differing from clang, each
 fixed with its fixture there:
 - **Rejected, where clang takes them:**
   - declarations and members of no declarator;
@@ -3194,8 +3197,20 @@ subobjects, symbolic pointers and active union selections. Each lookup checks th
 volatile, incomplete and effectful initializers supply no value proof. Runtime loads retain their effects,
 including const atomic loads. An enumerator publishes ordinary ICE evidence after its definition.
 
-The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
-declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
+Every warning the 33 get is the checker's at clang's line: the fourteen default warnings #705 lists
+now have producers, their sparse events and the driver's rendering. They are `-Wnon-literal-null-conversion`
+(a non-literal integer constant zero converted to a pointer, from a zero literal's source provenance that
+parentheses and selections keep), `-Wliteral-range` (a floating literal past its type's magnitude, at the
+literal), the ungrouped ordered pointer/integer comparison, `-Wmissing-declarations` (a declaration of no
+declarator, at file scope and for a member), the ungrouped plain `_Complex` assumption,
+`-Wgnu-variable-sized-type-not-at-end`, `-Wstatic-local-in-inline` with its `static` note, the
+`-Wmany-braces-around-scalar-init` excess brace, `-Winitializer-overrides` with its prior-initialization note,
+`-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
+for an unnamed parameter before C23. Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
+driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
+compares the driver's complete diagnostics with clang's for every producer and policy, and
+`test-checker`'s catalogue compares each warning's line.
 
 ## Corpus comparison and semantic mutations
 
