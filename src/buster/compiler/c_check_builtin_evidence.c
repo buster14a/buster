@@ -39,7 +39,7 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
         effects |= op == CHECK_OP_STATEMENT_VALUE && (graph->members[node] & BUSTER_CHECK_SIDE_EFFECT) != 0;
         effects |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP ||
                    builtin == CBUILTIN_PREFETCH || builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET ||
-                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA);
+                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA || cbuiltin_carry(builtin));
         effects |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
                                                      builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
         const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
@@ -77,13 +77,12 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
 static uint32_t check_input_declaration_alignment(const CheckInputReader* reader, uint32_t declaration, TypeId type)
 {
     const CheckInputAttributes* attributes = reader->output->attributes[declaration];
-    const TypeId plain = type_strip_aligned(reader->types, type);
     uint32_t result = type_alignment_log2(reader->types, type);
     if (attributes != 0 && attributes->alignment_log2 != 0)
     {
         result = (uint32_t)attributes->alignment_log2 - 1;
     }
-    else if (type_kind_is_array(type_kind(reader->types, plain)) && type_size(reader->types, type) >= 16 && result < 4)
+    else if (type_large_array(reader->types, type) && result < 4)
     {
         result = 4;
     }

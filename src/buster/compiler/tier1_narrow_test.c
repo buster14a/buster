@@ -348,7 +348,9 @@ static bool tier1_narrow_records(const Tier1SelectPlan* plan, const Tier1EmitRes
     {
         while (node < function->instruction_count && emitted->code.node_first[node + 1] == record)
         {
-            if (probes && !plan->covered[node] && (function->type[node] == IR_I8 || function->type[node] == IR_I16))
+            // Issue #981: every rule making a narrow value leaves zeros past its width in the whole 64-bit
+            // register. Probe I1 as well as I8/I16 so a later copy/extension cannot hide noncanonical bits.
+            if (probes && !plan->covered[node] && (function->type[node] == IR_I1 || function->type[node] == IR_I8 || function->type[node] == IR_I16))
             {
                 const uint32_t reg = tier1_narrow_register(emitted, node);
                 ready = ready && reg < 16 && reg != X86_REGISTER_R11;
@@ -431,7 +433,7 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
                     tier1_emit_test_expect(test, memcmp(data, page_expected, page) == 0, "narrow memory value and every adjacent byte match the frozen oracle");
                     for (uint32_t node = 0; probes && node < fixture->nodes; node += 1)
                     {
-                        if (!plan->covered[node] && (fixture->function.type[node] == IR_I8 || fixture->function.type[node] == IR_I16))
+                        if (!plan->covered[node] && (fixture->function.type[node] == IR_I1 || fixture->function.type[node] == IR_I8 || fixture->function.type[node] == IR_I16))
                         {
                             tier1_emit_test_expect(test, observed[node] == expected->values[sample][node], "narrow producer/reload COPY holds zero-extended canonical bits before a later conversion");
                         }
@@ -600,8 +602,12 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
         arena_pop_to(&test->output, 0);
         arena_pop_to(&test->input, 0);
     }
-    for (uint32_t failure = 0; failure < 11; failure += 1)
+    // Narrow arithmetic, compares, shifts, call arguments and I1 conversions; narrow parameters (0 and 1), returns (2 and
+    // 3) and call results (8) are taken (tier1_call_test.c runs the parameters and results, and these tests the returns).
+    static const uint32_t failures[] = { 4, 5, 6, 7, 9, 10 };
+    for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
+        const uint32_t failure = failures[index];
         const IrType narrow = failure & 1 ? IR_I16 : IR_I8;
         const IrSizes sizes = {
             .instruction_count = 6,
@@ -688,7 +694,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             const uint64_t scratch_mark = test->scratch.length;
             uint32_t node;
             const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &result, &node);
-            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "narrow PARAM/RET/CALL/arithmetic/compare/shift and I1 SEXT/TRUNC remain unsupported");
+            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "narrow call argument/arithmetic/compare/shift and I1 SEXT/TRUNC remain unsupported");
             tier1_emit_test_expect(test, test->output.length == output_mark && test->scratch.length == scratch_mark && memcmp(&before, &result, sizeof(result)) == 0, "unsupported narrow selection publishes no partial plan");
         }
         arena_pop_to(&test->output, 0);

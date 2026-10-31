@@ -250,6 +250,25 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
         "popq %rbp\n.cfi_def_cfa 7,8\nret\n.cfi_endproc\n",
         ".section .rodata.cst8,\"aM\",@progbits,8\n.p2align 3\n.Lconstant: .quad 0x12345678\n"
         ".text\nconstant_reader: movq .Lconstant(%rip),%rax\nret\n.data\nconstant_address: .quad .Lconstant+1\n",
+        // #808: SSE2 packed integer mnemonics whose last letter is an AT&T suffix letter. GNU as assembles every one.
+        ".text\npacked_integer:\n"
+        "punpcklbw %xmm1,%xmm0\npunpckldq %xmm1,%xmm0\npunpcklqdq %xmm1,%xmm0\n"
+        "punpckhbw %xmm1,%xmm0\npunpckhdq %xmm1,%xmm0\npunpckhqdq %xmm1,%xmm0\n"
+        "packsswb %xmm1,%xmm0\npackssdw %xmm1,%xmm0\npackuswb %xmm1,%xmm0\n"
+        "pmuludq %xmm1,%xmm0\npaddb %xmm1,%xmm0\npaddw %xmm1,%xmm0\npaddq %xmm1,%xmm0\n"
+        "psubb %xmm1,%xmm0\npsubw %xmm1,%xmm0\npsubq %xmm1,%xmm0\n"
+        "pcmpeqb %xmm1,%xmm0\npcmpeqw %xmm1,%xmm0\npcmpgtb %xmm1,%xmm0\npcmpgtw %xmm1,%xmm0\n"
+        "pmaxsw %xmm1,%xmm0\npminub %xmm1,%xmm0\npsadbw %xmm1,%xmm0\npavgb %xmm1,%xmm0\npavgw %xmm1,%xmm0\n"
+        "pmulhw %xmm1,%xmm0\npmullw %xmm1,%xmm0\npsllw $2,%xmm0\npsllq $2,%xmm0\n"
+        "psrlw $2,%xmm0\npsrlq $2,%xmm0\npsraw $2,%xmm0\n"
+        "punpcklwd %xmm1,%xmm0\npunpckhwd %xmm1,%xmm0\npmaddwd %xmm1,%xmm0\n"
+        "pslld $2,%xmm0\npsrld $2,%xmm0\npsrad $2,%xmm0\npand %xmm1,%xmm0\npandn %xmm1,%xmm0\npor %xmm1,%xmm0\n"
+        "pslld %xmm1,%xmm0\npsrld %xmm1,%xmm0\npsrad %xmm1,%xmm0\n",
+        // #808: the markers clang's and GCC's -S output uses for external calls and hidden symbols.
+        ".text\n.globl compiler_markers\n.type compiler_markers,@function\ncompiler_markers:\n"
+        "endbr64\ncall memcpy@PLT\njmp strcmp@PLT\nnotrack jmp *%rax\nret\n"
+        ".size compiler_markers,.-compiler_markers\n"
+        ".data\n.globl hidden_target\n.hidden hidden_target\nhidden_target: .quad 0\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
     {
@@ -308,6 +327,24 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
     // Address-significance annotations are LLVM-only. Omitting the table conservatively preserves all addresses.
     static const char annotations[] = ".text\nf: ret\n.addrsig\n.addrsig_sym f\n";
     asm_test_pair(test, (String8){.pointer = (char*)annotations, .length = sizeof(annotations) - 1}, 1, X86_ARCH_BASELINE);
+    // #808: compiler-generated metadata and DWARF's LEB128 data. `.prefalign` is LLVM's; GNU as 2.42 refuses it, so
+    // only this frontend's two paths are compared. `.loc`'s view label and the LEB128 values are encoded here.
+    static const char compiler_metadata[] =
+        ".file 0 \"/tmp/dir\" \"source.c\" md5 0x0123456789abcdef0123456789abcdef\n"
+        ".text\n.Lfunc_begin0:\n.loc 0 1 0 view .LVU0\n.prefalign 4, .Lfunc_end0, nop\n"
+        "metadata: nop\n.Lfunc_end0:\nret\n"
+        ".data\n.sleb128 -1,0,63,64,-64,-65,123456\n.uleb128 0,1,127,128,300,624485\n.uleb128 .LVU0\n";
+    asm_test_pair(test, (String8){.pointer = (char*)compiler_metadata, .length = sizeof(compiler_metadata) - 1}, 1, X86_ARCH_BASELINE);
+    static const char leb128[] = ".data\nleb:\n.sleb128 -1,0,63,64,-64,-65,123456\n.uleb128 0,1,127,128,300,624485\n";
+    if (cross_check)
+    {
+        asm_test_oracle(test, leb128, directory, X86_ARCH_BASELINE);
+    }
+    static const char gotpcrel[] = ".text\ngot_reader: movq external_data@GOTPCREL(%rip), %rax\nmovq other_data@GOTPCRELX(%rip), %rcx\nret\n";
+    const AsmResult got = asm_test_pair(test, (String8){.pointer = (char*)gotpcrel, .length = sizeof(gotpcrel) - 1}, 1, X86_ARCH_BASELINE);
+    asm_test_check(test, got.error == 0 && got.link.fixups.count == 3 && (got.link.fixups.kind[1] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_LOAD_GOT &&
+                           (got.link.fixups.kind[2] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_LOAD_GOT,
+                   "@GOTPCREL on movq takes GNU as's relaxable GOT form", got.error);
     asm_test_local_symbols(test);
     if (cross_check)
     {

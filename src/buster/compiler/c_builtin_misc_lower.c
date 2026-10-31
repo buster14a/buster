@@ -16,6 +16,8 @@
 // All loops preserve the enclosing value stack, use absolute enclosing-stream branch destinations and initialize
 // their U64 temporaries before use. Return values have their declared machine classes. No helper allocation occurs.
 //
+// The bit builtins (cbuiltin_bits) are c_builtin_bits_lower.c's recipes, of their arguments' and result's descriptors.
+//
 // ALLOCA is Tier 0's ALLOCA of its U64 size, and FRAME_ADDRESS and RETURN_ADDRESS take no arguments: they are level 0's
 // (the producer refuses any other level and evaluates none), Tier 0's FRAME_ADDRESS and the word 8 bytes above it. Each
 // gives its function a frame pointer.
@@ -32,15 +34,31 @@ typedef struct CBuiltinMiscLowerCall CBuiltinMiscLowerCall;
 struct CBuiltinMiscLowerCall
 {
     CBuiltinId id;
-    uint32_t arguments[3];
+    uint32_t arguments[4];
     uint32_t argument_count;
     uint32_t constant_size;
     bool constant_size_known;
+    // A bit builtin's arguments' descriptors and its result's (width | BUSTER_CBUILTIN_SIGNED, BUSTER_CBUILTIN_LOWER_WIDE
+    // for 128 bits), a carry's pointer's 0, and a result past 64 bits' frame object.
+    uint32_t argument_types[4];
+    uint32_t result_type;
+    uint32_t result_object;
 };
+
+#include "c_builtin_bits_lower.c"
 
 static bool cbuiltin_misc_lower_local_class(const CBuiltinLowerBuffer* buffer, uint32_t local, uint32_t class)
 {
     const bool result = local < buffer->local_count && buffer->local_classes[local] == class;
+    return result;
+}
+
+// A 128-bit value's frame object (c_check_program_lower.c's check_lower_temporary of I128 or U128): an address-taken
+// local without a class of its own, as cbuiltin_lower_slot_valid takes a wide overflow operand's.
+static bool cbuiltin_misc_lower_object(const CBuiltinLowerBuffer* buffer, uint32_t local)
+{
+    const bool result = local < buffer->local_count && buffer->local_classes[local] == BUSTER_TYPED_CLASS_VOID &&
+                        (buffer->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
     return result;
 }
 
@@ -467,7 +485,21 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_MEMCMP: minimum = maximum = 3; result_class = BUSTER_TYPED_CLASS_I32; break;
         case CBUILTIN_FRAME_ADDRESS:
         case CBUILTIN_RETURN_ADDRESS: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
-        default: result.error = CBUILTIN_LOWER_UNSUPPORTED; break;
+        default:
+            if (cbuiltin_bits(call->id))
+            {
+                // A result past 64 bits is its frame object's value (c_builtin_bits_lower.c).
+                const bool wide = !cbuiltin_carry(call->id) && cbuiltin_bits_width(call->result_type) > 64;
+                cbuiltin_bits_arity(call->id, &minimum, &maximum);
+                result_class = cbuiltin_bits_class(cbuiltin_carry(call->id) ? call->argument_types[0] : call->result_type);
+                result.error = result_class == BUSTER_TYPED_CLASS_VOID || (wide && !cbuiltin_misc_lower_object(buffer, call->result_object)) ?
+                               CBUILTIN_LOWER_ARGUMENT : CBUILTIN_LOWER_OK;
+            }
+            else
+            {
+                result.error = CBUILTIN_LOWER_UNSUPPORTED;
+            }
+            break;
         }
         if (result.error == CBUILTIN_LOWER_OK && (call->argument_count < minimum || call->argument_count > maximum))
         {
@@ -475,9 +507,15 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         }
         for (uint32_t i = 0; result.error == CBUILTIN_LOWER_OK && i < call->argument_count; i += 1)
         {
-            const uint32_t class = call->id == CBUILTIN_EXPECT ? BUSTER_TYPED_CLASS_I64 : call->id == CBUILTIN_MEMSET && i == 1 ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64;
+            // A bit builtin's argument is of its descriptor's class, one past 64 bits a frame object, and a carry's pointer U64.
+            const bool bits = cbuiltin_bits(call->id) && !(cbuiltin_carry(call->id) && i == 3);
+            const bool wide = bits && cbuiltin_bits_width(call->argument_types[i]) > 64;
+            const uint32_t class = bits ? cbuiltin_lower_type_class(call->argument_types[i]) : call->id == CBUILTIN_EXPECT ? BUSTER_TYPED_CLASS_I64 :
+                                   call->id == CBUILTIN_MEMSET && i == 1 ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64;
             const bool hint_integer = i > 0 && (call->id == CBUILTIN_PREFETCH || (call->id == CBUILTIN_ASSUME_ALIGNED && i == 1));
-            const bool valid = hint_integer ? cbuiltin_misc_lower_integer(buffer, call->arguments[i]) : cbuiltin_misc_lower_local_class(buffer, call->arguments[i], class);
+            const bool valid = hint_integer ? cbuiltin_misc_lower_integer(buffer, call->arguments[i]) :
+                               wide ? cbuiltin_bits_width(call->argument_types[i]) <= 128 && cbuiltin_misc_lower_object(buffer, call->arguments[i]) :
+                                      class != BUSTER_TYPED_CLASS_VOID && cbuiltin_misc_lower_local_class(buffer, call->arguments[i], class);
             if (!valid)
             {
                 result.error = CBUILTIN_LOWER_ARGUMENT;
@@ -545,6 +583,10 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
                 cbuiltin_lower_operation(&recipe, BUSTER_TYPED_ADD);
                 cbuiltin_lower_emit(&recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
             }
+        }
+        else if (cbuiltin_bits(call->id))
+        {
+            cbuiltin_bits_recipe(&recipe, call->id, call->arguments, call->argument_types, call->argument_count, call->result_type, call->result_object);
         }
         else if (call->id != CBUILTIN_PREFETCH)
         {

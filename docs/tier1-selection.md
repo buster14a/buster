@@ -29,7 +29,37 @@ patterns are:
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. Larger displacements
-  return an unsupported result until materialization is implemented.
+  return an unsupported result until materialization is implemented. An
+  access's address is walked (`tier1_select_address`, #140) through the nodes
+  only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
+  typed stream's integers put around every address, addresses (one after
+  another while the operand has room for their one index), constant indices
+  and 64-bit additions of constants, which join the displacement while it fits
+  32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
+  conversions, two `lea`s and the constants' moves; a pointer that is a value
+  (a ptrtoint or an inttoptr of such a chain) is one `lea`. The index sheds the
+  constants added to it (`tier1_select_index`): a 64-bit addition of a constant
+  on either side, or a subtraction of one, joins the displacement scaled, so
+  that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`. A 32-bit `int` index
+  keeps its addition, which comes before its sign extension: `(i + c) * s` isn't
+  `i * s + c * s` when `i + c` overflows, which the IR doesn't rule out (and
+  `-fwrapv` defines).
+- C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
+  `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
+  `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
+  nests. A branch on such a chain is its comparison's `cmp` and `jcc`, and its
+  zero extension to an integer the comparison's `cmp`, `setcc` and `movzx`,
+  negated for an odd number of `eq` links, where every link is consecutive and
+  used only by the next, so that nothing the pattern doesn't compute runs
+  between the comparison and its test. `if (a < b)` had been
+  `cmp; setl; movzx; test; setne; movzx; test; jne`.
+- Division and remainder by a power of two 2^k: unsigned, a shift right by k or
+  a mask of k bits (a mask fitting an imm32); signed, for 1 ≤ k ≤ bits − 2,
+  `TIER1_RULE_DIVIDE_POWER`'s sequence, rounded toward zero as C's: the bias
+  2^k − 1 where the dividend is negative, from its sign in the scratch register
+  (`mov`, `sar`, `shr`), added by a `lea`, then an arithmetic shift, or for the
+  remainder a mask and the bias subtracted. A divisor of 1 is a copy (a zero
+  remainder). Other divisors remain `TIER1_RULE_DIVIDE`.
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
@@ -69,7 +99,8 @@ emit no late copies. This emitter has no frame or callee-saved-register changes.
 
 Calls, phis, switches, floating values, byte/word arithmetic, dynamic shifts,
 division/remainder, stack/symbol addresses, spill fragments and rematerialized
-fragments are explicit unsupported/allocation results in `tier1_select_emit`.
+fragments are explicit unsupported/allocation results in `tier1_select_emit`:
+it has neither call preservation nor the edge moves a phi needs.
 No semantic error silently falls back to another tier. The separate
 `tier1_emit.c` consumer described below handles allocated spill fragments
 without weakening that API's checks.
@@ -80,8 +111,11 @@ without weakening that API's checks.
 error_node)` returns `Tier1SelectError`. Both the vector and scalar paths invoke
 their corresponding IR verifier. A cross-block value use requires the supplied
 dominator intervals; structural verification alone is insufficient. This slice
-requires value definitions to precede uses in physical instruction order and
-does not accept phis.
+requires value definitions to precede uses in physical instruction order, but
+for a phi's operands, which may follow it (a loop's back edge). An integer phi
+selects `TIER1_RULE_PHI` (#140): no records and no effective uses, since its
+operands are uses on its block's incoming edges, which the CFG consumer's edge
+moves read (`tier1_emit_cfg.c`, in the [pipeline guide](tier1-pipeline.md)).
 
 The borrowed function remains immutable and alive until emission finishes.
 Input, result and scratch storage must not overlap unused arena capacity;
@@ -126,9 +160,16 @@ operand, type, immediate, memory-order and single-use constraints.
 
 The vector path chooses the cheapest candidate for sixteen independent ready
 nodes at a time, with unsigned comparisons over contiguous cost columns. The
-final batch is masked. A reverse node pass selects the cover and suppresses
-only the exact nodes consumed by its rules; an iterative pass publishes the
-effective-use CSR. There is no recursive tree walk or speculative input load.
+final batch is masked. A reverse node pass then marks what the code computes:
+the nodes with an effect (stores, calls, terminators, volatile loads), the
+parameters, the phis and their operands, the nodes nothing uses (an unused load
+or division the optimizer kept for the fault it may raise), and each value a
+marked node's chosen pattern reads. Every other node is covered, its users'
+patterns computing it themselves: a constant as an immediate, a load as a
+memory operand, an address as a displacement, a truth value's chain as a
+comparison, however deep their walks went (#140). A pattern's `fold_count` is
+only maximal munch's rank. An iterative pass publishes the effective-use CSR.
+There is no recursive tree walk or speculative input load.
 
 The scalar twin uses a switch to rank maximal-munch patterns by coverage and
 rule priority. It deliberately does not call the vector minimum-cost chooser.
@@ -190,6 +231,17 @@ and pipeline tests check.
 
 The output reserves at most six records per original node and two branches per
 block. Its logical lengths are the returned counts, not the reserved capacity.
+Every record a rule's expansion writes goes through `tier1_select_append`, which
+checks it against the node's room (`BUSTER_TIER1_SELECT_RECORDS_PER_NODE`): a
+sequence longer than the room writes nothing past it and marks the node's records
+overflowed, which the three consumers refuse as an invalid function. The
+signed power-of-two remainder's six records are the longest, the room's whole.
+The tests take a node's sequence to its room and past it with no-ops before its
+records (`Tier1SelectPattern.nops`, which the selector never sets):
+`test-tier1-select` through the selector's emitter and `test-tier1-emit` through
+both consumers, a conditional branch's sequence among them. At the room the
+function emits and runs; one record past it, it fails at the node with its
+arenas and result as they were.
 Input columns and output records require no padding. Only the encoder's own
 documented output buffer capacity/padding contract applies when encoding them.
 All retained arrays belong to the caller's arena. Emission failure restores its
@@ -215,8 +267,10 @@ The last returns, ends in `IR_UNREACHABLE`, or contains exactly one branch to
 itself. Forward identity jumps emit no record. The empty terminal sink emits
 a real self-jump targeting its block after the prologue; a preceding call is
 not assumed to terminate. Terminal paths emit no return epilogue. This admits
-the typed lowerer's parameter preheader and terminal suffix while general
-joins, nonempty backedges and phi moves still need an edge-location consumer.
+the typed lowerer's parameter preheader and terminal suffix. Every other
+function, with general joins, nonempty backedges and phis, goes through the CFG
+consumer, `tier1_emit_cfg.c` (#140), which allocates over the CFG
+(`tier1_cfg.c`) and moves values along its edges.
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
@@ -250,10 +304,10 @@ and encoding, publish them through `link_add_code_fixups` with the encoder's
 instruction ends. The references retain instruction indices, not guessed byte
 offsets. The older frameless `tier1_select_emit` API still rejects call plans.
 
-Indirect and variadic calls, stack arguments, floating-point and aggregate
-arguments/results, and general terminal-call CFGs are outside this bounded path.
-The supported empty terminal sink does not establish acceptance of source
-functions with conditional branches or unreachable continuation blocks.
+Indirect and variadic calls, stack arguments, and floating-point and aggregate
+arguments/results are outside this bounded path. Calls in general CFGs, loops
+among them, go through the CFG consumer, which saves the registers of values
+live past each call. Neither establishes acceptance of source functions.
 Unsupported calls and allocation/target/capacity errors publish no partial
 result. Correct execution of these component fixtures does not establish
 atomic-builtin, full-source ABI or corpus acceptance.
@@ -324,8 +378,9 @@ frame planning, fragment emission, branch sizing and encoding. Original
 registers. Both paths run against an independent integer oracle with stored
 values and with rematerialized constants, fixed/red-zone/frame-pointer frames,
 and stack probes. Independent allocation verification checks the produced
-fragments. Failures cover target denial, scratch-register conflicts, capacity,
-unsupported frame policies and general CFG backedges. Narrow-value fixtures
+fragments. Failures cover target denial, scratch-register conflicts, capacity
+and unsupported frame policies; a backedge through the entry now goes through
+the CFG consumer, after an added entry block. Narrow-value fixtures
 check canonical upper bits, exact byte/word accesses beside guard pages,
 sign boundaries, real spills and rematerialization. Terminal fixtures check
 explicit traps and empty self-loop sinks in bounded child processes, including

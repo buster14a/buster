@@ -1107,7 +1107,12 @@ composite type, creates distinct local/global symbols and passes selected
 `CheckDataObject` records to `check_data_emit` in `c_check_data.c`. It never
 reparses declarations or binds identifiers again. An actual initializer wins
 over later tentative or external declarations. Automatic objects and
-unreferenced function bodies produce no data atom.
+unreferenced function bodies produce no data atom. An object's alignment is its
+type's or its declarations' largest alignment attribute's, and without one at
+least 16 for an array of 16 bytes or more, as the x86-64 psABI aligns a global
+array and clang declares it, an `extern` one too, which clang's optimized code
+stores into with aligned SSE moves (`check_data_declared_alignment`, #978);
+compound literals and string literals keep their types' alignment.
 
 The emitter consumes checked aggregate initializer plans, including brace
 elision, designated/range stores, bit-fields, compatible string copies and
@@ -1333,6 +1338,9 @@ What the lowering covers past scalars (#145's programs):
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
   of their own size and alignment (up to 1 GB each), reached through
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+  An array of 16 bytes or more whose declaration has no alignment attribute or
+  specifier is aligned to at least 16, as the x86-64 psABI and clang align a
+  local array (`type_large_array`, #978); a compound literal keeps its type's.
   Past 16 bytes' alignment, Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
 - **Values aligned past 8 bytes.** A scalar local or parameter whose alignment
@@ -2378,7 +2386,9 @@ What the lowering covers past scalars (#145's programs):
   each instead of all earlier records (#611); the small, ordered span updates
   retain the existing scalar record layout and stable bound identities.
   Empty ranges still validate variably modified declarations and retain their
-  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  jump-scope metadata. A variably modified `typeof` operand is evaluated where its
+   declaration is executed, after the type's bounds and before the declaration's
+   initializers; a fixed-type `typeof` operand is not evaluated. In eleven paired fresh-process runs on the locked
   9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
   34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
   instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
@@ -3173,9 +3183,12 @@ record of them. A fixture records clang's verdict on its violation:
 - acceptance with a warning clang gives by default, for 33;
 - acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
 
-Every valid twin is accepted.
+Every valid twin is accepted. A warning fixture also records the line clang's warning has (`warning`), and the
+catalogue requires it from clang and from the checker: `CheckCorpusOracle.check_warning` makes
+`check_corpus_file_outcome` compare the checker's first kept sparse warning's presumed line (`CheckCorpusPath.first_warning_line`,
+from the reader's and the initializer walk's events and the translation unit's final undefined-internal analysis) with it.
 
-The first survey of the catalogue (main at `321f597`) found 14 of the 644 sources differing from clang, each
+The first survey of the catalogue (main at `321f597`) found 14 of the first 644 sources differing from clang, each
 fixed with its fixture there:
 - **Rejected, where clang takes them:**
   - declarations and members of no declarator;
@@ -3194,8 +3207,20 @@ subobjects, symbolic pointers and active union selections. Each lookup checks th
 volatile, incomplete and effectful initializers supply no value proof. Runtime loads retain their effects,
 including const atomic loads. An enumerator publishes ordinary ICE evidence after its definition.
 
-The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
-declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
+Every warning the 33 get is the checker's at clang's line: the fourteen default warnings #705 lists
+now have producers, their sparse events and the driver's rendering. They are `-Wnon-literal-null-conversion`
+(a non-literal integer constant zero converted to a pointer, from a zero literal's source provenance that
+parentheses and selections keep), `-Wliteral-range` (a floating literal past its type's magnitude, at the
+literal), the ungrouped ordered pointer/integer comparison, `-Wmissing-declarations` (a declaration of no
+declarator, at file scope and for a member), the ungrouped plain `_Complex` assumption,
+`-Wgnu-variable-sized-type-not-at-end`, `-Wstatic-local-in-inline` with its `static` note, the
+`-Wmany-braces-around-scalar-init` excess brace, `-Winitializer-overrides` with its prior-initialization note,
+`-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
+for an unnamed parameter before C23. Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
+driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
+compares the driver's complete diagnostics with clang's for every producer and policy, and
+`test-checker`'s catalogue compares each warning's line.
 
 ## Corpus comparison and semantic mutations
 
@@ -3827,6 +3852,46 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+**C23 `auto` and `constexpr` (#793).** In C23 a declaration's `auto`, when no
+other type specifier is beside it, is a type specifier rather than the storage
+class (`check_input_specifiers`, `check_input_declaration`). Its declared type
+is deduced from its initializer as clang deduces it: the initializer is
+lvalue-converted and decayed at the top, then each pointer, array, function and
+aligned level of the declarator matches its own operands, an array's extent and
+a function's parameters must be the same, and the placeholder takes the type
+there with the specifiers' `const` and `volatile`. Unlike `__auto_type`, a
+pointer declarator (`auto *p = &x`) and a declaration's later declarators
+(`auto a = 1, b = 2`) are the language's, and each later declarator must
+deduce the same type; file scope and `static`, `extern` and `register` are
+C23's. `auto` with another type specifier (`auto int x`) keeps its storage-class
+meaning, so `auto` and no initializer there is C's existing storage-class rule,
+not a deduction. Deduced declarations are refused by name where clang refuses
+them: a typedef's, a function's, a parameter's and a member's `auto` (a
+parameter's and a member's where the parser's own grammar reaches them), one
+without an initializer or with an array at its initializer, and an initializer
+list. A deduced type that is incomplete, variably modified, or a
+bit-field's value is refused as `__auto_type`'s is.
+
+A C23 `constexpr` declaration declares an initialized object whose type is
+const-qualified at its top level (`constexpr int *p` is `int *const`) and whose
+initializer must be a constant expression; a pointer's must be null (or
+`nullptr`), and its value exactly representable in the declared type (clang's
+refusal of `constexpr char c = 300`, `constexpr unsigned u = -1` and
+`constexpr float f = 0.1`). The reader evaluates the initializer once
+(`check_input_constexpr_finish`) and keeps an integer, floating, complex or
+null-pointer value for the object's uses' constant readings, so that an array
+bound, `case`, `static_assert` or another constant expression takes it. An
+aggregate's initializer is left to the initializer walk. At file scope a
+`constexpr` object has internal linkage, as clang gives it. Refused by name:
+`constexpr` with `typedef`, `extern`, `_Thread_local`, `inline`, a function
+type, a volatile type or an atomic type, without an initializer, a pointer
+whose initializer isn't null, and one whose initializer isn't a constant
+expression or isn't exactly representable.
+
+`test-checker`'s gnu23 source fixtures compare both forms with clang and check
+their deduced and const types; `test-checker-driver` checks the driver accepts
+the issue's original files and refuses the same places as clang in C23.
 
 ## Tail calls (#147)
 

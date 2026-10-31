@@ -85,7 +85,7 @@ static int run_ir_simd_tests(int argc, char** argv)
                            "SSA promotion refuses SIMD transactionally until sparse-payload rewriting is supported");
             IrOptimizeResult optimized = { .function.instruction_count = 123 };
             IrOptimizeOptions options = ir_optimize_options();
-            options.scalar = scalar != 0;
+            options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             checked = ir_optimize(&function, &output, &scratch, options, &optimized);
             ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && optimized.function.instruction_count == 123 && output.length == 0 && scratch.length == 0,
                            "SCCP/DCE/CFG refuses SIMD before scalar folding or payload reconstruction");

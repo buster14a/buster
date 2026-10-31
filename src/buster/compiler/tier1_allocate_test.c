@@ -1169,6 +1169,7 @@ static void tier1_allocation_test_native(Tier1AllocationTestTally* tally, Arena*
 
 #include "buster/compiler/tier1_moves_test.c"
 #include "buster/compiler/tier1_allocate_expiry_test.c"
+#include "buster/compiler/tier1_allocate_hints_test.c"
 
 static int run_tier1_allocate_tests(int argc, char** argv)
 {
@@ -1209,6 +1210,7 @@ static int run_tier1_allocate_tests(int argc, char** argv)
         tier1_allocation_test_move_scaling(&tally);
         tier1_allocation_test_required(&tally, &arena);
         tier1_allocation_test_expiry(&tally);
+        tier1_allocation_test_hints(&tally, &arena, seed);
         tier1_allocation_test_guarded(&tally, &arena);
         tier1_allocation_test_rematerialization(&tally);
         tier1_allocation_test_native(&tally, &arena, seed);

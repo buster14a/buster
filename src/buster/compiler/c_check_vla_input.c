@@ -98,6 +98,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
                                   CheckConstantInput** job, uint32_t* definition, uint8_t* kind, uint64_t* extent)
 {
     const Parser* parser = reader->parser;
+    const uint32_t previous_warning_bound = reader->warning_bound_open;
+    reader->warning_bound_open = open;
     bool valid = open < first && first <= end && end < parser->tokens.count;
     *kind = BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     *extent = 0;
@@ -206,6 +208,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             memset(reader->ignored + open, 1, end - open + 1);
         }
     }
+    reader->warning_bound_open = previous_warning_bound;
     return valid;
 }
 

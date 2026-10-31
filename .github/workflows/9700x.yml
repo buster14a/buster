@@ -352,6 +352,24 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
+      - name: Compile main.c alone under TSan or MSan
+        # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
+        # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the
+        # measurements and the coverage boundary.
+        if: ${{ success() && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') }}
+        run: |
+          set -euo pipefail
+          unset CPATH C_INCLUDE_PATH
+          mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
+            BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+          test "${#flags[@]}" -gt 0
+          objects=$(mktemp -d)
+          ./build/compiler --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" src/buster/compiler/main.c
+          ./build/compiler --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" src/buster/compiler/main.c
+          ./build/compiler --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" src/buster/compiler/main.c
+          cmp "$objects/all.o" "$objects/all-scalar.o"
+          rm -r "$objects"
+
       - name: Reject sanitizer reports even from expected-failure subprocesses
         if: ${{ !cancelled() && matrix.sanitizer != 'none' }}
         run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
@@ -1356,8 +1374,9 @@ jobs:
 
       - name: Benchmark the IR of the frozen SQLite source's functions
         # #131: the IR's bytes per source token of the functions -c compiles of the oracle's frozen sqlite3.c, and its
-        # largest functions' shares, then lowering, verification and promotion per typed entry by both paths, after both
-        # lowerings agree on every function and both promotions verify. benchmark-backend-source's options.
+        # largest functions' shares, then lowering, verification, promotion and #866's GVN per typed entry by both
+        # paths, after both lowerings agree on every function, both promotions verify and both GVN paths accept it.
+        # benchmark-backend-source's options.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-source,')
         run: |
           unset CPATH C_INCLUDE_PATH

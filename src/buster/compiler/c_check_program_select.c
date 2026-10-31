@@ -339,15 +339,16 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                  check_program_bodies_ordered(full);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
     // Only code generation's check of target features reads CheckProgram.body_eager, in a unit with a target attribute
-    // (CheckProgram.attribute_keys), and the lowering of a lock-free query whose answer is its function's emission's
-    // (CheckBuiltinAtomicEffect.late_completion): others make none. It is made by check_program_body_eager, from each
-    // selected body's declarations up to its definition, not by the definitions' flags, which hold the unit's final ones.
+    // (CheckProgram.attribute_keys) or an x86 builtin's call (#148), and the lowering of a lock-free query whose answer is
+    // its function's emission's (CheckBuiltinAtomicEffect.late_completion): others make none. It is made by
+    // check_program_body_eager, from each selected body's declarations up to its definition, not by the definitions'
+    // flags, which hold the unit's final ones.
     bool late = false;
     for (uint32_t i = 0; full->stream != 0 && i < full->stream->atomic_count; i += 1)
     {
         late |= full->stream->atomics[i].late_completion;
     }
-    const bool eager_needed = full->attribute_keys != 0 || late;
+    const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late;
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
@@ -427,13 +428,11 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t raw = (uint32_t)order[definition];
             const bool function = raw < full->body_count;
             const uint32_t object = function ? full->bodies[raw].object : data->objects[raw - full->body_count].object;
-            valid = object != 0 && object < objects && object_definitions[object] == 0;
+            valid = object != 0 && object < objects;
             if (valid)
             {
                 // The definition's object among the static objects, or past them (check_data_declared_index).
                 const uint32_t declared = check_data_declared_index(data, object);
-                object_definitions[object] = definition + 1;
-                definition_objects[definition] = object;
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
                 const uint32_t declaration = full->object_declarations[object];
                 if (declaration != BUSTER_CHECK_NONE && input->linkage[declaration] == 2)
@@ -452,7 +451,48 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     }
                     flags |= inline_only ? BUSTER_C_LOWERING_INLINE_ONLY : BUSTER_C_LOWERING_EXTERNAL;
                 }
-                definition_flags[definition] = flags;
+                // GNU89's extern inline definition followed by an ordinary definition: the ordinary one is the
+                // object's external definition; the inline one stays an inline definition. Clang accepts this shape
+                // (and keeps an extern inline body that a later plain inline declaration made external). Any other
+                // repeat is the checker's redefinition, which it has already refused.
+                const uint32_t previous = object_definitions[object];
+                if (previous == 0)
+                {
+                    object_definitions[object] = definition + 1;
+                }
+                else if ((definition_flags[previous - 1] & BUSTER_C_LOWERING_INLINE_ONLY) != 0)
+                {
+                    if ((flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0)
+                    {
+                        object_definitions[object] = definition + 1;
+                    }
+                }
+                else if ((flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0)
+                {
+                    const uint32_t previous_raw = (uint32_t)order[previous - 1];
+                    const uint32_t previous_declaration = previous_raw < full->body_count ? full->bodies[previous_raw].declaration : BUSTER_CHECK_NONE;
+                    const uint8_t previous_spelling = previous_declaration < input->token_count && input->function_flags != 0 ? input->function_flags[previous_declaration] : 0;
+                    const bool previous_extern_inline = previous_raw < full->body_count &&
+                        (previous_spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) ==
+                            (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN);
+                    if (previous_extern_inline)
+                    {
+                        flags = (flags & ~BUSTER_C_LOWERING_EXTERNAL) | BUSTER_C_LOWERING_INLINE_ONLY;
+                    }
+                    else
+                    {
+                        valid = false;
+                    }
+                }
+                else
+                {
+                    valid = false;
+                }
+                if (valid)
+                {
+                    definition_objects[definition] = object;
+                    definition_flags[definition] = flags;
+                }
             }
         }
         // An alias's or ifunc's base (#147): clang emits every alias and ifunc, and so the definition its symbol is at,
