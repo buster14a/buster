@@ -1216,20 +1216,31 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         parameter_prefix &= op == IR_PARAM;
         effective_capacity += op == IR_CALL && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count : 3;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
-        for (uint32_t p = 0; error == TIER1_SELECT_OK && p < operand_count; p += 1)
+        // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), and its use counts, but
+        // nothing folds into a phi, so its depth doesn't order the phi's choice. Its own loop leaves the others' as it was.
+        for (uint32_t p = 0; error == TIER1_SELECT_OK && op == IR_PHI && p < operand_count; p += 1)
         {
-            // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), its uses count, and
-            // since nothing folds into a phi, its depth doesn't order the phi's choice.
             const IrOperand operand = ir_operand(function, node, p, blocks[node]);
-            const bool phi = op == IR_PHI;
-            if ((!phi && operand.value >= node) || operand.value >= count || (blocks[operand.value] != blocks[node] && dominance == 0))
+            if (operand.value >= count || (blocks[operand.value] != blocks[node] && dominance == 0))
             {
                 error = TIER1_SELECT_ERROR_INVALID;
             }
             else
             {
                 uses[operand.value] += 1;
-                const uint32_t next = phi ? 0 : depths[operand.value] + 1;
+            }
+        }
+        for (uint32_t p = 0; error == TIER1_SELECT_OK && op != IR_PHI && p < operand_count; p += 1)
+        {
+            const IrOperand operand = ir_operand(function, node, p, blocks[node]);
+            if (operand.value >= node || (blocks[operand.value] != blocks[node] && dominance == 0))
+            {
+                error = TIER1_SELECT_ERROR_INVALID;
+            }
+            else
+            {
+                uses[operand.value] += 1;
+                const uint32_t next = depths[operand.value] + 1;
                 depths[node] = next > depths[node] ? next : depths[node];
             }
         }

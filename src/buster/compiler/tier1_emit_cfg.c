@@ -932,8 +932,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     return error;
 }
 
-// The CFG consumer's whole function: problem, allocation, frame and records.
-static Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
+// The CFG consumer's whole function: problem, allocation, frame and records, out of line, so that tier1_emit_function's
+// straight-line path compiles as it did without it.
+static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     emitted->general = true;
     Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
