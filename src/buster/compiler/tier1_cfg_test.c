@@ -372,8 +372,11 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                             for (uint32_t g = allocation->fragment_offsets[j]; apart && other == UINT32_MAX && g < allocation->fragment_offsets[j + 1]; g += 1)
                             {
                                 const bool overlap = allocation->starts[g] < allocation->ends[f] && allocation->starts[f] < allocation->ends[g];
-                                const bool allowed = ((result.intervals.allowed_registers[i] >> allocation->registers[g]) & 1) != 0;
-                                if (allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_REGISTER && overlap && allowed && allocation->registers[g] != allocation->registers[f])
+                                // A spill or rematerialize fragment has no register: its field is a slot or byte count, not
+                                // a bit allowed_registers can hold, so the shift waits for the kind to say it is a register.
+                                const bool registered = allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_REGISTER;
+                                const bool allowed = registered && allocation->registers[g] < 32 && ((result.intervals.allowed_registers[i] >> allocation->registers[g]) & 1) != 0;
+                                if (registered && overlap && allowed && allocation->registers[g] != allocation->registers[f])
                                 {
                                     other = g;
                                 }

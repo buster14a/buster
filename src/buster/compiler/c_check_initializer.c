@@ -86,6 +86,8 @@ static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const
 static CheckInitStatus check_initializer_live_writes(const TypeTable* types, const CheckInitializer* initialized, Arena* scratch, uint8_t** selected);
 
 typedef struct CheckInitCopy CheckInitCopy;
+typedef struct CheckInitHistoryNode CheckInitHistoryNode;
+typedef struct CheckInitHistoryPending CheckInitHistoryPending;
 typedef struct CheckInitFrame CheckInitFrame;
 struct CheckInitFrame
 {
@@ -95,6 +97,9 @@ struct CheckInitFrame
     uint32_t width;
     uint32_t resume;
     CheckInitCopy* copy;
+    CheckInitHistoryNode* history;
+    CheckInitHistoryPending* pending;
+    uint32_t designator;
     bool braced;
     bool wrapper;
 };
@@ -105,6 +110,7 @@ struct CheckInitSelection
     TypeId type;
     uint64_t offset;
     uint32_t width;
+    CheckInitHistoryNode* history;
 };
 
 typedef struct CheckInitUnion CheckInitUnion;
@@ -124,6 +130,7 @@ struct CheckInitCopy
     CheckInitUnion* unions;
     uint32_t union_count;
     uint32_t union_capacity;
+    bool semantic_suppressed;
 };
 
 typedef struct CheckInitRange CheckInitRange;
@@ -164,6 +171,10 @@ struct CheckInitWarningSink
     uint32_t* tokens;
     uint32_t capacity;
     uint32_t count;
+    // Semantic events use a third arena, disjoint from disposable parts and walker scratch. The walker stages
+    // facts privately, then publishes only after its final part append. The optional set deduplicates source facts.
+    CheckWarningBuffer* events;
+    CheckWarningSet* event_keys;
 };
 
 typedef struct CheckInitWarningCollector CheckInitWarningCollector;
@@ -190,6 +201,13 @@ struct CheckInitWalker
     const CheckConstValues* const_values;
     uint32_t source_position;
     CheckInitWarningCollector* warnings;
+    CheckWarningBuffer warning_events;
+    uint32_t warning_completion;
+    CheckInitHistoryNode** history_slots;
+    uint32_t history_count;
+    uint32_t history_capacity;
+    bool history_enabled;
+    bool semantic_suppressed;
     const CheckInitString* strings;
     uint32_t string_count;
     const uint32_t* string_ids;
@@ -239,6 +257,56 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
     }
 }
 
+static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarningEvent* event, const CheckWarningNote* notes, uint32_t count)
+{
+    if (!walker->semantic_suppressed && walker->warnings != NULL && walker->warnings->sink != NULL && walker->warnings->sink->events != NULL &&
+        !check_warning_append(&walker->warning_events, event, notes, count))
+    {
+        check_init_fail(walker, CHECK_INIT_RESOURCE, event->token);
+    }
+}
+
+static bool check_init_semantic_publish(CheckInitWalker* walker)
+{
+    CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
+    bool valid = sink == NULL || sink->events == NULL ||
+                 (sink->events->arena != NULL && sink->events->arena != walker->output && sink->events->arena != walker->scratch &&
+                  (sink->event_keys == NULL || sink->event_keys->arena == sink->events->arena));
+    CheckWarningBuffer staged = sink != NULL && sink->events != NULL ? *sink->events : (CheckWarningBuffer){ 0 };
+    CheckWarningSet keys = sink != NULL && sink->event_keys != NULL ? *sink->event_keys : (CheckWarningSet){ 0 };
+    keys.borrowed = true;
+    const uint64_t mark = staged.arena != NULL ? staged.arena->length : 0;
+    for (uint32_t i = 0; valid && i < walker->warning_events.count; i += 1)
+    {
+        const CheckWarningEvent* event = walker->warning_events.events + i;
+        const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
+        const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
+        const bool excess = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS;
+        const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL;
+        if (!once || sink->event_keys == NULL || !check_warning_set_contains(&keys, key))
+        {
+            const CheckWarningNote* notes = event->note_count != 0 ? walker->warning_events.notes + event->note_first : NULL;
+            valid = (!once || sink->event_keys == NULL || check_warning_set_add(&keys, key)) &&
+                    check_warning_append(&staged, event, notes, event->note_count);
+        }
+    }
+    if (valid && sink != NULL && sink->events != NULL)
+    {
+        *sink->events = staged;
+        if (sink->event_keys != NULL)
+        {
+            *sink->event_keys = keys;
+        }
+    }
+    else if (!valid && staged.arena != NULL)
+    {
+        arena_pop_to(staged.arena, mark);
+    }
+    return valid;
+}
+
+#include "c_check_init_history.c"
+
 static void check_init_warning(CheckInitWalker* walker, uint32_t token)
 {
     if (walker->result->warning_count == 0)
@@ -246,6 +314,16 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token)
         walker->result->warning_token = token;
     }
     walker->result->warning_count += 1;
+    const CheckWarningEvent event = {
+        .id = CHECK_WARNING_ID_EXCESS_INITIALIZERS,
+        .kind = CHECK_WARNING_EVENT_MESSAGE,
+        .token = token,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = walker->warning_completion,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS },
+    };
+    check_init_semantic_warning(walker, &event, NULL, 0);
     CheckInitWarningCollector* warnings = walker->warnings;
     if (warnings != NULL && token < warnings->token_count && !warnings->seen[token])
     {
@@ -350,13 +428,15 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
     const TypeTable* types = walker->types;
     const TypeId base = type_strip_aligned(types, frame->type);
     const uint8_t kind = type_kind(types, base);
+    const bool direct = frame->wrapper || !check_init_aggregate(types, base);
     bool valid = false;
     *selected = (CheckInitSelection){
         .type = frame->type,
         .offset = frame->offset,
         .width = frame->width,
+        .history = direct ? frame->history : NULL,
     };
-    if (frame->wrapper || !check_init_aggregate(types, base))
+    if (direct)
     {
         valid = frame->next == 0;
     }
@@ -403,6 +483,10 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
             }
             frame->next += 1;
         }
+    }
+    if (valid && !direct && walker->history_enabled)
+    {
+        selected->history = check_init_history_node(walker, frame->history, frame->next, selected->type);
     }
     return valid;
 }
@@ -454,6 +538,7 @@ static void check_init_used(CheckInitWalker* walker, const CheckInitFrame* frame
     }
     if (!frame->wrapper && type_kind(walker->types, type) == BUSTER_TYPE_KIND_UNION)
     {
+        check_init_history_union(walker, frame, token);
         if (walker->union_count == walker->union_capacity / 2)
         {
             const uint32_t capacity = walker->union_capacity == 0 ? 16 : walker->union_capacity <= UINT32_MAX / 2 ? walker->union_capacity * 2 : 0;
@@ -549,12 +634,23 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
     }
     else
     {
+        CheckInitHistoryNode* history = selected->history;
+        if (walker->history_enabled && history == NULL)
+        {
+            history = check_init_history_node(walker, NULL, 0, selected->type);
+        }
+        if (!braced)
+        {
+            check_init_history_enter(walker, history, token);
+        }
         walker->frames[walker->depth] = (CheckInitFrame){
             .type = type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC ?
                     type_conversion_operand(walker->types, selected->type) : selected->type,
             .offset = selected->offset,
             .width = selected->width,
             .braced = braced,
+            .history = history,
+            .designator = BUSTER_CHECK_NONE,
         };
         walker->depth += 1;
     }
@@ -783,6 +879,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
         CheckInitFrame* frame = &walker->frames[walker->depth - 1];
         const TypeId type = type_strip_aligned(walker->types, frame->type);
         const uint8_t kind = type_kind(walker->types, type);
+        frame->designator = token;
         if (parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE)
         {
             uint32_t close = token + 1;
@@ -920,6 +1017,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                     }
                     else
                     {
+                        frame->designator = token;
                         frame->next = member - begin;
                         if (!found)
                         {
@@ -1751,6 +1849,28 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
     }
 }
 
+// Only the leaf contributing this overload-set value receives the initializer's selected identity. A generic
+// expression can also contain independent calls to the same set in its control or unselected association.
+static bool check_init_overload_source(const CheckInitWalker* walker, uint32_t leaf, uint32_t source, uint32_t head)
+{
+    const CheckGraph* graph = walker->stream->graph;
+    uint32_t current = source;
+    bool result = current == leaf;
+    for (uint32_t steps = 0; !result && graph != NULL && current < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = (CheckOp)graph->ops[current];
+        const uint32_t child = graph->operand0[current];
+        if ((op != CHECK_OP_SELECT && op != CHECK_OP_ADDRESS) || child >= current ||
+            walker->stream->values[child].overload_head != head)
+        {
+            break;
+        }
+        current = child;
+        result = current == leaf;
+    }
+    return result;
+}
+
 // Source graph checking leaves aggregate elements pending until the subobject cursor supplies their exact
 // destination type. Resolve that edge without changing its shared leaf or admitting later declarations.
 static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction* action, uint32_t* candidate)
@@ -1963,6 +2083,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     .bytes = string->bytes,
                     .byte_count = size < string->byte_count ? size : string->byte_count,
                 };
+                check_init_history_value(walker, selected, token, node, true, 0);
                 check_init_clear(walker, selected->type, selected->offset, token);
                 check_init_append(walker, &part);
             }
@@ -1985,6 +2106,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
         }
         else if (check_vector_type(walker->types, type))
         {
+            check_init_history_value(walker, selected, token, node, false, 0);
             check_init_vector_value(walker, selected, destination, token, node);
         }
         else
@@ -1999,12 +2121,23 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 .extensions = check_init_extensions(walker, token),
             };
             action.operands[0] = check_init_constant_value(walker, node);
+            const uint32_t overload_head = action.operands[0].overload_head;
             CheckActionResult converted = { 0 };
             uint32_t candidate = 0;
             converted.diagnostic = check_init_overload(walker, &action, &candidate);
             if (converted.diagnostic == CHECK_DIAG_NONE)
             {
                 check_action_scalar(walker->types, &action, &converted);
+            }
+            if (converted.diagnostic == CHECK_DIAG_NONE)
+            {
+                CheckWarningEvent warning;
+                if (check_warning_null_event(walker->parser, walker->types, selected->type, action.operands,
+                                              token, end, walker->warning_completion, &warning))
+                {
+                    check_init_semantic_warning(walker, &warning, NULL, 0);
+                }
+                check_init_history_value(walker, selected, token, node, false, converted.value.flags);
             }
             if (converted.diagnostic != CHECK_DIAG_NONE)
             {
@@ -2019,6 +2152,29 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             }
             else
             {
+                if (candidate != 0 && walker->warnings != NULL && walker->warnings->sink != NULL && walker->warnings->sink->events != NULL)
+                {
+                    const CheckOverloadCandidate* identity = walker->stream->graph->overload_candidates + candidate - 1;
+                    for (uint32_t use = token; use < end; use += 1)
+                    {
+                        const uint32_t leaf = walker->token_nodes[use];
+                        if (walker->parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && leaf < walker->stream->count &&
+                            walker->stream->values[leaf].overload_head == overload_head &&
+                            check_init_overload_source(walker, leaf, node, overload_head))
+                        {
+                            const CheckWarningEvent witness = {
+                                .id = CHECK_WARNING_ID_UNDEFINED_INTERNAL,
+                                .kind = CHECK_WARNING_EVENT_MESSAGE,
+                                .token = use,
+                                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                                .completion = walker->warning_completion,
+                                .payload = { .first_type = identity->type, .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = identity->object },
+                            };
+                            check_init_semantic_warning(walker, &witness, NULL, 0);
+                        }
+                    }
+                }
                 const CheckInitPart part = {
                     .kind = CHECK_INIT_VALUE,
                     .type = selected->type,
@@ -2053,6 +2209,8 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
         walker->frames[0] = (CheckInitFrame){
             .type = type,
             .wrapper = true,
+            .history = check_init_history_node(walker, NULL, 0, type),
+            .designator = BUSTER_CHECK_NONE,
         };
         walker->depth = 1;
         const TypeId base = type_strip_aligned(walker->types, type);
@@ -2081,6 +2239,11 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                 if (closing->copy != 0)
                 {
                     check_init_finish_copy(walker, closing->copy, token);
+                    walker->semantic_suppressed = closing->copy->semantic_suppressed;
+                }
+                if (closing->pending != NULL)
+                {
+                    check_init_history_warning(walker, &closing->pending->previous, closing->pending->token, false);
                 }
                 walker->depth -= 1;
                 check_init_advance(walker);
@@ -2145,6 +2308,25 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                 check_init_used(walker, frame, token, true);
                 if (walker->parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
                 {
+                    const bool scalar_fill = frame->braced && frame->history == selected.history && !check_init_aggregate(walker->types, frame->type);
+                    CheckInitHistoryPending* pending = !scalar_fill ? check_init_history_save(walker, selected.history, token) : NULL;
+                    if (!scalar_fill)
+                    {
+                        check_init_history_replace(walker, selected.history, token, CHECK_INIT_HISTORY_LIST, false, false);
+                    }
+                    if (frame->braced && !frame->wrapper && !check_init_aggregate(walker->types, frame->type))
+                    {
+                        const CheckWarningEvent warning = {
+                            .id = CHECK_WARNING_ID_MANY_SCALAR_BRACES,
+                            .kind = CHECK_WARNING_EVENT_MANY_SCALAR_BRACES,
+                            .token = token,
+                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                            .completion = walker->warning_completion,
+                            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                        };
+                        check_init_semantic_warning(walker, &warning, NULL, 0);
+                    }
                     if (type_strip_aligned(walker->types, selected.type) == walker->flexible && selected.offset == walker->flexible_offset)
                     {
                         check_init_flexible_reset(walker, token);
@@ -2168,7 +2350,10 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                             check_init_clear(walker, selected.type, selected.offset, token);
                         }
                     }
-                    check_init_push(walker, &selected, true, token);
+                    if (check_init_push(walker, &selected, true, token))
+                    {
+                        walker->frames[walker->depth - 1].pending = pending;
+                    }
                     token += 1;
                 }
                 else
@@ -2206,6 +2391,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                         const CheckInitSelection array = {
                             .type = frame->type,
                             .offset = frame->offset,
+                            .history = frame->history,
                         };
                         check_init_value(walker, &array, token, stop, node, string);
                         const TypeId array_type = type_strip_aligned(walker->types, frame->type);
@@ -2220,6 +2406,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                             check_vector_type(walker->types, walker->stream->values[node].type))
                         {
                             selected = (CheckInitSelection){ .type = frame->type, .offset = frame->offset };
+                            selected.history = frame->history;
                             frame->next = check_vector_count(walker->types, frame->type) - 1;
                         }
                         if (check_init_whole(walker, &selected, token, stop, node, string))
@@ -2229,6 +2416,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                             const uint32_t compound = check_init_compound(walker, &selected, token, stop, node, &root_type, &source_offset);
                             if (compound != BUSTER_CHECK_NONE)
                             {
+                                check_init_history_value(walker, &selected, token, node, false, 0);
                                 check_init_clear(walker, selected.type, selected.offset, token);
                                 CheckInitCopy* copy = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCopy, 1);
                                 const CheckInitSelection root = { .type = root_type };
@@ -2246,7 +2434,12 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                                         .unions = walker->unions,
                                         .union_count = walker->union_count,
                                         .union_capacity = walker->union_capacity,
+                                        .semantic_suppressed = walker->semantic_suppressed,
                                     };
+                                    // Every compound literal has its own canonical source plan. Its expansion
+                                    // here supplies writes only; warning it twice would also assign the outer
+                                    // initializer's completion to diagnostics belonging to the inner source.
+                                    walker->semantic_suppressed = true;
                                     walker->frames[walker->depth - 1].resume = stop;
                                     walker->frames[walker->depth - 1].copy = copy;
                                     walker->unions = 0;
@@ -2358,6 +2551,10 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .const_values = static_storage && graph != NULL ? graph->const_values : NULL,
             .source_position = end,
             .warnings = warnings,
+            .warning_events = { .arena = scratch },
+            .warning_completion = end,
+            .history_enabled = warnings != NULL && warnings->sink != NULL && warnings->sink->events != NULL &&
+                               check_init_history_needed(parser, begin, end),
             .strings = strings,
             .string_count = string_count,
             .string_ids = string_ids,
@@ -2369,6 +2566,12 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .result = result,
         };
         valid = check_init_walk(&walker, type, begin, end);
+        if (!check_init_semantic_publish(&walker))
+        {
+            valid = false;
+            result->status = CHECK_INIT_RESOURCE;
+            result->failed_token = begin;
+        }
         if (valid && ignore_excess)
         {
             // Source override diagnostics belong here, with original checked writes, before emission discards

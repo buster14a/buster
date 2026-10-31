@@ -608,9 +608,19 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->types = &lane->types;
     reader->arena = &arenas->output;
     reader->scratch = &arenas->scratch;
+    reader->warning_query_arena = &arenas->results;
     reader->warning_events = (CheckWarningBuffer){ .arena = &arenas->output };
     reader->const_values = (CheckConstBuffer){ .arena = &arenas->output, .prefix = &top->output->const_values };
     input->const_values = check_const_view(&reader->const_values);
+    reader->literal_warnings = top->literal_warnings;
+    reader->literal_warnings.arena = &arenas->output;
+    reader->literal_warnings.borrowed = true;
+    reader->source_warning_keys = top->source_warning_keys;
+    reader->source_warning_keys.arena = &arenas->output;
+    reader->source_warning_keys.borrowed = true;
+    reader->variable_sized_records = top->variable_sized_records;
+    reader->variable_sized_records.arena = &arenas->output;
+    reader->variable_sized_records.borrowed = true;
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->deferred = 0;
     reader->lane = true;
@@ -972,6 +982,16 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->warning_events = (CheckWarningBuffer){ .arena = reader->arena };
     reader->const_values = (CheckConstBuffer){ .arena = reader->arena, .prefix = &top_input->const_values };
     input->const_values = check_const_view(&reader->const_values);
+    reader->literal_warnings = top->literal_warnings;
+    reader->literal_warnings.arena = reader->arena;
+    reader->literal_warnings.borrowed = true;
+    reader->warning_bound_open = BUSTER_CHECK_NONE;
+    reader->source_warning_keys = top->source_warning_keys;
+    reader->source_warning_keys.arena = reader->arena;
+    reader->source_warning_keys.borrowed = true;
+    reader->variable_sized_records = top->variable_sized_records;
+    reader->variable_sized_records.arena = reader->arena;
+    reader->variable_sized_records.borrowed = true;
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->cached_constant_count = top->cached_constant_count;
     reader->vararg_count = top->vararg_count;
@@ -1671,6 +1691,23 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
     return check_deferred_count_bytes(reader->output->constant_warnings, begin, finish < count ? finish : count, pass->vector);
 }
 
+// A 2 MB region of the merged stream's columns, faulted in on the calling thread before the lanes write them: a
+// store of 0 at the range's start and at every region's start it reaches, so that each region has its page before any
+// lane writes it. The pass writes every event of the columns on the lanes that read the bodies, into fresh huge pages
+// of the caller's scratch on a process's one reading, and lanes that write a fresh region at once each allocate and
+// clear a huge page for it, of which the kernel maps one (#874, as #764's race in the walks). The stores land in pages
+// already in place on a reading whose arenas are reused, and every byte they write the pass writes again.
+static void check_deferred_fault_range(void* begin, uint64_t bytes)
+{
+    uint8_t* end = (uint8_t*)begin + bytes;
+    uintptr_t region = (uintptr_t)begin & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+    while (bytes != 0 && region < (uintptr_t)end)
+    {
+        *(volatile uint8_t*)(region < (uintptr_t)begin ? begin : (void*)region) = 0;
+        region += BUSTER_ARENA_HUGE_PAGE_BYTES;
+    }
+}
+
 // A lane's share of the pass: its items by their tokens.
 static void check_deferred_pass_lane(void* argument)
 {
@@ -2115,8 +2152,23 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         costs[bodies] = (uint64_t)count + 1;
     }
-    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake.
+    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake. On more than
+    // one lane, fault in the columns the pass writes first, on this thread (check_deferred_fault_range): the merged
+    // stream's events, every one of which the pass writes, and the token positions, which its scans fill from their
+    // start. On one lane this thread writes them alone, and needs no fault-in.
     const uint32_t lanes = deferred->active > 1 ? deferred->active : 1;
+    if (valid && lanes > 1)
+    {
+        check_deferred_fault_range(key, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(declaration, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(point, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(end, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(previous, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(depth, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(operation, (uint64_t)event_total);
+        check_deferred_fault_range(kind, (uint64_t)event_total);
+        check_deferred_fault_range(positions, ((uint64_t)count + 1) * sizeof(uint32_t));
+    }
     if (valid && lanes == 1)
     {
         input->constant_warning_count = check_deferred_pass_items(&pass, 0, bodies + 1);
