@@ -51,7 +51,7 @@ algorithms, so their executables differ: the scalar path compiles a third time,
 with the IDs in source order, which must give the same bytes as with them in
 another order, and both paths' programs must run as expected. The report's last
 line adds how many of the compiled tests' functions Tier 1 compiled. On the
-subset at its introduction: 220 passed, Tier 1 compiling 346 of the 430
+subset at its introduction: 220 passed, Tier 1 compiling 350 of the 430
 functions.
 
 A test passes when everything it was put through gave the expected status and
