@@ -11411,8 +11411,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 const TypeId local_type = input->declared_types[declaration];
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
                 const CheckInputAttributes* attributes = input->attributes[declaration];
-                // The attribute's alignment is its log2 plus one, 0 for none.
-                const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+                // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
+                // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
+                // compound literal, which takes its type's.
+                const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
+                const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
+                                                    !input->compound_objects[input->objects[declaration] - 1] && type_large_array(types, local_type) ? 4 : 0;
                 const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
                 uint32_t local = BUSTER_CHECK_NONE;
                 writer->token = declaration;

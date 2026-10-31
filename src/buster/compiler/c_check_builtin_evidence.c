@@ -77,13 +77,12 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
 static uint32_t check_input_declaration_alignment(const CheckInputReader* reader, uint32_t declaration, TypeId type)
 {
     const CheckInputAttributes* attributes = reader->output->attributes[declaration];
-    const TypeId plain = type_strip_aligned(reader->types, type);
     uint32_t result = type_alignment_log2(reader->types, type);
     if (attributes != 0 && attributes->alignment_log2 != 0)
     {
         result = (uint32_t)attributes->alignment_log2 - 1;
     }
-    else if (type_kind_is_array(type_kind(reader->types, plain)) && type_size(reader->types, type) >= 16 && result < 4)
+    else if (type_large_array(reader->types, type) && result < 4)
     {
         result = 4;
     }

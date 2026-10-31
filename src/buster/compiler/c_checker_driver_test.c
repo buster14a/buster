@@ -1592,6 +1592,69 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
     free(program);
 }
 
+// #978: arrays of 16 bytes or more, which the x86-64 psABI aligns to 16, after a char each so that an alignment of 1 would
+// misalign them: a global one, which clang -O2's code clears with movaps through its `extern` declaration, a static one
+// it clears through a pointer it may assume aligned, and a thread-local one it clears through its own declaration. The
+// object, the same by both paths, linked with clang's must run to 0, where it faulted on the first movaps before.
+static void check_test_driver_array_alignment(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "char pad1 = 1;\nchar big[64];\nchar pad2 = 2;\nstatic char pad3 = 3;\nstatic char hidden[48];\n"
+                                  "_Thread_local char pad4 = 4;\n_Thread_local char tls[32];\n"
+                                  "char* hidden_address(void) { return hidden; }\nvoid clear_all(void);\n"
+                                  "int main(void)\n{\n    big[0] = 1;\n    hidden[47] = 2;\n    tls[31] = 3;\n    clear_all();\n"
+                                  "    return big[0] + hidden[47] + tls[31] + pad1 + pad2 + pad3 + pad4 - 10;\n}\n";
+    static const char clear[] = "extern char big[64];\nextern _Thread_local char tls[32];\nchar* hidden_address(void);\n"
+                                "void clear_all(void)\n{\n    char* hidden = __builtin_assume_aligned(hidden_address(), 16);\n"
+                                "    for (int i = 0; i < 64; i += 1) big[i] = 0;\n    for (int i = 0; i < 48; i += 1) hidden[i] = 0;\n"
+                                "    for (int i = 0; i < 32; i += 1) tls[i] = 0;\n}\n";
+    char sources[2][256];
+    char objects[3][256];
+    char linked[256];
+    snprintf(sources[0], sizeof(sources[0]), "%s/alignment.c", directory);
+    snprintf(sources[1], sizeof(sources[1]), "%s/alignment-clear.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/alignment.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/alignment-scalar.o", directory);
+    snprintf(objects[2], sizeof(objects[2]), "%s/alignment-clear.o", directory);
+    snprintf(linked, sizeof(linked), "%s/alignment-linked", directory);
+    const bool written = parse_test_write(sources[0], program, sizeof(program) - 1) && parse_test_write(sources[1], clear, sizeof(clear) - 1);
+    check_test_expect(test, written, "the arrays' alignment program is written");
+    char* text = NULL;
+    char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], sources[0], NULL };
+    char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], sources[0], NULL };
+    char* const clear_arguments[] = { (char*)clang, "-O2", "-c", "-o", objects[2], sources[1], NULL };
+    char* const* compiles[3] = {
+        vector_arguments,
+        scalar_arguments,
+        clear_arguments,
+    };
+    bool compiled = written;
+    for (uint32_t i = 0; written && i < 3; i += 1)
+    {
+        const int status = check_test_driver_spawn(compiles[i], &text);
+        compiled = compiled && status == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), "both paths write the same object of the arrays' alignment program");
+    char* const link_arguments[] = { (char*)clang, "-o", linked, objects[0], objects[2], NULL };
+    const int link_status = compiled ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* const run_arguments[] = { linked, NULL };
+    const int run_status = link_status == 0 ? check_test_driver_spawn(run_arguments, &text) : -1;
+    free(text);
+    check_test_expect(test, run_status == 0, "arrays of 16 bytes or more are aligned to 16: clang -O2's aligned stores into them run");
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        unlink(sources[i]);
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        unlink(objects[i]);
+    }
+    unlink(linked);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -5635,6 +5698,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_halves(&test, clang, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
+            check_test_driver_array_alignment(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);

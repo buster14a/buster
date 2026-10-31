@@ -1107,7 +1107,12 @@ composite type, creates distinct local/global symbols and passes selected
 `CheckDataObject` records to `check_data_emit` in `c_check_data.c`. It never
 reparses declarations or binds identifiers again. An actual initializer wins
 over later tentative or external declarations. Automatic objects and
-unreferenced function bodies produce no data atom.
+unreferenced function bodies produce no data atom. An object's alignment is its
+type's or its declarations' largest alignment attribute's, and without one at
+least 16 for an array of 16 bytes or more, as the x86-64 psABI aligns a global
+array and clang declares it, an `extern` one too, which clang's optimized code
+stores into with aligned SSE moves (`check_data_declared_alignment`, #978);
+compound literals and string literals keep their types' alignment.
 
 The emitter consumes checked aggregate initializer plans, including brace
 elision, designated/range stores, bit-fields, compatible string copies and
@@ -1333,6 +1338,9 @@ What the lowering covers past scalars (#145's programs):
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
   of their own size and alignment (up to 1 GB each), reached through
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+  An array of 16 bytes or more whose declaration has no alignment attribute or
+  specifier is aligned to at least 16, as the x86-64 psABI and clang align a
+  local array (`type_large_array`, #978); a compound literal keeps its type's.
   Past 16 bytes' alignment, Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
 - **Values aligned past 8 bytes.** A scalar local or parameter whose alignment
