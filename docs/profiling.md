@@ -121,7 +121,7 @@ The noise sets which comparison to use.
   ```text
   list 1, user cycles (millions):
     main: 54 runs, median 675.104; placements 677.594, 675.136, 674.258, 671.883, 677.117, 671.217 (spread 0.95%); copies within 0.90%
-    head: 54 runs, median 674.359; placements 674.027, 675.121, 674.294, 671.583, 678.106, 670.795 (spread 1.09%); copies within 1.27%; against main -0.11% (over placements -1.00% to +1.03%; over placements and copies -1.75% to +1.78%)
+    head: 54 runs, median 674.359; placements 677.027, 675.121, 674.294, 671.583, 678.106, 670.795 (spread 1.09%); copies within 1.27%; against main -0.11% (over placements -1.00% to +1.03%; over placements and copies -1.75% to +1.78%)
     main-again: 54 runs, median 675.512; placements 679.463, 674.851, 671.730, 674.322, 679.635, 672.309 (spread 1.18%); copies within 0.70%; against main +0.06% (over placements -0.87% to +1.25%; over placements and copies -1.63% to +1.67%)
   ```
 
