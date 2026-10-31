@@ -106,16 +106,6 @@
     X(ISLESSEQUAL, 0x15cu, "__builtin_islessequal", BUSTER_CBUILTIN_SOURCE) \
     X(ISLESSGREATER, 0x15du, "__builtin_islessgreater", BUSTER_CBUILTIN_SOURCE) \
     X(ISUNORDERED, 0x15eu, "__builtin_isunordered", BUSTER_CBUILTIN_SOURCE) \
-    X(ISNORMAL, 0x3d0u, "__builtin_isnormal", BUSTER_CBUILTIN_SOURCE) \
-    X(ISSUBNORMAL, 0x3d1u, "__builtin_issubnormal", BUSTER_CBUILTIN_SOURCE) \
-    X(ISZERO, 0x3d2u, "__builtin_iszero", BUSTER_CBUILTIN_SOURCE) \
-    X(ISSIGNALING, 0x3d3u, "__builtin_issignaling", BUSTER_CBUILTIN_SOURCE) \
-    X(ISFPCLASS, 0x3d4u, "__builtin_isfpclass", BUSTER_CBUILTIN_SOURCE) \
-    X(SIGNBITF, 0x3d5u, "__builtin_signbitf", BUSTER_CBUILTIN_SOURCE) \
-    X(SIGNBITL, 0x3d6u, "__builtin_signbitl", BUSTER_CBUILTIN_SOURCE) \
-    X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
-    X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
-    X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE) \
     X(SQRT, 0x200u, "__builtin_sqrt", BUSTER_CBUILTIN_SOURCE) \
     X(SQRTF, 0x201u, "__builtin_sqrtf", BUSTER_CBUILTIN_SOURCE) \
     X(COPYSIGN, 0x202u, "__builtin_copysign", BUSTER_CBUILTIN_SOURCE) \
@@ -404,7 +394,17 @@
     X(OPENCL_ATOMIC_FETCH_XOR, 0x439u, "__opencl_atomic_fetch_xor", BUSTER_CBUILTIN_SOURCE) \
     X(OPENCL_ATOMIC_INIT, 0x43au, "__opencl_atomic_init", BUSTER_CBUILTIN_SOURCE) \
     X(OPENCL_ATOMIC_LOAD, 0x43bu, "__opencl_atomic_load", BUSTER_CBUILTIN_SOURCE) \
-    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE)
+    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE) \
+    X(ISNORMAL, 0x3d0u, "__builtin_isnormal", BUSTER_CBUILTIN_SOURCE) \
+    X(ISSUBNORMAL, 0x3d1u, "__builtin_issubnormal", BUSTER_CBUILTIN_SOURCE) \
+    X(ISZERO, 0x3d2u, "__builtin_iszero", BUSTER_CBUILTIN_SOURCE) \
+    X(ISSIGNALING, 0x3d3u, "__builtin_issignaling", BUSTER_CBUILTIN_SOURCE) \
+    X(ISFPCLASS, 0x3d4u, "__builtin_isfpclass", BUSTER_CBUILTIN_SOURCE) \
+    X(SIGNBITF, 0x3d5u, "__builtin_signbitf", BUSTER_CBUILTIN_SOURCE) \
+    X(SIGNBITL, 0x3d6u, "__builtin_signbitl", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
