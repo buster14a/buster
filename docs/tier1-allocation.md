@@ -141,9 +141,15 @@ one up still holds a free register or none, and every level below none, so an
 end never overwrites a deposit and a start never finds no register while the
 class's pressure fits; with hints it may use more of the class's registers than
 maximum pressure. The scan honors the static `hints` first, then `hint_values`.
-Without `hint_values` every output is unchanged. `tier1_allocate_hints_test.c`
-checks the rule against an independent reference over positions, and a trace
-whose two values the rule alone swaps.
+Without `hint_values` every output is unchanged, and so is the code: the
+allocator is one body compiled twice, an input without hints running a copy with
+no hint code and one with them a noinline copy that validates them first. On
+the 9700X, `benchmark-tier1-allocation`'s cases (which have no hints) then run
+within 2% of the allocator before hints, but tiny-fit's vector path at +2.9%, 30
+cycles per call for the dispatch; with the hint code in the plain loops they had
+run 4% to 15% slower. `tier1_allocate_hints_test.c` checks the rule against an
+independent reference over positions, and a trace whose two values the rule
+alone swaps.
 
 That matching stays scalar, for a measured reason. It used to resolve the
 partners' registers afterwards: pointer-jumping rounds over every interval,
@@ -345,27 +351,66 @@ to the predecessor's final state: each must read the value it says it carries
 and write a location of that value's class, and the successor's entry state
 must then hold every live-in value and each phi's operand.
 
-`test-tier1-cfg [--seed N] [--count N]` runs six fixtures (a diamond, a loop
-phi, a phi swap, a critical edge, one register, and a swap without general
-registers, whose slot cycle needs the temporary slot) and `--count` random SSA
-programs (2,000 by default) over CFGs with loops, self-loops, irreducible
-regions, narrowed masks, required uses, fixed ranges and rematerializable
-values, every use dominated by its definition (`dominators.c`). Both entry
-points' results must pass the checker and, up to 600 intervals, the interval
-verifier. On every fixture and every eighth program, mutants must fail the
-checker: a register fragment given the register of another value's fragment
-that overlaps it, and an edge's or a split's move run before a move whose
-source it overwrites.
+`test-tier1-cfg [--seed N] [--count N]` runs seven fixtures (a diamond, a loop
+phi, a phi swap, a critical edge, one register, a swap without general
+registers, whose slot cycle needs the temporary slot, and a double live across a
+call, which a fixed range splits) and `--count` random SSA programs (2,000 by
+default) over CFGs with loops, self-loops, irreducible regions, narrowed masks,
+required uses, fixed ranges and rematerializable values, every use dominated by
+its definition (`dominators.c`). Both entry points' results must pass the
+checker and, up to 600 intervals, the interval verifier, and the two must agree
+on which cases they refuse. On every fixture and every eighth program, mutants
+must fail the checker: a register fragment given the register of another
+value's fragment that overlaps it, and an edge's or a split's move run before a
+move whose source it overwrites.
 
-This first form keeps interval construction, edge resolution and the checker
-scalar around the vector liveness solve and the vector allocator; their shares
-of the cost are to be measured on the 9700X before they get vector paths. A
-value's fresh interval at a join takes whatever register the allocator gives
-it, so edges into joins and loop headers may move values that a hint would keep
-in place; the move counts on the corpora come first. Not yet done: the adapter
-from the shared IR's functions, the corpora's checks, native emission of the
-edge moves and the split edges, and the 9700X's compile-time and code-quality
-comparisons.
+### On real code
+
+`tier1_cfg_ir.c` turns a promoted function of the shared IR into an allocation
+problem, until the selector makes general CFGs' (#141): two positions per
+instruction (three where it clobbers registers between its uses and its
+result), a call's caller-saved general and vector registers, division's rax and
+rdx and a variable shift's rcx as fixed ranges, constants and addresses
+rematerializable, and an instruction's first operand and a store's value
+needing registers. A function with a value of a type the model has no class for
+(long double, 128-bit integers) is left out and counted.
+
+`test-tier1-cfg-source [--print NAME] [options] file...` prepares every function
+`-c` compiles as `test-ir-source` does, lowers and promotes it, adapts it,
+allocates it by both paths and checks both with `tier1_cfg_verify`; any refusal
+but the model's, a rejection or paths that disagree fail it. The correctness
+list runs it on c-testsuite's subset, the frozen `sqlite3.c` and musl's units,
+whose every function allocates and passes the checker on both paths:
+
+| Corpus | Functions | Left out | IR instructions | Intervals | Left to the scan | Spilled values | Stores | Reloads | Moves | Split edges |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| c-testsuite's subset | 430 | 8 | 16,274 | 13,390 | 40.5% | 0 | 0 | 0 | 187 | 34 |
+| `sqlite3.c` | 2,602 | 2 | 493,470 | 541,061 | 93.4% | 4,654 | 20,270 | 23,882 | 70,982 | 2,626 |
+| musl | 2,883 | 223 | 228,216 | 228,195 | 88.1% | 1,995 | 5,980 | 7,277 | 22,004 | 982 |
+
+These are the vector path's; the scalar path spills the same values with the
+same stores and reloads, and its moves are within 0.4%. The scan takes most of
+real code's intervals: a call's fixed ranges make every class that has one
+irregular, which the coloring path doesn't take.
+
+`benchmark-tier1-cfg-source [--only VARIANT] [--after-scalar MS] [options]
+file...` times both paths' allocation of the same functions per IR instruction
+and per typed entry, and the interval allocator's share (`tier1_allocate` on
+the CFG's own intervals), with 21-pass medians. On the 9700X (CPU 2), on
+`sqlite3.c`'s 2,600 functions, the vector path took 815 cycles per IR
+instruction (1,014 per typed entry), 245 of them the interval allocator's; the
+scalar path 1,462 (1,817), 888 of them its. Tier 0's whole compile of the same
+functions (`benchmark-backend-source`) took 65.7 cycles per typed entry by its
+vector path and 177 by its scalar path: Tier 0 has no allocation to time apart,
+a value's register being its stack depth.
+
+This first form keeps liveness's rows, interval construction, edge resolution
+and the checker scalar around `dataflow.c`'s vector solve and the vector
+allocator; at 570 of the vector path's 815 cycles per instruction, they are
+the next to get vector paths. Each block's interval of a spilled value is stored
+again where it is evicted, though its slot still holds it: storing a spilled
+value once, at its definition, is the next change for the code. Native emission
+of the edge moves and split edges is #140's next step.
 
 ## Rematerialization
 
