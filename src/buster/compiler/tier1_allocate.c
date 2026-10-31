@@ -3,8 +3,9 @@
 //
 // Tier 1's machine-interval allocator. Include after lane.c. The selector supplies effective uses after folding;
 // its liveness adapter supplies half-open ranges in loop-contiguous machine order. This is not a second IR.
-// tier1_allocate builds position events, colors unrestricted classes by pressure/reuse chains and pointer jumping,
-// and defers constrained or overfull classes to tier1_allocate_scan. The scalar twin always uses that scan.
+// tier1_allocate builds position events, colors unrestricted classes by LIFO reuse in event order (each start takes
+// the register of the most recent end at its pressure level), and defers constrained or overfull classes to
+// tier1_allocate_scan. The scalar twin always uses that scan.
 // tier1_allocation_verify independently checks fragments, interference and fixed ranges. tier1_resolve_moves orders
 // edge/phi assignments, breaking cycles with a caller-reserved location. No function emits spill machine code.
 //
@@ -189,78 +190,88 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
     return input->rematerializable != 0 && input->rematerializable[interval] != 0 ? BUSTER_TIER1_ALLOCATE_REMATERIALIZE : BUSTER_TIER1_ALLOCATE_SPILL;
 }
 
-// Scalar decisions are bounded by 32 physical registers, not by the number of previously seen intervals.
+// Scalar decisions are bounded by 32 physical registers, not by the number of previously seen intervals. An interval
+// frees its register at its end event, unless an eviction gave the register to another interval (active[r] says
+// whose it is); ends precede starts at one position, so adjacent half-open intervals still share registers.
 // Fixed clobbers restrict a whole interval; splitting around call sites belongs in the producer's machine ranges.
 static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds)
 {
+    // A local copy keeps the column pointers in registers: under -fno-strict-aliasing every store below could change
+    // *input, and clang would reload them after each one.
+    const Tier1AllocationInput columns = *input;
     uint32_t active[32];
     for (uint32_t r = 0; r < 32; r += 1)
     {
         active[r] = UINT32_MAX;
     }
+    uint32_t occupied = 0;
     bool valid = true;
     for (uint32_t e = 0; valid && e < event_count; e += 1)
     {
         const uint32_t interval = events[e] >> 1;
-        if ((events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) == 0 && (events[e] & 1) != 0 && input->classes[interval] == class)
+        if ((events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) == 0 && columns.classes[interval] == class)
         {
-            const uint32_t position = input->starts[interval];
-            uint32_t free = 0;
-            for (uint32_t r = 0; r < 32; r += 1)
+            if ((events[e] & 1) == 0)
             {
-                if (active[r] != UINT32_MAX && input->ends[active[r]] <= position)
+                const uint32_t r = regs[interval];
+                if (r < 32 && active[r] == interval)
                 {
                     active[r] = UINT32_MAX;
-                }
-                free |= active[r] == UINT32_MAX ? 1u << r : 0;
-            }
-            free &= allowed[interval];
-            uint32_t chosen = UINT32_MAX;
-            if (free != 0)
-            {
-                chosen = (uint32_t)__builtin_ctz(free);
-                if (input->hints != 0 && input->hints[interval] != UINT8_MAX && ((free >> input->hints[interval]) & 1) != 0)
-                {
-                    chosen = input->hints[interval];
+                    occupied &= ~(1u << r);
                 }
             }
             else
             {
-                const bool required = input->flags != 0 && (input->flags[interval] & BUSTER_TIER1_ALLOCATE_REQUIRED) != 0;
-                uint32_t farthest = tier1_allocation_next_use(input, interval, position);
-                for (uint32_t r = 0; r < 32; r += 1)
+                const uint32_t position = columns.starts[interval];
+                const uint32_t free = ~occupied & allowed[interval];
+                uint32_t chosen = UINT32_MAX;
+                if (free != 0)
                 {
-                    const uint32_t other = active[r];
-                    if (((allowed[interval] >> r) & 1) != 0 && other != UINT32_MAX && (input->flags == 0 || (input->flags[other] & BUSTER_TIER1_ALLOCATE_REQUIRED) == 0))
+                    chosen = (uint32_t)__builtin_ctz(free);
+                    if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
                     {
-                        const uint32_t next = tier1_allocation_next_use(input, other, position);
-                        if ((required && chosen == UINT32_MAX) || next > farthest)
+                        chosen = columns.hints[interval];
+                    }
+                }
+                else
+                {
+                    const bool required = columns.flags != 0 && (columns.flags[interval] & BUSTER_TIER1_ALLOCATE_REQUIRED) != 0;
+                    uint32_t farthest = tier1_allocation_next_use(&columns, interval, position);
+                    for (uint32_t r = 0; r < 32; r += 1)
+                    {
+                        const uint32_t other = active[r];
+                        if (((allowed[interval] >> r) & 1) != 0 && other != UINT32_MAX && (columns.flags == 0 || (columns.flags[other] & BUSTER_TIER1_ALLOCATE_REQUIRED) == 0))
                         {
-                            chosen = r;
-                            farthest = next;
+                            const uint32_t next = tier1_allocation_next_use(&columns, other, position);
+                            if ((required && chosen == UINT32_MAX) || next > farthest)
+                            {
+                                chosen = r;
+                                farthest = next;
+                            }
                         }
+                    }
+                    if (chosen != UINT32_MAX)
+                    {
+                        const uint32_t victim = active[chosen];
+                        split[victim] = position;
+                        kinds[victim] = tier1_allocation_spill_kind(&columns, victim);
+                    }
+                    else if (required)
+                    {
+                        valid = false;
                     }
                 }
                 if (chosen != UINT32_MAX)
                 {
-                    const uint32_t victim = active[chosen];
-                    split[victim] = position;
-                    kinds[victim] = tier1_allocation_spill_kind(input, victim);
+                    regs[interval] = (uint8_t)chosen;
+                    active[chosen] = interval;
+                    occupied |= 1u << chosen;
                 }
-                else if (required)
+                else
                 {
-                    valid = false;
+                    split[interval] = position;
+                    kinds[interval] = tier1_allocation_spill_kind(&columns, interval);
                 }
-            }
-            if (chosen != UINT32_MAX)
-            {
-                regs[interval] = (uint8_t)chosen;
-                active[chosen] = interval;
-            }
-            else
-            {
-                split[interval] = position;
-                kinds[interval] = tier1_allocation_spill_kind(input, interval);
             }
         }
     }
@@ -344,58 +355,62 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
 // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
 static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces)
 {
+    // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
+    // has no register (regs is UINT8_MAX) until a required use reloads it, so the active[r] check guards its end.
+    const Tier1AllocationInput columns = *input;
     uint32_t active[32];
     for (uint32_t r = 0; r < 32; r += 1)
     {
         active[r] = UINT32_MAX;
     }
-    for (uint32_t i = 0; i < input->count; i += 1)
+    for (uint32_t i = 0; i < columns.count; i += 1)
     {
-        if (input->classes[i] == class)
+        if (columns.classes[i] == class)
         {
-            begins[i] = input->starts[i];
-            kinds[i] = tier1_allocation_spill_kind(input, i);
+            begins[i] = columns.starts[i];
+            kinds[i] = tier1_allocation_spill_kind(&columns, i);
         }
     }
+    uint32_t occupied = 0;
     bool valid = true;
     for (uint32_t e = 0; valid && e < event_count; e += 1)
     {
         const bool use_event = (events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) != 0;
         const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
         const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
-        const bool handles = use_event || (events[e] & 1) != 0;
-        if (handles && input->classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
+        const bool end_event = !use_event && (events[e] & 1) == 0;
+        if (end_event && columns.classes[interval] == class)
         {
-            const uint32_t position = use_event ? input->use_positions[use] : input->starts[interval];
-            const bool required = tier1_allocation_required_at(input, interval, position);
-            uint32_t free = 0;
-            for (uint32_t r = 0; r < 32; r += 1)
+            const uint32_t r = regs[interval];
+            if (r < 32 && active[r] == interval)
             {
-                if (active[r] != UINT32_MAX && input->ends[active[r]] <= position)
-                {
-                    active[r] = UINT32_MAX;
-                }
-                free |= active[r] == UINT32_MAX ? 1u << r : 0;
+                active[r] = UINT32_MAX;
+                occupied &= ~(1u << r);
             }
-            free &= allowed[interval];
+        }
+        else if (!end_event && columns.classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
+        {
+            const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
+            const bool required = tier1_allocation_required_at(&columns, interval, position);
+            const uint32_t free = ~occupied & allowed[interval];
             uint32_t chosen = UINT32_MAX;
             if (free != 0)
             {
                 chosen = (uint32_t)__builtin_ctz(free);
-                if (input->hints != 0 && input->hints[interval] != UINT8_MAX && ((free >> input->hints[interval]) & 1) != 0)
+                if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
                 {
-                    chosen = input->hints[interval];
+                    chosen = columns.hints[interval];
                 }
             }
             else
             {
-                uint32_t farthest = tier1_allocation_next_use(input, interval, position);
+                uint32_t farthest = tier1_allocation_next_use(&columns, interval, position);
                 for (uint32_t r = 0; r < 32; r += 1)
                 {
                     const uint32_t victim = active[r];
-                    if (((allowed[interval] >> r) & 1) != 0 && victim != UINT32_MAX && !tier1_allocation_required_at(input, victim, position))
+                    if (((allowed[interval] >> r) & 1) != 0 && victim != UINT32_MAX && !tier1_allocation_required_at(&columns, victim, position))
                     {
-                        const uint32_t next = tier1_allocation_next_use(input, victim, position);
+                        const uint32_t next = tier1_allocation_next_use(&columns, victim, position);
                         if ((required && chosen == UINT32_MAX) || next > farthest)
                         {
                             chosen = r;
@@ -408,7 +423,7 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
                     const uint32_t victim = active[chosen];
                     tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
                     begins[victim] = position;
-                    kinds[victim] = tier1_allocation_spill_kind(input, victim);
+                    kinds[victim] = tier1_allocation_spill_kind(&columns, victim);
                     regs[victim] = UINT8_MAX;
                 }
                 else if (required)
@@ -423,103 +438,53 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
                 kinds[interval] = BUSTER_TIER1_ALLOCATE_REGISTER;
                 regs[interval] = (uint8_t)chosen;
                 active[chosen] = interval;
+                occupied |= 1u << chosen;
             }
         }
     }
-    for (uint32_t i = 0; valid && i < input->count; i += 1)
+    for (uint32_t i = 0; valid && i < columns.count; i += 1)
     {
-        if (input->classes[i] == class)
+        if (columns.classes[i] == class)
         {
-            tier1_allocation_finish_piece(pieces, i, begins[i], input->ends[i], kinds[i], regs[i]);
+            tier1_allocation_finish_piece(pieces, i, begins[i], columns.ends[i], kinds[i], regs[i]);
         }
     }
     return valid;
 }
 
-// Inclusive prefix sums of +/-1 event columns, including bounded tails. Keeping the pressure column also gives
-// the matching depth: an end at depth d opens the reuse chain consumed by the next start from depth d.
-static void tier1_allocation_pressure(const int32_t* deltas, uint32_t count, int32_t* pressure)
+// The class's events in order, one level per pressure: an end at level d deposits its interval's register there,
+// and the next start at level d takes it (the most recent end no other start has taken); a start at a level no end
+// has reached takes a fresh register. A start's partner started earlier, so its register is final when the two are
+// matched, and each register is resolved in this one pass. It replaced a prefix sum of the deltas and pointer
+// jumping over the partners, which recomputed what this loop knows (docs/tier1-allocation.md, "Assignment").
+static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs)
 {
-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    int32_t carry = 0;
-    for (uint32_t first = 0; first < count; first += 16)
-    {
-        const uint32_t remaining = count - first;
-        const uint32_t length = remaining < 16 ? remaining : 16;
-        const __mmask16 mask = (__mmask16)((1u << length) - 1);
-        __m512i sum = _mm512_maskz_loadu_epi32(mask, deltas + first);
-        for (uint32_t step = 1; step < 16; step *= 2)
-        {
-            const __m512i offset = _mm512_set1_epi32((int32_t)step);
-            const __mmask16 high = _mm512_cmpge_epi32_mask(lanes, offset);
-            const __m512i previous = _mm512_maskz_permutexvar_epi32(high, _mm512_sub_epi32(lanes, offset), sum);
-            sum = _mm512_add_epi32(sum, previous);
-        }
-        sum = _mm512_add_epi32(sum, _mm512_set1_epi32(carry));
-        _mm512_mask_storeu_epi32(pressure + first, mask, sum);
-        carry = pressure[first + length - 1];
-    }
-}
-
-static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, const int32_t* pressure, uint32_t event_count, uint32_t* parents, uint32_t* next, uint8_t* regs)
-{
-    uint32_t ended[32];
+    uint8_t ended[32];
     uint32_t available = input->registers[class];
-    for (uint32_t r = 0; r < 32; r += 1)
-    {
-        ended[r] = UINT32_MAX;
-    }
+    uint32_t level = 0;
+    memset(ended, UINT8_MAX, sizeof(ended));
     for (uint32_t e = 0; e < event_count; e += 1)
     {
         const uint32_t interval = events[e] >> 1;
         if ((events[e] & 1) == 0)
         {
-            ended[pressure[e]] = interval;
+            level -= 1;
+            ended[level] = regs[interval];
         }
         else
         {
-            const uint32_t depth = (uint32_t)pressure[e] - 1;
-            if (ended[depth] != UINT32_MAX)
+            uint8_t r = ended[level];
+            if (r != UINT8_MAX)
             {
-                parents[interval] = ended[depth];
-                ended[depth] = UINT32_MAX;
+                ended[level] = UINT8_MAX;
             }
             else
             {
-                const uint32_t r = (uint32_t)__builtin_ctz(available);
+                r = (uint8_t)__builtin_ctz(available);
                 available &= available - 1;
-                regs[interval] = (uint8_t)r;
             }
-        }
-    }
-    // Parent ids can point in either numeric direction because intervals arrive in arbitrary input order. Two
-    // disjoint columns make each round a simultaneous jump; scalar loads avoid Zen 5's expensive vector gather.
-    bool changed = true;
-    while (changed)
-    {
-        changed = false;
-        for (uint32_t first = 0; first < input->count; first += 16)
-        {
-            const uint32_t remaining = input->count - first;
-            const uint32_t length = remaining < 16 ? remaining : 16;
-            uint32_t jumped[16] = { 0 };
-            for (uint32_t lane = 0; lane < length; lane += 1)
-            {
-                jumped[lane] = parents[parents[first + lane]];
-            }
-            const __mmask16 mask = (__mmask16)((1u << length) - 1);
-            const __m512i old = _mm512_maskz_loadu_epi32(mask, parents + first);
-            const __m512i value = _mm512_loadu_si512(jumped);
-            changed |= (_mm512_cmpneq_epi32_mask(old, value) & mask) != 0;
-            _mm512_mask_storeu_epi32(next + first, mask, value);
-        }
-        memcpy(parents, next, (uint64_t)input->count * sizeof(uint32_t));
-    }
-    for (uint32_t i = 0; i < input->count; i += 1)
-    {
-        if (input->classes[i] == class)
-        {
-            regs[i] = regs[parents[i]];
+            regs[interval] = r;
+            level += 1;
         }
     }
 }
@@ -529,27 +494,28 @@ static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* inp
 {
     (void)vector;
 
-    for (uint32_t f = 0; f < input->fixed.count; f += 1)
+    const Tier1AllocationInput columns = *input;
+    for (uint32_t f = 0; f < columns.fixed.count; f += 1)
     {
-        for (uint32_t first = 0; first < input->count; first += BUSTER_VECTOR_PATH(vector) ? 16 : 1)
+        for (uint32_t first = 0; first < columns.count; first += BUSTER_VECTOR_PATH(vector) ? 16 : 1)
         {
             if (BUSTER_VECTOR_PATH(vector))
             {
-                const uint32_t remaining = input->count - first;
+                const uint32_t remaining = columns.count - first;
                 const uint32_t length = remaining < 16 ? remaining : 16;
                 const __mmask16 lanes = (__mmask16)((1u << length) - 1);
-                const __m512i start = _mm512_maskz_loadu_epi32(lanes, input->starts + first);
-                const __m512i end = _mm512_maskz_loadu_epi32(lanes, input->ends + first);
-                const __m128i classes = _mm_maskz_loadu_epi8(lanes, input->classes + first);
-                const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)input->fixed.classes[f]));
-                const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)input->fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)input->fixed.starts[f]));
+                const __m512i start = _mm512_maskz_loadu_epi32(lanes, columns.starts + first);
+                const __m512i end = _mm512_maskz_loadu_epi32(lanes, columns.ends + first);
+                const __m128i classes = _mm_maskz_loadu_epi8(lanes, columns.classes + first);
+                const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)columns.fixed.classes[f]));
+                const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)columns.fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)columns.fixed.starts[f]));
                 const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
-                const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)input->fixed.registers[f]), current);
+                const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)columns.fixed.registers[f]), current);
                 _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
             }
-            else if (input->classes[first] == input->fixed.classes[f] && input->starts[first] < input->fixed.ends[f] && input->ends[first] > input->fixed.starts[f])
+            else if (columns.classes[first] == columns.fixed.classes[f] && columns.starts[first] < columns.fixed.ends[f] && columns.ends[first] > columns.fixed.starts[f])
             {
-                allowed[first] &= ~input->fixed.registers[f];
+                allowed[first] &= ~columns.fixed.registers[f];
             }
         }
     }
@@ -563,28 +529,29 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
 {
     (void)vector;
 
+    const Tier1AllocationInput columns = *input;
     bool valid = true;
-    if (input->fixed.count != 0 && input->count != 0)
+    if (columns.fixed.count != 0 && columns.count != 0)
     {
         // Avoid index overhead when the cross-product fits sixteen comparisons per input row plus the already-paid
         // position domain. This keeps tiny functions/small fixed sets simple while bounding that work linearly too.
-        const uint64_t simple_budget = input->position_count + 16ull * (input->count + input->fixed.count);
-        const bool simple = !BUSTER_VECTOR_PATH(vector) || (uint64_t)input->fixed.count * input->count <= simple_budget;
+        const uint64_t simple_budget = columns.position_count + 16ull * (columns.count + columns.fixed.count);
+        const bool simple = !BUSTER_VECTOR_PATH(vector) || (uint64_t)columns.fixed.count * columns.count <= simple_budget;
         if (simple)
         {
             tier1_allocation_filter_fixed_simple(input, BUSTER_VECTOR_PATH(vector), allowed);
         }
         else
         {
-            uint32_t* next = arena_push_array(arena, input->fixed.count, sizeof(uint32_t), 4);
+            uint32_t* next = arena_push_array(arena, columns.fixed.count, sizeof(uint32_t), 4);
             valid = next != 0;
             if (valid)
             {
                 uint32_t maximum_ends[BUSTER_TIER1_ALLOCATE_CLASSES][32] = { 0 };
-                memset(buckets, 0, ((uint64_t)input->position_count + 2) * sizeof(uint32_t));
-                for (uint32_t f = 0; f < input->fixed.count; f += 1)
+                memset(buckets, 0, ((uint64_t)columns.position_count + 2) * sizeof(uint32_t));
+                for (uint32_t f = 0; f < columns.fixed.count; f += 1)
                 {
-                    const uint32_t start = input->fixed.starts[f];
+                    const uint32_t start = columns.fixed.starts[f];
                     next[f] = buckets[start];
                     buckets[start] = f + 1;
                 }
@@ -594,24 +561,24 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
                     if ((events[e] & (BUSTER_TIER1_ALLOCATE_USE_EVENT | 1)) == 0)
                     {
                         const uint32_t i = events[e] >> 1;
-                        while (position < input->ends[i])
+                        while (position < columns.ends[i])
                         {
                             for (uint32_t link = buckets[position]; link != 0; link = next[link - 1])
                             {
                                 const uint32_t f = link - 1;
-                                uint32_t* maximum = maximum_ends[input->fixed.classes[f]];
-                                const __m512i end = _mm512_set1_epi32((int32_t)input->fixed.ends[f]);
+                                uint32_t* maximum = maximum_ends[columns.fixed.classes[f]];
+                                const __m512i end = _mm512_set1_epi32((int32_t)columns.fixed.ends[f]);
                                 for (uint32_t r = 0; r < 32; r += 16)
                                 {
                                     const __m512i previous = _mm512_loadu_si512(maximum + r);
-                                    const __m512i updated = _mm512_mask_max_epu32(previous, (__mmask16)(input->fixed.registers[f] >> r), previous, end);
+                                    const __m512i updated = _mm512_mask_max_epu32(previous, (__mmask16)(columns.fixed.registers[f] >> r), previous, end);
                                     _mm512_storeu_si512(maximum + r, updated);
                                 }
                             }
                             position += 1;
                         }
-                        const uint32_t* maximum = maximum_ends[input->classes[i]];
-                        const __m512i start = _mm512_set1_epi32((int32_t)input->starts[i]);
+                        const uint32_t* maximum = maximum_ends[columns.classes[i]];
+                        const __m512i start = _mm512_set1_epi32((int32_t)columns.starts[i]);
                         const uint32_t low = _mm512_cmpgt_epu32_mask(_mm512_loadu_si512(maximum), start);
                         const uint32_t high = _mm512_cmpgt_epu32_mask(_mm512_loadu_si512(maximum + 16), start);
                         allowed[i] &= ~(low | (high << 16));
@@ -627,6 +594,10 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
 {
     (void)vector;
 
+    // A local copy keeps the column pointers in registers: under -fno-strict-aliasing each store below could change
+    // *input, and clang would reload them after every one. Its address must not escape, or the stores could alias
+    // it as well: the helpers take input and make their own copies.
+    const Tier1AllocationInput columns = input != 0 ? *input : (Tier1AllocationInput){ 0 };
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
     Tier1Allocation allocation = { 0 };
@@ -635,11 +606,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     uint32_t* buckets = 0;
     uint32_t* allowed = 0;
     uint32_t* split = 0;
-    uint32_t* parents = 0;
-    uint32_t* next = 0;
     uint32_t* class_events = 0;
-    int32_t* deltas = 0;
-    int32_t* pressure = 0;
     uint8_t* regs = 0;
     uint8_t* kinds = 0;
     uint8_t* value_seen = 0;
@@ -652,55 +619,51 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     if (arena != 0 && result != 0 && tier1_allocation_input_valid(input))
     {
         error = TIER1_ALLOCATION_CAPACITY;
-        fragment_capacity = input->count * 2 + (input->use_required != 0 ? input->use_count * 2 : 0);
-        event_count = input->count * 2;
-        if (input->use_required != 0)
+        fragment_capacity = columns.count * 2 + (columns.use_required != 0 ? columns.use_count * 2 : 0);
+        event_count = columns.count * 2;
+        if (columns.use_required != 0)
         {
-            for (uint32_t use = 0; use < input->use_count; use += 1)
+            for (uint32_t use = 0; use < columns.use_count; use += 1)
             {
-                event_count += input->use_required[use];
+                event_count += columns.use_required[use];
             }
         }
-        allocation.interval_count = input->count;
-        allocation.fragment_offsets = arena_push_array(arena, (uint64_t)input->count + 1, sizeof(uint32_t), 4);
+        allocation.interval_count = columns.count;
+        allocation.fragment_offsets = arena_push_array(arena, (uint64_t)columns.count + 1, sizeof(uint32_t), 4);
         allocation.starts = arena_push_array(arena, fragment_capacity, sizeof(uint32_t), 4);
         allocation.ends = arena_push_array(arena, fragment_capacity, sizeof(uint32_t), 4);
         allocation.kinds = arena_push_array(arena, fragment_capacity, sizeof(uint8_t), 1);
         allocation.registers = arena_push_array(arena, fragment_capacity, sizeof(uint8_t), 1);
-        allocation.value_registers = arena_push_array(arena, input->value_count, sizeof(uint8_t), 1);
-        allocation.spill_ids = arena_push_array(arena, input->value_count, sizeof(uint32_t), 4);
-        allocation.spill_values = arena_push_array(arena, input->value_count, sizeof(uint32_t), 4);
+        allocation.value_registers = arena_push_array(arena, columns.value_count, sizeof(uint8_t), 1);
+        allocation.spill_ids = arena_push_array(arena, columns.value_count, sizeof(uint32_t), 4);
+        allocation.spill_values = arena_push_array(arena, columns.value_count, sizeof(uint32_t), 4);
         retained = arena->length;
-        buckets = arena_push_array(arena, (uint64_t)input->position_count + 2, sizeof(uint32_t), 4);
+        buckets = arena_push_array(arena, (uint64_t)columns.position_count + 2, sizeof(uint32_t), 4);
         events = arena_push_array(arena, event_count, sizeof(uint32_t), 4);
-        allowed = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-        split = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-        regs = arena_push_array(arena, input->count, sizeof(uint8_t), 1);
-        kinds = arena_push_array(arena, input->count, sizeof(uint8_t), 1);
-        value_seen = arena_push_array(arena, input->value_count, sizeof(uint8_t), 1);
-        value_active_end = arena_push_array(arena, input->value_count, sizeof(uint32_t), 4);
+        allowed = arena_push_array(arena, columns.count, sizeof(uint32_t), 4);
+        split = arena_push_array(arena, columns.count, sizeof(uint32_t), 4);
+        regs = arena_push_array(arena, columns.count, sizeof(uint8_t), 1);
+        kinds = arena_push_array(arena, columns.count, sizeof(uint8_t), 1);
+        value_seen = arena_push_array(arena, columns.value_count, sizeof(uint8_t), 1);
+        value_active_end = arena_push_array(arena, columns.value_count, sizeof(uint32_t), 4);
         if (allocation.fragment_offsets != 0 && allocation.starts != 0 && allocation.ends != 0 && allocation.kinds != 0 && allocation.registers != 0 && allocation.value_registers != 0 && allocation.spill_ids != 0 && allocation.spill_values != 0 && buckets != 0 && events != 0 && allowed != 0 && split != 0 && regs != 0 && kinds != 0 && value_seen != 0 && value_active_end != 0)
         {
             error = TIER1_ALLOCATION_OK;
         }
         if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
         {
-            parents = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-            next = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-            class_events = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
-            deltas = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(int32_t), 4);
-            pressure = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(int32_t), 4);
-            if (parents == 0 || next == 0 || class_events == 0 || deltas == 0 || pressure == 0)
+            class_events = arena_push_array(arena, (uint64_t)columns.count * 2, sizeof(uint32_t), 4);
+            if (class_events == 0)
             {
                 error = TIER1_ALLOCATION_CAPACITY;
             }
         }
-        if (error == TIER1_ALLOCATION_OK && input->use_required != 0)
+        if (error == TIER1_ALLOCATION_OK && columns.use_required != 0)
         {
-            use_intervals = arena_push_array(arena, input->use_count, sizeof(uint32_t), 4);
+            use_intervals = arena_push_array(arena, columns.use_count, sizeof(uint32_t), 4);
             pieces.pieces = arena_push_array(arena, fragment_capacity, sizeof(Tier1AllocationPiece), _Alignof(Tier1AllocationPiece));
-            pieces.heads = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-            pieces.tails = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
+            pieces.heads = arena_push_array(arena, columns.count, sizeof(uint32_t), 4);
+            pieces.tails = arena_push_array(arena, columns.count, sizeof(uint32_t), 4);
             if (use_intervals == 0 || pieces.pieces == 0 || pieces.heads == 0 || pieces.tails == 0)
             {
                 error = TIER1_ALLOCATION_CAPACITY;
@@ -709,57 +672,53 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     }
     if (error == TIER1_ALLOCATION_OK)
     {
-        memset(buckets, 0, ((uint64_t)input->position_count + 2) * sizeof(uint32_t));
-        memset(value_seen, 0, input->value_count);
-        memset(value_active_end, 0, (uint64_t)input->value_count * sizeof(uint32_t));
-        memset(allocation.value_registers, UINT8_MAX, input->value_count);
-        memset(allocation.spill_ids, 0xff, (uint64_t)input->value_count * sizeof(uint32_t));
-        for (uint32_t i = 0; i < input->count; i += 1)
+        memset(buckets, 0, ((uint64_t)columns.position_count + 2) * sizeof(uint32_t));
+        memset(value_seen, 0, columns.value_count);
+        memset(value_active_end, 0, (uint64_t)columns.value_count * sizeof(uint32_t));
+        memset(allocation.value_registers, UINT8_MAX, columns.value_count);
+        memset(allocation.spill_ids, 0xff, (uint64_t)columns.value_count * sizeof(uint32_t));
+        for (uint32_t i = 0; i < columns.count; i += 1)
         {
-            buckets[input->starts[i] + 1] += 1;
-            buckets[input->ends[i] + 1] += 1;
-            allowed[i] = input->allowed_registers[i];
-            split[i] = input->ends[i];
+            buckets[columns.starts[i] + 1] += 1;
+            buckets[columns.ends[i] + 1] += 1;
+            allowed[i] = columns.allowed_registers[i];
+            split[i] = columns.ends[i];
             regs[i] = UINT8_MAX;
             kinds[i] = BUSTER_TIER1_ALLOCATE_REGISTER;
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                parents[i] = i;
-            }
-            if (input->use_required != 0)
+            if (columns.use_required != 0)
             {
                 pieces.heads[i] = UINT32_MAX;
                 pieces.tails[i] = UINT32_MAX;
-                for (uint32_t use = input->use_offsets[i]; use < input->use_offsets[i + 1]; use += 1)
+                for (uint32_t use = columns.use_offsets[i]; use < columns.use_offsets[i + 1]; use += 1)
                 {
                     use_intervals[use] = i;
-                    buckets[input->use_positions[use] + 1] += input->use_required[use];
+                    buckets[columns.use_positions[use] + 1] += columns.use_required[use];
                 }
             }
         }
-        for (uint32_t position = 1; position <= input->position_count + 1; position += 1)
+        for (uint32_t position = 1; position <= columns.position_count + 1; position += 1)
         {
             buckets[position] += buckets[position - 1];
         }
         // End events precede starts at the same position, so adjacent half-open intervals can reuse registers.
-        for (uint32_t i = 0; i < input->count; i += 1)
+        for (uint32_t i = 0; i < columns.count; i += 1)
         {
-            events[buckets[input->ends[i]]] = i * 2;
-            buckets[input->ends[i]] += 1;
+            events[buckets[columns.ends[i]]] = i * 2;
+            buckets[columns.ends[i]] += 1;
         }
-        for (uint32_t i = 0; i < input->count; i += 1)
+        for (uint32_t i = 0; i < columns.count; i += 1)
         {
-            events[buckets[input->starts[i]]] = i * 2 + 1;
-            buckets[input->starts[i]] += 1;
+            events[buckets[columns.starts[i]]] = i * 2 + 1;
+            buckets[columns.starts[i]] += 1;
         }
-        if (input->use_required != 0)
+        if (columns.use_required != 0)
         {
-            for (uint32_t use = 0; use < input->use_count; use += 1)
+            for (uint32_t use = 0; use < columns.use_count; use += 1)
             {
-                if (input->use_required[use] != 0)
+                if (columns.use_required[use] != 0)
                 {
-                    events[buckets[input->use_positions[use]]] = BUSTER_TIER1_ALLOCATE_USE_EVENT | use;
-                    buckets[input->use_positions[use]] += 1;
+                    events[buckets[columns.use_positions[use]]] = BUSTER_TIER1_ALLOCATE_USE_EVENT | use;
+                    buckets[columns.use_positions[use]] += 1;
                 }
             }
         }
@@ -768,20 +727,20 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             if ((events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) == 0 && (events[e] & 1) != 0)
             {
                 const uint32_t i = events[e] >> 1;
-                const uint32_t value = input->values[i];
-                if (value_active_end[value] > input->starts[i])
+                const uint32_t value = columns.values[i];
+                if (value_active_end[value] > columns.starts[i])
                 {
                     error = TIER1_ALLOCATION_INVALID;
                 }
-                if (value_seen[value] != 0 && value_seen[value] != input->classes[i] + 1)
+                if (value_seen[value] != 0 && value_seen[value] != columns.classes[i] + 1)
                 {
                     error = TIER1_ALLOCATION_INVALID;
                 }
-                value_seen[value] = input->classes[i] + 1;
-                value_active_end[value] = input->ends[i];
+                value_seen[value] = columns.classes[i] + 1;
+                value_active_end[value] = columns.ends[i];
             }
         }
-        if (error == TIER1_ALLOCATION_OK && input->fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
+        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
@@ -791,18 +750,18 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             uint32_t class_count = 0;
             uint32_t class_event_count = 0;
             int32_t live = 0;
-            for (uint32_t i = 0; i < input->count; i += 1)
+            for (uint32_t i = 0; i < columns.count; i += 1)
             {
-                if (input->classes[i] == class)
+                if (columns.classes[i] == class)
                 {
                     class_count += 1;
-                    regular &= allowed[i] == input->registers[class];
+                    regular &= allowed[i] == columns.registers[class];
                 }
             }
             for (uint32_t e = 0; e < event_count; e += 1)
             {
                 const uint32_t interval = events[e] >> 1;
-                if ((events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) == 0 && input->classes[interval] == class)
+                if ((events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) == 0 && columns.classes[interval] == class)
                 {
                     const int32_t delta = (events[e] & 1) != 0 ? 1 : -1;
                     live += delta;
@@ -813,23 +772,21 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                     if (BUSTER_VECTOR_PATH(vector))
                     {
                         class_events[class_event_count] = events[e];
-                        deltas[class_event_count] = delta;
                     }
                     class_event_count += 1;
                 }
             }
-            regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(input->registers[class]);
+            regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(columns.registers[class]);
             if (regular && class_count != 0)
             {
-                tier1_allocation_pressure(deltas, class_event_count, pressure);
-                tier1_allocation_color(input, class, class_events, pressure, class_event_count, parents, next, regs);
+                tier1_allocation_color(input, class, class_events, class_event_count, regs);
                 allocation.vector_intervals += class_count;
             }
             else
             {
                 allocation.scalar_intervals += class_count;
                 bool assigned = false;
-                if (input->use_required != 0)
+                if (columns.use_required != 0)
                 {
                     extended[class] = true;
                     assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces);
@@ -847,13 +804,13 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     }
     if (error == TIER1_ALLOCATION_OK)
     {
-        memset(value_seen, 0, input->value_count);
-        for (uint32_t i = 0; i < input->count; i += 1)
+        memset(value_seen, 0, columns.value_count);
+        for (uint32_t i = 0; i < columns.count; i += 1)
         {
             allocation.fragment_offsets[i] = allocation.fragment_count;
-            const uint32_t value = input->values[i];
+            const uint32_t value = columns.values[i];
             uint8_t direct = UINT8_MAX;
-            if (extended[input->classes[i]])
+            if (extended[columns.classes[i]])
             {
                 uint32_t piece_count = 0;
                 for (uint32_t id = pieces.heads[i]; id != UINT32_MAX; id = pieces.pieces[id].next)
@@ -876,24 +833,24 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 }
                 allocation.splits += piece_count - 1;
             }
-            else if (split[i] > input->starts[i])
+            else if (split[i] > columns.starts[i])
             {
                 const uint32_t fragment = allocation.fragment_count;
                 allocation.fragment_count += 1;
-                allocation.starts[fragment] = input->starts[i];
+                allocation.starts[fragment] = columns.starts[i];
                 allocation.ends[fragment] = split[i];
                 allocation.kinds[fragment] = BUSTER_TIER1_ALLOCATE_REGISTER;
                 allocation.registers[fragment] = regs[i];
             }
-            if (!extended[input->classes[i]] && split[i] < input->ends[i])
+            if (!extended[columns.classes[i]] && split[i] < columns.ends[i])
             {
                 const uint32_t fragment = allocation.fragment_count;
                 allocation.fragment_count += 1;
                 allocation.starts[fragment] = split[i];
-                allocation.ends[fragment] = input->ends[i];
+                allocation.ends[fragment] = columns.ends[i];
                 allocation.kinds[fragment] = kinds[i];
                 allocation.registers[fragment] = UINT8_MAX;
-                allocation.splits += split[i] > input->starts[i] ? 1 : 0;
+                allocation.splits += split[i] > columns.starts[i] ? 1 : 0;
                 if (kinds[i] == BUSTER_TIER1_ALLOCATE_SPILL && allocation.spill_ids[value] == UINT32_MAX)
                 {
                     allocation.spill_ids[value] = allocation.spill_count;
@@ -901,9 +858,9 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                     allocation.spill_count += 1;
                 }
             }
-            if (!extended[input->classes[i]])
+            if (!extended[columns.classes[i]])
             {
-                direct = split[i] == input->ends[i] ? regs[i] : UINT8_MAX;
+                direct = split[i] == columns.ends[i] ? regs[i] : UINT8_MAX;
             }
             if (value_seen[value] == 0)
             {
@@ -915,7 +872,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 allocation.value_registers[value] = UINT8_MAX;
             }
         }
-        allocation.fragment_offsets[input->count] = allocation.fragment_count;
+        allocation.fragment_offsets[columns.count] = allocation.fragment_count;
         allocation.retained_bytes = retained - saved;
         allocation.scratch_bytes = arena->length - retained;
         arena_pop_to(arena, retained);

@@ -300,10 +300,12 @@ none of its subset's programs makes a name twice in clang's objects.
   compares too: at `d12fd583`, with one difference, inlined.
 - **`main.c`**, the compiler's own unit, with `build.sh`'s flags for a plain
   `-march=znver5` build, whatever the run's host, sanitizer and fuzzing: every
-  correctness run (`tools/ci/correctness.tests`) compiles it by `-c` and by
-  `--lower-all`, each with `--verify`, the scalar path's `--lower-all` object
-  byte for byte the vector path's, and compares its checking, by both paths,
-  and its `-c` object with clang's (`test-checker-corpus --symbols-minimum 1`).
+  correctness run but the TSan and MSan rows (`tools/ci/correctness.tests`,
+  whose 6,323,682-token unit exceeds their hosted runner's memory: docs/ci.md)
+  compiles it by `-c` and by `--lower-all`, each with `--verify`, the scalar
+  path's `--lower-all` object byte for byte the vector path's, and compares
+  its checking, by both paths, and its `-c` object with clang's
+  (`test-checker-corpus --symbols-minimum 1`).
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined.
 

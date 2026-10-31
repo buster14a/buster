@@ -114,12 +114,16 @@ musl="$corpus/libc/musl"
 # #129: the compiler's own main.c, with build.sh's flags for a plain -march=znver5 build whatever this run's host,
 # sanitizer and fuzzing (the unit docs/c-lowering.md measures): checked by both paths, which must agree, and
 # accepted as clang -fsyntax-only accepts it, and its -c object must define what clang -O0 -c's does, but for the
-# documented reasons. The one file must be compared.
+# documented reasons. The one file must be compared, except in the TSan and MSan rows: its 6,323,682 preprocessed
+# tokens hold 7.5 GiB resident unsanitized, and TSan's shadow takes the same check past 20 GiB, beyond the hosted
+# runner (docs/ci.md). Every other row and the 9700X still run it.
+if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
   BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
 test "${#flags[@]}" -gt 0
 ./build/compiler test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" src/buster/compiler/main.c
+fi
 == Test the C lexer as C++
 ./build/compiler test-lexer --cplusplus
 ./build/compiler test-lexer --raw-strings
@@ -182,7 +186,10 @@ rm "$flags_file" "$sources_file"
 # run's host, sanitizer and fuzzing (the unit docs/c-lowering.md measures), by -c, which lowers what its roots
 # reach, and by --lower-all, which lowers every definition but C's inline-only ones, the header intrinsics of
 # features znver5 lacks among them; each with --verify's checks of every function's records. The scalar path's
-# --lower-all object must be the vector path's, byte for byte.
+# --lower-all object must be the vector path's, byte for byte. A compile takes 10 GiB under TSan and 6.6 GiB under
+# MSan, so those rows skip it here with the main.c checking comparison above (docs/ci.md); every other row and the
+# 9700X still run it.
+if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
   BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
@@ -193,6 +200,7 @@ objects=$(mktemp -d)
 ./build/compiler --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" src/buster/compiler/main.c
 cmp "$objects/all.o" "$objects/all-scalar.o"
 rm -r "$objects"
+fi
 == Test the object writer
 # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
 # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
