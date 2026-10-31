@@ -969,7 +969,9 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
                 {
                     through |= emitted.code.records[r].form == X86_FORM_CALL_RM64 && emitted.code.records[r].rm == X86_REGISTER_R10;
                 }
-                tier1_emit_test_expect(test, emitted.general && through && emitted.call_stores != 0, "an indirect call goes through R10, its live value saved around it");
+                // The parameter live across the call is in a callee-saved register from the entry on, or saved around it.
+                tier1_emit_test_expect(test, emitted.general && through && (emitted.callee_used != 0 || emitted.call_stores != 0),
+                                       "an indirect call goes through R10, its live value kept across it");
             }
             else if (fixture->parameter_type != 0)
             {
