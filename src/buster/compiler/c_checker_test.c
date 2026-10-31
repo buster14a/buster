@@ -5401,6 +5401,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_warning_deferred_test.c"
 #include "c_check_warning_policy_test.c"
 #include "c_check_warning_render_test.c"
+#include "c_check_warning_reader_test.c"
 #include "c_check_lazy_test.c"
 #include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
@@ -5614,8 +5615,10 @@ static int run_checker_tests(int argc, char** argv)
             check_test_warning_events(&test);
             check_test_const_values(&test);
             check_test_warning_deferred(&test);
+            check_test_warning_set(&test);
             check_test_warning_policy(&test);
             check_test_warning_render(&test);
+            check_test_warning_reader(&test);
             check_test_const_sources(&test, clang);
             check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
