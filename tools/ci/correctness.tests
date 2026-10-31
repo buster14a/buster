@@ -352,6 +352,18 @@ musl="$corpus/libc/musl"
 ./build/compiler test-ir-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
+# #140: each function -c compiles, lowered and promoted as test-ir-source does, adapted to an allocation problem
+# (tier1_cfg_ir.c's machine model), allocated by both of tier1_cfg.c's paths and checked by tier1_cfg_verify.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+./build/compiler test-tier1-cfg-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-tier1-cfg-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+./build/compiler test-tier1-cfg-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
@@ -489,6 +501,8 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 ./build/compiler test-ir-inline
 == Test Tier 1 allocation, reload splitting and rematerialization
 ./build/compiler test-tier1-allocation
+== Test Tier 1 allocation over CFGs, edge moves and the independent checker
+./build/compiler test-tier1-cfg
 == Test dataflow bitsets
 ./build/compiler test-dataflow
 == Test the partial Zen 5 model and instruction harness

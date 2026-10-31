@@ -246,6 +246,17 @@ designs and the compilers already built this way.
   constraints and pending CFG/corpus emission. Use the shared 9700X lock per
   build/test/measurement and CPU 2 for timing.
 
+- `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
+  liveness with phi operands on their edges, hinted (`hint_values`) to keep one
+  register, then each edge's parallel move, placed at a block's end or start or
+  on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
+  is its independent checker, which simulates each block and edge.
+  `test-tier1-cfg` runs fixtures and random SSA over random CFGs with mutants;
+  `test-tier1-cfg-source` adapts every function `-c` compiles of real C, lowered
+  and promoted, through a machine model (`tier1_cfg_ir.c`) and checks both paths'
+  allocations. The allocation guide's "Allocation over a CFG (#140)" has the
+  contract and what is pending.
+
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
   #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
