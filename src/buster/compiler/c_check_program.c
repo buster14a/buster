@@ -1692,6 +1692,18 @@ static void check_control_drain(CheckControlWriter* writer)
             // or declaration initializer; expressions of nested statements have their own source tokens.
             for (uint32_t node = plan == BUSTER_CHECK_NONE && assembly == BUSTER_CHECK_NONE ? writer->token_first[task.token] : BUSTER_CHECK_NONE; node != BUSTER_CHECK_NONE; node = writer->node_next[node])
             {
+                // The evaluated typeof operand is already a control entry; the discard wrapper the expression walk
+                // made of its value at the terminator must not evaluate it again.
+                uint32_t operand = node;
+                while (operand != BUSTER_CHECK_NONE && (writer->program->input->graph.ops[operand] == CHECK_OP_CAST ||
+                                                        writer->program->input->graph.ops[operand] == CHECK_OP_CONVERT))
+                {
+                    operand = writer->program->input->graph.operand0[operand];
+                }
+                if (evaluation != BUSTER_CHECK_NONE && operand == evaluation)
+                {
+                    continue;
+                }
                 if (!check_control_static(writer, node))
                 {
                     if (writer->count < writer->capacity)

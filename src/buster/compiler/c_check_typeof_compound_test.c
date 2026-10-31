@@ -165,6 +165,11 @@ static void check_test_typeof_compounds(CheckTest* test, const char* clang)
         "int tested(int n) { int x = n; __typeof__((int (*)[3]){bump(&x)}) p = 0;"
         "return x * 100 + (p != 0); }",
         "typeof-fixed-compound-operand-is-unevaluated", clang);
+    check_test_program_source(test,
+        "static void *bump(int *p) { ++*p; return 0; }"
+        "int tested(int n) { int x = 0; int m = n > 0 ? n : 1;"
+        "__typeof__((int (*)[m]){bump(&x)}) p; (void)p; return x; }",
+        "typeof-variably-modified-compound-operand-without-initializer", clang);
     // The operand is evaluated before the declared object's initializer, as Clang orders a declaration's effects.
     check_test_program_source(test,
         "static void *bump(int *p, int v) { *p = *p * 10 + v; return 0; }"
