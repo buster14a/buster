@@ -644,7 +644,7 @@ static void check_builtin_float_test_classes(CheckBuiltinFloatTest* test, TypeTa
         check_builtin_float_one(table, &action, &result);
         check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == results[i] && !result.folded &&
                                         result.floating_type == (i == 0 ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_DOUBLE) && result.class_mask == 3 &&
-                                        (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_VECTOR) != 0,
+                                        result.unsupported == 0 && result.evaluated_operands == 1,
                                         "isfpclass of a vector gives the signed vector of its elements' width, never folded");
     }
     arguments[0] = check_test_float(BUSTER_TYPE_DOUBLE, 1.0L);

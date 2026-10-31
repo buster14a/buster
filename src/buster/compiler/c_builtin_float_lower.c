@@ -28,7 +28,8 @@
 // ISNORMAL, ISSUBNORMAL, ISZERO, ISSIGNALING and ISFPCLASS test their FPClassTest mask (`class_mask`) as clang's
 // llvm.is.fpclass does, by a table of 64 bits that the recipe indexes by six bits of the argument's representation
 // (cbuiltin_float_lower_class_table); SIGNBITF and SIGNBITL are SIGNBIT of their already converted F32 and F80 arguments,
-// and CANONICALIZE, CANONICALIZEF and CANONICALIZEL leave x * 1.0 of theirs, as clang's mulss, mulsd and fmulp do.
+// and CANONICALIZE, CANONICALIZEF and CANONICALIZEL leave x * 1.0 of theirs, as clang's mulss, mulsd and fmulp do. The
+// source producer classifies a vector's lanes one at a time, each loaded into the argument local (`lanes`).
 //
 // Publication inherits cbuiltin_lower's disjoint-column, initialized-local and transactional capacity contracts.
 // No source dispatch, allocation, source checking, FP environment change or Tier 1 acceptance is supplied here.
@@ -48,6 +49,12 @@ struct CBuiltinFloatLowerCall
     uint64_t constant_bits;
     // The FPClassTest bits a classification tests (the checker's class_mask).
     uint32_t class_mask;
+    // isfpclass of a vector, the source producer's (the recipe reads none of these): the frame objects of the vector and of
+    // the result, its lanes and their bytes, each lane classified loaded into argument_local; 0 lanes for a scalar.
+    uint32_t vector_local;
+    uint32_t result_local;
+    uint32_t lanes;
+    uint32_t lane_bytes;
 };
 
 // The x87's encodings, by category: each line of cbuiltin_float_lower_x87_class gives one, its exponent and significand.

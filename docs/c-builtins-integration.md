@@ -527,8 +527,13 @@ gives clang's answers for all 1024 masks on every class of encoding, under
 their converted arguments. `canonicalize` is the argument times 1.0 of its
 class, as clang's `mulss`, `mulsd` and `fld1`, `fmulp` are: a signaling NaN
 comes out quiet, an unsupported x87 encoding the default NaN, and a
-pseudo-denormal normalized. `isfpclass` of a vector is refused by name
-(`__builtin_isfpclass of a vector`).
+pseudo-denormal normalized. `isfpclass` of a vector of floats or doubles
+stores the vector into a frame object and classifies each lane by the scalar
+recipe, the lane loaded into the recipe's argument, storing its 1 or 0 into
+the result's frame object as an `int` or a `long long`, as clang's zero
+extension of `llvm.is.fpclass`'s lanes gives (`check_lower_floating_lanes`);
+a vector of half-precision or `__bf16` lanes stays refused, as their scalars
+are.
 
 `test-check-builtins-float` checks each fold against the host compiler's own
 builtins in each format (`isfpclass`'s with every mask), the mask's rules and
@@ -541,9 +546,10 @@ model. `test-checker` (`c_check_program_classify_test.c`) checks the rules'
 sources by both paths against clang, and runs programs natively against clang
 -O0's builds: `isfpclass` with all 1024 masks on every class of float, double
 and x87 encoding, under `FENV_ACCESS` and not; the other classifiers, the
-signbits and canonicalize's results; folds; and operands evaluated once.
-Clang -O3's code differs from -O0's for eight masks of x87 values, so -O0's
-builds are the oracle.
+signbits and canonicalize's results; folds; operands evaluated once; and
+vectors of 4 to 64 bytes of floats and doubles, GNU's and clang's extended
+ones, at x86-64-v4. Clang -O3's code differs from -O0's for eight masks of x87
+values, so -O0's builds are the oracle.
 
 ## Atomic and terminal helper calls
 

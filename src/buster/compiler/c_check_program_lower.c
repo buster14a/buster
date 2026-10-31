@@ -6830,11 +6830,44 @@ static __attribute__((noinline)) void check_lower_floating_strict(CheckLowerWrit
     }
 }
 
+// isfpclass of a vector: each lane's classification by the scalar recipe of the lane loaded into the argument local,
+// stored into the result's frame object as an int (a float's lane) or a long long (a double's), 1 or 0, as clang's zero
+// extension of llvm.is.fpclass's lanes is; then the result vector. Out of line, as few tasks are.
+static __attribute__((noinline)) void check_lower_floating_lanes(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const CBuiltinFloatLowerCall* call = writer->floating + task.node;
+    const uint8_t element = (uint8_t)call->argument_class;
+    const uint8_t lane_class = call->lane_bytes == 8 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+    for (uint32_t lane = 0; lane < call->lanes && writer->output->status == CHECK_PROGRAM_OK; lane += 1)
+    {
+        const uint64_t offset = (uint64_t)lane * call->lane_bytes;
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->result_local);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->vector_local);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_LOAD, element, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, element, call->argument_local);
+        check_lower_floating_recipe(writer, call, BUSTER_TYPE_INT);
+        if (lane_class == BUSTER_TYPED_CLASS_I64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SET, lane_class, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, call->result_local);
+}
+
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
 static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CBuiltinFloatLowerCall* call = writer->floating + task.node;
-    if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
+    if (call->lanes != 0)
+    {
+        check_lower_floating_lanes(writer, task);
+    }
+    else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
     {
         check_lower_floating_strict(writer, task);
     }
@@ -6946,12 +6979,15 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                               cbuiltin_float_class(id) || cbuiltin_float_signbit(id) || cbuiltin_float_canonicalize(id);
         const bool compare = id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED;
         const bool selectors = id == CBUILTIN_FPCLASSIFY;
-        // isfpclass's mask (its second argument) is a constant the effect holds, never evaluated.
+        // isfpclass's mask (its second argument) is a constant the effect holds, never evaluated. Its first may be a vector.
         const uint32_t arguments = selectors ? 6u : id == CBUILTIN_ISFPCLASS ? 2u : 1u;
+        const TypeId operand = id == CBUILTIN_ISFPCLASS && count == 2 ?
+                               type_unqualified(type_strip_aligned(program->types, stream->values[graph->argument_nodes[graph->argument_offsets[node]]].type)) : 0;
+        const uint8_t operand_kind = operand != 0 ? type_kind(program->types, operand) : BUSTER_TYPE_KIND_VOID;
+        const bool vector = operand_kind == BUSTER_TYPE_KIND_VECTOR || operand_kind == BUSTER_TYPE_KIND_EXT_VECTOR;
         if (effect->unsupported != 0 || (classify && count != arguments) || (compare && count != 2))
         {
-            check_lower_unsupported(writer, effect->unsupported == BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_VECTOR ? "__builtin_isfpclass of a vector" :
-                                                                                                                 "this floating builtin");
+            check_lower_unsupported(writer, "this floating builtin");
         }
         else if (compare)
         {
@@ -6977,6 +7013,35 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                                            operand == effect->selected_selector ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID);
                 }
             }
+        }
+        else if (classify && vector && check_lower_vector_of(writer, operand) == 0)
+        {
+            check_lower_unsupported(writer, "vector types of other than 4, 8, 16, 32 or 64 bytes");
+        }
+        else if (classify && vector)
+        {
+            // isfpclass of a vector of floats or doubles: the vector stored into a frame object, then each lane classified
+            // by the scalar recipe and stored into the result's frame object (check_lower_floating_lanes).
+            const uint32_t index = writer->floating_count++;
+            const CheckVectorShape shape = check_vector_builtin_shape(program->types, operand);
+            const uint8_t class = check_lower_class(writer, effect->floating_type);
+            const uint32_t vector_local = check_lower_temporary_of(writer, operand);
+            const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+            writer->floating[index] = (CBuiltinFloatLowerCall){
+                .id = id,
+                .argument_local = check_lower_temporary(writer, class),
+                .argument_class = class,
+                .fenv_access = fenv_access,
+                .class_mask = effect->class_mask,
+                .vector_local = vector_local,
+                .result_local = check_lower_temporary_of(writer, stream->values[node].type),
+                .lanes = shape.lanes,
+                .lane_bytes = shape.element,
+            };
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = stream->values[node].type });
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector_local);
+            check_lower_operand(writer, node, 3, false, operand);
+            writer->vectors = true;
         }
         else if (classify)
         {

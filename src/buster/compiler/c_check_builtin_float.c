@@ -40,7 +40,6 @@
 #define BUSTER_CHECK_BUILTIN_FLOAT_UNKNOWN_PAYLOAD 0x04u
 #define BUSTER_CHECK_BUILTIN_FLOAT_INVALID_PAYLOAD 0x08u
 #define BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION 0x10u
-#define BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_VECTOR 0x20u
 #define BUSTER_CHECK_BUILTIN_FLOAT_MASK_LIMIT 1023u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_QUALIFIERS 0x01u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_POINTER_SIGN 0x02u
@@ -673,7 +672,6 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                     check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, fp);
                 }
                 output->action.value.type = result;
-                output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_VECTOR;
             }
             if (fpclass && output->action.diagnostic == CHECK_DIAG_NONE)
             {

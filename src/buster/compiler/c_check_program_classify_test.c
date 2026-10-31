@@ -5,7 +5,8 @@
 // isfpclass, signbitf and signbitl, and canonicalize, canonicalizef and canonicalizel. Source fixtures checked by both
 // paths against clang, and programs run natively against clang -O0's build: isfpclass with every mask on every class of
 // float, double and x87 encoding, under FENV_ACCESS and not, the other classifiers, the signbits' conversions,
-// canonicalize's results, folds and evaluation; and isfpclass of a vector, refused by name. Included by c_checker_test.c.
+// canonicalize's results, folds and evaluation, and isfpclass of vectors of floats and doubles at x86-64-v4. Included by
+// c_checker_test.c.
 
 // The rules, as clang's Sema has them: a real floating argument unconverted (isfpclass's a vector of them too), isfpclass's
 // mask an integer constant expression in [0, 1023], and the signbits' and canonicalize's prototypes.
@@ -155,22 +156,52 @@ static const struct
       "return r+seen*128+t[(unsigned)n%9]*(n+7);}" },
 };
 
+// isfpclass of vectors of 4, 8, 16, 32 and 64 bytes of floats and doubles, GNU's and clang's extended ones, each lane 1
+// or 0 (clang's zero extension of llvm.is.fpclass's lanes), with masks LLVM tests apart, into an FNV-1a hash.
+#define BUSTER_CHECK_TEST_CLASSIFY_VECTORS \
+    "typedef float f2 __attribute__((vector_size(8)));typedef int i2 __attribute__((vector_size(8)));" \
+    "typedef float f4 __attribute__((vector_size(16)));typedef int i4 __attribute__((vector_size(16)));" \
+    "typedef float f8 __attribute__((vector_size(32)));typedef int i8 __attribute__((vector_size(32)));" \
+    "typedef float f16 __attribute__((vector_size(64)));typedef int i16 __attribute__((vector_size(64)));" \
+    "typedef double d2 __attribute__((vector_size(16)));typedef long long l2 __attribute__((vector_size(16)));" \
+    "typedef double d4 __attribute__((vector_size(32)));typedef long long l4 __attribute__((vector_size(32)));" \
+    "typedef double d8 __attribute__((vector_size(64)));typedef long long l8 __attribute__((vector_size(64)));" \
+    "typedef float e4 __attribute__((ext_vector_type(4)));typedef int k4 __attribute__((ext_vector_type(4)));" \
+    "typedef float e1 __attribute__((ext_vector_type(1)));typedef int k1 __attribute__((ext_vector_type(1)));" \
+    "unsigned mix(unsigned h,int v){return (h^(unsigned)v)*16777619u;}"
+
 static __attribute__((noinline)) void check_test_classify_runs(CheckTest* test, const char* clang)
 {
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_test_classify_programs); i += 1)
     {
         check_test_program_source(test, check_test_classify_programs[i].source, check_test_classify_programs[i].name, clang);
     }
-    // isfpclass of a vector: checked as clang does, its lowering refused by name.
-    X86Target v4 = { 0 };
-    const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);
-    check_test_expect(test, parsed, "the vector classification's target");
+    // isfpclass of vectors, which vectors' lowering takes at x86-64-v4 (clang's builds with its -march too).
+    X86Target target = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &target);
+    check_test_expect(test, parsed, "the vector classifications' target, x86-64-v4");
     if (parsed)
     {
-        check_test_program_boundary_target(test,
-                                           "typedef float v4 __attribute__((vector_size(16)));typedef int i4 __attribute__((vector_size(16)));"
-                                           "i4 tested(v4 x){return __builtin_isfpclass(x,3);}",
-                                           "classify-isfpclass-of-a-vector", true, false, 0, 0, "__builtin_isfpclass of a vector", &v4);
+        const X86Target native = x86_target_native();
+        const bool run_native = (native.features & target.features) == target.features;
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64-v4";
+        check_test_program_source_native_limits(test,
+            BUSTER_CHECK_TEST_CLASSIFY_VECTORS BUSTER_CHECK_TEST_CLASSIFY_IEEE
+            "int tested(int n){unsigned h=2166136261u;f16 f;d8 d;for(int i=0;i<16;i++)f[i]=makef(n+i,(n+i)&1);"
+            "for(int i=0;i<8;i++)d[i]=maked(n*3+i,i&1);"
+            "i16 a=__builtin_isfpclass(f,0x3),b=__builtin_isfpclass(f,0x1f8),c=__builtin_isfpclass(f,0x2a5);"
+            "l8 p=__builtin_isfpclass(d,0x90),q=__builtin_isfpclass(d,0x204),r=__builtin_isfpclass(d,0x3ff);"
+            "f2 g2={f[0],f[1]};i2 a2=__builtin_isfpclass(g2,0x60);f4 g4={f[2],f[3],f[4],f[5]};i4 a4=__builtin_isfpclass(g4,0x108);"
+            "f8 g8;for(int i=0;i<8;i++)g8[i]=f[i+8];i8 a8=__builtin_isfpclass(g8,0x0f3);"
+            "d2 h2={d[0],d[1]};l2 p2=__builtin_isfpclass(h2,0x1);d4 h4={d[2],d[3],d[4],d[5]};l4 p4=__builtin_isfpclass(h4,0x3fc);"
+            "e4 x4={f[6],f[7],f[8],f[9]};k4 y4=__builtin_isfpclass(x4,0x207);e1 x1={f[10]};k1 y1=__builtin_isfpclass(x1,0x80);"
+            "for(int i=0;i<16;i++)h=mix(h,a[i]+2*b[i]+4*c[i]);for(int i=0;i<8;i++)h=mix(h,(int)(p[i]+2*q[i]+4*r[i])+8*a8[i]);"
+            "for(int i=0;i<2;i++)h=mix(h,a2[i]+2*(int)p2[i]);for(int i=0;i<4;i++)h=mix(h,a4[i]+2*(int)p4[i]+4*y4[i]);"
+            "return (int)mix(h,y1[0]);}",
+            "classify-isfpclass-of-vectors", clang, false, -1, 0, &target, run_native);
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64";
     }
 }
 
