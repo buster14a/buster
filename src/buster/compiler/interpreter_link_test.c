@@ -77,6 +77,7 @@ static void interpreter_link_test_data(InterpreterLinkTest* tally)
     if (ready)
     {
         // The output arena has been used before: BSS must not rely on mmap's initial zeros.
+        assert(arena_commit(&output_arena, output_arena.capacity));
         memset(output_arena.base, 0xa5, output_arena.capacity);
         uint8_t string_bytes[] = "hello";
         uint8_t data_bytes[64] = { 0 };

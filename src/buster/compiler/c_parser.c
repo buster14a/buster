@@ -12362,7 +12362,7 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
     const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     if (arena.base == 0)
     {
-        fprintf(stderr, "fatal error: can't reserve memory\n");
+        arena_report_failure(stderr, "parsing", 1ull << 36);
     }
     else if (!parsed)
     {
@@ -12382,7 +12382,7 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
             // The preprocessor's setup says why it failed, when it can (an invalid SOURCE_DATE_EPOCH, say).
             if (!pp.fatal)
             {
-                fprintf(stderr, "fatal error: can't reserve memory\n");
+                arena_report_failure(stderr, "parsing", 1ull << 36);
             }
         }
         else

@@ -79,6 +79,7 @@ static void check_test_x86_diagnostic_storage(CheckTest* test)
         bool succeeded = false;
         for (uint32_t limit = 17; limit <= 64; limit += 1)
         {
+            assert(arena_commit(&scratch, scratch.capacity));
             memset(scratch.base, 0xa5, capacity);
             scratch.length = 17;
             scratch.capacity = limit;
@@ -133,6 +134,7 @@ static void check_test_x86_context_storage(CheckTest* test)
             bool succeeded = false;
             for (uint32_t limit = 17; limit <= 96; limit += 1)
             {
+                assert(arena_commit(&scratch, scratch.capacity));
                 memset(scratch.base, 0xa5, capacity);
                 scratch.length = 17;
                 scratch.capacity = limit;

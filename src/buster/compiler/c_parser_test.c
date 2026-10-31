@@ -3232,6 +3232,7 @@ static uint32_t parse_test_workspace_budget(void)
     bool valid = held != 0;
     if (valid)
     {
+        assert(arena_commit(&guarded, guarded.capacity));
         memset(guarded.base, 0xa5, guarded.capacity);
         memset(held, 0x3c, 12345);
     }

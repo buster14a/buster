@@ -1801,7 +1801,7 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
     }
     else
     {
-        fprintf(stderr, "fatal error: can't reserve memory for the libraries\n");
+        arena_report_failure(stderr, "the libraries", UINT64_C(1) << 36);
     }
 }
 
@@ -1874,7 +1874,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         else if (!valid)
         {
-            fprintf(stderr, "fatal error: can't reserve linker memory\n");
+            arena_report_failure(stderr, "linking", UINT64_C(1) << 36);
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
         // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
@@ -2253,7 +2253,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                  parse_initialize(parser, &parser_options, options->language);
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
-        fprintf(errors, "fatal error: can't reserve checker memory\n");
+        arena_report_failure(errors, "checking", UINT64_C(1) << 36);
     }
     else
     {

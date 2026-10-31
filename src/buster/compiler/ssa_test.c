@@ -815,7 +815,9 @@ static void ssa_test_dominance_handoff(SsaTestTally* tally, SsaTestSpace* space)
                 arena_pop_to(&space->scratch, 0);
                 space->output.length = 37;
                 space->scratch.length = 29;
+                assert(arena_commit(&space->output, space->output.capacity));
                 memset(space->output.base, 0xab, 37);
+                assert(arena_commit(&space->scratch, space->scratch.capacity));
                 memset(space->scratch.base, 0xcd, 29);
                 // The fallback must fit without either quadratic matrix. Prefix
                 // offsets also force the child arenas to account for alignment.
@@ -867,7 +869,9 @@ static void ssa_test_capacity(SsaTestTally* tally, SsaTestSpace* space)
                 space->scratch.length = 29;
                 space->output.capacity = small == 0 ? 37 + room : capacity;
                 space->scratch.capacity = small == 1 ? 29 + room : scratch_capacity;
+                assert(arena_commit(&space->output, space->output.capacity));
                 memset(space->output.base, 0xab, 37);
+                assert(arena_commit(&space->scratch, space->scratch.capacity));
                 memset(space->scratch.base, 0xcd, 29);
                 SsaResult before;
                 memset(&before, 0x5a, sizeof(before));
