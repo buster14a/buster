@@ -25,7 +25,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUSTER_TIER1_PIPELINE_CASES 16
+#define BUSTER_TIER1_PIPELINE_CASES 17
 #define BUSTER_TIER1_PIPELINE_CALL_CASES 3
 #define BUSTER_TIER1_PIPELINE_FUNCTIONS 2
 #define BUSTER_TIER1_PIPELINE_INPUTS 32
@@ -77,7 +77,6 @@ struct Tier1PipelineTest
     uint32_t native_results;
     uint32_t clang_results;
     uint32_t resolved_calls;
-    uint32_t refused;
     // The CFG consumer's functions, and what their edges took.
     uint32_t general;
     uint64_t edge_moves;
@@ -549,8 +548,8 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
     }
     else if (shape == 8)
     {
-        // The stack's position saved and restored around a's, the dynamic stack's, which Tier 1 refuses
-        // (tier1_pipeline_refusals).
+        // The stack's position saved and restored around a's (#141): the dynamic stack's, whose frame pointer makes the
+        // function the CFG consumer's.
         tier0_emit(program, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
@@ -1188,6 +1187,7 @@ static const uint32_t tier1_pipeline_shapes[BUSTER_TIER1_PIPELINE_CASES] = {
     14,
     15,
     16,
+    8,
 };
 
 static void tier1_pipeline_supported(Tier1PipelineTest* test)
@@ -1319,47 +1319,6 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
     }
 }
 
-static void tier1_pipeline_refusals(Tier1PipelineTest* test)
-{
-    const uint32_t shapes[] = {
-        8,
-    };
-    for (uint32_t fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(shapes); fixture_index += 1)
-    {
-        const uint32_t shape = shapes[fixture_index];
-        test->fixture = shape;
-        Tier1PipelineFixture fixture;
-        Tier1PipelineFixture original;
-        tier1_pipeline_fixture(&fixture, shape);
-        memcpy(&original, &fixture, sizeof(fixture));
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            test->vector = path != 0;
-            test->rematerialize = false;
-            tier1_pipeline_reset(test);
-            Tier0Functions functions;
-            IrFunction function;
-            IrDominance dominance;
-            const bool ready = tier1_pipeline_upstream(test, &fixture.program, fixture.program.function_count - 1, &functions, &function, &dominance);
-            if (ready)
-            {
-                Arena* selected = &test->arenas[TIER1_PIPELINE_SELECTED];
-                Arena* scratch = &test->arenas[TIER1_PIPELINE_SCRATCH];
-                Tier1SelectPlan plan;
-                memset(&plan, 0xa5, sizeof(plan));
-                Tier1SelectPlan prior;
-                memcpy(&prior, &plan, sizeof(plan));
-                uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selection = tier1_select_plan(&function, &dominance, selected, scratch, test->vector, &plan, &node);
-                const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "the dynamic stack receives explicit unsupported status");
-                tier1_pipeline_expect(test, selected->length == 0 && scratch->length == 0 && memcmp(&plan, &prior, sizeof(plan)) == 0, "unsupported selection rolls back arenas and result");
-                test->refused += refused;
-            }
-            tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "unsupported compilation preserves the original typed fixture");
-        }
-    }
-}
-
 // The C side's prelude and each fixture's formula, by fixture index: statements that set `result` from a, b and c (which
 // they may change). Separate source formulas intentionally know nothing about SSA IDs, selected patterns or
 // allocations. Signed narrow inputs are reconstructed with in-range arithmetic before casting, without host truncation.
@@ -1387,6 +1346,7 @@ static const char* const tier1_pipeline_formulas[BUSTER_TIER1_PIPELINE_CASES] = 
     "uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b;",
     "uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1);",
     "result = (uint64_t)((double)a * 0.75 + 1.0);",
+    "result = a;",
 };
 
 static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const char* path)
@@ -1561,22 +1521,20 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_mutation_regression(&test);
             tier1_pipeline_deadline_regression(&test);
             tier1_pipeline_supported(&test);
-            tier1_pipeline_refusals(&test);
             if (cross_check && test.failures == 0)
             {
                 tier1_pipeline_clang(&test, clang);
             }
             tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
             tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
-            tier1_pipeline_expect(&test, test.refused == 2, "every remaining unsupported shape is refused on both paths");
-            tier1_pipeline_expect(&test, test.general == 8 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
-                                  "every control-flow fixture and the floating one go through the CFG consumer, whose edges move values, critical ones through stubs");
+            tier1_pipeline_expect(&test, test.general == 9 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
+                                  "every control-flow fixture, the floating one and the dynamic stack's go through the CFG consumer, whose edges move values, critical ones through stubs");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, seed);
+        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {
             arena_release(&test.arenas[a]);

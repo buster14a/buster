@@ -184,6 +184,20 @@ patterns are:
   return address, plus the named arguments' stack bytes
   (`tier1_emit_cfg_incoming`). Every variadic definition that selection
   accepts goes to the CFG consumer.
+- The dynamic stack (#141): `alloca` (`TIER1_RULE_ALLOCA`) rounds its size up to
+  the alignment rsp keeps, takes it from rsp and gives rsp as its address
+  (`lea d, [size + alignment - 1]`, `and d, -alignment`, `sub rsp, d`,
+  `mov d, rsp`), or with a constant size of up to 1 GB a `sub` of the rounded
+  constant (`TIER1_RULE_ALLOCA_IMMEDIATE`); `stack_save` copies rsp and
+  `stack_restore` sets it. The alignment is 16 bytes, or a realigned frame's,
+  which the CFG consumer sets in the holes' `scale`, so that rsp keeps the
+  alignment at every call after an allocation. An allocation and a restore are
+  memory barriers: no load folds past either. Every function with one is the CFG
+  consumer's, in a dynamic frame (the frame guide's "Frame and prologue rules"):
+  a frame pointer, its places rbp's (or r15's in a realigned frame), and each
+  call with stack arguments takes its outgoing area, its stack bytes rounded up
+  to the alignment, from rsp before its stores and gives it back after it
+  returns (`tier1_emit_cfg_call_area`).
 - By-value aggregates (#789): a call or a function with ABI records takes each
   argument and parameter where its record says (`tier1_select_argument_place`,
   `tier1_select_parameter_place`): a scalar in its register or stack slot, and

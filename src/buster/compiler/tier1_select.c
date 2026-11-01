@@ -155,6 +155,15 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_CONVERT,
     TIER1_RULE_FLOAT_CONVERT_WIDE,
     TIER1_RULE_FLOAT_RETURN,
+    // The dynamic stack (#141), whose functions are the CFG consumer's with a frame pointer: an allocation rounds its
+    // size up to the frame's alignment, takes it from rsp and gives rsp as its address (lea, and, sub and mov from its
+    // size's register, or with ALLOCA_IMMEDIATE a sub of the rounded constant), so that rsp keeps that alignment at
+    // every call after it. Its pattern's and holes' `scale` is the alignment's log2: 4 from selection, and a realigned
+    // frame's from the CFG consumer. A save copies rsp and a restore sets it.
+    TIER1_RULE_ALLOCA,
+    TIER1_RULE_ALLOCA_IMMEDIATE,
+    TIER1_RULE_STACK_SAVE,
+    TIER1_RULE_STACK_RESTORE,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -868,6 +877,35 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     case TIER1_RULE_PHI:
         break;
+    case TIER1_RULE_ALLOCA:
+    case TIER1_RULE_ALLOCA_IMMEDIATE:
+    {
+        // The size rounded up to the alignment `1 << scale`, from rsp; the allocation's address is rsp after it. A
+        // constant's rounded size is the subtraction's immediate, and an allocation of none moves nothing.
+        const int64_t alignment = INT64_C(1) << holes->scale;
+        if (holes->rule == TIER1_RULE_ALLOCA)
+        {
+            tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = destination, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(alignment - 1) });
+            tier1_select_append(&result, (X86Instruction){ .form = alignment <= 128 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32, .rm = destination, .immediate = (int32_t)-alignment });
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_SUB_R64_RM64, X86_REGISTER_RSP, destination));
+        }
+        else
+        {
+            const uint64_t rounded = (holes->immediate + (uint64_t)alignment - 1) & ~((uint64_t)alignment - 1);
+            if (rounded != 0)
+            {
+                tier1_select_append(&result, (X86Instruction){ .form = rounded <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32, .rm = X86_REGISTER_RSP, .immediate = (int32_t)rounded });
+            }
+        }
+        tier1_select_append(&result, tier1_select_move(8, destination, X86_REGISTER_RSP));
+        break;
+    }
+    case TIER1_RULE_STACK_SAVE:
+        tier1_select_append(&result, tier1_select_move(8, destination, X86_REGISTER_RSP));
+        break;
+    case TIER1_RULE_STACK_RESTORE:
+        tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RSP, holes->left));
+        break;
     case TIER1_RULE_STACK_ADDRESS:
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = destination, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE });
         break;
@@ -1453,7 +1491,8 @@ struct Tier1SelectForest
 static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
-    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+    // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -1485,7 +1524,8 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
         const __mmask16 volatile_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | volatile_load) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | volatile_load) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -1775,6 +1815,8 @@ struct Tier1SelectPart
 #define BUSTER_TIER1_SELECT_MAX_STACK_OFFSET (256u * BUSTER_ABI_SLOT_BYTES)
 // The largest aggregate result a return copies through the hidden pointer, 8 bytes at a time (#789).
 #define BUSTER_TIER1_SELECT_MAX_RESULT_COPY 4096u
+// The largest constant size an allocation folds (#141): rounded up to any frame's alignment, it fits a sub's imm32.
+#define BUSTER_TIER1_SELECT_MAX_ALLOCA_IMMEDIATE (UINT64_C(1) << 30)
 
 // An aggregate of `size` bytes in `registers` (a location's two, or a result's first two) as its parts (#789): eightbyte
 // k in registers[k], 8 bytes or what is left of the aggregate. Returns how many, into `parts`, or 0 for a shape Tier 1
@@ -2854,6 +2896,41 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    else if (op == IR_ALLOCA && function->type[a] == IR_I64)
+    {
+        // The dynamic stack (#141). A constant size whose rounding to any frame's alignment fits a sub's imm32 folds.
+        base.rule = TIER1_RULE_ALLOCA;
+        base.values[0] = a;
+        base.width = 8;
+        base.scale = 4;
+        base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        uint64_t size = 0;
+        if (tier1_select_constant(function, a, &size) && size <= BUSTER_TIER1_SELECT_MAX_ALLOCA_IMMEDIATE)
+        {
+            base.rule = TIER1_RULE_ALLOCA_IMMEDIATE;
+            base.values[0] = BUSTER_IR_NONE;
+            base.immediate = size;
+            base.intrinsic_cost = 2;
+            tier1_select_fold(forest, node, a, &base);
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if (op == IR_STACK_SAVE)
+    {
+        base.rule = TIER1_RULE_STACK_SAVE;
+        base.width = 8;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_STACK_RESTORE && function->type[a] == IR_I64)
+    {
+        base.rule = TIER1_RULE_STACK_RESTORE;
+        base.values[0] = a;
+        base.width = 8;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_CBR)
     {
         base.rule = TIER1_RULE_BRANCH;
@@ -3122,7 +3199,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)))
+        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -3480,8 +3557,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
     // plan before allocating records, even if earlier value locations are spilled. A memory operand through a frame
     // object needs the frame's layout too, an indirect jump's labels their symbols, a variadic definition its register
-    // save area, a floating value the vector class's registers (#141), and a function's own ABI records its aggregates'
-    // copies and parts (#789): the CFG consumer's.
+    // save area, a floating value the vector class's registers (#141), a function's own ABI records its aggregates'
+    // copies and parts (#789), and the dynamic stack its frame pointer and call areas (#141): the CFG consumer's.
     if (error == TIER1_SELECT_OK && (plan->function->label_count != 0 || plan->function->variadic || plan->function->parameter_passed != 0))
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
@@ -3492,7 +3569,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
             tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
             tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE ||
-            plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
+            plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT || (plan->patterns[node].rule >= TIER1_RULE_ALLOCA && plan->patterns[node].rule <= TIER1_RULE_STACK_RESTORE))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

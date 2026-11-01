@@ -225,8 +225,12 @@ passes each aggregate's bytes where its record says, in registers or in its
 stack slots, and stores an aggregate result into its object; a function stores
 each aggregate parameter's registers into a frame object at its entry, and
 returns an aggregate's parts or copies it through the hidden pointer (the
-selection guide's "By-value aggregates"). Still refused: long double, selects
-of floating values, switches, the dynamic stack, and the convention's rarer
+selection guide's "By-value aggregates"). So does the dynamic stack (#141):
+variable-length arrays' and `alloca`'s allocations, and the stack's position
+saved and restored around their scopes, in a frame with a frame pointer whose
+places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
+from rsp around it (the selection guide's "The dynamic stack"). Still refused:
+long double, selects of floating values, switches, and the convention's rarer
 aggregate shapes (a part in a stack slot, a high or low eightbyte alone, a
 vector's or the x87's register).
 

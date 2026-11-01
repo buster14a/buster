@@ -93,7 +93,9 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         // own (#141).
         const bool stacked = (op == IR_CALL && tier1_select_call_stack_bytes(function, &function->calls[function->b[node]]) != 0) ||
                              (op == IR_PARAM && tier1_select_parameter_place(function, function->a[node]).kind == BUSTER_TIER1_PLACE_STACK);
-        chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_LIFETIME && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow)) && rule != TIER1_RULE_DIVIDE &&
+        // The dynamic stack's operations need the CFG consumer's frame pointer and call areas (#141).
+        const bool dynamic = op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE;
+        chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_LIFETIME && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow)) && rule != TIER1_RULE_DIVIDE && !dynamic &&
                 (op != IR_CALL || function->calls[function->b[node]].abi == 0) &&
                 rule != TIER1_RULE_SHIFT && !mask && !floating && !stacked;
         prefix &= op == IR_PARAM;
@@ -213,9 +215,42 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
     {
         save_area |= (function->slots[s].flags & BUSTER_IR_SLOT_REGISTER_SAVE_AREA) != 0;
     }
+    // The dynamic stack (#141): a frame pointer, the frame's places from rbp (or a realigned frame's from r15) and each
+    // call's outgoing area at its own rsp (Tier1Frame.dynamic_outgoing).
+    bool dynamic = false;
+    for (uint32_t node = 0; node < function->instruction_count; node += 1)
+    {
+        dynamic |= function->op[node] == IR_ALLOCA || function->op[node] == IR_STACK_SAVE || function->op[node] == IR_STACK_RESTORE;
+    }
     // A function with its own ABI records (#789) stages an aggregate result's parts below rsp on its way out
     // (tier1_emit_cfg_aggregate_result): its frame stays out of the red zone.
-    return options->frame_flags | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) | (function->parameter_passed != 0 ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0);
+    return options->frame_flags | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) | (function->parameter_passed != 0 ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) |
+           (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
+}
+
+// The alignment's log2 that rsp keeps in a dynamic frame (#141): 16 bytes', or a realigned frame's. An allocation rounds
+// its size up to it, and so does each call's outgoing area (tier1_emit_cfg_call_area).
+static uint8_t tier1_emit_cfg_stack_alignment(const Tier1Frame* frame)
+{
+    const uint32_t alignment = frame->alignment > 16 ? frame->alignment : 16;
+    return (uint8_t)__builtin_ctz(alignment);
+}
+
+// A call's outgoing area in a dynamic frame (Tier1Frame.dynamic_outgoing, #141): its stack bytes rounded up to the
+// alignment rsp keeps, which the call takes from rsp before its arguments' stores and gives back after it returns; 0 for
+// a call without stack arguments or in a fixed frame, whose area is the frame's own.
+static uint32_t tier1_emit_cfg_call_area(const Tier1EmitResult* emitted, uint32_t stack_bytes)
+{
+    const uint32_t alignment = UINT32_C(1) << tier1_emit_cfg_stack_alignment(&emitted->frame);
+    return emitted->frame.dynamic_outgoing && stack_bytes != 0 ? (stack_bytes + alignment - 1) & ~(alignment - 1) : 0;
+}
+
+// rsp less or plus a call's outgoing area (#141): `sub rsp, area` or `add rsp, area`.
+static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, Tier1EmitBuffer* buffer)
+{
+    const uint16_t form = area <= 127 ? (release ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8) : (release ? X86_FORM_ADD_RM64_IMM32 : X86_FORM_SUB_RM64_IMM32);
+    const X86Instruction record = { .form = form, .rm = X86_REGISTER_RSP, .immediate = (int32_t)area };
+    return area == 0 || tier1_emit_append(buffer, record) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
 
 // The inverse of a conditional jump's form, or X86_FORM_NONE for a form the selector doesn't choose.
@@ -1900,6 +1935,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             }
             const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
             Tier1SelectHoles holes = { 0 };
+            // A call's outgoing area in a dynamic frame (tier1_emit_cfg_call_area), released after it returns.
+            uint32_t call_area = 0;
             // The arguments' registers, and an indirect call's callee's after them.
             uint32_t argument_registers[BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1] = { 0 };
             if (error == TIER1_EMIT_OK && selected)
@@ -1918,6 +1955,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 const uint32_t arguments = calls ? called->argument_count : 0;
                 Tier1SelectPlaces places = { 0 };
                 uint32_t staged = 0;
+                // A dynamic frame's call takes its outgoing area from rsp first (#141): its stores below are rsp's.
+                call_area = calls ? tier1_emit_cfg_call_area(emitted, tier1_select_call_stack_bytes(function, called)) : 0;
+                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, false, &buffer) : error;
                 for (uint32_t u = plan->effective_use_offsets[node]; calls && u < plan->effective_use_offsets[node + 1]; u += 1)
                 {
                     const uint32_t value = plan->effective_use_values[u];
@@ -1952,6 +1992,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 if (error == TIER1_EMIT_OK && !calls)
                 {
                     holes = tier1_select_holes(plan, transitions.registers, node);
+                    // An allocation rounds to the alignment rsp keeps (#141), a realigned frame's past 16 bytes.
+                    holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(&emitted->frame) : holes.scale;
                 }
             }
             if (error == TIER1_EMIT_OK)
@@ -2044,6 +2086,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         error = tier1_emit_call(plan, node, argument_registers, saved, transitions.registers[node], &into, &buffer, scratch, emitted);
                     }
                 }
+                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, true, &buffer) : error;
             }
             else if (error == TIER1_EMIT_OK && selected && (op == IR_BR || op == IR_CBR || (op == IR_BR_INDIRECT && input->successor_offsets[b + 1] - input->successor_offsets[b] == 1)))
             {

@@ -713,6 +713,39 @@ static const char check_test_tier1_records_other_source[] =
     "long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
     "long b_vsum(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
 
+// The dynamic stack's fixture (#141): variable-length arrays in a loop's body (a save and a restore per iteration), beside
+// calls with stack arguments (each with its outgoing area at its own rsp), in a frame realigned by an object aligned to 64
+// (its base r15), with values live across calls in callee-saved registers, in a variadic definition, and alloca's. Each
+// callee's backtrace() walks through the dynamic frames' unwind tables to the C runtime's: the frames' total it prints
+// is clang's build's only where none of them stops the walk.
+static const char check_test_tier1_dynamic_source[] =
+    "#include <alloca.h>\n#include <execinfo.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n"
+    "static long unwound;\n"
+    "__attribute__((noinline)) static void probe(void) { void* frames[64]; unwound += backtrace(frames, 64); }\n"
+    "__attribute__((noinline)) static long sum8(long a, long b, long c, long d, long e, long f, long g, long h) { return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h; }\n"
+    "__attribute__((noinline)) static long touch(long* p, long n) { probe(); long s = 0; for (long i = 0; i < n; i += 1) s += p[i] * (i + 1); return s; }\n"
+    "long tier1_vla_loop(long n) { long total = 0; for (long k = 1; k <= n; k += 1) { long a[k]; for (long i = 0; i < k; i += 1) a[i] = i * k + 1; total += touch(a, k); } return total; }\n"
+    "long tier1_vla_calls(long n) { long a[n + 1]; for (long i = 0; i <= n; i += 1) a[i] = i + 3; long s = sum8(a[0], a[1], a[2 % (n + 1)], n, 5, 6, a[n], 8); char b[n * 3 + 1];\n"
+    "    memset(b, 'x', n * 3); b[n * 3] = 0; return s + (long)strlen(b) + sum8(1, 2, 3, 4, 5, 6, a[n / 2], s); }\n"
+    "long tier1_vla_aligned(long n) { _Alignas(64) char wide[64]; for (int i = 0; i < 64; i += 1) wide[i] = (char)i; long a[n];\n"
+    "    for (long i = 0; i < n; i += 1) a[i] = wide[i % 64] + (long)((uintptr_t)wide & 63); long s = touch(a, n); double d[n];\n"
+    "    for (long i = 0; i < n; i += 1) d[i] = (double)i / 2; for (long i = 0; i < n; i += 1) s += (long)(d[i] * 4);\n"
+    "    return s + sum8(s, n, 3, 4, 5, 6, 7, (long)((uintptr_t)a & 15)); }\n"
+    "long tier1_alloca(long n) { long* p = alloca(n * sizeof(long)); long* q = __builtin_alloca(32); for (long i = 0; i < n; i += 1) p[i] = i * i;\n"
+    "    q[0] = 1; q[1] = 2; q[2] = 3; q[3] = (long)(((uintptr_t)p | (uintptr_t)q) & 15); return touch(p, n) + touch(q, 4); }\n"
+    "long tier1_vla_live(long n, long m) { long kept = n * 7 + m; long other = m * 13; long r = 0; for (long k = 0; k < 3; k += 1) { long a[n + k];\n"
+    "    for (long i = 0; i < n + k; i += 1) a[i] = kept + i; r += touch(a, n + k) + other + sum8(kept, other, r, k, n, m, 7, 8); if (r > 1000000) break; }\n"
+    "    return r + kept + other; }\n"
+    "long tier1_vla_variadic(int n, ...) { va_list list; va_start(list, n); long a[n]; for (int i = 0; i < n; i += 1) a[i] = va_arg(list, long); va_end(list);\n"
+    "    return touch(a, n) + sum8(n, a[0], a[n - 1], 4, 5, 6, 7, 8); }\n"
+    "int main(void) {\n"
+    "    printf(\"%ld %ld %ld %ld %ld %ld\\n\", tier1_vla_loop(9), tier1_vla_calls(10), tier1_vla_aligned(70), tier1_alloca(12), tier1_vla_live(5, 3),\n"
+    "           tier1_vla_variadic(9, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));\n"
+    "    printf(\"%ld %ld %ld %ld %ld %ld\\n\", tier1_vla_loop(1), tier1_vla_calls(1), tier1_vla_aligned(1), tier1_alloca(1), tier1_vla_live(1, 0), tier1_vla_variadic(1, 11L));\n"
+    "    printf(\"%ld\\n\", unwound);\n"
+    "    return 0;\n"
+    "}\n";
+
 static const char check_test_tier1_records_source[] =
     "#include \"tier1-records.h\"\n"
     "#define TWIST(S) S a_twist_##S(S s, int k) { unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(p[i] + k + i); return s; }\n"
@@ -1979,6 +2012,41 @@ static void check_test_driver_tier1_float(CheckTest* test, const char* clang, co
     unlink(unit);
     unlink(other);
     unlink(other_object);
+    unlink(reference);
+}
+
+// The dynamic stack's fixture (#141), compiled by --tier1 into an executable by each path, with and without
+// rematerialization, with no function refused: it must print what clang -O0's build prints.
+static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-dynamic.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-dynamic-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_dynamic_source, sizeof(check_test_tier1_dynamic_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the dynamic stack's fixture runs");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-dynamic-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", program, rematerialize != 0, path != 0, false, false, NULL, &build);
+            check_test_expect(test, compiled, "the dynamic stack's fixture compiles by --tier1, every function Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's variable-length arrays, allocas and their calls print clang -O0's build's output");
+            unlink(program);
+        }
+    }
+    unlink(unit);
     unlink(reference);
 }
 
