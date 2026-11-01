@@ -335,8 +335,9 @@ designs and the compilers already built this way.
   #126); `test-checker` runs them against clang's code and checks that a
   misaligned one is refused exactly where clang calls libatomic. The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
-  `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
-  `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
+  `xsetbv`, `monitorx`, `mwaitx`, `tzcnt`, `lzcnt_u16`, the fences, `clflush`,
+  `ldmxcsr`, `stmxcsr`, Key Locker's, `umwait`, `tpause` and `xbegin`) are
+  per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
   of vectors and pointers both, and its encryptions' with a branch that branch
   sizing sizes. The library builtins (`c_builtin_library.c`) are calls of their
   C library functions by name, with their rows' prototypes, folded where clang
