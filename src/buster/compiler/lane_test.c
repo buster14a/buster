@@ -72,7 +72,7 @@
 //     a flow of rounds that lane 0 begins before it settles, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
 //     of this process's CPUs in pairs, in fours and all one core: as many lanes as the capacity and the cores allow, each
 //     round on them, each lane's lane_session_asked as many, a lazy session's lane 1 created though it runs on one,
-//     where one core leaves it no other lane; a lazy session of two lanes on one CPU, whose flow of rounds lane 0 begins
+//     where one core leaves it no other lane; a lazy session of three lanes on one CPU, whose flow of rounds lane 0 begins
 //     before it settles, which must read its lanes as sharing the CPU in each round's narrowed group, and every narrowed
 //     group and round of the sessions' flows must read what its session's lanes do; and in a child, a session that leaves
 //     its lanes parked at its end (but in sanitizer builds, which join them).
@@ -2799,9 +2799,10 @@ static uint64_t lane_test_sessions(void)
             lane_test_topology_remove(root, end);
         }
     }
-    // A lazy session of two lanes on one CPU, whose flow of rounds begins before lane 0 settles: lane 0 begins the flow as a
-    // group of one (lane_flow_begin), so the session settles its answer with no group of its own, and each round's narrowed
-    // group must still read that its lanes share the CPU. This thread's mask is cut to one CPU while it runs.
+    // A lazy session of three lanes on one CPU, whose flow of rounds begins before lane 0 settles: lane 0 begins the flow
+    // as a group of one (lane_flow_begin), so the session settles its answer with no group of its own, and each round's
+    // narrowed group must still read that its lanes share the CPU. Three lanes make the session lazy (lane.c: more than
+    // two), which the run must confirm, and this thread's mask is cut to one CPU while it runs.
     uint64_t one[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     uint32_t cpu = 0;
     while (known && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64 && (allowed[cpu / 64] & (UINT64_C(1) << (cpu % 64))) == 0)
@@ -2818,16 +2819,18 @@ static uint64_t lane_test_sessions(void)
     {
         LaneSessionTest test = {
             .caller = caller,
-            .expected = 2,
-            .asked = 2,
+            .expected = 3,
+            .asked = 3,
             .shares_cpus = true,
         };
         const uint64_t created = lane_process.threads_created;
-        const uint32_t ran = lane_session_run(&session, 2, 0, lane_test_session_early_flow, &test, BUSTER_LANE_SESSION_LAZY);
-        failures += ran != 2 || lane_process.threads_created != created + 1 ? 1 : 0;
+        const uint32_t ran = lane_session_run(&session, 3, 0, lane_test_session_early_flow, &test, BUSTER_LANE_SESSION_LAZY);
+        // A session of three lanes is lazy, and lazy is the shape that settles without lane 0 in its group: a session that
+        // wasn't would pass the rounds' check without reaching the session's answer.
+        failures += ran != 3 || lane_process.threads_created != created + 2 || !session.lazy ? 1 : 0;
         for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
         {
-            failures += test.calls[lane] != (lane < 2 ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+            failures += test.calls[lane] != (lane < 3 ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
         }
         failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
         failures += syscall(SYS_sched_setaffinity, 0, sizeof(allowed), allowed) == 0 ? 0 : 1;
@@ -2855,7 +2858,7 @@ static uint64_t lane_test_sessions(void)
         sigaction(SIGUSR1, &previous_action, 0);
     }
     failures += lane_test_unwatch() ? 0 : 1;
-    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies, one of two "
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies, one of three "
            "lanes on one CPU whose flow began before lane 0 settled and one parked at its end, %lu wrong\n",
            BUSTER_LANE_TEST_MAX_LANES, (unsigned long)failures);
     return failures;
