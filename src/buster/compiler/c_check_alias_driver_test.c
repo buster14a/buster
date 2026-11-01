@@ -472,6 +472,78 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
                             "'weakref' attribute only applies to variables and functions", true);
 }
 
+// GNU's function multiversioning (#839): clang's errors and notes at -fsyntax-only and -c, by both checker paths, for
+// the attributes clang refuses beside target("default"), target_clones and cpu_specific, and for a second target
+// version that checks the first declaration.
+static void check_test_driver_multiversion(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* expected;
+        bool syntax;
+    } cases[] = {
+        { "always_inline beside target default",
+          "int g(int x) { return x; }\n__attribute__((always_inline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'always_inline'", true },
+        { "noinline beside target default",
+          "int g(int x) { return x; }\n__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'noinline'", true },
+        { "flatten beside target default",
+          "int g(int x) { return x; }\n__attribute__((flatten, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'flatten'", true },
+        { "cold beside target default",
+          "int g(int x) { return x; }\n__attribute__((cold, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'cold'", true },
+        { "hot beside target default",
+          "int g(int x) { return x; }\n__attribute__((hot, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'hot'", true },
+        { "weak beside target default",
+          "int g(int x) { return x; }\n__attribute__((weak, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'weak'", true },
+        { "const beside target default",
+          "int g(int x) { return x; }\n__attribute__((const, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'const'", true },
+        { "pure beside target default",
+          "int g(int x) { return x; }\n__attribute__((pure, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'pure'", true },
+        { "naked beside target default",
+          "int g(int x) { return x; }\n__attribute__((naked, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "non-ASM statement in naked function is not supported", true },
+        { "alias beside target default",
+          "int g(int x) { return x; }\n__attribute__((alias(\"g\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "definition 'h' cannot also be an alias", true },
+        { "target_clones beside target",
+          "int g(int x) { return x; }\n__attribute__((target_clones(\"avx2\", \"default\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "'target' and 'target_clones' attributes are not compatible", true },
+        { "cpu_specific beside target",
+          "int g(int x) { return x; }\n__attribute__((cpu_specific(generic), target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "'target' and 'cpu_specific' attributes are not compatible", true },
+        { "a second target version checks the first declaration",
+          "__attribute__((always_inline, target(\"avx2\"))) int h(int x);\n"
+          "__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'always_inline'", true },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        check_test_alias_errors(test, clang, executable, directory, cases[i].name, cases[i].source, cases[i].expected, cases[i].syntax);
+    }
+}
+
 static void check_test_driver_retained(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char source[] =

@@ -89,6 +89,8 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_ENUM_EXTENSIBILITY,
     CHECK_ATTRIBUTE_TARGET,
     CHECK_ATTRIBUTE_TARGET_CLONES,
+    CHECK_ATTRIBUTE_CPU_SPECIFIC,
+    CHECK_ATTRIBUTE_CPU_DISPATCH,
     CHECK_ATTRIBUTE_MIN_VECTOR_WIDTH,
     CHECK_ATTRIBUTE_NO_SANITIZE,
     CHECK_ATTRIBUTE_NO_INSTRUMENT_FUNCTION,
@@ -149,6 +151,7 @@ typedef enum CheckInputAttributeSchema
     CHECK_ATTRIBUTE_INTEGER_LIST,
     CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS,
     CHECK_ATTRIBUTE_STRING_LIST,
+    CHECK_ATTRIBUTE_IDENTIFIER_LIST,
 } CheckInputAttributeSchema;
 
 typedef enum CheckInputCallingConvention
@@ -305,6 +308,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "enum_extensibility", CHECK_ATTRIBUTE_ENUM_EXTENSIBILITY, CHECK_ATTRIBUTE_IDENTIFIER, 1, 1 },
     { "target", CHECK_ATTRIBUTE_TARGET, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "target_clones", CHECK_ATTRIBUTE_TARGET_CLONES, CHECK_ATTRIBUTE_STRING_LIST, 1, 255 },
+    // clang's CPU dispatch multiversioning. Its code generation isn't supported yet, but retaining it lets the checker
+    // report clang's attribute-compatibility errors at -fsyntax-only, as #839 requires.
+    { "cpu_specific", CHECK_ATTRIBUTE_CPU_SPECIFIC, CHECK_ATTRIBUTE_IDENTIFIER_LIST, 1, 255 },
+    { "cpu_dispatch", CHECK_ATTRIBUTE_CPU_DISPATCH, CHECK_ATTRIBUTE_IDENTIFIER_LIST, 1, 255 },
     { "min_vector_width", CHECK_ATTRIBUTE_MIN_VECTOR_WIDTH, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "no_sanitize", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_STRING_LIST, 1, 255 },
     { "no_sanitize_address", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -352,6 +359,11 @@ static bool check_input_attribute_equal(String8 text, const char* expected)
 {
     const uint64_t length = strlen(expected);
     return text.length == length && (length == 0 || memcmp(text.pointer, expected, length) == 0);
+}
+
+static bool check_input_attribute_text_equal(String8 a, String8 b)
+{
+    return a.length == b.length && (a.length == 0 || memcmp(a.pointer, b.pointer, a.length) == 0);
 }
 
 static void check_input_attribute_error(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t first, uint32_t end, CheckInputAttributeError error)
@@ -722,6 +734,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         }
         // cleanup's argument is an expression, which its own check below reads.
         const bool identifier = (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER && attribute->kind != CHECK_ATTRIBUTE_CLEANUP) ||
+                                attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_LIST ||
                                 (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
         const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST;
         if (valid && identifier)
@@ -1376,6 +1389,317 @@ struct CheckInputAttributeSubject
     bool external;
 };
 
+// GNU's function multiversioning (#839): target("default") makes a function multiversioned even alone, and
+// target_clones, cpu_specific and cpu_dispatch do too. clang's checkNonMultiVersionCompatAttributes keeps only used
+// (for target alone), nonnull and nothrow; every other declaration attribute it retains is an error at the function's
+// name. Attributes clang keeps in the function's type or ignores on a function (noreturn, the calling conventions,
+// access, externally_visible, unsequenced and reproducible) are allowed here too.
+typedef enum CheckInputMultiversionKind
+{
+    CHECK_MULTIVERSION_NONE,
+    CHECK_MULTIVERSION_TARGET,
+    CHECK_MULTIVERSION_TARGET_CLONES,
+    CHECK_MULTIVERSION_CPU_SPECIFIC,
+    CHECK_MULTIVERSION_CPU_DISPATCH,
+} CheckInputMultiversionKind;
+
+static const char* check_input_multiversion_name(CheckInputMultiversionKind kind)
+{
+    const char* result = "";
+    switch (kind)
+    {
+        case CHECK_MULTIVERSION_TARGET: result = "target"; break;
+        case CHECK_MULTIVERSION_TARGET_CLONES: result = "target_clones"; break;
+        case CHECK_MULTIVERSION_CPU_SPECIFIC: result = "cpu_specific"; break;
+        case CHECK_MULTIVERSION_CPU_DISPATCH: result = "cpu_dispatch"; break;
+        case CHECK_MULTIVERSION_NONE: break;
+    }
+    return result;
+}
+
+// Whether clang's multiversioning check accepts `attribute` on a function of `kind` (clang's
+// AttrCompatibleWithMultiVersion, and the attributes it doesn't retain as declaration attributes).
+static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKind kind, const CheckInputAttribute* attribute, bool inline_function)
+{
+    bool result = false;
+    switch (attribute->kind)
+    {
+        case CHECK_ATTRIBUTE_USED: result = kind == CHECK_MULTIVERSION_TARGET; break;
+        case CHECK_ATTRIBUTE_NONNULL:
+        case CHECK_ATTRIBUTE_NOTHROW:
+        // Type-level attributes, which clang doesn't see in FunctionDecl::attrs().
+        case CHECK_ATTRIBUTE_NORETURN:
+        case CHECK_ATTRIBUTE_CALLING_CONVENTION:
+        case CHECK_ATTRIBUTE_REGPARM:
+        // Attributes clang ignores on a function (with a warning this checker doesn't model).
+        case CHECK_ATTRIBUTE_ACCESS:
+        case CHECK_ATTRIBUTE_EXTERNALLY_VISIBLE:
+        case CHECK_ATTRIBUTE_UNSEQUENCED:
+        case CHECK_ATTRIBUTE_REPRODUCIBLE:
+        // clang ignores artificial on a function that isn't inline, and refuses it on an inline one.
+        case CHECK_ATTRIBUTE_ARTIFICIAL: result = !inline_function; break;
+        // Type attributes.
+        case CHECK_ATTRIBUTE_PACKED:
+        case CHECK_ATTRIBUTE_ALIGNED:
+        case CHECK_ATTRIBUTE_ALIGNAS:
+        case CHECK_ATTRIBUTE_MODE:
+        case CHECK_ATTRIBUTE_VECTOR_SIZE:
+        case CHECK_ATTRIBUTE_EXT_VECTOR_TYPE:
+        case CHECK_ATTRIBUTE_TRANSPARENT_UNION:
+        case CHECK_ATTRIBUTE_MAY_ALIAS:
+        case CHECK_ATTRIBUTE_ALIGN_VALUE:
+        // Attributes whose subjects aren't functions; their own checks report a bad subject.
+        case CHECK_ATTRIBUTE_COMMON:
+        case CHECK_ATTRIBUTE_NOCOMMON:
+        case CHECK_ATTRIBUTE_TLS_MODEL:
+        case CHECK_ATTRIBUTE_CLEANUP:
+        case CHECK_ATTRIBUTE_NONSTRING:
+        case CHECK_ATTRIBUTE_DESIGNATED_INIT:
+        case CHECK_ATTRIBUTE_FLAG_ENUM:
+        case CHECK_ATTRIBUTE_ENUM_EXTENSIBILITY:
+        case CHECK_ATTRIBUTE_FALLTHROUGH:
+        case CHECK_ATTRIBUTE_MUSTTAIL:
+            result = true;
+            break;
+        default:
+            break;
+    }
+    return result;
+}
+
+// The first attribute clang's multiversioning check refuses on `attributes` of `kind`, or BUSTER_CHECK_NONE. `skip`
+// marks attributes a later multiversioning attribute made incompatible (clang doesn't add them), and `active` is the
+// multiversioning attribute itself.
+static uint32_t check_input_attribute_multiversion_disallowed(const CheckInputAttributes* attributes, CheckInputMultiversionKind kind,
+                                                             const bool* skip, uint32_t active, bool inline_function)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; attributes != NULL && result == BUSTER_CHECK_NONE && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool multiversion = attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
+                                  attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
+        if (!attribute->ignored && i != active && !(skip != NULL && skip[i]) && !multiversion &&
+            !check_input_attribute_multiversion_allowed(kind, attribute, inline_function))
+        {
+            result = i;
+        }
+    }
+    return result;
+}
+
+// `attributes`' first non-ignored target attribute, or BUSTER_CHECK_NONE.
+static uint32_t check_input_attribute_target_index(const CheckInputAttributes* attributes)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; attributes != NULL && result == BUSTER_CHECK_NONE && i < attributes->count; i += 1)
+    {
+        if (!attributes->records[i].ignored && attributes->records[i].kind == CHECK_ATTRIBUTE_TARGET)
+        {
+            result = i;
+        }
+    }
+    return result;
+}
+
+// Whether `attributes` make a function multiversioned on their own: a target("default"), target_clones, cpu_specific
+// or cpu_dispatch attribute.
+static bool check_input_attribute_multiversion_present(const CheckInputAttributes* attributes)
+{
+    bool result = false;
+    for (uint32_t i = 0; attributes != NULL && !result && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        if (!attribute->ignored)
+        {
+            result = attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                     attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH ||
+                     (attribute->kind == CHECK_ATTRIBUTE_TARGET && check_input_attribute_equal(attribute->text, "default"));
+        }
+    }
+    return result;
+}
+
+// Whether `attributes` hold target_clones, cpu_specific or cpu_dispatch.
+static bool check_input_attribute_other_multiversion(const CheckInputAttributes* attributes)
+{
+    bool result = false;
+    for (uint32_t i = 0; attributes != NULL && !result && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        result = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                                         attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH);
+    }
+    return result;
+}
+
+// clang's Sema checks for GNU's function multiversioning (#839), at -fsyntax-only: a target("default") function, or one
+// with target_clones, cpu_specific or cpu_dispatch, refuses every other declaration attribute clang keeps but used (for
+// target alone), nonnull and nothrow, at the function's name. A target attribute beside target_clones, cpu_specific or
+// cpu_dispatch is incompatible with it: the later attribute's error, with clang's note at the earlier one. A target
+// declaration that makes a function multiversioned with an earlier one checks the earlier declaration's attributes
+// first, at its name, with clang's note at the new declaration. `previous` is the function's previous declaration's
+// attributes, if any.
+static void check_input_attribute_multiversion(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name,
+                                               const CheckInputAttributes* previous, uint32_t previous_name, bool inline_function,
+                                               bool previous_inline)
+{
+    if (attributes == NULL || attributes->error != CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        return;
+    }
+    bool multiversion = false;
+    for (uint32_t i = 0; !multiversion && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        multiversion = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
+                                               attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH);
+    }
+    if (!multiversion)
+    {
+        return;
+    }
+    const uint64_t mark = reader->scratch->length;
+    const uint32_t count = attributes->count;
+    bool* incompatible = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, bool, count) : NULL;
+    reader->output->resource |= count != 0 && incompatible == NULL;
+    if (count != 0 && incompatible == NULL)
+    {
+        arena_pop_to(reader->scratch, mark);
+        return;
+    }
+    if (count != 0)
+    {
+        memset(incompatible, 0, count);
+    }
+    uint32_t first_target = BUSTER_CHECK_NONE;
+    uint32_t target_default = BUSTER_CHECK_NONE;
+    uint32_t first_clones = BUSTER_CHECK_NONE;
+    uint32_t first_cpu = BUSTER_CHECK_NONE;
+    uint32_t first_dispatch = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        CheckInputAttribute* attribute = attributes->records + i;
+        if (attribute->ignored)
+        {
+            continue;
+        }
+        // The earlier attribute clang still has: one a later multiversioning attribute made incompatible isn't added.
+        const uint32_t target = first_target != BUSTER_CHECK_NONE && !incompatible[first_target] ? first_target : BUSTER_CHECK_NONE;
+        const uint32_t clones = first_clones != BUSTER_CHECK_NONE && !incompatible[first_clones] ? first_clones : BUSTER_CHECK_NONE;
+        const uint32_t cpu = first_cpu != BUSTER_CHECK_NONE && !incompatible[first_cpu] ? first_cpu : BUSTER_CHECK_NONE;
+        const uint32_t dispatch = first_dispatch != BUSTER_CHECK_NONE && !incompatible[first_dispatch] ? first_dispatch : BUSTER_CHECK_NONE;
+        uint32_t earlier = BUSTER_CHECK_NONE;
+        switch (attribute->kind)
+        {
+            case CHECK_ATTRIBUTE_TARGET:
+                first_target = first_target == BUSTER_CHECK_NONE ? i : first_target;
+                target_default = target_default == BUSTER_CHECK_NONE && check_input_attribute_equal(attribute->text, "default") ? i : target_default;
+                earlier = clones != BUSTER_CHECK_NONE ? clones : cpu != BUSTER_CHECK_NONE ? cpu : dispatch;
+                break;
+            case CHECK_ATTRIBUTE_TARGET_CLONES:
+                first_clones = first_clones == BUSTER_CHECK_NONE ? i : first_clones;
+                earlier = target != BUSTER_CHECK_NONE ? target : cpu != BUSTER_CHECK_NONE ? cpu : dispatch;
+                break;
+            case CHECK_ATTRIBUTE_CPU_SPECIFIC:
+                first_cpu = first_cpu == BUSTER_CHECK_NONE ? i : first_cpu;
+                earlier = target != BUSTER_CHECK_NONE ? target : clones != BUSTER_CHECK_NONE ? clones : dispatch;
+                break;
+            case CHECK_ATTRIBUTE_CPU_DISPATCH:
+                first_dispatch = first_dispatch == BUSTER_CHECK_NONE ? i : first_dispatch;
+                earlier = target != BUSTER_CHECK_NONE ? target : clones != BUSTER_CHECK_NONE ? clones : cpu;
+                break;
+            default:
+                break;
+        }
+        if (earlier != BUSTER_CHECK_NONE && !incompatible[i])
+        {
+            check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_INCOMPATIBLE, 0, attribute->name_token,
+                                            attributes->records[earlier].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
+            incompatible[i] = true;
+        }
+    }
+    // The active multiversioning attribute: the first target("default"), target_clones, cpu_specific or cpu_dispatch
+    // that clang adds. A target of another string alone isn't multiversioned, but two target strings are.
+    uint32_t active = BUSTER_CHECK_NONE;
+    CheckInputMultiversionKind active_kind = CHECK_MULTIVERSION_NONE;
+    for (uint32_t i = 0; i < count && active == BUSTER_CHECK_NONE; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        if (attribute->ignored || incompatible[i])
+        {
+            continue;
+        }
+        if (attribute->kind == CHECK_ATTRIBUTE_TARGET)
+        {
+            active = check_input_attribute_equal(attribute->text, "default") ? i : active;
+            active_kind = active != BUSTER_CHECK_NONE ? CHECK_MULTIVERSION_TARGET : active_kind;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                 attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH)
+        {
+            active = i;
+            active_kind = attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES ? CHECK_MULTIVERSION_TARGET_CLONES :
+                          attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ? CHECK_MULTIVERSION_CPU_SPECIFIC : CHECK_MULTIVERSION_CPU_DISPATCH;
+        }
+    }
+    bool target_multiversion = active_kind == CHECK_MULTIVERSION_TARGET;
+    if (active == BUSTER_CHECK_NONE && first_target != BUSTER_CHECK_NONE && !incompatible[first_target])
+    {
+        // Two target attributes of different strings make the function multiversioned without a "default".
+        for (uint32_t i = first_target + 1; i < count && !target_multiversion; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            target_multiversion = !attribute->ignored && !incompatible[i] && attribute->kind == CHECK_ATTRIBUTE_TARGET &&
+                                  !check_input_attribute_text_equal(attribute->text, attributes->records[first_target].text);
+        }
+        if (target_multiversion)
+        {
+            active = first_target;
+            active_kind = CHECK_MULTIVERSION_TARGET;
+        }
+    }
+    // A new target declaration that makes the function multiversioned with an earlier one checks the earlier
+    // declaration's attributes first, at its name, and its own only if that one is clean.
+    bool causes = false;
+    if (previous != NULL && previous_name != BUSTER_CHECK_NONE && !check_input_attribute_other_multiversion(previous))
+    {
+        const uint32_t previous_target = check_input_attribute_target_index(previous);
+        const uint32_t current_target = check_input_attribute_target_index(attributes);
+        causes = current_target != BUSTER_CHECK_NONE &&
+                 (check_input_attribute_equal(attributes->records[current_target].text, "default") ||
+                  (previous_target != BUSTER_CHECK_NONE &&
+                   !check_input_attribute_text_equal(attributes->records[current_target].text, previous->records[previous_target].text)));
+    }
+    if (causes)
+    {
+        const uint32_t bad = check_input_attribute_multiversion_disallowed(previous, CHECK_MULTIVERSION_TARGET, NULL, BUSTER_CHECK_NONE, previous_inline);
+        if (bad != BUSTER_CHECK_NONE)
+        {
+            check_input_report_multiversion(reader, previous_name, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, CHECK_MULTIVERSION_TARGET,
+                                            previous->records[bad].name_token, name, CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED, 0);
+            arena_pop_to(reader->scratch, mark);
+            return;
+        }
+        // The new declaration makes the function multiversioned even where its own target isn't "default".
+        if (active == BUSTER_CHECK_NONE && first_target != BUSTER_CHECK_NONE && !incompatible[first_target])
+        {
+            active = first_target;
+            active_kind = CHECK_MULTIVERSION_TARGET;
+        }
+    }
+    if (active != BUSTER_CHECK_NONE)
+    {
+        const uint32_t bad = check_input_attribute_multiversion_disallowed(attributes, active_kind, incompatible, active, inline_function);
+        if (bad != BUSTER_CHECK_NONE)
+        {
+            check_input_report_multiversion(reader, name, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, (uint8_t)active_kind,
+                                            attributes->records[bad].name_token, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, 0);
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
 // One pass over a declaration's attributes, for those whose place on a definition matters. clang's no_builtin is
 // permitted on a function's definition alone: on another function's declaration it is an error at its name, and on
 // anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as written, as an
@@ -1417,8 +1741,16 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         }
         else if (aliasing && !subject.is_typedef && defining && (subject.function || subject.external || subject.variable_definition))
         {
+            const uint32_t reports = reader->output->report_count;
             check_input_report_subject(reader, attribute->name_token, kind == CHECK_ATTRIBUTE_IFUNC ? CHECK_INPUT_IFUNC_DEFINITION : CHECK_INPUT_ALIAS_DEFINITION,
                                        subject.name);
+            // clang's alias and ifunc definition errors are after its multiversioning check, though their attributes
+            // are earlier in the declaration: order them after the function's name (#839).
+            if (reader->output->report_count != reports && subject.function && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE &&
+                check_input_attribute_multiversion_present(attributes))
+            {
+                reader->output->reports[reports].sort = subject.name + 1;
+            }
             valid = false;
         }
         defining |= aliasing;
