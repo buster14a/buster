@@ -365,7 +365,7 @@ static const ChangesModule changes_modules[] = {
     {
         .name = "compile_time",
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
-                   "compile_measure",
+                   "compile_measure|c_check_input|c_checker|c_parser|lane|c_check_program",
     },
 };
 
@@ -1520,7 +1520,7 @@ static const ChangesFixture changes_fixtures[] = {
     {
         .name = "the reader produces the binding events: the default handoff's samples, not the modes' comparison",
         .files = "src/buster/compiler/c_check_input.c",
-        .outputs_true = "checker checker_bindings",
+        .outputs_true = "checker checker_bindings compile_time",
         .outputs_false = "checker_binding_modes parser_bindings check_debug",
         .measured = "checker-bindings checker-deferred lowering-source",
         .unmeasured = "lexer parser",
