@@ -380,6 +380,42 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             }
             mismatches += check_input_scan_pointers((const void* const*)pointers, first, count) != present;
         }
+        // The walk's next-mark scan (check_input_scan_nonzero_from, check_input_resolve_next): from the 64-token line that
+        // holds each token, with the tokens below it and from the stop on not read, against the next nonzero role.
+        for (uint32_t first = 0; first < count; first += 1)
+        {
+            const uint32_t line = first & ~63u;
+            uint64_t nonzero = 0;
+            for (uint32_t i = first; i < count && i < line + 64; i += 1)
+            {
+                nonzero |= (uint64_t)(roles[i] != 0) << (i - line);
+            }
+            mismatches += check_input_scan_nonzero_from(roles, line, first, count) != nonzero;
+        }
+        {
+            Parser walked = { 0 };
+            CheckInputReader reader = { .parser = &walked, .visits = roles };
+            const uint32_t limits[] = { 0, count / 3, count / 2 + 1, count, UINT32_MAX };
+            for (uint32_t l = 0; count != 0 && l < BUSTER_ARRAY_LENGTH(limits); l += 1)
+            {
+                reader.resolve_limit = limits[l];
+                const uint32_t ends[] = { count - 1, (count - 1) / 2 };
+                for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(ends); e += 1)
+                {
+                    for (uint32_t token = 0; token <= ends[e]; token += 1)
+                    {
+                        const uint32_t stop = reader.resolve_limit > token && reader.resolve_limit < ends[e] ? reader.resolve_limit : ends[e];
+                        uint32_t expected_next = token + 1;
+                        while (expected_next < stop && roles[expected_next] == 0)
+                        {
+                            expected_next += 1;
+                        }
+                        expected_next = expected_next < stop ? expected_next : token + 1 < stop ? stop : token + 1;
+                        mismatches += check_input_resolve_next(&reader, token, ends[e]) != expected_next;
+                    }
+                }
+            }
+        }
         // count_tokens on a parser of these columns, by both paths, against the test's own counts.
         Parser parser = { 0 };
         parser.tokens.count = count;
@@ -595,6 +631,238 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         if (mappings[i] != MAP_FAILED)
         {
             munmap(mappings[i], 2 * page);
+        }
+    }
+}
+
+// check_input_selection_positions (#877) by both paths, against the test's own reading of the tree: random forests of
+// up to 1,100 tokens, whose parents come before or after their children, with names drawn among the two selections',
+// another and none, and a random order of the tokens in which each comes after its children as their postorder. A
+// close's bit is set where its least child has one of the two names. The names, the tree's columns and the bits each
+// end at a PROT_NONE page, so a load past one faults.
+static __attribute__((noinline)) void check_test_selection_positions(CheckTest* test)
+{
+    enum
+    {
+        NAMES,
+        PARENTS,
+        POSTORDER,
+        POSITIONS,
+        FIRST_CHILD,
+        BITS,
+        COLUMNS,
+    };
+    enum
+    {
+        CAPACITY = 1100,
+    };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t bytes = (((uint64_t)CAPACITY + 1) * sizeof(uint32_t) + page - 1) / page * page;
+    uint8_t* mappings[COLUMNS];
+    bool ready = true;
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        mappings[i] = mmap(0, bytes + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + bytes, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "guarded selection position columns' allocation");
+    static uint64_t expected[(CAPACITY + 63) / 64];
+    const uint32_t spellings[] = { C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR, C_NAME_BUILTIN_OFFSETOF, 0 };
+    uint32_t differences = 0;
+    uint32_t selections = 0;
+    for (uint32_t round = 0; ready && round < 420; round += 1)
+    {
+        const uint32_t count = round <= 200 ? round : 201 + check_test_random(test) % (CAPACITY - 200);
+        const uint32_t words = (count + 63) / 64;
+        uint32_t* names = check_test_scan_column(mappings[NAMES] + bytes, count, 4);
+        uint32_t* parents = check_test_scan_column(mappings[PARENTS] + bytes, count, 4);
+        uint32_t* postorder = check_test_scan_column(mappings[POSTORDER] + bytes, count, 4);
+        uint32_t* positions = check_test_scan_column(mappings[POSITIONS] + bytes, count + 1, 4);
+        uint32_t* first_child = check_test_scan_column(mappings[FIRST_CHILD] + bytes, count + 1, 4);
+        uint64_t* bits = check_test_scan_column(mappings[BITS] + bytes, words, 8);
+        // The postorder, a random order of the tokens: each token's parent is a later one in it, or none.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            postorder[i] = i;
+        }
+        for (uint32_t i = count; i > 1; i -= 1)
+        {
+            const uint32_t j = check_test_random(test) % i;
+            const uint32_t swap = postorder[i - 1];
+            postorder[i - 1] = postorder[j];
+            postorder[j] = swap;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            positions[postorder[i]] = i;
+        }
+        positions[count] = count;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t later = count - 1 - positions[i];
+            parents[i] = later == 0 || check_test_random(test) % 8 == 0 ? BUSTER_PARSE_NONE : postorder[positions[i] + 1 + check_test_random(test) % later];
+            names[i] = spellings[check_test_random(test) % BUSTER_ARRAY_LENGTH(spellings)];
+        }
+        // Each token's least child, as parse_tree_links links them: the last write from the end.
+        for (uint32_t i = 0; i <= count; i += 1)
+        {
+            first_child[i] = BUSTER_PARSE_NONE;
+        }
+        for (uint32_t i = count; i-- > 0;)
+        {
+            if (parents[i] < count)
+            {
+                first_child[parents[i]] = i;
+            }
+        }
+        memset(expected, 0, sizeof(expected));
+        uint32_t expected_count = 0;
+        for (uint32_t keyword = 0; keyword < count; keyword += 1)
+        {
+            const uint32_t close = parents[keyword];
+            bool least = close < count && (names[keyword] == C_NAME_GENERIC || names[keyword] == C_NAME_BUILTIN_CHOOSE_EXPR);
+            for (uint32_t other = 0; least && other < keyword; other += 1)
+            {
+                least = parents[other] != close;
+            }
+            if (least)
+            {
+                expected[positions[close] / 64] |= UINT64_C(1) << (positions[close] % 64);
+                expected_count += 1;
+            }
+        }
+        selections += expected_count;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            memset(bits, 0, (uint64_t)words * sizeof(uint64_t));
+            const uint32_t found = check_input_selection_positions(names, parents, first_child, postorder, positions, count, bits, scalar != 0);
+            differences += found != expected_count || memcmp(bits, expected, (uint64_t)words * sizeof(uint64_t)) != 0;
+        }
+    }
+    char description[160];
+    snprintf(description, sizeof(description), "the selections' closes: %u of 840 position sets differ from the tree's (%u closes)", differences, selections);
+    check_test_expect(test, ready && differences == 0 && selections != 0, description);
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], bytes + page);
+        }
+    }
+}
+
+// The asm labels' kernels (#877) by both paths, against the test's own reading of the columns: the tokens with
+// attributes (check_input_asm_attributed_tokens), the tokens whose object is labelled (check_input_asm_labelled_tokens)
+// and the uses of labelled declarations (check_input_asm_labelled_uses), on random columns of every length to 200 and
+// some to 1,100, whose objects and declarations fall past the tokens too. Each column ends at a PROT_NONE page, so a
+// load or a store past one faults.
+static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* test)
+{
+    enum
+    {
+        ATTRIBUTES,
+        OBJECTS,
+        DECLARATIONS,
+        LABELLED,
+        DECLARED,
+        TOKENS,
+        COLUMNS,
+    };
+    enum
+    {
+        CAPACITY = 1100,
+    };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t bytes = (((uint64_t)CAPACITY + 1) * sizeof(void*) + page - 1) / page * page;
+    uint8_t* mappings[COLUMNS];
+    bool ready = true;
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        mappings[i] = mmap(0, bytes + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + bytes, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "guarded asm label kernel columns' allocation");
+    static uint32_t expected[CAPACITY];
+    static uint32_t expected_declared[(CAPACITY + 31) / 32];
+    static CheckInputAttributes record;
+    uint32_t differences = 0;
+    uint32_t uses = 0;
+    for (uint32_t round = 0; ready && round < 260; round += 1)
+    {
+        const uint32_t count = round <= 200 ? round : 201 + check_test_random(test) % (CAPACITY - 200);
+        const uint32_t slots = count + 1;
+        const uint32_t object_words = (slots + 31) / 32;
+        const uint32_t token_words = (count + 31) / 32;
+        const uint32_t density = 1 + check_test_random(test) % 16;
+        CheckInputAttributes** attributes = check_test_scan_column(mappings[ATTRIBUTES] + bytes, count, sizeof(void*));
+        uint32_t* objects = check_test_scan_column(mappings[OBJECTS] + bytes, count, 4);
+        uint32_t* declarations = check_test_scan_column(mappings[DECLARATIONS] + bytes, count, 4);
+        uint32_t* labelled = check_test_scan_column(mappings[LABELLED] + bytes, object_words, 4);
+        uint32_t* declared = check_test_scan_column(mappings[DECLARED] + bytes, token_words, 4);
+        uint32_t* tokens = check_test_scan_column(mappings[TOKENS] + bytes, count, 4);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            attributes[i] = check_test_random(test) % density == 0 ? &record : NULL;
+            const uint32_t object = check_test_random(test) % (slots + 2);
+            objects[i] = check_test_random(test) % 3 == 0 ? 0 : object;
+            declarations[i] = check_test_random(test) % 4 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % (count + 2);
+        }
+        for (uint32_t w = 0; w < object_words; w += 1)
+        {
+            labelled[w] = check_test_random(test) & check_test_random(test);
+        }
+        const CheckInput input = {
+            .token_count = count,
+            .attributes = attributes,
+            .objects = objects,
+            .declarations = declarations,
+        };
+        uint32_t expected_count = 0;
+        memset(expected_declared, 0, sizeof(expected_declared));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            if (attributes[i] != NULL)
+            {
+                expected[expected_count++] = i;
+            }
+            if (objects[i] != 0 && objects[i] < slots && ((labelled[objects[i] / 32] >> (objects[i] % 32)) & 1) != 0)
+            {
+                expected_declared[i / 32] |= UINT32_C(1) << (i % 32);
+            }
+        }
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            // The scalar path's uses are every token, whose declaration the pass tests: a host without the vector set
+            // takes it for both.
+            const bool every = BUSTER_SCALAR_PATH(scalar != 0);
+            const uint32_t found = check_input_asm_attributed_tokens(&input, count, tokens, scalar != 0);
+            differences += found != expected_count || memcmp(tokens, expected, (uint64_t)found * sizeof(uint32_t)) != 0;
+            memset(declared, 0xa5, (uint64_t)token_words * sizeof(uint32_t));
+            check_input_asm_labelled_tokens(&input, labelled, declared, scalar != 0);
+            differences += memcmp(declared, expected_declared, (uint64_t)token_words * sizeof(uint32_t)) != 0;
+            for (uint32_t first = 0; first < count; first += 16)
+            {
+                uint32_t mask = 0;
+                for (uint32_t lane = 0; lane < 16 && first + lane < count; lane += 1)
+                {
+                    const uint32_t declaration = declarations[first + lane];
+                    const bool marked = declaration < count && ((expected_declared[declaration / 32] >> (declaration % 32)) & 1) != 0;
+                    mask |= marked || every ? UINT32_C(1) << lane : 0;
+                    uses += marked && scalar == 0;
+                }
+                differences += check_input_asm_labelled_uses(&input, declared, first, count, scalar != 0) != mask;
+            }
+        }
+    }
+    char description[160];
+    snprintf(description, sizeof(description), "the asm labels' kernels: %u results differ from the columns' (%u uses of labelled declarations)",
+             differences, uses);
+    check_test_expect(test, ready && differences == 0 && uses != 0, description);
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], bytes + page);
         }
     }
 }

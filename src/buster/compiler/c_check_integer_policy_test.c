@@ -250,7 +250,7 @@ static void check_test_integer_warning_contexts(CheckTest* test, TypeTable* tabl
                     if (context == 9)
                     {
                         check_test_expect(test, scalar.warnings[graph.count - 1] == 0 &&
-                                               (scalar.values[graph.count - 1].flags & BUSTER_CHECK_ICE) != 0,
+                                               (check_stream_flags(&scalar, graph.count - 1) & BUSTER_CHECK_ICE) != 0,
                                           "discarded wrapped lexical ICE retains strict eligibility without a GNU folding warning");
                     }
                     if (context == 7 || context == 8)

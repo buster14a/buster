@@ -1506,7 +1506,9 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
                  a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_test_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
+        const CheckValue value_a = check_stream_value(a, i);
+        const CheckValue value_b = check_stream_value(b, i);
+        equal = check_test_value_equal(&value_a, &value_b) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
                 (a->diagnostic_operands != NULL ? a->diagnostic_operands[i] : 0) == (b->diagnostic_operands != NULL ? b->diagnostic_operands[i] : 0) &&
                 (a->member_offsets != NULL ? a->member_offsets[i] : 0) == (b->member_offsets != NULL ? b->member_offsets[i] : 0) &&
                 (a->warning_ignored != NULL ? a->warning_ignored[i] : 0) == (b->warning_ignored != NULL ? b->warning_ignored[i] : 0) &&
@@ -1657,9 +1659,9 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         check_test_expect(test, valid, "context fixture checker run");
         if (valid)
         {
-            check_test_expect(test, stream.values[logical].fault == CHECK_FAULT_NONE && stream.values[logical].integer == 0, "graph short circuit evaluated an unselected operand");
-            check_test_expect(test, stream.values[size].integer == 4 && stream.values[size].fault == CHECK_FAULT_NONE, "graph sizeof evaluated its operand");
-            check_test_expect(test, stream.values[selected].fault == CHECK_FAULT_DIVIDE_BY_ZERO, "graph lost selected evaluation fault");
+            check_test_expect(test, check_stream_value(&stream, logical).fault == CHECK_FAULT_NONE && check_stream_value(&stream, logical).integer == 0, "graph short circuit evaluated an unselected operand");
+            check_test_expect(test, check_stream_value(&stream, size).integer == 4 && check_stream_value(&stream, size).fault == CHECK_FAULT_NONE, "graph sizeof evaluated its operand");
+            check_test_expect(test, check_stream_value(&stream, selected).fault == CHECK_FAULT_DIVIDE_BY_ZERO, "graph lost selected evaluation fault");
             check_test_expect(test, stream.diagnostics[invalid] == CHECK_DIAG_INTEGER_REQUIRED, "graph hid a constraint violation in an unevaluated branch");
             bool assertion_report = false;
             bool evaluation_report = false;
@@ -1683,7 +1685,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         }
         check_test_compare_graph(test, table, &graph, output, scratch, true);
         const bool chain_valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
-        check_test_expect(test, chain_valid && stream.values[previous].integer == 127, "same-bracket-depth dependency chain was evaluated too early");
+        check_test_expect(test, chain_valid && check_stream_value(&stream, previous).integer == 127, "same-bracket-depth dependency chain was evaluated too early");
         arena_pop_to(output, output_mark);
         graph.count = 0;
         graph.leaf_count = 0;
@@ -3643,6 +3645,47 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             .standard = 2023
         },
+        // #1000: a comma's discarded operand is still evaluated in a constexpr initializer, which a
+        // variable's read fails where a constant would not — a scalar object's and an aggregate
+        // element's alike, block scope's automatic storage included.
+        {
+            "C23 constexpr: a discarded read isn't a constant expression",
+            "static int s;\n"
+            "void f(void) {\n"
+            "    constexpr double d =\n"
+            "        (s, 0.75);\n"
+            "    (void)d;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: an aggregate's discarded read isn't a constant expression",
+            "static int s;\n"
+            "void f(void) {\n"
+            "    constexpr double a[1] =\n"
+            "        { (s, 0.75) };\n"
+            "    (void)a;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: a discarded constant still initializes",
+            "void f(void) {\n"
+            "    constexpr double d =\n"
+            "        (1, 0.75);\n"
+            "    constexpr double a[1] =\n"
+            "        { (1, 0.75) };\n"
+            "    (void)d;\n"
+            "    (void)a;\n"
+            "}\n",
+            false,
+            false,
+            .standard = 2023
+        },
         {
             "C23 constexpr: without an initializer",
             "void f(void) {\n"
@@ -5579,7 +5622,7 @@ static __attribute__((noinline)) void check_test_type_capacity(CheckTest* test)
             CheckStream stream;
             const bool checked = check_graph_run(&table, &graph, &output, &scratch, &options, &stream);
             check_test_expect(test, !checked && stream.status == CHECK_STATUS_RESOURCE && stream.failed_node == 1 && stream.count == 0 &&
-                                   stream.values == 0 && output.length == output_mark && scratch.length == scratch_mark,
+                                   !check_stream_has_values(&stream) && output.length == output_mark && scratch.length == scratch_mark,
                               "scheduler exposes type-capacity failure and rolls back output");
         }
     }
@@ -5627,6 +5670,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 }
 
 #include "c_check_graph_test.c"
+#include "c_check_stream_columns_test.c"
 #include "c_check_builtin_graph_test.c"
 #include "c_check_varargs_graph_test.c"
 #include "c_check_special_graph_test.c"
@@ -5749,6 +5793,7 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
+static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
@@ -5967,11 +6012,15 @@ static int run_checker_tests(int argc, char** argv)
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
             check_test_type_capacity(&test);
+            check_test_stream_columns(&test);
+            check_test_fresh_output(&test);
             check_test_target_options(&test);
             check_test_bindings(&test);
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
             check_test_input_scans(&test);
+            check_test_selection_positions(&test);
+            check_test_asm_label_kernels(&test);
             check_test_expression_commas(&test);
             check_test_warning_ranges(&test);
             check_test_selection_roots(&test);
@@ -6020,6 +6069,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_source_benchmark(&test);
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
+            check_test_check_lanes_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
             check_test_expression_coverage(&test);
         }

@@ -1,0 +1,27 @@
+function (i64) -> i64 {
+  slot $0 size=8 align=8 type=void flags=0x00
+  slot $1 size=8 align=8 type=i64 flags=0x01
+  slot $2 size=8 align=8 type=i64 flags=0x00
+  slot $3 size=8 align=8 type=i64 flags=0x00
+b0:
+  %0 = param.i64 0
+  %1 = const.i64 0x00000000000000000000000000000007
+  %2 = lifetime.void $0 start
+  %3 = lifetime.void $2 start
+  %4 = lifetime.void $1 start
+  %5 = stack_addr.ptr $2
+  %6 = store.void %5, %0 align=8
+  %7 = stack_addr.ptr $3
+  %8 = store.void %7, %1 align=8
+  %9 = stack_addr.ptr $1
+  %10 = store.void %9, %0 align=8
+  %11 = load.i64 %5 align=8
+  %12 = load.i64 %7 align=8
+  %13 = load.i64 %9 align=8
+  %14 = add.i64 %11, %12
+  %15 = add.i64 %14, %13
+  %16 = lifetime.void $1 end
+  %17 = lifetime.void $2 end
+  %18 = lifetime.void $0 end
+  %19 = ret.void %15
+}

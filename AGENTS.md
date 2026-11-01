@@ -227,12 +227,13 @@ designs and the compilers already built this way.
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
-  stores and constants of every width) and allocated in the opmask class by the
-  CFG consumer, which moves and spills them at their widths and saves them around
-  calls; vectors are refused (#141). Run
+  stores, constants and bitcasts to and from integers of every width) and
+  allocated in the opmask class by the CFG consumer, which moves and spills them
+  at their widths and saves them around calls; vectors are refused (#141). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
-  natively against the IR's interpreter) for bounded typed-stream/native
+  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
+  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -354,6 +355,14 @@ designs and the compilers already built this way.
   early returns as tails, an open frame where the code doesn't end in its last
   epilogue: the frame guide's "Unwind tables"; `test-check-debug --cross-check`
   unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every instruction).
+  Its frame objects share slots by their blocks' lifetimes, which `--tier1` asks
+  the checked program for (`c_check_program_lifetime.c`: a block a jump enters
+  past its opening keeps its objects' whole-function lifetimes) and the IR
+  carries as `lifetime` markers, colored by the CFG consumer over `dataflow.c`'s
+  fixpoint on the reversed CFG (`tier1_emit_cfg_lifetimes`; the frame guide's
+  "Slot sharing between objects"); `test-tier1-emit` checks shared and separate
+  rows natively, and `test-checker-driver`'s lifetime fixture smaller frames
+  than `--tier1-no-lifetimes`' against clang.
   `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
   `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
@@ -515,7 +524,8 @@ designs and the compilers already built this way.
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   unwind tables alike, #177's `check_tier1_frame`; without `-g`; `--tier1-report` and
   `--tier1-refusals` say which step refused the others, and
-  `--tier1-no-rematerialize` compiles them without rematerialization: [the Tier 1
+  `--tier1-no-rematerialize` compiles them without rematerialization and
+  `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
   guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
@@ -909,9 +919,11 @@ designs and the compilers already built this way.
   `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
   (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret);
   and a `--tier1 --verify` fixture's Tier 1 frames (#177: spill slots alone,
-  pushes, two returns, an open frame, a realigned one, a red-zone leaf, the
-  shapes `--tier1-report`'s counts show), walked by `backtrace()` by each path
-  and linked by GNU ld and lld, and by gdb at every instruction.
+  pushes, two returns, an open frame, a realigned one, open and with two
+  returns too, a red-zone leaf, the shapes `--tier1-report`'s counts show and
+  each function's FDE rows, by `readelf -wF`), walked by `backtrace()` by each
+  path, by `--lanes 1` and 8 into one lane's bytes and linked by GNU ld and lld,
+  and by gdb at every instruction.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -1308,7 +1320,10 @@ designs and the compilers already built this way.
   number; rows take them by role (`MASK(j)`, `MASK_RESULT`, `MASK_SCRATCH(k)`,
   borrowing k1 on past k7), and the stack's depths are a column of their own
   in a function with masks (`Tier0Function.masks`, `tier0_vector_mask_depths`
-  and its twin). `interpreter.c` runs them; `ir_lower.c` refuses them; the
+  and its twin). `interpreter.c` runs them; `ir_lower.c` lowers them to the
+  IR's `m8` to `m64`, its rows of the front end's `_k*` builtins through
+  `ir_simd_typed.c`'s decoder, so `--tier1` compiles them by Tier 1
+  (docs/ir-simd.md's "Masks from the typed stream"); the
   front end's AVX-512 builtins are their first user (`check_x86_lower_masks`);
   `test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over
   them natively against the interpreter and a model of its own. The
@@ -1335,8 +1350,9 @@ designs and the compilers already built this way.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
   (#131), with labels (`br_indirect`), by-value aggregates' ABI records (the
-  producer's locations, which the IR's types can't give) and a variadic
-  definition's frame and anchors. `ir_lower.c` lowers the `Tier0Function` stream
+  producer's locations, which the IR's types can't give), a variadic
+  definition's frame and anchors, and frame slots' lifetime markers (`lifetime`,
+  #177, from `Tier0Function.lifetime_entries`). `ir_lower.c` lowers the `Tier0Function` stream
   into the all-in-memory form for SSA promotion: frame objects as address-taken
   slots of their size and alignment, `COPY` as integer load/store pieces, the
   dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
@@ -2912,6 +2928,15 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   20,000 times, pausing together now and then, while lane 0 waits on it with
   `lane_wait` for every advance, sleeping on its futex with more than one lane:
   each value it sees even and larger than the last, and no advance lost;
+- groups that share CPUs (#824): `lane_group_shares_cpus` against this thread's
+  affinity mask — a group of exactly the process's CPUs doesn't share them, one
+  of more does unless every lane is pinned, and one lane never does — and a
+  group of two lanes on one CPU, which the test cuts this thread's mask to: both
+  lanes must read their group as sharing it, and the lane that waited for lane
+  0's stall must have slept, its group's wait leaving `mwaitx` and the spin that
+  takes its place without it at once, since either holds the CPU the late lane
+  needs; two lanes on the process's own CPUs, where it has more than one, read
+  theirs as not sharing them;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
@@ -5027,8 +5052,8 @@ The exact commands, pinned inputs and raw reports for the #117 acceptance
 refresh are in [the measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md).
 Its invocation scripts take a separate normal shared-host lock for each command.
 
-`./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+`./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
+vectorized|scalar] [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
@@ -5082,6 +5107,22 @@ library corpus.
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
 without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
 output's tokens must be the same (#120).
+
+`--markers` runs and prints as `-E` without `-P` does: with the expansion starts
+the line markers read and the history deferred (`PPOptions.expansion_starts` and
+`defer_history`, as the `-E` driver sets them), the printing timed with its line
+markers and reported as `-E with printing`; of the controls it takes
+`--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
+vectorized kernels with the printer's spellings by `pp_print_spellings`
+(`spellings`) and by its general loop for every chunk (`per-token`,
+`PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
+warm-up print, with markers or without, must give the same bytes, whatever the
+implementation and the read limit. With line markers the
+general loop prints in the time the printer before #649 took; with `-P`, it
+printed 7–17% slower than that printer on an AVX-512 Xeon and 6% slower a
+token on the 9700X, so `main.c`'s `-P` history is `-P`'s before. The 9700X
+job runs both, with and without `--markers`, on `main.c` and the frozen
+`sqlite3.c` where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under
@@ -5541,9 +5582,14 @@ lazy session.
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
-every run one lane's code. Run it under the 9700X's lock without `taskset`,
-with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
-and the benchmark on the frozen SQLite source where the emission changes.
+every run one lane's code, for the target its options give (#1045:
+`test-checker` measures a unit of 512-bit vectors with `-march=znver5` and
+refuses the same unit for the baseline profile, and measures a baseline
+unit's function whose target attribute takes AVX2's vectors,
+`c_check_lanes_benchmark_test.c`). Run it under the 9700X's lock without
+`taskset`, with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job
+runs the test, and the benchmark on the frozen SQLite source where the
+emission changes, on the lane counts of the guide's table (#1069).
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
 measurements.
 
@@ -5614,7 +5660,12 @@ it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
 each alone, and with `--generate DIR` it writes a program of synth's shape
 (512 units of 200 functions by default) for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
-measurements.
+measurements. The end-to-end single- and multi-unit contract, with the
+mixed-tier and actual command-team receipts, is
+[the multicore acceptance guide](docs/multicore-acceptance.md);
+`tests/driver/multicore.c` runs it in the shared correctness suite. What
+#149's remaining whole-process performance acceptance still needs is there
+too.
 
 ## Selective lowering
 
@@ -6215,7 +6266,9 @@ pinned to one allowed CPU; like the others, its measurements are informational.
 vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
-it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+it, and the definitions `-c` lowers are lowered and emitted for the target its
+options give (`-march`, the `-m` features: #1041), each function with a target
+attribute for the attribute's, outside the time;
 their typed streams, with the symbols' access the emission gave them
 (`check_program_access`), make one corpus with the other files' functions, which
 both paths must agree on before the same medians are reported. A file the

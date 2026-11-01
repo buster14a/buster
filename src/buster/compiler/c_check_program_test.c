@@ -63,19 +63,130 @@ static void check_test_program_addressed(CheckTest* test)
     }
 }
 
-#define BUSTER_CHECK_TEST_SCAN_COLUMNS 16u
+#define BUSTER_CHECK_TEST_SCAN_COLUMNS 24u
 #define BUSTER_CHECK_TEST_SCAN_TOKENS 129u
+
+// check_program_plans on a scan's random tree (#877): random initializers, some compound literals' and some whose
+// declarations have no statement, each column, plan_first and the `planned` bitset ending at a PROT_NONE page, and
+// plan_first and plan_next poisoned. Against an oracle that walks each initializer's parents with a set of the tokens it
+// saw: a statement's bit is set exactly when some plan is its, its list is its plans in order, and no other entry of
+// plan_first or of plan_next is written; a compound literal's plan joins no list, and one with no statement fails. With
+// `listed`, `plan_count` plans: as many as the tokens, at random tokens, or fewer, at ascending tokens as the producer writes
+// them, with plan_next sized for them alone. Without, no CheckInitializers and no plan_next, as check_program passes for a
+// unit without plans: nothing is written or marked.
+static void check_test_program_plans(CheckTest* test, const CheckInput* base, const Parser* parser, uint8_t* const* mappings, uint64_t page, uint32_t plan_count,
+                                     bool listed)
+{
+    const uint32_t count = base->token_count;
+    const uint32_t plans = listed ? plan_count : 0;
+    const uint32_t words = (count + 64) / 64;
+    uint8_t* compound_objects = mappings[0] + page - count;
+    uint32_t* initializer_begins = (uint32_t*)(mappings[1] + page - (uint64_t)count * sizeof(uint32_t));
+    uint32_t* declaration_tokens = (uint32_t*)(mappings[2] + page - (uint64_t)plans * sizeof(uint32_t));
+    uint32_t* plan_first = (uint32_t*)(mappings[3] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
+    uint64_t* planned = (uint64_t*)(mappings[4] + page - (uint64_t)words * sizeof(uint64_t));
+    uint32_t* plan_next = (uint32_t*)(mappings[5] + page - ((uint64_t)plans + 1) * sizeof(uint32_t));
+    const uint32_t poison = 0xa5a5a5a5u;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        const uint32_t draw = check_test_random(test);
+        compound_objects[token] = (uint8_t)(draw % 6 == 0);
+        initializer_begins[token] = (draw >> 3) % 5 == 0 ? 0 : (draw >> 3) % 5 == 1 ? count + 1 : 1 + (draw >> 6) % count;
+    }
+    for (uint32_t i = 0; i < plans; i += 1)
+    {
+        const uint32_t draw = check_test_random(test);
+        const uint32_t step = count / plans;
+        declaration_tokens[i] = plans < count ? i * step + draw % step : draw % 9 == 0 ? count + draw % 3 : (draw >> 4) % (count != 0 ? count : 1);
+    }
+    CheckInput input = *base;
+    input.compound_objects = compound_objects;
+    input.initializer_begins = initializer_begins;
+    const CheckInitializers initializers = { .declaration_tokens = declaration_tokens, .count = plans, .token_count = count };
+    const CheckInitializers* given = listed ? &initializers : NULL;
+    uint32_t* next = listed ? plan_next : NULL;
+    for (uint32_t token = 0; token <= count; token += 1)
+    {
+        plan_first[token] = poison;
+    }
+    for (uint32_t i = 0; i <= plans; i += 1)
+    {
+        plan_next[i] = poison;
+    }
+    memset(planned, 0, (uint64_t)words * sizeof(uint64_t));
+    CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+    const bool compound = check_program_plans(&program, parser, given, plan_first, planned, next);
+    // The oracle: each plan's statement, or a compound literal's mark, or none.
+    uint32_t statements[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+    bool expected_compound = false;
+    CheckProgramStatus expected_status = CHECK_PROGRAM_OK;
+    uint32_t expected_token = BUSTER_CHECK_NONE;
+    bool same = true;
+    for (uint32_t i = plans; i-- > 0;)
+    {
+        const uint32_t declaration = declaration_tokens[i];
+        const bool literal = declaration < count && compound_objects[declaration] != 0;
+        uint32_t statement = BUSTER_CHECK_NONE;
+        if (!literal)
+        {
+            bool seen[BUSTER_CHECK_TEST_SCAN_TOKENS + 1] = { 0 };
+            uint32_t token = declaration < count && initializer_begins[declaration] != 0 ? initializer_begins[declaration] - 1 : BUSTER_CHECK_NONE;
+            while (token < count && !seen[token] && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
+            {
+                seen[token] = true;
+                token = parser->tree.parents[token];
+            }
+            statement = token < count && parser->tree.roles[token] == PARSE_ROLE_TERMINATOR ? token : BUSTER_CHECK_NONE;
+            if (statement == BUSTER_CHECK_NONE && expected_status == CHECK_PROGRAM_OK)
+            {
+                expected_status = CHECK_PROGRAM_INVALID;
+                expected_token = declaration;
+            }
+        }
+        expected_compound |= literal && base->static_objects[declaration] == 0;
+        statements[i] = statement;
+        same &= !literal || plan_next[i] == BUSTER_CHECK_NONE;
+        same &= literal || statement != BUSTER_CHECK_NONE || plan_next[i] == poison;
+    }
+    for (uint32_t token = 0; token < words * 64; token += 1)
+    {
+        uint32_t first = BUSTER_CHECK_NONE;
+        for (uint32_t i = plans; i-- > 0;)
+        {
+            first = statements[i] == token ? i : first;
+        }
+        const bool bit = ((planned[token / 64] >> (token % 64)) & 1) != 0;
+        same &= bit == (first != BUSTER_CHECK_NONE);
+        same &= token > count || first != BUSTER_CHECK_NONE || plan_first[token] == poison;
+        // Its list: every plan of the statement, in order, then its end.
+        uint32_t link = first != BUSTER_CHECK_NONE ? plan_first[token] : BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; first != BUSTER_CHECK_NONE && i < plans; i += 1)
+        {
+            if (statements[i] == token)
+            {
+                same &= link == i;
+                link = link < plans ? plan_next[link] : BUSTER_CHECK_NONE;
+            }
+        }
+        same &= link == BUSTER_CHECK_NONE;
+    }
+    same &= plan_first[count] == poison && plan_next[plans] == poison;
+    check_test_expect(test, same && compound == expected_compound && program.status == expected_status && program.token == expected_token,
+                      listed ? "check_program's plans link each statement's initializers in order and mark exactly those statements"
+                             : "check_program's plans write and mark nothing for a unit without initializer plans");
+}
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
-// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations,
+// initializers' tokens, with their bitset; the initializer plans' statements (check_test_program_plans, #877); the
+// variable-length arrays' declarations; the reached builtins; the static objects' declarations,
 // needs and naked functions, with room for their column and without (whose symbols #442's kernels number:
 // check_test_program_declaring); and at 64 and 128 tokens, the cases' marks, against a test of each token.
 static void check_test_program_scans(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mappings[BUSTER_CHECK_TEST_SCAN_COLUMNS] = { 0 };
-    bool ready = page >= BUSTER_CHECK_TEST_SCAN_TOKENS * sizeof(uint32_t);
+    bool ready = page >= (BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t);
     for (uint32_t column = 0; column < BUSTER_CHECK_TEST_SCAN_COLUMNS; column += 1)
     {
         mappings[column] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -200,15 +311,36 @@ static void check_test_program_scans(CheckTest* test)
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            // The bitsets as check_program allocates them, a word per 64 nodes and one past the last, each ending at a
+            // PROT_NONE page (#877).
+            const uint32_t words = (node_count + 64) / 64;
+            uint64_t* initialized[2] = {
+                (uint64_t*)(mappings[16] + page - (uint64_t)words * sizeof(uint64_t)),
+                (uint64_t*)(mappings[17] + page - (uint64_t)words * sizeof(uint64_t)),
+            };
             uint32_t bodies[2];
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 memset(initializers[path], 0xff, sizeof(initializers[path]));
-                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], path == 0);
+                memset(initialized[path], 0, (uint64_t)words * sizeof(uint64_t));
+                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], initialized[path], path == 0);
+            }
+            // A node's bit, read from its word, says that some token's initializer it is, and its entry is then the last such
+            // token's (#877).
+            bool marked = memcmp(initialized[0], initialized[1], (uint64_t)words * sizeof(uint64_t)) == 0;
+            for (uint32_t node = 0; node < words * 64; node += 1)
+            {
+                uint32_t last = BUSTER_CHECK_NONE;
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    last = initializer_nodes[token] == node && node < node_count ? token : last;
+                }
+                const bool bit = ((initialized[0][node / 64] >> (node % 64)) & 1) != 0;
+                marked &= bit == (last != BUSTER_CHECK_NONE) && (last == BUSTER_CHECK_NONE || initializers[0][node] == last);
             }
             check_test_expect(test, bodies[0] == bodies[1] && memcmp(openings[0], openings[1], bodies[0] * sizeof(uint32_t)) == 0 &&
-                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0,
-                              "check_program's openings and initializers agree with their scalar twin at every guarded tail");
+                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0 && marked,
+                              "check_program's openings, initializers and their bits agree with their scalar twin at every guarded tail");
             Parser parser = { 0 };
             parser.tree.roles = roles;
             parser.tree.parents = parents;
@@ -233,6 +365,9 @@ static void check_test_program_scans(CheckTest* test)
                                    memcmp(allocation_next[0], allocation_next[1], sizeof(allocation_next[0])) == 0 &&
                                    memcmp(vla_blocks[0], vla_blocks[1], sizeof(vla_blocks[0])) == 0 && memcmp(vla_saves[0], vla_saves[1], sizeof(vla_saves[0])) == 0,
                               "check_program's variable-length array declarations agree with their scalar twin at every guarded tail");
+            check_test_program_plans(test, &input, &parser, mappings + 18, page, count, true);
+            check_test_program_plans(test, &input, &parser, mappings + 18, page, count / 3, true);
+            check_test_program_plans(test, &input, &parser, mappings + 18, page, 0, false);
             const CheckGraph graph = { .ops = ops, .count = node_count };
             uint32_t builtins[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t builtin_counts[2];
@@ -2028,6 +2163,113 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
         "automatic-sparse-no-large-image", clang, false, 0, 0);
 }
 
+// The objects check_lower_prepare marks in `locals` (#877), against a walk of each body's parameters (CheckInput's own
+// chain) and of every token that declares an automatic object in that body, written out here rather than through the
+// lowering's lists: each such object's bit is set, its local_map entry none, and no other bit, past the count too.
+static bool check_test_program_locals(const CheckProgram* program, const CheckLowerShared* shared)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    const uint32_t words = (count + 64) / 64;
+    uint8_t* openings = calloc((uint64_t)count + 1, 1);
+    uint8_t* local = calloc((uint64_t)words * 64, 1);
+    bool same = openings != NULL && local != NULL;
+    for (uint32_t b = 0; same && b < program->body_count; b += 1)
+    {
+        const uint32_t opening = program->bodies[b].opening;
+        if (opening < count)
+        {
+            openings[opening] = 1;
+        }
+        for (uint32_t parameter = input->parameters[opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+        {
+            const uint32_t object = input->objects[parameter];
+            if (object <= count)
+            {
+                local[object] = 1;
+            }
+        }
+    }
+    for (uint32_t token = 0; same && token < count; token += 1)
+    {
+        const uint32_t body = input->declaration_bodies[token];
+        const uint32_t object = input->objects[token];
+        if (input->declarations[token] == token && body < count && openings[body] != 0 && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+            input->static_objects[token] == 0 && object <= count)
+        {
+            local[object] = 1;
+        }
+    }
+    for (uint32_t object = 0; same && object < words * 64; object += 1)
+    {
+        const bool bit = ((shared->locals[object / 64] >> (object % 64)) & 1) != 0;
+        same &= bit == (local[object] != 0) && (local[object] == 0 || shared->local_map[object] == BUSTER_CHECK_NONE);
+    }
+    free(openings);
+    free(local);
+    return same;
+}
+
+// check_lower_local_keep and check_lower_local_of (#877) at every count to 129 objects, the bitset and the map each ending
+// at a PROT_NONE page and the map poisoned: random objects kept, each read back as none and every other as none without
+// its entry read; a written entry read back, and a writer without the bitset reading every entry.
+static void check_test_program_local_bits(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[2] = { 0 };
+    bool ready = page >= 130 * sizeof(uint32_t);
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        mappings[i] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0 && ready;
+    }
+    check_test_expect(test, ready, "the lowering's local bits have protected tails");
+    bool same = true;
+    for (uint32_t count = 0; ready && count <= 129; count += 1)
+    {
+        const uint32_t words = (count + 64) / 64;
+        uint64_t* locals = (uint64_t*)(mappings[0] + page - (uint64_t)words * sizeof(uint64_t));
+        uint32_t* local_map = (uint32_t*)(mappings[1] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(locals, 0, (uint64_t)words * sizeof(uint64_t));
+        memset(local_map, 0xa5, ((uint64_t)count + 1) * sizeof(uint32_t));
+        CheckLowerShared shared = { .local_map = local_map, .locals = locals };
+        bool kept[130] = { 0 };
+        for (uint32_t k = 0; k < count / 3 + 2; k += 1)
+        {
+            // The last object, past it (ignored) and random ones, some twice.
+            const uint32_t object = k == 0 ? count : k == 1 ? count + 1 : check_test_random(test) % (count + 1);
+            check_lower_local_keep(&shared, object, count);
+            if (object <= count)
+            {
+                kept[object] = true;
+            }
+        }
+        const CheckLowerWriter writer = { .local_map = local_map, .locals = locals };
+        for (uint32_t object = 0; object <= count; object += 1)
+        {
+            same &= check_lower_local_of(&writer, object) == BUSTER_CHECK_NONE;
+            same &= ((locals[object / 64] >> (object % 64)) & 1) == (uint64_t)kept[object];
+            same &= kept[object] || local_map[object] == 0xa5a5a5a5u;
+        }
+        for (uint32_t object = count + 1; object < words * 64; object += 1)
+        {
+            same &= ((locals[object / 64] >> (object % 64)) & 1) == 0;
+        }
+        local_map[count] = count / 2;
+        same &= check_lower_local_of(&writer, count) == count / 2;
+        const CheckLowerWriter unmarked = { .local_map = local_map };
+        same &= count == 0 || check_lower_local_of(&unmarked, 0) == local_map[0];
+    }
+    check_test_expect(test, same, "the lowering's local bits mark the objects kept and read none for the others");
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED && mappings[i] != 0)
+        {
+            munmap(mappings[i], page * 2);
+        }
+    }
+}
+
 // A program fixture checked and lowered by both paths for a target (null for x86-64's): accepted or not, lowered or
 // refused, with the references and initializations it keeps; and, for a refusal with `reason`, the feature the refusal
 // names (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
@@ -2085,15 +2327,22 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 }
                 check_test_expect(test, program.reference_count == references && writes == initializations,
                                   "checked body preserves exact live reference and ordered initializer counts");
-                if (program.body_count == 0)
                 {
                     const uint64_t output_mark = output.length;
                     const uint64_t scratch_mark = scratch.length;
                     CheckLowerShared shared = { 0 };
                     CheckProgramLowered prepared = { 0 };
                     const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
-                    check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
-                                      "a unit without function bodies allocates no ABI table, including one with object initializers");
+                    if (program.body_count == 0)
+                    {
+                        check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
+                                          "a unit without function bodies allocates no ABI table, including one with object initializers");
+                    }
+                    check_test_expect(test, !machine || prepared_ok, "a program that lowers prepares its lowering");
+                    if (prepared_ok)
+                    {
+                        check_test_expect(test, check_test_program_locals(&program, &shared), "the lowering marks exactly its bodies' parameters and locals");
+                    }
                     arena_pop_to(&output, output_mark);
                     arena_pop_to(&scratch, scratch_mark);
                 }
@@ -3034,6 +3283,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_control_walks(test);
     check_test_program_addressed(test);
     check_test_program_scans(test);
+    check_test_program_local_bits(test);
     check_test_program_bodies(test, clang);
     check_test_program_declaring(test);
     check_test_program_refused(test);

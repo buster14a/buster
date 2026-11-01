@@ -49,11 +49,11 @@ static void check_test_program_queries(CheckTest* test, const char* clang)
         {
             CheckBuiltinQueryEffect* effect = stream.queries;
             const CheckBuiltinQueryEffect saved = *effect;
-            const CheckValue source_value = stream.values[effect->node];
+            const CheckValue source_value = check_stream_value(&stream, effect->node);
             effect->runtime_value.integer = 0;
             bool truth = true;
             check_test_expect(test, check_program_runtime_truth(&program, effect->node, effect->node, &truth) && !truth &&
-                                   source_value.integer == 1 && stream.values[effect->node].integer == 1,
+                                   source_value.integer == 1 && check_stream_value(&stream, effect->node).integer == 1,
                               "runtime query truth consumes its own known value without rewriting the source proof");
             CheckProgramCode code = { 0 };
             const bool emitted = check_program_emit(&code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
@@ -94,10 +94,11 @@ static void check_test_program_queries(CheckTest* test, const char* clang)
                 const bool accepted = check_program_emit(&rejected, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
                                                          &output, &bytes, &scratch, NULL, NULL, false, true);
                 const CheckProgramStatus expected = mutation == 4 ? CHECK_PROGRAM_INVALID : CHECK_PROGRAM_UNSUPPORTED;
+                const CheckValue after = check_stream_value(&stream, saved.node);
                 check_test_expect(test, !accepted && rejected.status == expected && rejected.lowered.functions == NULL &&
                                        rejected.link.symbols.count == 0 && output.length == output_mark && bytes.length == bytes_mark &&
                                        scratch.length == 0 && program.status == CHECK_PROGRAM_OK &&
-                                       memcmp(stream.values + saved.node, &source_value, sizeof(source_value)) == 0,
+                                       memcmp(&after, &source_value, sizeof(source_value)) == 0,
                                   "unresolved or malformed query plans publish no code and preserve source metadata and arena prefixes");
                 if (mutation != 4)
                 {

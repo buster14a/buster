@@ -152,26 +152,26 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
                           "FENV and math graph actions retain valid source constraints");
         if (checked)
         {
-            check_test_expect(test, scalar.values[constant].integer == 1 && scalar.queries[0].runtime_value.integer == 0 &&
-                                   scalar.queries[0].evaluated_operands == 1 && scalar.values[ancestor].integer == 2 &&
-                                   (scalar.values[ancestor].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
+            check_test_expect(test, check_stream_value(&scalar, constant).integer == 1 && scalar.queries[0].runtime_value.integer == 0 &&
+                                   scalar.queries[0].evaluated_operands == 1 && check_stream_value(&scalar, ancestor).integer == 2 &&
+                                   (check_stream_flags(&scalar, ancestor) & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
                               "source constant_p proof and executable false result retain distinct values and a transitive runtime witness");
-            check_test_expect(test, scalar.values[comma_query].integer == 0 && scalar.values[call_query].integer == 0 &&
+            check_test_expect(test, check_stream_value(&scalar, comma_query).integer == 0 && check_stream_value(&scalar, call_query).integer == 0 &&
                                    scalar.queries[1].evaluated_operands == 0 && scalar.queries[2].evaluated_operands == 0 &&
                                    scalar.queries[1].runtime_value.integer == 0 && scalar.queries[2].runtime_value.integer == 0 &&
-                                   (scalar.values[comma_query].flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
-                                   (scalar.values[call_query].flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0,
+                                   (check_stream_flags(&scalar, comma_query) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+                                   (check_stream_flags(&scalar, call_query) & BUSTER_CHECK_FP_ENVIRONMENT) == 0,
                               "constant_p leaves marked comma and call operands unevaluated when their source proof is false");
-            check_test_expect(test, scalar.values[classify].integer == 12 && scalar.floating[0].selected_selector == BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR &&
+            check_test_expect(test, check_stream_value(&scalar, classify).integer == 12 && scalar.floating[0].selected_selector == BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR &&
                                    scalar.floating[0].evaluated_operands == 63 && scalar.floating[0].definite_operands == 48 &&
                                    scalar.floating[0].evaluation == CHECK_BUILTIN_FLOAT_EVALUATION_FPCLASSIFY_RUNTIME && !scalar.floating[0].folded &&
                                    scalar.floating[1].node == sign && scalar.floating[1].may_raise_fp_exceptions,
                               "environment-dependent classification retains all runtime selector paths and strict comparison exceptions");
-            check_test_expect(test, scalar.values[copy].type == BUSTER_TYPE_FLOAT && scalar.values[copy].constant_kind == CHECK_CONSTANT_FLOATING &&
+            check_test_expect(test, check_stream_type(&scalar, copy) == BUSTER_TYPE_FLOAT && check_stream_constant_kind(&scalar, copy) == CHECK_CONSTANT_FLOATING &&
                                    scalar.floating[2].runtime_builtin == CBUILTIN_COPYSIGNF && !scalar.floating[2].folded &&
                                    scalar.floating[2].converted_arguments[0].type == BUSTER_TYPE_FLOAT &&
                                    scalar.floating[2].compiler_barrier && scalar.floating[2].may_raise_inexact &&
-                                   scalar.values[square].type == BUSTER_TYPE_DOUBLE && scalar.values[square].constant_kind == CHECK_CONSTANT_NONE &&
+                                   check_stream_type(&scalar, square) == BUSTER_TYPE_DOUBLE && check_stream_constant_kind(&scalar, square) == CHECK_CONSTANT_NONE &&
                                    scalar.floating[3].may_set_errno && scalar.floating[3].errno_pointer_type == type_pointer(table, BUSTER_TYPE_INT),
                               "math descriptors retain source conversions, runtime environment requirements and a real errno pointer type");
             const uint64_t mark = output.length;

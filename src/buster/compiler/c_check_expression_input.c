@@ -122,6 +122,15 @@ static void check_input_expression_list(CheckInputReader* reader, uint32_t token
     reader->first_value[token] = values.first;
     reader->last_value[token] = values.last;
     reader->value_counts[token] = values.count;
+    if (reader->static_initializers[token])
+    {
+        // A braced static initializer's elements are constant expressions, which initializer planning diagnoses:
+        // the same constant evaluation its scalar form's INITIALIZE gets (check_input_expression_act's list).
+        for (uint32_t value = values.first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+        {
+            reader->output->graph.contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+        }
+    }
 }
 
 _Static_assert(sizeof(CheckValue) == 96 && offsetof(CheckValue, category) == 4 && offsetof(CheckValue, flags) == 8 &&

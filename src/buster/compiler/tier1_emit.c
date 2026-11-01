@@ -18,8 +18,9 @@
 // block must branch to the immediately following block. The sink has no values to reconcile and retains its branch.
 // Every other function, general control flow and phis, goes to tier1_emit_cfg.c, which allocates over the CFG and
 // moves values along its edges; numeric fragment order is not a substitute.
-// Indirect/variadic/wide-ABI calls, dynamic/variadic frames and direct register-to-register
-// fragment transitions are explicit unsupported cases. R11 remains reserved for selection and frame probes.
+// Indirect/variadic/wide-ABI calls, dynamic frames and direct register-to-register fragment transitions are explicit
+// unsupported cases here. A variadic definition goes to tier1_emit_cfg.c too, which fills its register save area (#789).
+// R11 remains reserved for selection and frame probes.
 //
 // Borrowed inputs are immutable and may precede allocations in the output arena, but must not overlap either arena's
 // unused capacity. The arenas are disjoint. Failure restores both lengths and preserves the result. All retained
@@ -147,6 +148,11 @@ struct Tier1EmitResult
     // Recomputed values' definitions that nothing read, which the CFG consumer leaves out (tier1_emit_cfg_dead_definition).
     uint32_t dropped_definitions;
     uint32_t jumps;
+    // In the CFG consumer, each of the function's labels' first record (IrFunction.labels, #789), where the driver defines
+    // its symbol: its block's first record, or where the indirect jump that may go to it has a stub for that edge, the
+    // stub's (tier1_emit_cfg_labels); label_count of them, the function's, and none in a function without labels.
+    uint32_t* label_records;
+    uint32_t label_count;
     // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
     // `exit_count` of them. The C driver's unwind tables take the early returns' teardowns from them (#177).
     uint32_t* exits;

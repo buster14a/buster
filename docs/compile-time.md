@@ -417,7 +417,9 @@ The stages that changed, from each compile's `--time-stages` medians:
 
 ### What's left
 
-At about 393 MB, by arena (smaps at the compile's end, on the laptop):
+At about 393 MB, by arena (smaps at the compile's end, on the laptop), as #572
+left them; "The binding table, the fresh output and the stream's columns",
+below, has what #628 changed since (the stream's values among it, now columns):
 - **The driver's arena, 120 MB.** It holds:
   - the reader's output columns, which the later stages read, about 58 MB.
     Most are filled with `NONE` or zero for every token, though few tokens
@@ -434,6 +436,95 @@ At about 393 MB, by arena (smaps at the compile's end, on the laptop):
 Not at the peak, the reader's own arena's 61 MB of huge pages are still most of
 `check-input`'s system time. [#628](https://github.com/buster14a/buster/issues/628)
 follows up on these.
+
+### The binding table, the fresh output and the stream's columns (#628)
+
+Three of those allocations touched memory that held nothing:
+- **The binding table.** Its nine event columns each have room for four events
+  a token, of which the walk writes a prefix (`sqlite3.c`'s 167,456 of 2.86
+  million) and reads no further. In the reader's arena's huge pages each
+  column's first touch cleared one or two 2 MB pages, 11 of the arena's 34.
+  The table is now in the arena's base pages, with the scope stacks: about
+  4.5 MB of pages (1,126 more faults) where it took 22 MB.
+- **The zero-default output columns.** The C driver's reader
+  (`check_input_compile`) says that no copy of its arena pushed past its
+  length. Where that arena's pages past its length are still the kernel's zero
+  (`arena_untouched`: an owned mapping that no push reached past its length),
+  the reader no longer writes zeros over its 17 zero-default output columns
+  and the graph's `warning_suppressed`.
+  A column the walk never writes then takes no memory: the later passes read
+  the kernel's zero page there. That covers most of `sqlite3.c`'s byte columns
+  and `expression_regions`. Every other caller, and a reused, popped or poisoned
+  arena, keeps the clear. The `NONE` columns keep their fills.
+- **The stream's values.** `CheckStream.values` had a 96-byte `CheckValue` for
+  every node, of which `sqlite3.c`'s 323,557 nodes use little: 36% have an
+  object and 12% anything past it (a constant's payload, an address
+  constant's offset, a bit-field's place, a fault).
+  - The fields every node has are now columns: type, flags, object, category
+    and constant kind, 14 bytes a node.
+  - A node with more keeps its whole value as a row of `payloads`, which
+    `payload_rows` finds. On `sqlite3.c` the columns and row indices take
+    5.8 MB and the rows under 4 MB, where the values took 31 MB.
+  - The lowering reads the columns it prefetched before, and the batch path's
+    classification loads the type column 16 nodes at a time where it gathered
+    from 96-byte records.
+  - Readers take values through `check_stream_value` and its fields' accessors
+    ([the checker guide](c-checker.md)).
+
+On this repository's 4-core cloud VM, without Zen 5's vector set (the scalar
+host build, `--lanes 1`), `-c` of the frozen `sqlite3.c` peaks as follows, with
+each build's object the same bytes by both paths:
+
+| build | peak RSS | check-input's peak added |
+| --- | ---: | ---: |
+| main `f152e63` | 399,772 KB | 256,276 KB |
+| binding table and fresh output | 395,680 KB | 234,204 KB |
+| and the stream's columns | 377,332 KB | 233,992 KB |
+
+- **The binding table** cuts `check-input`'s addition by 18 MB, and **the
+  fresh output** cuts it by 4 MB more. The compile's peak is later than the
+  reader's, so only the fresh output's empty columns showed there at first.
+- **The stream's columns** take 18 MB more off the end of the compile, where
+  the peak then is. The reader's peak is now within 4 MB of the end's.
+On the 9700X, the `compile_time` step of the PR's run (#518's measurement:
+`measure-compile`, 11 rotated runs, and `perf stat -r 11`, pinned to CPU 2) at
+`f243b507` merged into main, against the same step of three runs of the same
+morning, PRs whose changes don't reach the default `-c`'s checker or its
+lowering (#1040's, #177's and #179's heads, on main 18 to 24 minutes later
+than this PR's merge; their medians' median):
+
+| | same-day runs | #628 and #529 | change |
+| --- | ---: | ---: | ---: |
+| wall time | 134.485 ms | 132.079 ms | −1.8% |
+| peak RSS (`wait4`) | 400,108 KB | 381,072 KB | −19,036 KB (−4.8%) |
+| task-clock (perf) | 133.49 ms | 131.30 ms | −1.6% |
+| cycles, kernel | 109.9 M | 103.2 M | −6.1% |
+| cycles, user | 630.4 M | 624.8 M | −0.9% |
+| instructions, user | 1,399.4 M | 1,444.0 M | +44.6 M (+3.2%) |
+| page faults | 1,997 | 3,114 | +1,117 |
+| `clear_page_erms`' share of the samples | 14.56% | 13.00% | |
+| check-input | 58.820 ms | 57.277 ms | −1.54 ms |
+| check-input's peak added | 241,324 KB | 221,392 KB | −19,932 KB |
+| check-expressions | 13.681 ms | 14.054 ms | +0.37 ms |
+| check-program | 13.896 ms | 14.160 ms | +0.26 ms |
+| lower | 14.157 ms | 13.556 ms | −0.60 ms |
+
+- **The memory.** The peak falls by the stream's and the binding table's
+  share, and the kernel's cycles by 6%. The page faults grow by the binding
+  table's base pages: 4 KB faults where it took 2 MB ones.
+- **The instructions.** 44.6 M more, 3.2%, are the accessors'. A value read
+  through `check_stream_value` is built from the columns, or copied from its
+  row, where it was one copy. `check_stream_type` and its kin test for a
+  hand-built stream's `dense_values` first. The check and the program pass
+  take 0.37 and 0.26 ms longer. The lowering, which waited on the stream's
+  96-byte records, takes 0.60 ms less, and so does every stage that clears
+  fewer pages. Making the hot readers read the columns directly, and the
+  graph run's stores cheaper, is what is left of this change's cost.
+- **The other runs' code.** The three runs built other PRs' heads on a
+  slightly later main (link-foreign, docs, tests and #1010's x86 builtins,
+  which `sqlite3.c` doesn't call). Their three medians agree within 1.2 ms of
+  wall time and 0.2 M instructions. The comparison is no A/B of one build,
+  but its differences are larger than that spread.
 
 ## The checker's graph and program passes (#530)
 
@@ -573,6 +664,23 @@ scratch-written extent, while its retained output extent is unchanged.
 These measurements precede integration of #572's storage and #186's
 traversal; they are not a measured sum of those independent improvements.
 
+**The next-mark scan's loads.** The walk in source order finds each next
+marked token with `check_input_resolve_next`. It loaded the 64 bytes of
+`visits` from the token after the current one, a masked load that crossed a
+cache line for nearly every token it visited: 92 of 95 sampled loads on the
+9700X (the 29 October record, 0.85% of `-c`'s cycle samples). It now loads
+the aligned 64 bytes that hold that token, with the bytes below it and from
+the walk's stop on masked off and not read (`check_input_scan_nonzero_from`),
+and steps a line at a time after that. `visits` starts on a cache line, so no
+load crosses one. The walk visits the same tokens, and `test-checker` checks
+both functions against a scalar reading of columns that end at a `PROT_NONE`
+page.
+
+The same PR's #628 changes also shorten `check-input` itself: the reader no
+longer writes zeros over its fresh output columns, and the binding table's
+pages are base pages, of which it clears a fifth of what it did ("The binding
+table, the fresh output and the stream's columns", above).
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
@@ -684,6 +792,104 @@ every token) and visits only them:
   `declaration_plans` has only a few readers, indexed by declaring token.
   Compacting these maps and changing those readers together is tracked in
   [#641](https://github.com/buster14a/buster/issues/641).
+
+## Token-wide work for sparse constructs (#877)
+
+[#877](https://github.com/buster14a/buster/issues/877) found about 4% of `-c sqlite3.c` spent in passes that visit
+every token for constructs that the unit has a handful of, or none. Its label table (#917) and runtime-name declarations
+(#920) merged on their own. This change handles the rest of its items and the attributes comment's reader sweeps.
+Every change keeps both paths' objects and diagnostics byte for byte.
+
+- **Selections** (`check_input_selections`). In a unit that spells `_Generic` or `__builtin_choose_expr` (the pass
+  doesn't run otherwise), the pass visited every token in postorder to find the closes whose first child is one of them.
+  Its body is now `check_input_selection`, for one close.
+  - **Vector path.** `check_input_selection_positions` compares 16 tokens' names at a time with the two names. Each
+    such keyword maps to its parent, of which it must be the first child, and sets a bit at that close's postorder
+    position. The pass visits those bits' closes in order, which is the order the walk would visit them in, so a
+    selection's operands are still selected before it.
+  - **Scalar path.** The walk. The kernel's own scalar path tests every close as the walk does: its twin in
+    `test-checker`.
+  - **Fallback.** Without room for the bits (`(count + 63) / 64` words of scratch), the vector path walks.
+- **`check_program`'s columns.** `vla_first`, `allocation_first`, `allocation_next`, `vla_blocks` and `vla_saves`, and the
+  allocations' pass over every token, are made only where the unit may have a variable-length array
+  (`check_program_variable`): where it has a bound (`vla_count`), or its type table has a variable-length array's type.
+  The condition is exact, since `check_action_runtime_size` needs such a type. `asm_statements` is made only with asm
+  statements, and `region_first` only with regions. Each reader tests the column's presence first, as
+  `check_lower_prepare` already did for `vla_identities`. A jump's search for the blocks it leaves
+  (`check_control_leave`) is skipped without the variable-length arrays' columns. Each column is 4 bytes a token, 2.9 MB
+  for `sqlite3.c`. Six of them were filled whole, 17 MB together; `allocation_next` took address space only.
+  Then `plan_first` (each statement's first initializer plan, 4 bytes a token) and `initializers` (each initializer
+  node's declaration, 4 bytes a node) are written at few entries. A bitset marks them (`planned`, `initialized`: a bit of
+  each), and the readers test it, rather than reading a column cleared at every entry (`check_program_bit`).
+- **The lowering's tables.** `switch_locals` is set to none only at the cases' owners, its only reads. `local_first` is
+  set to none only at the bodies' openings, where it is read, and at the locals' bodies, where it is written. Both used
+  to be filled at every token. `local_map` is read for any object an expression names, a global's included, and must
+  read as none for all but the body's own. Only its parameters' and locals' entries are ever written, so preparation
+  clears just those and marks them in a bitset (`locals`, a bit an object), before any lane lowers a body. Its readers
+  go through `check_lower_local_of`, which reads none for an unmarked object; the lanes only read the bits.
+- **The asm labels** (`check_input_asm_labels`). The reader swept the `attributes` column three times for its
+  attributed tokens: for any label, for the labelled objects, and for the register variables' labels (which moved
+  here from `check_input_asm_finish`, in the same order).
+  - **One list.** `check_input_asm_attributed_tokens` now lists those tokens once, testing 8 pointers at a time.
+  - **Sparse states.** The objects' states and first labels are kept only for the labelled objects, which a bitset
+    marks, rather than cleared for every token (9 bytes a token).
+  - **The uses.** Before the pass over the uses reads an identifier's object and state, it tests whether the
+    identifier's declaration is one of a labelled object's: a bitset over the tokens
+    (`check_input_asm_labelled_tokens`), which a gather of 16 tokens' words reads (`check_input_asm_labelled_uses`).
+  - **Twins.** Each kernel's scalar path tests every token.
+  - The emission's own sweep of `attributes` and the column itself (#628) are unchanged.
+
+`test-checker` checks the selections' kernel against a reading of random forests of up to 1,100 tokens, and the asm
+labels' three kernels against a reading of random columns. Every column ends at a `PROT_NONE` page, and both paths
+run. The existing program fixtures of variable-length arrays (jumps out of their blocks among them), asm statements and
+statement expressions run through the columns, and every unit without them skips them. The bitsets are checked against
+readings of their own too, each ending at a `PROT_NONE` page: `initialized` against the tokens' initializer nodes on
+random columns; `planned` against a walk of random initializers' parents to their statements, whose lists must be their
+plans in order and which may write no other entry of `plan_first` or `plan_next` (`check_program_plans`), with as many
+plans as tokens, fewer, and none; and `locals`
+against each program fixture's bodies' parameters and automatic declarations, and through its accessors on random
+objects.
+
+**On the 9700X.** The pull request's `compile_time` step, at its first head (`f0084098`,
+[job 124825289835](https://github.com/buster14a/buster/actions/runs/41297067398/job/124825289835)), on the frozen
+`sqlite3.c` with the step's options: `-c` took 130.239 ms wall (129.656 to 131.298), the median of 11 runs pinned to
+CPU 2. Its stages' medians:
+
+| stage | ms | range |
+| --- | ---: | --- |
+| `check-input` | 56.694 | 56.288 to 57.042 |
+| `check-program` | 11.992 | 11.892 to 12.021 |
+| `lower` | 14.114 | 13.918 to 14.355 |
+
+`main`'s pushes that day were cancelled or stopped before the 9700X job, so there is no base from the same step and day.
+A matched comparison of the stages, interleaved and over code placements (`time-runs`, #509), is still to be made.
+
+**Instructions.** Callgrind counted the same compile's user instructions on baseline (`-march=x86-64`) builds of `main`
+(`91cfe9e0`) and of this change. Those builds take the scalar paths, so the selections' change doesn't show; the
+other three are on both paths. Both wrote the same object.
+
+| | `main` | this change | change |
+| --- | ---: | ---: | ---: |
+| the whole compile | 5,890.9 M | 5,846.6 M | -44.2 M (-0.75%) |
+| glibc's `memset` | 188.9 M | 160.0 M | -28.9 M |
+| `check_program`, inclusive | 170.5 M | 148.6 M | -21.9 M |
+| `check_input_run`, inclusive | 1,697.0 M | 1,679.8 M | -17.1 M |
+| `check_input_asm_labels`, inclusive | 29.1 M | 22.3 M | -6.8 M |
+| `check_lower_prepare`, inclusive | 54.9 M | 49.7 M | -5.2 M |
+
+`check_program_allocations` (6.1 M) no longer runs, and `check_control_leave` fell from 391 K to 7.5 K. These are
+instruction counts, not time: the fills cost the 9700X mostly memory traffic and fresh pages, which only its own
+comparison shows. Callgrind needs a finite address space to run the compiler (`ulimit -v 67108864`, docs/arena-memory.md).
+
+The later bitsets (`planned`, `initialized` and `locals`), counted the same way on baseline builds of `main`
+(`92252c30`) and of that change, which wrote the same object:
+
+| | `main` | the bitsets | change |
+| --- | ---: | ---: | ---: |
+| the whole compile | 5,868.9 M | 5,862.8 M | -6.1 M (-0.10%) |
+| glibc's `memset` | 137.9 M | 131.1 M | -6.8 M |
+| `check_program`, inclusive | 148.2 M | 145.1 M | -3.1 M |
+| `check_lower_prepare`, inclusive | 51.0 M | 49.0 M | -2.0 M |
 
 ## Linking is not in the 194.8 ms
 
@@ -869,3 +1075,118 @@ compares `bc1b4861` with `8b815992`, including the host's default page policy,
 an exec-inherited per-process THP-disable control and body-bearing units.
 That control did not change the host to `madvise`. These timings predate the
 later encoder changes; validation of the current source is recorded separately.
+
+### The backend's tables when a function is emitted (#590)
+
+A unit with a selected function still builds the backend's tables in every
+process. On a 2.1 GHz Xeon VM (4 vCPUs, kernel 6.18, transparent huge pages
+`madvise`, as Ubuntu, Debian and Fedora ship them), `hello.c`'s
+`backend-setup` was 3.4 to 4.5 ms of a 10 to 14 ms compile. It took 1,132 base
+pages' faults:
+- 788 in the encoder's template table;
+- 257 in Tier 0's tables;
+- 41 in the operand semantics' tables;
+- 38 in the unwind templates.
+
+Without faults, the encoder's own build was about 0.9 ms. Of that, 0.41 ms was
+the forms' templates, 0.40 ms was building their FS and GS templates again,
+and the rest was a 1.6 MB copy for the marked forms. The 9700X hid most of
+this: its kernel's `always` gives `.bss` huge pages without being asked.
+
+What changed:
+- **The encoder's FS and GS templates come from each form's own.** In 64-bit
+  mode an override only inserts its byte, so `x86_template_with_segment` makes
+  both from the form's template and the counts its build kept, and refuses
+  where the build would. Every entry is compared with the builder's
+  ([the encoder's design](x86-64-encoder.md), "Templates and the canonical
+  slot"). Each entry's marked copy is written in the same per-entry pass
+  that writes its halves the other way around.
+- **`x86_encode`'s template table gets huge pages.** Before the build, the
+  encoder asks for huge pages (`MADV_HUGEPAGE`) and commits the ranges it
+  writes (`MADV_POPULATE_WRITE`, one call per range).
+  - It asks only for the 2 MB pages the table fills at least 750 KB of
+    (`lane.c`'s measured break-even). Its bytes fall in two or three, and that
+    is usually two of them.
+  - That is a fault per huge page where huge pages come, and base pages
+    committed in one call per range for the rest, or where none come.
+  - A 2 MB margin on either side keeps them in the table's own storage. The
+    storage isn't aligned to a huge page, because wild 0.10, which links CI's
+    builds, refuses alignments past 64 KB.
+  - Only `main.c`'s units' copy, the one a compile builds, has the margins,
+    4 MB of `.bss` in all. The benchmarks' units, which no compile runs, keep
+    their copies as they were, rather than 67 MB of margins over 16 copies.
+  - `x86_encoder_initialized` is in `.data`, as `lane.c`'s `LaneProcess` is.
+    In `.bss` it followed the margin into a 2 MB region where a compile writes
+    nothing else, and an `always` kernel cleared that region's huge page for
+    the one byte. At the earlier heads that had it there (`8da9e479` and
+    `f5179878`), on the 9700X, that cost 2 MB of peak RSS, and `hello.c`'s
+    other stages took 0.05 to 0.06 ms more; the table below is from after the
+    move.
+  - The other modes' tables (32-bit addresses, APX, 32- and 16-bit modes),
+    which no compile builds, keep their size. They get only the commit.
+- **Tier 0 commits its nine tables' pages in one call per array**
+  (`tier0_prepare_tables`). One structure of them, in a huge page of its own,
+  ran 2.2 times as many instructions, because LLVM no longer knew the tables
+  apart ([Tier 0](tier0.md)).
+- **The semantics and unwind tables are left as they are.** Their 79 faults
+  cost less than a huge page's clearing would.
+
+Objects are the same bytes: the 220 programs of c-testsuite's subset,
+`hello.c` and `sqlite3.c` on the 9700X (the record's `objects.txt`), and the
+compiler's own `main.c` (39 MB) on the VM, all compiled with `-c` by both
+builds. The encoder's loops are unchanged.
+[The frozen record](https://github.com/buster14a/buster-performance/tree/5af90b2008b8440ff284b6e41ff1250479a29eb5/docs/measurements/backend-setup-590-2026-11-01)
+has the raw outputs, commands and harness. In the tables, "disabled" is a
+process's `PR_SET_THP_DISABLE`, which its children inherit; it stands in for a
+kernel with `never`.
+
+On the 9700X (THP `always`, under its lock, CPU 2), this change at `32e0c754`
+against `main` at `b823d1c2`, both built by `build.sh` there, with tcc 0.9.28rc
+as the reference:
+
+| input | THP | `main` | this change | tcc |
+| --- | --- | ---: | ---: | ---: |
+| `hello.c`'s `backend-setup`, medians of 3 × 41 | `always` | 0.583 ms | 0.518 ms | |
+| `hello.c`'s stages | `always` | 2.080 ms | 2.035 ms | |
+| `hello.c`'s `backend-setup` | disabled | 0.831 ms | 0.627 ms | |
+| `hello.c`'s stages | disabled | 2.153 ms | 1.944 ms | |
+| c-testsuite's 220, best of 3 each, mean | `always` | 1.913 ms | 1.809 ms | 0.553 ms |
+| c-testsuite's 220, best of 3 each, mean | disabled | 2.078 ms | 1.852 ms | 0.515 ms |
+| `sqlite3.c`, `measure-compile --runs 11` | `always` | 135.25 ms | 135.39 ms | |
+
+- **Peak RSS on the 9700X.** `backend-setup`'s peak added is `main`'s (6,564
+  KiB), and its 2 MB windows of `.bss` are `main`'s six.
+- **Small files there.** Its kernel already gave the tables huge pages, so the
+  gain is the derived templates and the commits: a tenth of `backend-setup`,
+  and about 2% of a small file's stages.
+
+On a 2.1 GHz Xeon VM (THP `madvise`), `91cfe9e0` against `8da9e479`, both
+linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
+
+| input | THP | `91cfe9e0` | this change | tcc |
+| --- | --- | ---: | ---: | ---: |
+| `hello.c`, `measure-compile --runs 31`, two rounds | `madvise` | 13.8, 12.8 ms | 10.9, 10.1 ms | 3.2 to 3.5 ms |
+| `hello.c`'s `backend-setup` | `madvise` | 3.87, 3.86 ms (1,129 faults) | 2.09, 2.17 ms (420) | |
+| `hello.c`, two rounds | disabled | 13.6, 11.7 ms | 10.7, 10.7 ms | |
+| `hello.c`'s `backend-setup` | disabled | 4.21, 3.21 ms | 2.36, 2.53 ms | |
+| c-testsuite's 220, best of 3 each, mean | `madvise` | 8.84 ms | 8.03 ms | 2.04 ms |
+| c-testsuite's 220, best of 3 each, mean | disabled | 9.07 ms | 7.70 ms | 2.11 ms |
+
+- **Minor faults.** A kernel counts `MADV_POPULATE_WRITE`'s pages as minor
+  faults: about 1,130 of them in the "disabled" rows, with none taken one at a
+  time.
+- **Peak RSS on the VM.** With huge pages it grows by 1.2 MB (31.0 to
+  32.3 MB), as the kernel clears the table's huge pages whole.
+- **Address space.** On the 9700X, `size build/compiler` gives `.bss` as
+  191,387,924 bytes before and 195,641,236 after: the margins. That is address
+  space, not memory or file size: the `.bss` segment has no file bytes.
+- **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 can be
+  several times the median.
+- **Against tcc.** c-testsuite's programs take 3.3 to 4 times tcc's time,
+  against 3.5 to 4.3 times before. What remains of `backend-setup` (2.1 to
+  2.5 ms on the VM, 0.52 ms on the 9700X) is mostly the encoder's build and its
+  pages' clearing, Tier 0's build, and semantics and unwind.
+- **Not done.** Building the tables ahead of time, into a snapshot or
+  read-only data, would take their build and clearing out of a compile. That
+  needs an identity and staleness scheme like the runtime snapshot's. It
+  remains #590's open direction.

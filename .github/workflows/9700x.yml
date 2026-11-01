@@ -996,6 +996,22 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
+      - name: Benchmark the printer on main.c and the frozen sqlite3.c, with line markers and without
+        # #649: -E -P's and -E's printing (--markers runs and prints as the -E driver does) by pp_print_spellings against
+        # the printer's general loop for every chunk (--spelling-cost), which with line markers prints in the time the
+        # printer before #649 took (with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon and 6% slower
+        # a token on the 9700X: main.c's history in the step above is -P's before). About 13 s.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          sqlite=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost "${sqlite[@]}"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost "${sqlite[@]}"
+
       - name: Benchmark the directive tables on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
         run: |
@@ -1192,8 +1208,8 @@ jobs:
           ./build/compiler benchmark-checker-deferred --passes 12 --lanes 8 --cpus "2,$others" "${source[@]}"
 
       - name: Benchmark the functions' lanes on frozen SQLite
-        # #151: -c's emission of the frozen SQLite source on 1, 2, 4 and 8 lanes and on the rule's, every run one lane's
-        # code and each lane count's object one lane's. Lane 0 runs on CPU 2, the other lanes on one CPU of each other
+        # #151: -c's emission of the frozen SQLite source on 1, 2, 3, 4, 6 and 8 lanes and on the rule's, every run one
+        # lane's code and each lane count's object one lane's: the rows of docs/function-lanes.md's table (#1069). Lane 0 runs on CPU 2, the other lanes on one CPU of each other
         # core the job may use. The driver's own feature answers, not clang's (--clang-features), as -c takes them: with
         # clang's, SQLite takes its atomics' path, which the emission refuses.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-lanes,')
@@ -1215,7 +1231,7 @@ jobs:
           ' | head -n 7 | paste -sd, -)"
           test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,4,8 --cpus "2,$others" "${source[@]}"
+          ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,3,4,6,8 --cpus "2,$others" "${source[@]}"
 
       - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
         # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1

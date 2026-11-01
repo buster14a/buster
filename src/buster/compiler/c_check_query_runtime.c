@@ -250,7 +250,8 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
             const CheckRegionProofStep* step = graph->region_steps + region->first + i;
             if (step->node != BUSTER_CHECK_NONE)
             {
-                const CheckValue* value = stream->values + step->node;
+                const CheckValue checked_value = check_stream_value(stream, step->node);
+                const CheckValue* value = &checked_value;
                 effect |= proofs[indices[step->node]].syntax_effects ||
                           (value->category == CHECK_LVALUE && ((type_qualifiers(value->type) & BUSTER_TYPE_VOLATILE) != 0 ||
                            (value->flags & BUSTER_CHECK_VOLATILE_PART) != 0 || check_action_kind(types, value->type) == BUSTER_TYPE_KIND_ATOMIC));
@@ -276,8 +277,8 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
         {
             if (operands[i] != BUSTER_CHECK_NONE)
             {
-                effect |= proofs[indices[operands[i]]].syntax_effects ||
-                          check_query_read_effect(types, stream->values + operands[i], stream->conversions[node].operands[i]);
+                const CheckValue operand = check_stream_value(stream, operands[i]);
+                effect |= proofs[indices[operands[i]]].syntax_effects || check_query_read_effect(types, &operand, stream->conversions[node].operands[i]);
             }
         }
         if (check_graph_has_arguments(op))
@@ -291,7 +292,8 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
             {
                 const uint32_t slot = graph->argument_offsets[node] + i;
                 const uint32_t child = graph->argument_nodes[slot];
-                effect |= proofs[indices[child]].syntax_effects || check_query_read_effect(types, stream->values + child, stream->argument_conversions[slot]);
+                const CheckValue argument = check_stream_value(stream, child);
+                effect |= proofs[indices[child]].syntax_effects || check_query_read_effect(types, &argument, stream->argument_conversions[slot]);
             }
         }
     }
@@ -400,7 +402,7 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     else if (action.op == CHECK_OP_CALL || action.op == CHECK_OP_BUILTIN_X86 || action.op == CHECK_OP_BUILTIN_ATOMIC ||
              action.op == CHECK_OP_BUILTIN_VECTOR || action.op == CHECK_OP_BUILTIN_OVERFLOW || action.op == CHECK_OP_VARARGS)
     {
-        result.value = stream->values[node];
+        result.value = check_stream_value(stream, node);
         result.value.constant_kind = CHECK_CONSTANT_NONE;
         result.diagnostic = stream->diagnostics[node];
         memcpy(result.conversions, stream->conversions[node].operands, sizeof(result.conversions));
@@ -522,7 +524,7 @@ static void check_query_prove(TypeTable* types, const CheckGraph* graph, const C
                                                    child->values[lane], stream->argument_conversions[graph->argument_offsets[node]], lane != 2);
         input.complex_constant = value.constant_kind == CHECK_CONSTANT_COMPLEX;
         folded[lane] = child->valid[lane] && check_builtin_query_constant(types, &input, &value);
-        proof->values[lane] = stream->values[node];
+        proof->values[lane] = check_stream_value(stream, node);
         proof->values[lane].constant_kind = CHECK_CONSTANT_INTEGER;
         proof->values[lane].integer = folded[lane];
         proof->values[lane].flags &= ~BUSTER_CHECK_FP_ENVIRONMENT;
@@ -632,7 +634,7 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
                 const uint32_t index = check_query_effect_index(stream->queries, stream->query_count, sizeof(*stream->queries), node);
                 for (uint32_t lane = 0; lane < 3; lane += 1)
                 {
-                    proof->values[lane] = lane == 2 ? stream->queries[index].runtime_value : stream->values[node];
+                    proof->values[lane] = lane == 2 ? stream->queries[index].runtime_value : check_stream_value(stream, node);
                     proof->valid[lane] = check_action_foldable(proof->values + lane);
                 }
             }

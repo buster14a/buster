@@ -77,6 +77,9 @@
 #include <string.h>
 #include "host_isa.h"
 
+// OS-dependent includes
+#include <sys/mman.h>
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The typed stream
 
@@ -520,7 +523,16 @@ struct Tier0Function
     const uint8_t* call_tails;
     bool entry_records;
     bool choice_requests;
+    // Optional lifetimes of the frame's objects (#177), which Tier 0 ignores and ir_lower turns into IR_LIFETIME markers
+    // before their entries: lifetime_count events, event k before entry lifetime_entries[k] (nondecreasing, below
+    // count), of local lifetime_locals[k] without BUSTER_TIER0_LIFETIME_END, the end of its object's lifetime where that
+    // bit is set and its start otherwise. A local without events lives throughout its function.
+    const uint32_t* lifetime_entries;
+    const uint32_t* lifetime_locals;
+    uint32_t lifetime_count;
 };
+
+#define BUSTER_TIER0_LIFETIME_END 0x80000000u
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
 static bool tier0_is_object(const Tier0Function* function, uint64_t local)
@@ -3051,11 +3063,41 @@ static bool tier0_inc_dec_costs_no_more(void)
     return cheaper;
 }
 
+// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name.
+#define BUSTER_TIER0_MADV_POPULATE_WRITE 23
+
+// Before tier0_initialize writes its tables (about 1 MB), their pages, both ends rounded out, committed in one call each
+// (MADV_POPULATE_WRITE) rather than a fault each (#590): a kernel whose transparent huge pages are only `madvise`d gave them 257 base pages'
+// faults in every compile. Each stays a separate array, which the passes' code needs: one structure of them, in a huge
+// page of its own, took tier0_initialize from 82 to 184 million instructions in 60 builds, as LLVM can't tell that its
+// members don't overlap. A call failing (an older kernel) leaves the pages to their faults.
+static void tier0_commit(const void* table, uintptr_t bytes)
+{
+    const uintptr_t page = 4096;
+    const uintptr_t first = (uintptr_t)table & ~(page - 1);
+    const uintptr_t last = ((uintptr_t)table + bytes + page - 1) & ~(page - 1);
+    madvise((void*)first, last - first, BUSTER_TIER0_MADV_POPULATE_WRITE);
+}
+
+static void tier0_prepare_tables(void)
+{
+    tier0_commit(tier0_templates, sizeof(tier0_templates));
+    tier0_commit(tier0_template_infos, sizeof(tier0_template_infos));
+    tier0_commit(tier0_compiled, sizeof(tier0_compiled));
+    tier0_commit(tier0_slot_words, sizeof(tier0_slot_words));
+    tier0_commit(tier0_template_words, sizeof(tier0_template_words));
+    tier0_commit(tier0_masks, sizeof(tier0_masks));
+    tier0_commit(tier0_slots, sizeof(tier0_slots));
+    tier0_commit(tier0_slot_bases, sizeof(tier0_slot_bases));
+    tier0_commit(tier0_choice_shapes, sizeof(tier0_choice_shapes));
+}
+
 static bool tier0_initialize(void)
 {
     // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
     if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
     {
+        tier0_prepare_tables();
         tier0_inc_dec = tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0;
         memset(tier0_slot_bases, 0, sizeof(tier0_slot_bases));
         tier0_template_count = 0;
@@ -9839,7 +9881,13 @@ static bool tier0_operation_decoration_valid(const Tier0Operation* operation, ui
 // roles placed somewhere (VECTOR(j) as register j), a record x86_validate takes.
 static bool tier0_operation_valid(const Tier0Operation* operation)
 {
-    bool valid = operation->record_count <= BUSTER_TIER0_OPERATION_RECORDS && operation->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
+    // A row past the fixed columns is refused before any of them is read: the mask analysis and the sample placement
+    // below index them by the row's counts.
+    if (operation->record_count > BUSTER_TIER0_OPERATION_RECORDS || operation->operand_count > BUSTER_TIER0_OPERATION_OPERANDS)
+    {
+        return false;
+    }
+    bool valid = true;
     for (uint32_t j = 0; valid && j < operation->operand_count; j += 1)
     {
         const uint32_t class = operation->operand_classes[j];

@@ -57,8 +57,9 @@ through maximum end, including any intervening holes. The interval producer
 should retain these bounds while constructing intervals. An address-taken
 local supplies its conservative scope lifetime, including every possible
 escaped use; a local or aggregate producer can use the same column contract.
-The current C checker and source-to-SSA path do not yet produce this complete
-frame request. The frame module introduces no parallel IR.
+The C driver's `--tier1` gives each block's objects its block's lifetime and
+the CFG consumer passes them so ("Slot sharing between objects" below). The
+frame module introduces no parallel IR.
 
 `AbiCall[]`, produced by `abi_assign` or its scalar twin in
 `calling_convention.c`, supplies each call's outgoing byte count and required
@@ -171,7 +172,11 @@ The variadic prologue plans all six general argument-register saves and eight
 sixteen-byte vector saves; the latter are conditional on entry AL being
 nonzero. The emitter must preserve that entry AL value until these
 conditional saves are decided. Variadic stores explicitly name RSP as their
-base.
+base. Tier 1's CFG consumer asks for this area for a variadic definition with a
+register save area (#789). The IR's save-area slot is the area itself, at
+`variadic_offset`. Its overflow area is addressed from the incoming frame:
+16 bytes past RBP with a frame pointer, and otherwise past the reservation,
+the pushed callee-saved registers and the return address from RSP.
 
 With `PROBE_STACK`, allocations of at least 4096 bytes use a
 `PROBE_ALLOCATE` step. A realigning prologue probes its subtraction whatever its
@@ -187,6 +192,65 @@ asks for no probes, refuses such a frame rather than describe it wrongly.
 
 The plan has bounded step arrays and no instruction positions. Spill
 loads/stores belong to the instruction consumer.
+
+## Slot sharing between objects
+
+Tier 1's frame lets objects that are never live at once share a slot (#177's
+design: an address-taken local's lifetime is its scope, conservatively, since
+its address can escape within it). The lifetimes are C's own: an automatic
+object lives from its block's entry to the block's exit, however either
+happens, wherever its declaration is in the block (C17 6.2.4p5).
+
+- The checked program, asked by `--tier1` (`CheckProgramOptions.lifetimes`,
+  `c_check_program_lifetime.c`), lists each block's local declarations by its
+  closing brace (`CheckProgram.lifetime_first`). Its control stream gets a
+  `CHECK_CONTROL_LIFETIME` start where the block's statements begin, and an end
+  after them (after the block's cleanups) and before each break, continue or
+  goto that leaves it (after the jump's cleanups). A goto back inside the block,
+  before a declaration, leaves nothing: the object still lives, and a pointer to
+  it may be read there. Clang's markers end such an object, which C doesn't. A
+  return, a computed goto and the body's end need no end, since nothing in the
+  block follows them, and an end missing on a path only makes a lifetime
+  longer.
+- A block that a jump can enter other than through its opening brace has no
+  lifetimes; its objects live throughout the function, as clang leaves out the
+  markers of an object a goto bypasses (`VarBypassDetector`). Such blocks are:
+  - those between a goto's label (or an asm goto's) and the innermost block
+    that holds the jump too. No emitted body reaches the asm goto part yet:
+    the lowering refuses asm goto by name (`CheckProgramAsm.reason`), and the
+    part stands ready for when it takes one;
+  - those between a case or default label and its switch, the switch's own
+    block among them, whose opening brace never runs;
+  - every block around a label whose address is taken;
+  - a statement expression's own block.
+- The lowering turns each control into an event per local of the block
+  (`Tier0Function.lifetime_entries` and `lifetime_locals`), which Tier 0
+  doesn't read. `ir_lower` turns the events into `lifetime` markers before their
+  entries ([the IR guide](ir.md)'s "Slot lifetimes"), and SSA promotion drops a
+  promoted slot's markers.
+- The CFG consumer (`tier1_emit_cfg_lifetimes`) finds where each object with
+  markers is live. That forward problem (some path from a start reaches here
+  without an end) is backward liveness on the reversed CFG, which `dataflow.c`'s
+  AVX-512 solver, or its scalar twin with `--scalar`, solves. A block's last
+  marker of an object is its use where it starts the object and its definition
+  where it ends it. The object's interval for the coloring above is the hull of
+  the positions where it is live, among the spill slots'. An object without
+  markers keeps its whole function.
+
+The positions are the blocks' layout, so a hull can cover positions where its
+object is dead (a branch's other arm laid out inside), which only keeps slots
+apart. An access through an object's address comes between a start and an end
+on some path, so its positions are inside the hull. The analyses' passes are
+walks up the parse tree from the declarations, jumps, cases and labels, each
+bounded by its depth, and they run only for `--tier1`. Like the control stream
+they feed, they are scalar.
+
+`--tier1-no-lifetimes` compiles without lifetimes, every object a slot of its
+own. On `test-checker-driver`'s lifetime fixture (`check_test_driver_tier1_lifetimes`),
+which has the cases above, Tier 1's frames take 1,480 bytes with lifetimes
+against 2,064 without, by both paths. Every build prints clang's output. That
+was measured in a cloud container: frame sizes against `clang -O2` on the
+corpora and the run time on the 9700X are still to be measured.
 
 ## Native frame companion
 
@@ -270,13 +334,18 @@ transitions), `return_tails` (returns published as tails) and `red_zones`
 `test-check-debug --cross-check` (`c_check_unwind_test.c`) checks it on a
 fixture compiled by `--tier1 --verify`, every function but `main` by Tier 1:
 a frame of spill slots alone, one with pushes, two returns each after its own
-epilogue, an open frame whose loop's latch comes last, a realigned frame, and a
-leaf whose spills are in the red zone, whose shapes `--tier1-report`'s counts
-must show.
+epilogue, an open frame whose loop's latch comes last, a realigned frame (with
+its frame pointer), the same open and with two returns, and a leaf whose spills
+are in the red zone, whose shapes `--tier1-report`'s counts must show. Each
+function's FDE, as `readelf -wF` interprets it, must have its shape: from the
+entry's row, a row with the CFA rsp+8 at each return's `ret`, a last row with
+another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in
+some row exactly for the frame pointers, and the leaf's one row.
 By each path and through GNU ld and lld, `backtrace()` walks through every frame
-to `main` (and without unwind tables stops at the first), and gdb's backtrace at
-every instruction of each function, both returns and the loop's iterations
-among them, gives the function and `main`. Tier 1 doesn't make the other
+to `main` (and without unwind tables stops at the first), `--lanes 1` and 8 make
+the vector path's bytes, and gdb's backtrace at every instruction of each
+function, both returns and the loops' iterations among them, gives the function
+and `main`. Tier 1 doesn't make the other
 shapes the planner can: its allocator gives a leaf no callee-saved register (they
 go only to values live across a call), so a red zone has no pushes above it, and
 its selection refuses the dynamic stack's operations, so no frame of Tier 1's is
@@ -363,10 +432,9 @@ they shorten every prologue and epilogue that saves registers, but their run
 time on `speedtest1` hasn't been measured. Issue #177 remains open for
 [#142](https://github.com/buster14a/buster/issues/142) generated-code checking,
 [#137](https://github.com/buster14a/buster/issues/137) Tier 1 cross-linking
-including variadic definitions (which the CFG consumer still refuses) and
-over-aligned functions, address-taken locals' scope lifetimes (each frame object
-is live throughout its function today, so objects never share a slot),
-frame-size comparisons against `clang -O2` on the corpora, and controlled
+including variadic definitions and over-aligned functions, frame-size
+comparisons against `clang -O2` on the corpora (with and without the objects'
+lifetimes, "Slot sharing between objects"), and controlled
 `speedtest1`/corpus runtime evidence for slot sharing and frame-pointer
 omission. Prologue-plan simulation and bounded native-helper execution do not
 satisfy those full-program requirements.

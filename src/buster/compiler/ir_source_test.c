@@ -21,7 +21,8 @@
 // function of that name, as lowered and as promoted. Before the files, the first is prepared again in a child whose
 // address space can't grow by the preparation's arena, which must fail it as the memory's, touching nothing it couldn't
 // allocate (ir_source_exhausted). --simd instead checks the bounded vector adapter and text forms, and requires
-// transactional refusal at the still-scalar SSA promoter boundary. It never counts that refusal as promotion.
+// transactional refusal of a function with vectors at the SSA promoter's boundary, never counting that refusal as
+// promotion; a function whose only SIMD values are masks, which the promoter takes (#179), must promote.
 // --dominators additionally checks each form against #174's scalar/vector/AUTO analysis and its independent
 // definition oracle; unlike the ordinary command, no excluded file is a pass. --dominators-cfg NEW_FILE implies
 // that check and exports the qualified CFGs to an exclusively created file. Only a complete successful corpus
@@ -387,10 +388,11 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
         const IrCheck promotion = agree ? ssa_ir_promote(&vector, promoted_output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         const IrCheck promotion_twin = agree ? ssa_ir_promote_scalar(&scalar, promoted_output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         const bool promotes = agree && promotion.error == IR_OK && promotion_twin.error == IR_OK && promotion.dominance_checked && promotion_twin.dominance_checked;
-        // --simd explicitly tests the unsupported optimizer boundary; ordinary scalar corpus acceptance still
-        // requires promotion. Refusal must preserve the output arena and leave both candidate objects untouched.
+        // --simd explicitly tests the unsupported optimizer boundary, a function with vectors (masks alone promote, #179);
+        // ordinary scalar corpus acceptance still requires promotion. Refusal must preserve the output arena and leave
+        // both candidate objects untouched.
         const IrFunction untouched = {0};
-        const bool simd_refused = allow_simd && agree && ir_function_has_simd(&vector) &&
+        const bool simd_refused = allow_simd && agree && ir_function_has_vectors(&vector) &&
                                   promotion.error == IR_ERROR_UNSUPPORTED && promotion_twin.error == IR_ERROR_UNSUPPORTED &&
                                   promoted_output->length == promoted_mark && memcmp(&promoted, &untouched, sizeof(promoted)) == 0 &&
                                   memcmp(&promoted_twin, &untouched, sizeof(promoted_twin)) == 0;

@@ -1110,7 +1110,8 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
     for (uint32_t node = 0; node < stream->count; node += 1)
     {
         const uint64_t mark = scratch->length;
-        const CheckValue* value = stream->values + node;
+        const CheckValue checked_value = check_stream_value(stream, node);
+        const CheckValue* value = &checked_value;
         const String8 type = value->type != 0 ? type_print(types, scratch, value->type, (String8){ 0 }, &names, 0) : (String8){ 0 };
         printf("%u token=%u op=%u type=%.*s category=%u", node, graph->tokens[node], graph->ops[node], (int)type.length, type.pointer != 0 ? type.pointer : "", value->category);
         if (value->constant_kind == CHECK_CONSTANT_INTEGER)
@@ -2319,9 +2320,10 @@ struct CheckDriverCommand
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
-    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize.
+    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize and --tier1-no-lifetimes.
     bool tier1;
     bool tier1_no_rematerialize;
+    bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
 };
@@ -2678,6 +2680,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .scalar = scalar,
                         .target = options->target,
                         .predefines = &options->predefines,
+                        // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
+                        .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                     };
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
@@ -3214,6 +3218,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes.tier1_no_rematerialize = true;
         }
+        else if (strcmp(arguments[i], "--tier1-no-lifetimes") == 0)
+        {
+            lanes.tier1_no_lifetimes = true;
+        }
         else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
         {
             const char* value = arguments[i][7] == '=' ? arguments[i] + 8 : i + 1 < count ? arguments[++i] : 0;
@@ -3348,6 +3356,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .libraries = &libraries,
         .tier1 = lanes.tier1,
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
+        .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
     };
@@ -3370,7 +3379,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
     {
@@ -3385,9 +3394,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
-    else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize) && !lanes.tier1)
+    else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || lanes.tier1_no_lifetimes) && !lanes.tier1)
     {
-        fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" : "--tier1-no-rematerialize");
+        fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
+                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : "--tier1-no-lifetimes");
     }
     else if (lanes.tier1 && source_rows)
     {

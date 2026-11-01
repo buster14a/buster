@@ -17,9 +17,10 @@
 //   build/compiler test-tier1-cfg-source [--simd] [--print NAME] [preprocessor options] file...
 //
 // --print NAME prints that function's allocation problem's sizes and each path's counts. --simd allocates a function
-// with vectors or masks, which the SSA promoter refuses (test-ir-source --simd checks that it does), in its lowered
-// form, which is SSA too (its locals in slots), so that #732's vector and mask values reach the vector and opmask
-// classes (#179): the report then counts its masks, which must be some. This is a test outside the compile path, with
+// with vectors, which the SSA promoter refuses (test-ir-source --simd checks that it does), in its lowered form, which is
+// SSA too (its locals in slots), so that #732's vector and mask values reach the vector and opmask classes (#179): the
+// report then counts its masks, which must be some. A function whose only SIMD values are masks the promoter takes, and
+// it is promoted and allocated as any other: refused, it fails the run. This is a test outside the compile path, with
 // no vector path of its own.
 
 #include <time.h>
@@ -152,8 +153,9 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
         IrFunction promoted = { 0 };
         const IrCheck lowering = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, lowered_output, scratch, &lowered);
         const IrCheck refused = lowering.error == IR_OK ? ssa_ir_promote(&lowered, promoted_output, scratch, &promoted) : lowering;
-        // With --simd, a function the promoter refuses for its vectors or masks is allocated as lowered.
-        const bool lowered_form = simd && lowering.error == IR_OK && refused.error == IR_ERROR_UNSUPPORTED && ir_function_has_simd(&lowered);
+        // With --simd, a function the promoter refuses for its vectors is allocated as lowered; one of masks alone, which
+        // the promoter takes (#179), must promote.
+        const bool lowered_form = simd && lowering.error == IR_OK && refused.error == IR_ERROR_UNSUPPORTED && ir_function_has_vectors(&lowered);
         const IrCheck promotion = lowered_form ? lowering : refused;
         const IrFunction* allocated = lowered_form ? &lowered : &promoted;
         totals->simd += lowered_form;

@@ -129,6 +129,15 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_LDMXCSR,
     CBUILTIN_X86_HELPER_STMXCSR,
     CBUILTIN_X86_HELPER_XSETBV,
+    CBUILTIN_X86_HELPER_MM_LFENCE,
+    CBUILTIN_X86_HELPER_MM_MFENCE,
+    CBUILTIN_X86_HELPER_MM_SFENCE,
+    CBUILTIN_X86_HELPER_MM_PAUSE,
+    CBUILTIN_X86_HELPER_MM_CLFLUSH,
+    CBUILTIN_X86_HELPER_MM_GETCSR,
+    CBUILTIN_X86_HELPER_MM_SETCSR,
+    CBUILTIN_X86_HELPER_M_PREFETCH,
+    CBUILTIN_X86_HELPER_M_PREFETCHW,
     CBUILTIN_X86_HELPER_TILEZERO,
     CBUILTIN_X86_HELPER_TILELOADD,
     CBUILTIN_X86_HELPER_TILELOADDT1,
@@ -212,6 +221,18 @@ static const X86Instruction cbuiltin_x86_helper_ldmxcsr[] = {
 static const X86Instruction cbuiltin_x86_helper_stmxcsr[] = {
     { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -4, .form = X86_FORM_STMXCSR_M32 },
     { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -4, .form = X86_FORM_MOV_R32_RM32 },
+    { .form = X86_FORM_RET },
+};
+
+// _m_prefetch's and _m_prefetchw's lines at p, as clang's code prefetches them: PREFETCHT0 (a read, locality 3) and
+// PREFETCHW.
+static const X86Instruction cbuiltin_x86_helper_prefetch[] = {
+    { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_PREFETCHT0_M8 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_prefetchw[] = {
+    { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_PREFETCHW_M8 },
     { .form = X86_FORM_RET },
 };
 
