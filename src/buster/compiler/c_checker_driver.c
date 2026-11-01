@@ -961,6 +961,12 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                                 phase == 2 && extra[index].position != located ? extra[index].position :
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
+                    // An x86 builtin's call whose hard immediate constraint failed: clang's message at the call's begin,
+                    // published where the report's own token puts it (#1066).
+                    char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
+                    uint32_t x86_location = BUSTER_CHECK_NONE;
+                    const char* x86_message = phase == 1 ? check_diagnostic_x86_hard(input, stream, stream->reports + index, x86_text, sizeof(x86_text), &x86_location) :
+                                                           NULL;
                     if (source != BUSTER_CHECK_NONE)
                     {
                         const uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
@@ -1075,6 +1081,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
                                 "unsupported semantic '#pragma %.*s%s%.*s' directive",
                                 (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
+                        else if (x86_message != NULL && x86_location < count)
+                        {
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, "%s", x86_message);
                         }
                         else
                         {

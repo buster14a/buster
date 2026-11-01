@@ -838,7 +838,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY)
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_LAUNDER))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -1678,6 +1678,15 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
     CheckBuiltinX86Result checked;
     check_x86_action(types, call, action, &checked);
     *result = checked.action;
+    // A failed hard immediate constraint makes the call an invalid expression, as clang's is: its value has no type, so an
+    // enclosing call or operator inherits the error (check_graph_inherited_error) rather than reports another. Clang checks
+    // no call whose arguments hold an error (#1066).
+    const bool hard = checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_ICE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_RC ||
+                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SAE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE;
+    if (checked.status == CHECK_BUILTIN_X86_ERROR && hard)
+    {
+        result->value = (CheckValue){ 0 };
+    }
     CheckBuiltinX86Effect* effect = stream->x86 + stream->x86_count++;
     *effect = (CheckBuiltinX86Effect){
         .node = node,

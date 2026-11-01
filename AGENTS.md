@@ -398,7 +398,10 @@ designs and the compilers already built this way.
   them natively against clang -O0's build. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
-  bit builtins' and `expect`'s; `test-checker --program-align` runs them. The
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them, and
+  `classify_type`, `eh_return_data_regno`, `dwarf_cfa`, `launder` and the
+  generic leaves (`debugtrap`, `memcpy_inline` and the others: the guide's
+  "Generic builtins of clang's own checks and of an instruction or two"). The
   signaling NaNs and the `_Float16` and `__float128` constants (`nans`,
   `nanf16`, `inff128` and the others) are floating builtins, their NaNs' bits
   exact in static data and code (`check_action_nan_bits`); `test-checker
@@ -5114,12 +5117,11 @@ vectorized kernels with the printer's spellings by `pp_print_spellings`
 (`spellings`) and by its general loop for every chunk (`per-token`,
 `PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
 warm-up print, with markers or without, must give the same bytes, whatever the
-implementation and the read limit. With line markers the
-general loop prints in the time the printer before #649 took; with `-P`, it
-printed 7–17% slower than that printer on an AVX-512 Xeon and 6% slower a
-token on the 9700X, so `main.c`'s `-P` history is `-P`'s before. The 9700X
-job runs both, with and without `--markers`, on `main.c` and the frozen
-`sqlite3.c` where it measures the preprocessor, about 13 s.
+implementation and the read limit. Both take the printer's own copies, its
+line markers' batches among them, so the two rows differ in the spellings
+alone, and each row's history in the job is its before. The 9700X job runs
+both, with and without `--markers`, on `main.c` and the frozen `sqlite3.c`
+where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under

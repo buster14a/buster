@@ -392,28 +392,40 @@ vector, measured only with the predefines.
 
 ### The 9700X
 
-On the 9700X under its lock, lane 0 on CPU 2 and the others on one CPU of
-each other core (`--cpus 2,0,1,3,4,5,6,7`), medians of 11 runs. Clang 23.1.1
-built the compiler with `build.sh`. The frozen `sqlite3.c` uses the CI step's
-options (2,602 functions, 554,386 tokens in their bodies, the largest 28,522).
-Times are in milliseconds. These predate #1045: the benchmark emitted baseline
-x86-64 code, though the step passes `-march=znver5`; from #1045's commit on, the
-step's numbers time znver5 code, as `-c` compiles it, and aren't comparable with
-earlier ones.
+The 9700X CI job's `benchmark-check-lanes` step (#1069): under the host's
+lock, lane 0 on CPU 2 and the others on one CPU of each other core
+(`--cpus 2,$others`), medians of 11 runs. Clang 23.1.4 built the compiler
+(`BUSTER_HOST_ARCH=znver5`, `BUSTER_DEBUG_INFO=0`). The frozen `sqlite3.c`
+uses the CI step's options, `-march=znver5` among them, for which the
+benchmark emits znver5 code, as `-c` compiles it (#1045): 2,602 functions,
+554,920 tokens in their bodies, the largest 28,603, and 1,227,192 bytes of
+code. The run is #1072's, at
+`c8a4838b`; [the record](https://github.com/buster14a/buster-performance/tree/29d000e41628428f478785fc6d4c5e20f40603c2/docs/measurements/function-lanes-znver5-1069-2026-11-01)
+has its log and an earlier run's. Times are in milliseconds, with each
+row's fastest and slowest of the 11.
 
-| Lanes | Emission | Speedup | Preparation | Lanes' part | Merge |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 36.6 | 1.00 | 3.0 | 31.1 | 2.4 |
-| 2 | 22.6 | 1.62 | 3.0 | 17.1 | 2.5 |
-| 3 | 17.5 | 2.09 | 3.0 | 12.0 | 2.5 |
-| 4 | 15.0 | 2.43 | 3.0 | 9.6 | 2.5 |
-| 6 | 12.9 | 2.84 | 3.0 | 7.3 | 2.5 |
-| 8 | 11.9 | 3.06 | 3.0 | 6.4 | 2.5 |
-| The rule's (8) | 12.2 | 3.01 | 3.0 | 6.6 | 2.5 |
+| Lanes | Emission | Fastest | Slowest | Speedup | Preparation | Lanes' part | Merge |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 19.8 | 19.6 | 20.2 | 1.00 | 1.9 | 16.4 | 1.6 |
+| 2 | 12.6 | 12.5 | 12.8 | 1.57 | 1.8 | 9.1 | 1.7 |
+| 3 | 10.2 | 10.1 | 12.8 | 1.93 | 1.8 | 6.7 | 1.7 |
+| 4 | 9.1 | 9.0 | 9.6 | 2.17 | 1.8 | 5.6 | 1.7 |
+| 6 | 8.3 | 8.1 | 9.7 | 2.40 | 1.9 | 4.7 | 1.7 |
+| 8 | 8.1 | 7.9 | 12.9 | 2.45 | 1.9 | 4.5 | 1.7 |
+| The rule's (8) | 8.0 | 7.9 | 11.3 | 2.47 | 1.9 | 4.4 | 1.7 |
 
-The lanes' part takes 4.9 times less time on 8 lanes than on one. The
-preparation and the merge stay serial, about half of 8 lanes' time; most of
-both is passes over every token of the unit.
+The lanes' part takes 3.6 times less time on 8 lanes than on one. The
+preparation and the merge stay serial, 3.6 ms, 44% of 8 lanes' time; most of
+both is passes over every token of the unit. The 8-lane rows have the widest
+spread: their slowest runs are up to 60% over their medians. The earlier
+run's forced 8-lane median was 8.8 ms, its lanes' part 5.2 ms (3.1 times less
+than one lane's); its 1, 2 and 4 lanes and the rule's row stayed within 0.6%
+of this table's medians (8.07 against 8.02 ms for the rule's row).
+
+The table before #1069 (clang 23.1.1) timed baseline x86-64 code, though the
+step passed `-march=znver5`, and an earlier compiler: 36.6 ms on one lane and
+11.9 on 8, the lanes' part 4.9 times less. Its difference from this one mixes
+the target, the toolchain and the compiler's other changes since.
 
 The whole driver, `-c` of #136's frozen copy of `sqlite3.c`, 11 rounds in a
 rotating order, against main (`e04462c1`). The objects are byte-identical:

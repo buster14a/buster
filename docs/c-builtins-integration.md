@@ -1074,6 +1074,72 @@ width by alignments of every width, 128-bit and wide `_BitInt` sources,
 addresses in static data and in frames, and `expect`'s and
 `expect_with_probability`'s arguments evaluated once, in order, or not at all.
 
+## Generic builtins of clang's own checks and of an instruction or two
+
+The checker takes `__builtin_classify_type`, `__builtin_eh_return_data_regno`,
+`__builtin_dwarf_cfa` and `__builtin_launder` (catalog codes 0x3f0 to 0x3f3,
+after the NaN constants) as miscellaneous builtins, by clang 23's Sema and
+evaluator (`check_builtin_misc_generic`):
+
+- `classify_type(e)` is its operand's GCC type class, as clang's evaluator gives
+  it in C: `void` 0, an integer or an enumeration 1, `bool` 4, a pointer, an
+  array or a function 5, a floating type 8, a complex one 9, a struct 12, a union
+  13, a `_BitInt` 18, a vector 19, and `nullptr_t` -1. An `_Atomic` type is its
+  value type's class. The operand is any expression, of an incomplete type too,
+  read by its type before any conversion, and never runs (`classify_type(i++)`
+  leaves `i`). The call is an int constant expression;
+- `eh_return_data_regno(n)` is x86-64's DWARF register of the n-th exception
+  data register, rax's 0 and rdx's 1, and -1 for any other n, which must be an
+  integer constant expression. The call is an int constant expression;
+- `dwarf_cfa()` is the function's canonical frame address, which clang -O0's
+  code computes as rbp + 16: Tier 0's `FRAME_ADDRESS` plus 16, which gives the
+  function a frame pointer as `__builtin_frame_address` does;
+- `launder(p)` is p, of its type, which must be a pointer to a complete object
+  type: not `void`'s, not a function's, and not an incomplete struct's. An
+  address constant stays one (`int* p = __builtin_launder(&g);` at file scope),
+  so `__has_constexpr_builtin` answers 1 for it, as clang's does.
+
+Eleven others are leaves, per-unit helpers of clang -O0's instructions
+(`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
+features. Their prototypes are clang's metadata's:
+
+- `__builtin_debugtrap`: `int3`, whose trap returns past it;
+- `__builtin_readcyclecounter`: `rdtsc`, as `__builtin_ia32_rdtsc`;
+- `__builtin_readsteadycounter`: 0, since x86's code reads no counter for it;
+- `__builtin_thread_pointer`: `fs:[0]`;
+- `__builtin_stack_address`: the caller's rsp at the call, past the leaf's
+  return address;
+- `__builtin_dwarf_sp_column`: 7, rsp's DWARF register;
+- `__builtin___clear_cache`, `__builtin_assume_separate_storage` and
+  `__builtin_assume_dereferenceable`: nothing past their arguments, which the
+  call evaluates as clang's does;
+- `__builtin_memcpy_inline` and `__builtin_memset_inline`: their constant
+  size's bytes, by `rep movsb` and `rep stosb`, where clang's code stores them
+  itself.
+
+A call's size of `memcpy_inline` and `memset_inline` must be an integer
+constant expression (the prototype's `I`). A non-constant one is refused at the
+argument, as the x86 builtins' are; clang's message ("argument to ... must be
+a constant integer", at the call) is pending for both. `__builtin_verbose_trap`,
+whose two arguments clang requires to be string literals, is pending too.
+
+Two costs are accepted for now:
+- A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
+  clang's code makes the constant size's stores itself. Lowering them through
+  the misc builtins' straight-line copy and fill recipes
+  (`cbuiltin_misc_lower_copy_small`) is a follow-up.
+- `__has_constexpr_builtin` answers 0 for `__builtin_assume_separate_storage`,
+  which clang answers 1 for. A leaf has no catalogue row for the query to read,
+  and since the builtin returns `void`, no C constant expression can call it.
+
+`test-checker --program-align` checks source fixtures of their classes,
+registers, types and refusals by both paths against clang, and runs programs
+natively against clang -O0's build: the folds, launder's pointers, a callee's
+CFA against its caller's stack address, debugtrap's trap counted by a SIGTRAP
+handler, the counters, the thread and stack pointers, the no-ops' arguments
+evaluated once in order, and the inline copy's and fill's bytes
+(`c_check_program_generic_builtins_test.c`).
+
 ## Intrinsic checking contracts
 
 The later maintainer decision in #156 includes target intrinsics in #148's
@@ -1390,6 +1456,41 @@ storage. Allocation failure marks the source input as a resource failure,
 leaves call metadata untouched and restores scratch. Differential fixtures
 exercise both driver schedules, nested selections, dead statements, unevaluated
 contexts and pragma/`-w` policy; storage tests cover every allocation cut.
+
+For #1066, a call whose hard immediate constraint fails is reported as clang
+reports it. A nonconstant immediate, one of the prototype's `I` arguments or
+one a SemaX86 rule constrains, gives `argument to 'NAME' must be a constant
+integer`, where clang's `BuiltinConstantArg` says it. An invalid rounding or
+SAE control gives `invalid rounding argument`, and an invalid gather or
+scatter scale `scale argument must be 1, 2, 4, or 8`. Each is placed at the
+call's begin, the builtin's name, with the notes of the macros it comes from.
+The checker still records them as `CHECK_DIAG_INCOMPATIBLE` on the call's node,
+and its effect keeps the failed constraint. The call's value has no type, so
+that an enclosing call or operator inherits the error rather than reports
+another, as clang checks no call whose arguments hold an error. The driver and the corpus check
+find that effect by node (`check_diagnostic_x86_hard`), a search per error
+reported, since the stream keeps the effects in their nodes' order. The report
+keeps the call's `)` as its token, so its order among the unit's other
+diagnostics, and the cutoffs that read it, are as before: clang reports the call
+after its arguments' own diagnostics. `-fsyntax-only` and `-c` print it alike.
+`test-checker` (`check_test_x86_hard_errors`) compares hand-written fixtures
+with clang, line for line: the k-shifts, a call over two lines, two calls on one
+line, nested calls, macros, constants that are integer constant expressions and
+ones that aren't, rounding, SAE and scale controls, and errors in the arguments
+(an undeclared one, failed calls inside calls and operators, and failed calls in
+a conditional's arms, which each report). Each runs by both paths, with
+`-fsyntax-only` and `-c`. `check_test_x86_hard_corpus` runs the corpus check on
+a call over two lines, in a unit that parses and in one whose later syntax
+error sends it through the repair. Its first error must be clang's line,
+column and message. `check_test_x86_hard_every` generates a unit with one
+call for every in-scope x86 builtin and each of its integer constant arguments,
+that argument a parameter, and compares it with clang the same four ways. It
+also checks that every lowering row's immediate and rounding control is such
+an argument, so the lowering never refuses a nonconstant one that the checker
+let through. It also checks that every x86 builtin's message fits
+`BUSTER_CHECK_DIAGNOSTIC_X86_TEXT`, and that it generated every call it counted.
+Its coverage may not fall below the tree's: 588 calls of 555 builtins, and 555
+lowering rows.
 
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
 shuffle, conversion, nondeterministic and nontemporal spellings, and the 52
