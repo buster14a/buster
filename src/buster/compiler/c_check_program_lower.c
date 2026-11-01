@@ -11043,7 +11043,17 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
         memset(shared->local_map, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(shared->switch_locals, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
+        // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
+        // than every token (#877).
+        for (uint32_t c = 0; c < program->case_count; c += 1)
+        {
+            const uint32_t owner = program->cases[c].owner;
+            if (owner <= count)
+            {
+                shared->switch_locals[owner] = BUSTER_CHECK_NONE;
+            }
+        }
         if (input->vla_count != 0)
         {
             memset(shared->vla_identities, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -11056,8 +11066,22 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 }
             }
         }
-        memset(shared->local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         const uint32_t declaring_count = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
+        // Each body's locals' list is empty before the links below, where it is read (each body's, at its opening) and
+        // where it is written (each local's body), rather than at every token (#877).
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            shared->local_first[program->bodies[b].opening] = BUSTER_CHECK_NONE;
+        }
+        for (uint32_t d = 0; d < declaring_count; d += 1)
+        {
+            const uint32_t token = declaring[d];
+            const uint32_t body = input->declaration_bodies[token];
+            if (input->declarations[token] == token && body < count && input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token])
+            {
+                shared->local_first[body] = BUSTER_CHECK_NONE;
+            }
+        }
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
         for (uint32_t d = declaring_count; d-- > 0;)
         {

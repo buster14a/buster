@@ -685,6 +685,51 @@ every token) and visits only them:
   Compacting these maps and changing those readers together is tracked in
   [#641](https://github.com/buster14a/buster/issues/641).
 
+## Token-wide work for sparse constructs (#877)
+
+[#877](https://github.com/buster14a/buster/issues/877) found about 4% of `-c sqlite3.c` spent in passes that visit
+every token for constructs that the unit has a handful of, or none. Its label table (#917) and runtime-name declarations
+(#920) merged on their own. This change handles the rest of its items and the attributes comment's reader sweeps.
+Every change keeps both paths' objects and diagnostics byte for byte.
+
+- **Selections** (`check_input_selections`). The pass visited every token in postorder to find the closes whose first
+  child is `_Generic` or `__builtin_choose_expr`. Its body is now `check_input_selection`, for one close.
+  - **Vector path.** `check_input_selection_positions` compares 16 tokens' names at a time with the two names. Each
+    such keyword maps to its parent, of which it must be the first child, and sets a bit at that close's postorder
+    position. The pass visits those bits' closes in order, which is the order the walk would visit them in, so a
+    selection's operands are still selected before it.
+  - **Scalar path.** The walk, which is the kernel's twin too.
+  - **Fallback.** Without room for the bits (`(count + 63) / 64` words of scratch), the vector path walks.
+- **`check_program`'s columns.** `vla_first`, `allocation_first`, `allocation_next`, `vla_blocks` and `vla_saves`, and the
+  allocations' pass over every token, are made only where the unit may have a variable-length array
+  (`check_program_variable`): where it has a bound (`vla_count`), or its type table has a variable-length array's type.
+  The condition is exact, since `check_action_runtime_size` needs such a type. `asm_statements` is made only with asm
+  statements, and `region_first` only with regions. Each reader tests the column's presence first, as
+  `check_lower_prepare` already did for `vla_identities`. A jump's search for the blocks it leaves
+  (`check_control_leave`) is skipped without the variable-length arrays' columns. Each column was 4 bytes a token,
+  2.9 MB of `sqlite3.c`.
+- **The lowering's tables.** `switch_locals` is set to none only at the cases' owners, its only reads. `local_first` is
+  set to none only at the bodies' openings, where it is read, and at the locals' bodies, where it is written. Both used
+  to be filled at every token. `local_map` keeps its fill: an expression's object may be any object (a global's
+  included), which it reads as none.
+- **The asm labels** (`check_input_asm_labels`). The reader swept the `attributes` column three times for its
+  attributed tokens: for any label, for the labelled objects, and for the register variables' labels (which moved
+  here from `check_input_asm_finish`, in the same order).
+  - **One list.** `check_input_asm_attributed_tokens` now lists those tokens once, testing 8 pointers at a time.
+  - **Sparse states.** The objects' states and first labels are kept only for the labelled objects, which a bitset
+    marks, rather than cleared for every token (9 bytes a token).
+  - **The uses.** Before the pass over the uses reads an identifier's object and state, it tests whether the
+    identifier's declaration is one of a labelled object's: a bitset over the tokens
+    (`check_input_asm_labelled_tokens`), which a gather of 16 tokens' words reads (`check_input_asm_labelled_uses`).
+  - **Twins.** Each kernel's scalar path tests every token.
+  - The emission's own sweep of `attributes` and the column itself (#628) are unchanged.
+
+`test-checker` checks the selections' kernel against a reading of random forests of up to 1,100 tokens, and the asm
+labels' three kernels against a reading of random columns. Every column ends at a `PROT_NONE` page, and both paths
+run. The existing program fixtures of variable-length arrays (jumps out of their blocks among them), asm statements and
+statement expressions run through the columns, and every unit without them skips them. The 9700X numbers come from the
+pull request's `compile_time` step.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
