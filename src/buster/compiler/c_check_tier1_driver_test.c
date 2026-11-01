@@ -368,7 +368,9 @@ static const char check_test_tier1_masks_source[] =
 // unsigned by each parameter's type: `movl %edi, %eax` for a signed char's return), linked together. A narrow parameter
 // of the caller unit's own, which it truncates, is called there too. tier1_call_cross_signedness passes a signed char
 // value to an unsigned char parameter and an unsigned char value to a signed char parameter, so the extension must be
-// the parameter's type's, not the argument expression's.
+// the parameter's type's, not the argument expression's. clang_calls_narrow, in the clang -O2 unit, calls the caller
+// unit's tier1_narrow_entry through a prototype of ints, with bits set above each parameter's width: the callee must
+// truncate as clang -O0's own callee does.
 static const char check_test_tier1_narrow_caller_source[] =
     "#include <stdio.h>\n"
     "int tier1_take_s8(signed char c);\n"
@@ -377,6 +379,7 @@ static const char check_test_tier1_narrow_caller_source[] =
     "int tier1_take_u16(unsigned short s);\n"
     "int tier1_take_bool(_Bool b);\n"
     "long tier1_take_mixed(signed char a, unsigned short b, short c, unsigned char d);\n"
+    "int clang_calls_narrow(int x);\n"
     "static int tier1_call_narrow(int x)\n"
     "{\n"
     "    signed char a = (signed char)(x * 37);\n"
@@ -400,12 +403,20 @@ static const char check_test_tier1_narrow_caller_source[] =
     "{\n"
     "    return a * 100000 + b + (c ? 7 : 0);\n"
     "}\n"
+    "int tier1_narrow_entry(signed char a, unsigned short b, _Bool c)\n"
+    "{\n"
+    "    return a * 100000 + b + (c ? 7 : 0);\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    unsigned long total = 0;\n"
     "    for (int x = -300; x < 300; x += 7)\n"
     "    {\n"
     "        total = total * 31 + (unsigned long)tier1_call_narrow(x) + (unsigned long)tier1_call_mixed(x) + (unsigned long)tier1_call_cross_signedness(x) + (unsigned long)tier1_narrow_parameters((signed char)x, (unsigned short)(x * 3), x > 0);\n"
+    "    }\n"
+    "    for (int x = -4; x < 4; x += 1)\n"
+    "    {\n"
+    "        total = total * 31 + (unsigned long)clang_calls_narrow(x);\n"
     "    }\n"
     "    printf(\"%lu\\n\", total);\n"
     "    return 0;\n"
@@ -417,7 +428,9 @@ static const char check_test_tier1_narrow_callee_source[] =
     "int tier1_take_s16(short s) { return s; }\n"
     "int tier1_take_u16(unsigned short s) { return s; }\n"
     "int tier1_take_bool(_Bool b) { return b ? 7 : 3; }\n"
-    "long tier1_take_mixed(signed char a, unsigned short b, short c, unsigned char d) { return a * 1000000L + b * 1000L + c * 10L + d; }\n";
+    "long tier1_take_mixed(signed char a, unsigned short b, short c, unsigned char d) { return a * 1000000L + b * 1000L + c * 10L + d; }\n"
+    "int tier1_narrow_entry(int a, int b, int c);\n"
+    "int clang_calls_narrow(int x) { return tier1_narrow_entry(0x123456f0 + x, 0x7fff0000 | (x & 0xffff), 0x5a5a0000 | (x & 1)); }\n";
 
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
@@ -1320,7 +1333,7 @@ static void check_test_driver_tier1_narrow(CheckTest* test, const char* clang, c
     char expected[256] = { 0 };
     const bool ran = referenced && callee_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's builds of the narrow arguments' fixture run");
-    static const char* const names[4] = { "tier1_call_narrow", "tier1_call_mixed", "tier1_call_cross_signedness", "tier1_narrow_parameters" };
+    static const char* const names[5] = { "tier1_call_narrow", "tier1_call_mixed", "tier1_call_cross_signedness", "tier1_narrow_parameters", "tier1_narrow_entry" };
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
     {
         for (uint32_t path = 0; path < 2; path += 1)
