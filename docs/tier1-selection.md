@@ -149,8 +149,10 @@ patterns are:
 four-byte spill slots. Their logical memory widths remain one/two bytes.
 Signed extension interprets the source sign bit, then normalizes a narrow
 destination again; for example, `I8(-1)` to `I16` has register bits `0xffff`.
-Narrow arithmetic/comparisons and byte/word parameter, return and call ABI
-forms remain unsupported. `i1` memory and signed-extension forms are also
+Narrow arithmetic/comparisons remain unsupported, as do raw `i8`/`i16`
+parameter, return and call ABI forms; the C lowering gives a call's narrow
+arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
+"Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and

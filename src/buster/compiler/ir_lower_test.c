@@ -1948,17 +1948,32 @@ static void ir_lower_test_narrow(IrLowerTestTally* tally)
     };
     if (ready && ir_lower_test_lower(tally, &source, IR_I32, 2, &output, &twin_output, &scratch, &function, 0, 0))
     {
-        // Each parameter's i32, and the truncation its store reads.
+        // Each parameter's i32, the truncation its store reads, and that store.
         uint32_t truncated = 0;
+        uint32_t truncations[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
         for (uint32_t i = 0; i < function.instruction_count; i += 1)
         {
             const uint32_t a = function.a[i];
             const bool parameter = function.op[i] == IR_TRUNC && a < function.instruction_count && function.op[a] == IR_PARAM && function.type[a] == IR_I32;
-            truncated |= parameter && function.a[a] == 0 && function.type[i] == IR_I8 ? 1u : 0;
-            truncated |= parameter && function.a[a] == 1 && function.type[i] == IR_I16 ? 2u : 0;
+            if (parameter && function.a[a] == 0 && function.type[i] == IR_I8)
+            {
+                truncated |= 1;
+                truncations[0] = i;
+            }
+            if (parameter && function.a[a] == 1 && function.type[i] == IR_I16)
+            {
+                truncated |= 2;
+                truncations[1] = i;
+            }
         }
-        ir_lower_test_expect(tally, function.parameter_count == 2 && function.parameter_types[0] == IR_I32 && function.parameter_types[1] == IR_I32 && truncated == 3,
-                             "a narrow parameter arrives as an i32 its callee truncates", 0, 0);
+        uint32_t stored = 0;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            stored |= function.op[i] == IR_STORE && function.a[i] == 0 && function.b[i] == truncations[0] ? 1u : 0;
+            stored |= function.op[i] == IR_STORE && function.a[i] == 1 && function.b[i] == truncations[1] ? 2u : 0;
+        }
+        ir_lower_test_expect(tally, function.parameter_count == 2 && function.parameter_types[0] == IR_I32 && function.parameter_types[1] == IR_I32 && truncated == 3 && stored == 3,
+                             "a narrow parameter arrives as an i32 its callee truncates into its slot", 0, 0);
         uint32_t call = BUSTER_IR_NONE;
         for (uint32_t i = 0; i < function.instruction_count; i += 1)
         {
