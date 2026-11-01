@@ -71,6 +71,11 @@ unset CPATH C_INCLUDE_PATH
 # then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
 # clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Test c-testsuite's programs with Tier 1's code [4 CPUs]
+# #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
+# others by Tier 0), by both paths, whose allocators assign registers differently, both programs run; the scalar
+# path's executable the same bytes with the ids in source order and in another (#153). The declared subset must pass.
+./build/compiler test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
@@ -217,6 +222,7 @@ fi
 ./build/compiler test-ir-simd
 ./build/compiler test-ir-lowering
 ./build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c
+./build/compiler test-ir-source --dataflow-self-test
 ./build/compiler test-ir-parse
 ./build/compiler test-ir-reduce
 ./build/compiler test-ir-metamorphic --seed 731 --count 6
@@ -251,6 +257,7 @@ fi
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-check-builtins-atomic-rmw
 ./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-bits
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-lower
 ./build/compiler test-builtin-varargs-lower
@@ -293,6 +300,15 @@ clang -std=c17 -O2 -Wall -Wextra -Werror tests/peak-rss.c -o build/test-peak-rss
 ./build/compiler test-checker-driver --executable ./build/compiler
 == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
 ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
+== Test Make dependency-rule serialization
+# #805's serializer, standalone until the driver calls it: the x86-64 build's scalar classifier and the
+# native build's AVX-512BW path where the host supplies it, each over generated names against an
+# independent quoting implementation, guarded tails, malformed records and capacities, and --oracle's
+# -MT/-MQ target rules against the installed gcc and clang's -MM output.
+clang -std=c17 -O2 -march=x86-64 -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-scalar
+./build/test-dependency-rule-scalar --oracle
+clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-native
+./build/test-dependency-rule-native --oracle
 == Test DWARF source lines and late address finalization
 # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
 ./build/compiler test-debug --cross-check

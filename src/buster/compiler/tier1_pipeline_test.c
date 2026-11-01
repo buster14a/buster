@@ -695,7 +695,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     if (ok)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.scalar = !test->vector;
+        options.path = test->vector ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_SCALAR;
         IrOptimizeResult result;
         const IrCheck check = ir_optimize(&promoted, &test->arenas[TIER1_PIPELINE_OPTIMIZED], scratch, options, &result);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real SCCP, DCE and CFG optimization succeeds");
@@ -1275,7 +1275,9 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         if ((shape == 9 || shape == 14) && f + 1 == fixture.program.function_count)
                         {
-                            tier1_pipeline_expect(test, emitted->call_stores != 0 && emitted->call_loads != 0, "nonconstant values live across a direct call reach caller-save stores and reloads");
+                            // Kept in callee-saved registers (tier1_emit_cfg_callee), or saved around the call.
+                            tier1_pipeline_expect(test, emitted->callee_used != 0 || (emitted->call_stores != 0 && emitted->call_loads != 0),
+                                                  "nonconstant values live across a direct call keep callee-saved registers or reach caller-save stores and reloads");
                         }
                         if (shape == 13)
                         {

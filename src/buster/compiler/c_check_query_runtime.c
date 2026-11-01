@@ -261,7 +261,8 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
         }
     }
     effect |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP || builtin == CBUILTIN_PREFETCH ||
-              builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET || builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA);
+              builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET || builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA ||
+              cbuiltin_carry(builtin));
     effect |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
                                                 builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
     effect |= op == CHECK_OP_BUILTIN_FLOAT && check_builtin_math_kind(builtin) == CHECK_BUILTIN_MATH_SQRT;
@@ -355,8 +356,7 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     }
     CheckActionResult result = { 0 };
     uint32_t argument_mask = action.argument_count >= 32 ? UINT32_MAX : (1u << action.argument_count) - 1;
-    bool builtin_fp_effect = strict && action.op == CHECK_OP_BUILTIN_FLOAT &&
-                             (action.member == CBUILTIN_FPCLASSIFY || action.member == CBUILTIN_ISINF_SIGN);
+    bool builtin_fp_effect = strict && action.op == CHECK_OP_BUILTIN_FLOAT && check_builtin_float_strict(action.member);
     if (action.op == CHECK_OP_BUILTIN_MISC || action.op == CHECK_OP_BUILTIN_FLOAT || action.op == CHECK_OP_BUILTIN_BIT_CAST)
     {
         CheckBuiltinMiscEffect misc;

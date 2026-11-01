@@ -16,12 +16,22 @@
 #define BUSTER_IR_OPTIMIZE_SCCP 1u
 #define BUSTER_IR_OPTIMIZE_DCE 2u
 #define BUSTER_IR_OPTIMIZE_CFG 4u
+#define BUSTER_IR_OPTIMIZE_AUTO 0u
+#define BUSTER_IR_OPTIMIZE_VECTOR 1u
+#define BUSTER_IR_OPTIMIZE_SCALAR 2u
 
 typedef struct IrOptimizeOptions IrOptimizeOptions;
 struct IrOptimizeOptions
 {
     uint32_t passes;
     uint32_t sweep_limit;
+    // The caller's requested path. AUTO picks a twin by the function's size (#860): the vector passes' per-call
+    // set-up (verification, the dominator rows and the CFG's pointer jumping, in prepare and again in result
+    // verification) doesn't pay on small functions, so below the measured bound the scalar passes run. VECTOR and
+    // SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
+    uint32_t path;
+    // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
+    // the internal pieces without ir_optimize set it directly (ir_optimize_licm.c, ir_optimize_sroa.c).
     bool scalar;
 };
 
@@ -72,6 +82,7 @@ static __attribute__((unused)) IrOptimizeOptions ir_optimize_options(void)
     const IrOptimizeOptions result = {
         .passes = BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG,
         .sweep_limit = BUSTER_IR_OPTIMIZE_DEFAULT_SWEEPS,
+        .path = BUSTER_IR_OPTIMIZE_AUTO,
     };
     return result;
 }
@@ -404,7 +415,7 @@ static __m512i ir_optimize_lookup_blocks(const uint32_t* values, const uint32_t*
 // The caller must protect phi-edge identity before classifying a block as transparent. A cycle of transparent
 // jumps resolves to its smallest block id, where the consumer retains a self-loop. This preserves nontermination.
 // Both implementations write exactly the same targets. Failure leaves targets and scratch.length unchanged.
-static __attribute__((unused)) bool ir_optimize_thread_targets(Arena* scratch, const uint32_t* direct, uint32_t count, uint32_t* targets, bool scalar)
+static __attribute__((unused, aligned(64))) bool ir_optimize_thread_targets(Arena* scratch, const uint32_t* direct, uint32_t count, uint32_t* targets, bool scalar)
 {
     (void)scalar;
 
@@ -719,6 +730,26 @@ static uint8_t ir_optimize_meet(uint8_t left, IrConstant a, uint8_t right, IrCon
     return result;
 }
 
+// A visit's transfer kind by operation: a fold candidate or the overdefined default (0), a
+// constant, a state copy, a phi meet, a select pick, or a unary fold. The op-indexed read keeps
+// the per-instruction dispatch a load where the compare chain lowered to a jump table's indirect
+// branch (#786).
+static const uint8_t ir_optimize_transfer_kinds[64] = {
+    [IR_CONST] = 1,
+    [IR_COPY] = 2,
+    [IR_PHI] = 3,
+    [IR_SELECT] = 4,
+    [IR_NEG] = 5,
+    [IR_NOT] = 5,
+    [IR_TRUNC] = 5,
+    [IR_ZEXT] = 5,
+    [IR_SEXT] = 5,
+    [IR_INTTOPTR] = 5,
+    [IR_PTRTOINT] = 5,
+    [IR_BITCAST] = 5,
+    [IR_FNEG] = 5,
+};
+
 static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value)
 {
     const IrFunction* f = work->function;
@@ -726,17 +757,18 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
     const uint32_t a = f->a[i];
     const uint32_t b = f->b[i];
     uint8_t result = IROPT_OVERDEFINED;
-    if (op == IR_CONST)
+    const uint32_t kind = ir_optimize_transfer_kinds[op];
+    if (kind == 1)
     {
         result = IROPT_CONSTANT;
         *value = f->constants[a];
     }
-    else if (op == IR_COPY)
+    else if (kind == 2)
     {
         result = work->states[a];
         *value = work->values[a];
     }
-    else if (op == IR_PHI)
+    else if (kind == 3)
     {
         result = IROPT_UNKNOWN;
         for (uint32_t incoming = 0; incoming < b; incoming += 1)
@@ -750,7 +782,7 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
             }
         }
     }
-    else if (op == IR_SELECT)
+    else if (kind == 4)
     {
         if (work->states[a] == IROPT_CONSTANT)
         {
@@ -768,7 +800,7 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
             result = IROPT_UNKNOWN;
         }
     }
-    else if (op == IR_NEG || op == IR_NOT || op == IR_TRUNC || op == IR_ZEXT || op == IR_SEXT || op == IR_INTTOPTR || op == IR_PTRTOINT || op == IR_BITCAST || op == IR_FNEG)
+    else if (kind == 5)
     {
         result = work->states[a];
         if (result == IROPT_CONSTANT)
@@ -776,19 +808,21 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
             unsigned __int128 bits = ir_optimize_bits(work->values[a]);
             const uint32_t source_width = ir_type_bits[f->type[a]];
             const uint32_t width = ir_type_bits[f->type[i]];
+            // Each applies to one op, so independent conditions; an else-if chain lowers to a
+            // jump table's indirect branch here (#786).
             if (op == IR_NEG)
             {
                 bits = -bits;
             }
-            else if (op == IR_NOT)
+            if (op == IR_NOT)
             {
                 bits = ~bits;
             }
-            else if (op == IR_SEXT && (bits & ((unsigned __int128)1 << (source_width - 1))) != 0)
+            if (op == IR_SEXT && (bits & ((unsigned __int128)1 << (source_width - 1))) != 0)
             {
                 bits |= ~(unsigned __int128)0 << source_width;
             }
-            else if (op == IR_FNEG)
+            if (op == IR_FNEG)
             {
                 bits ^= (unsigned __int128)1 << (width - 1);
             }
@@ -880,12 +914,6 @@ static bool ir_optimize_control(IrOptimizeWork* work, uint32_t i, bool queue)
     {
         target = f->a[i];
     }
-    else if (op == IR_BR_INDIRECT)
-    {
-        // It may go to any of its labels (its list's, a jump table's, or every label): no address it holds is known to be
-        // one label's rather than another's.
-        all = true;
-    }
     else if (op == IR_CBR || op == IR_SWITCH)
     {
         const uint8_t state = work->states[f->a[i]];
@@ -908,6 +936,12 @@ static bool ir_optimize_control(IrOptimizeWork* work, uint32_t i, bool queue)
                 }
             }
         }
+    }
+    else if (op == IR_BR_INDIRECT)
+    {
+        // It may go to any of its labels (its list's, a jump table's, or every label): no address it holds is known to be
+        // one label's rather than another's.
+        all = true;
     }
     bool changed = false;
     for (uint32_t edge = work->cfg.successor_offsets[block]; edge < work->cfg.successor_offsets[(uint64_t)block + 1]; edge += 1)
@@ -1109,7 +1143,7 @@ static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
     return result;
 }
 
-static bool ir_optimize_mark_operands(IrOptimizeWork* work, uint32_t i, bool queue)
+static __attribute__((aligned(64))) bool ir_optimize_mark_operands(IrOptimizeWork* work, uint32_t i, bool queue)
 {
     const IrFunction* f = work->function;
     bool changed = false;
@@ -1136,7 +1170,7 @@ static bool ir_optimize_mark_operands(IrOptimizeWork* work, uint32_t i, bool que
     return changed;
 }
 
-static void ir_optimize_dce_worklist(IrOptimizeWork* work)
+static __attribute__((aligned(64))) void ir_optimize_dce_worklist(IrOptimizeWork* work)
 {
     for (uint32_t i = 0; i < work->function->instruction_count; i += 1)
     {
@@ -1151,7 +1185,7 @@ static void ir_optimize_dce_worklist(IrOptimizeWork* work)
     }
 }
 
-static void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
+static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
 {
     const IrFunction* f = work->function;
     for (uint32_t block = 0; block < f->block_count; block += 1)
@@ -1315,6 +1349,19 @@ static uint32_t ir_optimize_phi_inputs(const IrOptimizeWork* work, uint32_t inst
     return count;
 }
 
+// The rewrite's structured-operand arms by operation: a phi's live incoming pairs, a call's
+// argument list, a cbr's two targets, a switch's case list, or a br_indirect's label list. The
+// op-indexed read keeps the per-instruction dispatch a load where the compare chain lowered to a
+// jump table's indirect branch (#786).
+static const uint8_t ir_optimize_rewrite_kinds[64] = {
+    [IR_PHI] = 1,
+    [IR_CALL] = 2,
+    [IR_CALL_INDIRECT] = 2,
+    [IR_CBR] = 3,
+    [IR_SWITCH] = 4,
+    [IR_BR_INDIRECT] = 5,
+};
+
 static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* scratch, IrOptimizeOptions options, IrFunction* result)
 {
     const IrFunction* f = work->function;
@@ -1371,24 +1418,25 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                     if (work->live[i] != 0 && phi == (phase == 0))
                     {
                         values[i] = sizes.instruction_count++;
+                        const uint32_t kind = ir_optimize_rewrite_kinds[f->op[i]];
                         if (work->states[i] == IROPT_CONSTANT && f->op[i] != IR_CONST)
                         {
                             sizes.constant_count += 1;
                         }
-                        else if (f->op[i] == IR_PHI)
+                        else if (kind == 1)
                         {
                             sizes.extra_count += (uint64_t)ir_optimize_phi_inputs(work, i) * 2;
                         }
-                        else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
+                        else if (kind == 2)
                         {
                             sizes.call_count += 1;
                             sizes.extra_count += f->calls[f->b[i]].argument_count;
                         }
-                        else if (f->op[i] == IR_SWITCH && ir_optimize_single_successor(work, block) == BUSTER_IR_NONE)
+                        else if (kind == 4 && ir_optimize_single_successor(work, block) == BUSTER_IR_NONE)
                         {
                             sizes.extra_count += 1 + (uint64_t)f->c[i] * 2;
                         }
-                        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                        else if (kind == 5 && f->b[i] != BUSTER_IR_NONE)
                         {
                             sizes.extra_count += f->c[i];
                         }
@@ -1505,7 +1553,8 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                 {
                                     candidate.c[out] = values[f->c[i]];
                                 }
-                                if (op == IR_PHI)
+                                const uint32_t kind = ir_optimize_rewrite_kinds[op];
+                                if (kind == 1)
                                 {
                                     candidate.a[out] = extra;
                                     candidate.b[out] = 0;
@@ -1520,7 +1569,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                         }
                                     }
                                 }
-                                else if (op == IR_CALL || op == IR_CALL_INDIRECT)
+                                else if (kind == 2)
                                 {
                                     candidate.b[out] = calls;
                                     candidate.calls[calls] = f->calls[f->b[i]];
@@ -1531,12 +1580,12 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                     }
                                     calls += 1;
                                 }
-                                else if (op == IR_CBR)
+                                else if (kind == 3)
                                 {
                                     candidate.b[out] = blocks[threads[f->b[i]]];
                                     candidate.c[out] = blocks[threads[f->c[i]]];
                                 }
-                                else if (op == IR_SWITCH)
+                                else if (kind == 4)
                                 {
                                     candidate.b[out] = extra;
                                     candidate.extra[extra++] = blocks[threads[f->extra[f->b[i]]]];
@@ -1546,7 +1595,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                         candidate.extra[extra++] = blocks[threads[f->extra[f->b[i] + 2 + entry * 2]]];
                                     }
                                 }
-                                else if (op == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                                else if (kind == 5 && f->b[i] != BUSTER_IR_NONE)
                                 {
                                     // Its labels' list: label indices, which the rewrite keeps (their blocks move).
                                     candidate.b[out] = extra;
@@ -1590,14 +1639,32 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
     return check;
 }
 
-static IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scratch, IrOptimizeOptions options, IrOptimizeResult* result)
+// #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's shapes and
+// benchmark-ir-source's corpora (sqlite3.c's 2602 functions, lua's 1096): the vector passes' per-block
+// set-up only pays on giant dataflow-dense functions — at 16K+ instructions in near-single-block shape
+// vector wins 9-11%, at 8K it breaks even, and it loses everywhere smaller or branchier — so the scalar
+// passes run everywhere else. No corpus function reaches the bound; the largest real instruction-per-block
+// density is chacha_block's 247, where vector still loses 5%.
+#define BUSTER_IR_OPTIMIZE_AUTO_VECTOR_INSTRUCTIONS 8192u
+#define BUSTER_IR_OPTIMIZE_AUTO_VECTOR_BLOCK_LENGTH 512u
+
+static bool ir_optimize_auto_scalar(const IrFunction* function)
+{
+    const bool result = function->instruction_count < BUSTER_IR_OPTIMIZE_AUTO_VECTOR_INSTRUCTIONS ||
+                        (uint64_t)function->block_count * BUSTER_IR_OPTIMIZE_AUTO_VECTOR_BLOCK_LENGTH > function->instruction_count;
+    return result;
+}
+
+static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scratch, IrOptimizeOptions options, IrOptimizeResult* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
-    if (output != scratch && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
+    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
     {
+        options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
+                         (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
         check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)

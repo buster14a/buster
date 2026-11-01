@@ -81,6 +81,10 @@ struct Tier1CfgInput
     const uint8_t* classes;
     const uint32_t* allowed_registers;
     const uint32_t* definitions;
+    // Optional: the registers each value's definition must be in (a parameter's incoming one), a subset of its allowed
+    // ones, on the interval that holds the definition alone; allowed_registers holds on the others, and on every interval
+    // of a value whose entry is 0.
+    const uint32_t* definition_registers;
     // Optional: a value that may be recomputed rather than spilled.
     const uint8_t* rematerializable;
     // Ordinary uses, sorted per value: not phi operands. use_required is optional, as tier1_allocate takes it.
@@ -262,7 +266,8 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     valid = valid && (input->value_count == 0 || input->use_offsets[0] == 0) && (input->value_count == 0 || input->use_offsets[input->value_count] == input->use_count);
     for (uint32_t v = 0; valid && v < input->value_count; v += 1)
     {
-        valid = input->classes[v] < BUSTER_TIER1_ALLOCATE_CLASSES && (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && input->definitions[v] < input->position_count;
+        valid = input->classes[v] < BUSTER_TIER1_ALLOCATE_CLASSES && (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && input->definitions[v] < input->position_count &&
+                (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
         valid = valid && (input->rematerializable == 0 || input->rematerializable[v] <= 1) && input->use_offsets[v] <= input->use_offsets[v + 1];
         const uint32_t block = valid ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
         for (uint32_t u = input->use_offsets[v]; valid && u < input->use_offsets[v + 1]; u += 1)
@@ -517,7 +522,8 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
         pieces->starts[i] = start;
         pieces->ends[i] = end;
         pieces->values[i] = v;
-        pieces->allowed[i] = input->allowed_registers[v];
+        const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
+        pieces->allowed[i] = defined != 0 && start <= input->definitions[v] && input->definitions[v] < end ? defined : input->allowed_registers[v];
         pieces->classes[i] = input->classes[v];
         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
         pieces->hints[i] = hint;
@@ -1258,6 +1264,10 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 const bool reg = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
                 valid = (allocation->starts[f] == position && allocation->ends[f] > position && allocation->kinds[f] <= BUSTER_TIER1_ALLOCATE_REMATERIALIZE) || tier1_cfg_fail(check, "fragments don't tile their interval", 0, v, position);
                 valid = valid && ((!reg || (allocation->registers[f] < 32 && ((input->allowed_registers[v] >> allocation->registers[f]) & 1) != 0)) || tier1_cfg_fail(check, "a register outside the value's mask", 0, v, position));
+                // The definition's fragment in one of its registers.
+                const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
+                const bool defines = allocation->starts[f] <= input->definitions[v] && input->definitions[v] < allocation->ends[f];
+                valid = valid && ((defined == 0 || !defines || (reg && ((defined >> allocation->registers[f]) & 1) != 0)) || tier1_cfg_fail(check, "a definition outside its registers", 0, v, position));
                 valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v)) || tier1_cfg_fail(check, "a spill without a slot", 0, v, position));
                 valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_REMATERIALIZE || (input->rematerializable != 0 && input->rematerializable[v] != 0)) || tier1_cfg_fail(check, "a rematerialization of a value without a recipe", 0, v, position));
                 position = allocation->ends[f];

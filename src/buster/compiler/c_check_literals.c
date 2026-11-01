@@ -11,6 +11,13 @@
 #include <math.h>
 #include <stdlib.h>
 
+typedef enum CheckLiteralRange
+{
+    CHECK_LITERAL_RANGE_NONE,
+    CHECK_LITERAL_RANGE_OVERFLOW,
+    CHECK_LITERAL_RANGE_UNDERFLOW,
+} CheckLiteralRange;
+
 typedef struct CheckLiteral CheckLiteral;
 struct CheckLiteral
 {
@@ -33,6 +40,9 @@ struct CheckLiteral
     bool valid;
     bool resource;
     bool bit_unsigned;
+    // CHECK_LITERAL_RANGE_*: whether the spelling's magnitude is past its type's largest or below its smallest, in
+    // what was the literal's padding before `high`, so that every literal keeps its 48 bytes.
+    uint8_t range;
     // A bit-precise constant's bits past 64, 0 for every other literal: in what was the literal's padding, so that it
     // keeps its 48 bytes, which every literal is zeroed and copied in.
     uint64_t high;
@@ -366,6 +376,22 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             result->floating = value;
             result->real = true;
             result->valid = separators && end != spelling && end == spelling + written;
+            if (result->valid && isinf(value))
+            {
+                result->range = CHECK_LITERAL_RANGE_OVERFLOW;
+            }
+            else if (result->valid && value == 0)
+            {
+                // Only a nonzero spelling rounded all the way to zero is too small. Representable subnormals
+                // are quiet, as are exact zero spellings regardless of exponent. Ignore exponent digits.
+                bool nonzero = false;
+                for (uint32_t i = hex ? 2 : 0; i < written && (spelling[i] | 32u) != (hex ? 'p' : 'e'); i += 1)
+                {
+                    const uint32_t digit = check_literal_digit((uint8_t)spelling[i]);
+                    nonzero |= digit != 0 && digit < (hex ? 16u : 10u);
+                }
+                result->range = nonzero ? CHECK_LITERAL_RANGE_UNDERFLOW : CHECK_LITERAL_RANGE_NONE;
+            }
         }
         else
         {
@@ -454,6 +480,8 @@ static CheckValue check_literal_value(CheckLiteral literal)
     };
     return value;
 }
+
+#include "c_check_literal_warning.c"
 
 static bool check_literal_character_unit(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23)
 {

@@ -6676,7 +6676,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else if (count > 3 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
+    else if (count > 4 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
     {
         check_lower_unsupported(writer, "this builtin");
     }
@@ -6691,6 +6691,30 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
         *call = (CBuiltinMiscLowerCall){ .id = runtime, .argument_count = evaluated };
+        if (cbuiltin_bits(call->id))
+        {
+            // A bit builtin's recipe (c_builtin_bits_lower.c) takes its arguments' and result's descriptors, of up to 128
+            // bits (the checker refuses wider _BitInts), and a result past 64 bits' frame object, whose value it is.
+            const TypeId result_type = stream->values[node].type;
+            const uint32_t result = check_lower_builtin_type(program->types, result_type);
+            bool described = cbuiltin_carry(call->id) || result != 0;
+            for (uint32_t i = 0; i < evaluated; i += 1)
+            {
+                const bool pointer = cbuiltin_carry(call->id) && i == 3;
+                const uint32_t type = pointer ? 0 : check_lower_builtin_type(program->types, stream->argument_conversions[first + i].type);
+                described = described && (pointer || type != 0);
+                call->argument_types[i] = type;
+            }
+            call->result_type = result;
+            if (!described)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else if (!cbuiltin_carry(call->id) && cbuiltin_bits_width(result) > 64)
+            {
+                call->result_object = check_lower_temporary(writer, check_lower_class(writer, result_type));
+            }
+        }
         if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
         {
             const uint32_t size_node = graph->argument_nodes[first + 2];
@@ -6708,8 +6732,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         }
         for (uint32_t i = 0; i < evaluated; i += 1)
         {
+            // A bit builtin's 128-bit integer is a frame object of its own (check_lower_temporary's), whose limbs its
+            // recipe loads.
             const TypeId type = stream->argument_conversions[first + i].type;
-            if (check_lower_memory(writer, type))
+            if (check_lower_memory(writer, type) && !cbuiltin_bits(call->id))
             {
                 check_lower_unsupported(writer, "builtins of long double and __int128 operands");
             }
@@ -6718,8 +6744,9 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = stream->values[node].type });
         for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
+            // A frame object's value is its value class's (a 128-bit integer's), as SET_LOCAL writes it.
             const uint32_t local = call->arguments[i];
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[local], local);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->value_classes[local], local);
             check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
         }
     }
@@ -6830,11 +6857,44 @@ static __attribute__((noinline)) void check_lower_floating_strict(CheckLowerWrit
     }
 }
 
+// isfpclass of a vector: each lane's classification by the scalar recipe of the lane loaded into the argument local,
+// stored into the result's frame object as an int (a float's lane) or a long long (a double's), 1 or 0, as clang's zero
+// extension of llvm.is.fpclass's lanes is; then the result vector. Out of line, as few tasks are.
+static __attribute__((noinline)) void check_lower_floating_lanes(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const CBuiltinFloatLowerCall* call = writer->floating + task.node;
+    const uint8_t element = (uint8_t)call->argument_class;
+    const uint8_t lane_class = call->lane_bytes == 8 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+    for (uint32_t lane = 0; lane < call->lanes && writer->output->status == CHECK_PROGRAM_OK; lane += 1)
+    {
+        const uint64_t offset = (uint64_t)lane * call->lane_bytes;
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->result_local);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->vector_local);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_LOAD, element, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, element, call->argument_local);
+        check_lower_floating_recipe(writer, call, BUSTER_TYPE_INT);
+        if (lane_class == BUSTER_TYPED_CLASS_I64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SET, lane_class, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, call->result_local);
+}
+
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
 static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CBuiltinFloatLowerCall* call = writer->floating + task.node;
-    if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
+    if (call->lanes != 0)
+    {
+        check_lower_floating_lanes(writer, task);
+    }
+    else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
     {
         check_lower_floating_strict(writer, task);
     }
@@ -6942,10 +7002,17 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
     {
         const CheckBuiltinFloatEffect* effect = stream->floating + selected;
         const CBuiltinId id = effect->runtime_builtin;
-        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL;
+        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL ||
+                              cbuiltin_float_class(id) || cbuiltin_float_signbit(id) || cbuiltin_float_canonicalize(id);
         const bool compare = id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED;
         const bool selectors = id == CBUILTIN_FPCLASSIFY;
-        if (effect->unsupported != 0 || (classify && count != (selectors ? 6u : 1u)) || (compare && count != 2))
+        // isfpclass's mask (its second argument) is a constant the effect holds, never evaluated. Its first may be a vector.
+        const uint32_t arguments = selectors ? 6u : id == CBUILTIN_ISFPCLASS ? 2u : 1u;
+        const TypeId operand = id == CBUILTIN_ISFPCLASS && count == 2 ?
+                               type_unqualified(type_strip_aligned(program->types, stream->values[graph->argument_nodes[graph->argument_offsets[node]]].type)) : 0;
+        const uint8_t operand_kind = operand != 0 ? type_kind(program->types, operand) : BUSTER_TYPE_KIND_VOID;
+        const bool vector = operand_kind == BUSTER_TYPE_KIND_VECTOR || operand_kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        if (effect->unsupported != 0 || (classify && count != arguments) || (compare && count != 2))
         {
             check_lower_unsupported(writer, "this floating builtin");
         }
@@ -6974,6 +7041,45 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                 }
             }
         }
+        else if (classify && vector && check_lower_vector_of(writer, operand) == 0)
+        {
+            check_lower_unsupported(writer, "vector types of other than 4, 8, 16, 32 or 64 bytes");
+        }
+        else if (classify && vector)
+        {
+            const CheckVectorShape shape = check_vector_builtin_shape(program->types, operand);
+            if (shape.element != 4 && shape.element != 8)
+            {
+                // A long double's 16-byte element takes a vector of __int128 results (clang's signed vector of its
+                // elements' width), whose lanes these int and long long stores don't hold. Refuse, rather than write
+                // each lane's int at an offset no element stride gives.
+                check_lower_unsupported(writer, "isfpclass of a vector whose elements are not 4 or 8 bytes");
+            }
+            else
+            {
+                // isfpclass of a vector of floats or doubles: the vector stored into a frame object, then each lane
+                // classified by the scalar recipe and stored into the result's frame object (check_lower_floating_lanes).
+                const uint32_t index = writer->floating_count++;
+                const uint8_t class = check_lower_class(writer, effect->floating_type);
+                const uint32_t vector_local = check_lower_temporary_of(writer, operand);
+                const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+                writer->floating[index] = (CBuiltinFloatLowerCall){
+                    .id = id,
+                    .argument_local = check_lower_temporary(writer, class),
+                    .argument_class = class,
+                    .fenv_access = fenv_access,
+                    .class_mask = effect->class_mask,
+                    .vector_local = vector_local,
+                    .result_local = check_lower_temporary_of(writer, stream->values[node].type),
+                    .lanes = shape.lanes,
+                    .lane_bytes = shape.element,
+                };
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = stream->values[node].type });
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector_local);
+                check_lower_operand(writer, node, 3, false, operand);
+                writer->vectors = true;
+            }
+        }
         else if (classify)
         {
             const uint32_t index = writer->floating_count++;
@@ -6981,7 +7087,13 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             // A long double's argument is a frame object of its own, which fabsl clears the sign of in place.
             const uint32_t argument = check_lower_temporary(writer, class);
             const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
-            writer->floating[index] = (CBuiltinFloatLowerCall){ .id = id, .argument_local = argument, .argument_class = class, .fenv_access = fenv_access };
+            writer->floating[index] = (CBuiltinFloatLowerCall){
+                .id = id,
+                .argument_local = argument,
+                .argument_class = class,
+                .fenv_access = fenv_access,
+                .class_mask = effect->class_mask,
+            };
             if (selectors)
             {
                 const uint32_t category = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
@@ -11384,8 +11496,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 const TypeId local_type = input->declared_types[declaration];
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
                 const CheckInputAttributes* attributes = input->attributes[declaration];
-                // The attribute's alignment is its log2 plus one, 0 for none.
-                const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+                // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
+                // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
+                // compound literal, which takes its type's.
+                const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
+                const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
+                                                    !input->compound_objects[input->objects[declaration] - 1] && type_large_array(types, local_type) ? 4 : 0;
                 const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
                 uint32_t local = BUSTER_CHECK_NONE;
                 writer->token = declaration;

@@ -5827,6 +5827,51 @@ static void tier0_test_entry_repetitions(Tier0TestTally* tally)
     arena_release(&arena);
 }
 
+// #975's branch columns: the vector path's compressed stores of them (a block's whole 8-entry tail included) must hold,
+// for every branch, its own entry's first record and the first record of the entry it goes to, or the epilogue's for a
+// return's jump to the function's end: 12 branches, 8 and 4 in the emitter's two blocks, so that the last store writes
+// its reserved tail, against the positions both paths publish (Tier0Code.entry_records).
+static void tier0_test_branches(Tier0TestTally* tally)
+{
+    enum { ENTRIES = 13, BRANCHES = 12 };
+    Tier0TestEntry chain[ENTRIES];
+    for (uint32_t e = 0; e + 2 < (uint32_t)ENTRIES; e += 1)
+    {
+        chain[e] = (Tier0TestEntry){ BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, e + 1 };
+    }
+    // The last entry's return needs no jump: it falls into the epilogue. This one's goes to the function's end.
+    chain[ENTRIES - 2] = (Tier0TestEntry){ BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 };
+    chain[ENTRIES - 1] = (Tier0TestEntry){ BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 };
+    uint8_t kinds[ENTRIES];
+    uint8_t classes[ENTRIES];
+    uint64_t values[ENTRIES];
+    static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t local_flags[1] = { 0 };
+    Tier0Function function = tier0_test_stack_function(chain, ENTRIES, kinds, classes, values, local_classes, local_flags, 0);
+    function.entry_records = true;
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    const Tier0Check check = tier0_validate(&function);
+    const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+    const Tier0Code vector = tier0_compile(&function, &arena);
+    bool ready = tier0_test_expect(tally, arena.base != NULL && check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
+                                              tier0_test_same_code(&scalar, &vector),
+                                   "branches", "the chain: rule \"%s\" at %u, errors %d and %d, or the paths differ", check.rule != 0 ? check.rule : "", check.node,
+                                   scalar.error, vector.error);
+    ready = ready && tier0_test_expect(tally, vector.entry_count == (uint32_t)ENTRIES && vector.branch_count == (uint32_t)BRANCHES && vector.entry_records != 0 &&
+                                                  x86_validate(vector.records, vector.count) == vector.count &&
+                                                  branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count).error ==
+                                                      BRANCH_SIZING_OK,
+                                       "branches", "%u entries, %u branches, or an invalid record or column", vector.entry_count, vector.branch_count);
+    for (uint32_t k = 0; ready && k < (uint32_t)BRANCHES; k += 1)
+    {
+        const uint32_t target = k + 1 < (uint32_t)BRANCHES ? k + 1 : (uint32_t)ENTRIES;
+        ready = tier0_test_expect(tally, vector.branches[k] == vector.entry_records[k] && vector.targets[k] == vector.entry_records[target],
+                                  "branches", "branch %u: record %u (entry %u's is %u), target %u (entry %u's is %u)", k, vector.branches[k], k,
+                                  vector.entry_records[k], vector.targets[k], target, vector.entry_records[target]);
+    }
+    arena_release(&arena);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -5957,6 +6002,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_labels(&tally);
                 tier0_test_report("labels", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_branches(&tally);
+                tier0_test_report("branches", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

@@ -5590,6 +5590,11 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_warning_deferred_test.c"
 #include "c_check_warning_policy_test.c"
 #include "c_check_warning_render_test.c"
+#include "c_check_warning_reader_test.c"
+#include "c_check_literal_warning_test.c"
+#include "c_check_warning_graph_test.c"
+#include "c_check_warning_initializer_test.c"
+#include "c_check_warning_undefined_test.c"
 #include "c_check_lazy_test.c"
 #include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
@@ -5599,6 +5604,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
+#include "c_check_program_bits_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -5609,6 +5615,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_warning_input_test.c"
 #include "c_check_selection_test.c"
 #include "c_check_program_library_test.c"
+#include "c_check_program_classify_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -5685,6 +5692,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_vectors = false;
     bool program_amx = false;
     bool program_asm = false;
+    bool program_bits = false;
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
@@ -5728,6 +5736,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_asm = true;
         }
+        else if (strcmp(argv[i], "--program-bits") == 0)
+        {
+            program_bits = true;
+        }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
@@ -5747,7 +5759,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5802,6 +5814,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_program_asm(&test, clang);
         }
+        else if (initialized && program_bits)
+        {
+            check_test_bits(&test, clang);
+        }
         else if (initialized)
         {
             check_test_action_fixtures(&test, &types.table);
@@ -5814,8 +5830,13 @@ static int run_checker_tests(int argc, char** argv)
             check_test_warning_events(&test);
             check_test_const_values(&test);
             check_test_warning_deferred(&test);
+            check_test_warning_set(&test);
             check_test_warning_policy(&test);
             check_test_warning_render(&test);
+            check_test_warning_reader(&test);
+            check_test_warning_graph(&test);
+            check_test_warning_initializers(&test);
+            check_test_warning_undefined(&test);
             check_test_const_sources(&test, clang);
             check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
@@ -5823,6 +5844,7 @@ static int run_checker_tests(int argc, char** argv)
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
             check_test_literals(&test, &scratch);
+            check_test_literal_warnings(&test, &scratch);
             check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_recorded(&test, &types.table, &storage, &output, &scratch);
@@ -5892,8 +5914,10 @@ static int run_checker_tests(int argc, char** argv)
             check_test_programs(&test, clang);
             check_test_cleanups(&test, clang);
             check_test_musttails(&test, clang);
+            check_test_bits(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_library(&test, clang);
+            check_test_classify(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);

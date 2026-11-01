@@ -67,6 +67,22 @@ typedef enum Tier1SelectRule
     // A phi: no records, and no effective uses, since its operands are uses on its block's incoming edges, which the
     // CFG consumer's edge moves read (tier1_emit_cfg.c).
     TIER1_RULE_PHI,
+    // A frame object's address (IR_STACK_ADDR of slot `immediate`): a lea from the stack pointer, whose base and
+    // displacement the CFG consumer sets from the frame's layout of the object (tier1_emit_cfg.c).
+    TIER1_RULE_STACK_ADDRESS,
+    // A symbol's address (IR_SYMBOL_ADDR of symbol `immediate`): a lea from rip, marked for its reference, which the CFG
+    // consumer gives it, or a load of the symbol's GOT slot where its access says so.
+    TIER1_RULE_SYMBOL_ADDRESS,
+    // A division or remainder of values[0] by values[1] (`immediate`'s bit 0 signed, bit 1 the remainder), and a shift of
+    // values[0] by the count in values[1]: x86's fixed registers (rax and rdx, or cl), which the CFG consumer's sequence
+    // takes, saving another value live past it there (tier1_emit_cfg_fixed).
+    TIER1_RULE_DIVIDE,
+    TIER1_RULE_SHIFT,
+    // A signed division or remainder of values[0] by 2^`scale` (`immediate`'s bits as TIER1_RULE_DIVIDE's), rounded
+    // toward zero as C's: the dividend plus 2^scale - 1 where it is negative, a bias the scratch register computes from
+    // its sign, shifted right, or for the remainder masked and the bias taken back. An unsigned one is a shift or a mask
+    // (TIER1_RULE_IMMEDIATE).
+    TIER1_RULE_DIVIDE_POWER,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -108,7 +124,25 @@ struct Tier1SelectRecords
     uint8_t request;
     uint8_t destination;
     bool requested;
+    // A rule's sequence longer than a node's room: its records past the room weren't written, and every consumer refuses
+    // the node (tier1_select_append).
+    bool overflowed;
 };
+
+// A node's next record, where its room (BUSTER_TIER1_SELECT_RECORDS_PER_NODE) has one. A rule whose sequence is longer
+// writes nothing past the room and marks the node's records overflowed, which every consumer refuses, so that the
+// function fails rather than its expansion overwriting its own fields (#977's review: the signed power-of-two
+// remainder's six records are the room's whole).
+static void tier1_select_append(Tier1SelectRecords* result, X86Instruction record)
+{
+    const bool room = result->count < BUSTER_TIER1_SELECT_RECORDS_PER_NODE;
+    if (room)
+    {
+        result->records[result->count] = record;
+        result->count += 1;
+    }
+    result->overflowed |= !room;
+}
 
 // A record whose operation, on the destination register, has an immediate, as a request. The semantics module owns sign
 // extension, zero idioms, immediate widths and the flags proof for each alternate form. An operation without a row
@@ -117,7 +151,7 @@ struct Tier1SelectRecords
 static void tier1_select_request(Tier1SelectRecords* result, X86Operation operation, uint32_t width, uint8_t destination, int64_t value, uint8_t live_flags)
 {
     const uint32_t row = x86_choice_row(operation, width);
-    if (row != BUSTER_X86_CHOICE_NO_ROW)
+    if (row != BUSTER_X86_CHOICE_NO_ROW && result->count < BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
     {
         result->requested = true;
         result->request = result->count;
@@ -126,7 +160,7 @@ static void tier1_select_request(Tier1SelectRecords* result, X86Operation operat
         result->value = value;
         result->context = (uint16_t)(BUSTER_X86_CONTEXT_REGISTER | (destination == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0) | live_flags);
     }
-    result->records[result->count++] = (X86Instruction){0};
+    tier1_select_append(result, (X86Instruction){0});
 }
 
 // A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
@@ -260,6 +294,8 @@ struct Tier1SelectHoles
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
+    // The pattern's no-ops (Tier1SelectPattern.nops).
+    uint8_t nops;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -304,7 +340,7 @@ static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHo
     }
     else
     {
-        result->records[result->count++] = tier1_select_register_record(holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right);
+        tier1_select_append(result, tier1_select_register_record(holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right));
     }
 }
 
@@ -313,6 +349,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     Tier1SelectRecords result = {0};
     const uint8_t destination = holes->destination;
     const uint32_t width = holes->width;
+    for (uint32_t r = 0; r < holes->nops; r += 1)
+    {
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_NOP });
+    }
     switch (holes->rule)
     {
     case TIER1_RULE_LEAF:
@@ -322,40 +362,47 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
         break;
     case TIER1_RULE_COPY:
-        if (destination != holes->left || width == 4)
+        // Only a copy whose narrow source the planner's canonical column certified vanishes in its own register: its
+        // 32-bit storage has zeros past its width (tier1_select_canonical lists the producers, including the entry
+        // MOVZX of a narrow parameter and the result MOVZX of a narrow call). A 32-bit copy of an I32 value keeps its
+        // move: a parameter or call result may arrive with a dirty upper half, and the move is what clears it (the call
+        // tests' hostile callees check this).
+        if (destination != holes->left || (width == 4 && holes->source_width == 0))
         {
-            result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
         break;
     case TIER1_RULE_TRUNCATE:
     case TIER1_RULE_ZERO_EXTEND:
     {
+        // Truncations and zero extensions always emit: even in place they must clear the bits past the width.
+        // Narrow zero extensions never reach this case from the planner; they select COPY above.
         const uint32_t source_width = holes->rule == TIER1_RULE_TRUNCATE ? width : holes->source_width;
         const uint16_t form = source_width == 1 ? X86_FORM_MOVZX_R32_RM8 : source_width == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
-        result.records[result.count++] = tier1_select_register_record(form, destination, holes->left);
+        tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
         break;
     }
     case TIER1_RULE_SIGN_EXTEND:
     {
         const uint16_t form = holes->source_width == 4 ? X86_FORM_MOVSXD_R64_RM32 : holes->source_width == 2 ? (width == 8 ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVSX_R32_RM16) : (width == 8 ? X86_FORM_MOVSX_R64_RM8 : X86_FORM_MOVSX_R32_RM8);
-        result.records[result.count++] = tier1_select_register_record(form, destination, holes->left);
+        tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
         if (width == 2)
         {
             // I8 -> I16 has sixteen significant bits. Clear the rest of its canonical 32-bit storage value.
-            result.records[result.count++] = tier1_select_register_record(X86_FORM_MOVZX_R32_RM16, destination, destination);
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM16, destination, destination));
         }
         break;
     }
     case TIER1_RULE_UNARY:
         if (destination != holes->left)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
-        result.records[result.count++] = (X86Instruction)
+        tier1_select_append(&result, (X86Instruction)
         {
             .rm = destination,
             .form = holes->operation == X86_OPERATION_NEG ? (width == 8 ? X86_FORM_NEG_RM64 : X86_FORM_NEG_RM32) : (width == 8 ? X86_FORM_NOT_RM64 : X86_FORM_NOT_RM32),
-        };
+        });
         break;
     case TIER1_RULE_REGISTER:
     {
@@ -370,15 +417,15 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             }
             else
             {
-                result.records[result.count++] = tier1_select_move(width, BUSTER_TIER1_SELECT_SCRATCH, right);
+                tier1_select_append(&result, tier1_select_move(width, BUSTER_TIER1_SELECT_SCRATCH, right));
                 right = BUSTER_TIER1_SELECT_SCRATCH;
             }
         }
         if (destination != left)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, left);
+            tier1_select_append(&result, tier1_select_move(width, destination, left));
         }
-        result.records[result.count++] = tier1_select_register_record(tier1_select_binary_form(holes->operation, width), destination, right);
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_binary_form(holes->operation, width), destination, right));
         break;
     }
     case TIER1_RULE_IMMEDIATE:
@@ -390,13 +437,13 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const uint16_t form = width == 8 ? (small ? X86_FORM_IMUL_R64_RM64_IMM8 : X86_FORM_IMUL_R64_RM64_IMM32) : (small ? X86_FORM_IMUL_R32_RM32_IMM8 : X86_FORM_IMUL_R32_RM32_IMM32);
             X86Instruction record = tier1_select_register_record(form, destination, holes->left);
             record.immediate = small ? (int8_t)holes->immediate : (int32_t)holes->immediate;
-            result.records[result.count++] = record;
+            tier1_select_append(&result, record);
         }
         else
         {
             if (destination != holes->left)
             {
-                result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+                tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
             }
             const bool multiply_shift = holes->rule == TIER1_RULE_MULTIPLY_SHIFT;
             const int64_t immediate = multiply_shift ? (int64_t)holes->scale : (int64_t)holes->immediate;
@@ -413,7 +460,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = destination;
         record.form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M;
-        result.records[result.count++] = record;
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_LOAD:
@@ -422,7 +469,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = destination;
         record.form = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
-        result.records[result.count++] = record;
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_LOAD_OPERAND:
@@ -433,17 +480,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const bool aliases_index = (memory.mode & BUSTER_X86_MODE_INDEX) != 0 && memory.index == destination;
         if (destination != holes->left && (aliases_base || aliases_index))
         {
-            result.records[result.count++] = tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, destination);
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, destination));
             memory.rm = aliases_base ? BUSTER_TIER1_SELECT_SCRATCH : memory.rm;
             memory.index = aliases_index ? BUSTER_TIER1_SELECT_SCRATCH : memory.index;
         }
         if (destination != holes->left)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
         memory.reg = destination;
         memory.form = tier1_select_binary_form(holes->operation, width);
-        result.records[result.count++] = memory;
+        tier1_select_append(&result, memory);
         break;
     }
     case TIER1_RULE_STORE:
@@ -452,64 +499,102 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = holes->right;
         record.form = width == 1 ? X86_FORM_MOV_RM8_R8 : width == 2 ? X86_FORM_MOV_RM16_R16 : width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
-        result.records[result.count++] = record;
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_COMPARE:
     case TIER1_RULE_COMPARE_IMMEDIATE:
         tier1_select_compare(&result, holes);
-        result.records[result.count++] = (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] };
-        result.records[result.count++] = tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination);
+        tier1_select_append(&result, (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] });
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
         break;
     case TIER1_RULE_BRANCH_COMPARE:
         tier1_select_compare(&result, holes);
-        result.records[result.count++] = (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] };
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+        tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
     case TIER1_RULE_BRANCH:
-        result.records[result.count++] = tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left);
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JNE_REL8 };
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left));
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JNE_REL8 });
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
     case TIER1_RULE_SELECT:
     {
-        result.records[result.count++] = tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left);
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_TEST_RM32_R32, holes->left, holes->left));
         const bool inverse = destination == holes->right;
         const uint8_t initial = inverse ? holes->right : holes->third;
         const uint8_t alternate = inverse ? holes->third : holes->right;
         if (destination != initial)
         {
-            result.records[result.count++] = tier1_select_move(width, destination, initial);
+            tier1_select_append(&result, tier1_select_move(width, destination, initial));
         }
         const uint16_t form = width == 8 ? (inverse ? X86_FORM_CMOVE_R64_RM64 : X86_FORM_CMOVNE_R64_RM64) : (inverse ? X86_FORM_CMOVE_R32_RM32 : X86_FORM_CMOVNE_R32_RM32);
-        result.records[result.count++] = tier1_select_register_record(form, destination, alternate);
+        tier1_select_append(&result, tier1_select_register_record(form, destination, alternate));
         break;
     }
     case TIER1_RULE_JUMP:
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
     case TIER1_RULE_RETURN:
         if (width != 0 && holes->left != X86_REGISTER_RAX)
         {
-            result.records[result.count++] = tier1_select_move(width, X86_REGISTER_RAX, holes->left);
+            tier1_select_append(&result, tier1_select_move(width, X86_REGISTER_RAX, holes->left));
         }
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_RET };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_RET });
         break;
     case TIER1_RULE_UNREACHABLE:
-        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_UD2 };
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
         break;
     case TIER1_RULE_PHI:
         break;
+    case TIER1_RULE_STACK_ADDRESS:
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = destination, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE });
+        break;
+    case TIER1_RULE_SYMBOL_ADDRESS:
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP, .reg = destination, .mode = BUSTER_X86_MEMORY_RIP });
+        break;
+    case TIER1_RULE_DIVIDE_POWER:
+    {
+        // The bias in the scratch register: the dividend's sign through every bit, then its low `shift` bits (for a shift
+        // of 1 the sign bit alone), added to the dividend by a lea, which leaves the dividend for the remainder's mask.
+        const uint8_t bias = BUSTER_TIER1_SELECT_SCRATCH;
+        const uint32_t bits = width * 8;
+        const uint32_t shift = holes->scale;
+        tier1_select_append(&result, tier1_select_move(width, bias, holes->left));
+        if (shift > 1)
+        {
+            tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - 1) });
+        }
+        tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - shift) });
+        tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M, .reg = destination, .rm = holes->left, .index = bias, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) });
+        if ((holes->immediate & 2) != 0)
+        {
+            const int32_t mask = (int32_t)((UINT64_C(1) << shift) - 1);
+            const uint16_t form = mask <= 127 ? (width == 8 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM32_IMM8) : (width == 8 ? X86_FORM_AND_RM64_IMM32 : X86_FORM_AND_RM32_IMM32);
+            tier1_select_append(&result, (X86Instruction){ .form = form, .rm = destination, .immediate = mask });
+            tier1_select_append(&result, tier1_select_register_record(width == 8 ? X86_FORM_SUB_R64_RM64 : X86_FORM_SUB_R32_RM32, destination, bias));
+        }
+        else
+        {
+            tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = destination, .immediate = (int32_t)shift });
+        }
+        break;
+    }
     default:
-        result.records[result.count++] = (X86Instruction){0};
+        tier1_select_append(&result, (X86Instruction){0});
         break;
     }
     return result;
 }
 
 #define BUSTER_TIER1_SELECT_MAX_INSTRUCTIONS (1u << 20)
+// The largest frame object, and the most aligned, the selector takes: the frame's offsets are 32-bit.
+#define BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES (UINT64_C(1) << 28)
+#define BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT 4096u
 #define BUSTER_TIER1_SELECT_MAX_CANDIDATES 8
-#define BUSTER_TIER1_SELECT_MAX_FOLDS 3
+// The most links a pattern's walk follows through a truth value's chain or an address's (tier1_select_truth,
+// tier1_select_address): a bound on each node's walk, which every node of a chain takes again as its own pattern's.
+#define BUSTER_TIER1_SELECT_WALK 8
 
 // Cold per-node emission metadata. The hot rule-choice pass uses contiguous 16-lane cost arrays; the emitter consumes
 // all fields of one selected pattern. `values` preserve operand roles, including absent slots, while the effective-use
@@ -517,13 +602,16 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 // ordered argument slice, including duplicates, is in the effective-use CSR, immediate is its symbol ID, and width
 // is the result width (zero for void). Memory/conversion patterns keep logical byte widths, while the allocator and
 // frame consumer use tier1_select_width's 4-byte canonical storage for I8/I16. Conversion source_width is the source's
-// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. The original function stays immutable.
+// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. A zero extension of a canonical
+// I1, I8 or I16 value selects COPY instead, with canonical width and the narrow source width retained; COPY of a narrow
+// source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
+// `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
+// code leaves out follows from what the chosen patterns read (tier1_select_plan). The original function stays immutable.
 typedef struct Tier1SelectPattern Tier1SelectPattern;
 struct Tier1SelectPattern
 {
     uint64_t immediate;
     uint32_t values[3];
-    uint32_t folds[BUSTER_TIER1_SELECT_MAX_FOLDS];
     int32_t displacement;
     uint8_t rule;
     uint8_t operation;
@@ -534,6 +622,9 @@ struct Tier1SelectPattern
     uint8_t fold_count;
     uint8_t intrinsic_cost;
     bool compare_immediate;
+    // A test's: no-ops the node's expansion writes before its rule's records, which take its sequence to its room and
+    // past it (#989's review). Every pattern the selector makes has none.
+    uint8_t nops;
 };
 
 typedef struct Tier1SelectPlan Tier1SelectPlan;
@@ -586,6 +677,8 @@ struct Tier1SelectForest
     // load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no atomic access of its own:
     // C's atomic operations reach it as calls of the unit's leaves.
     const uint32_t* barriers;
+    // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
+    const uint8_t* canonical;
 };
 
 static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
@@ -646,16 +739,113 @@ static uint32_t tier1_select_memory_width(uint32_t type)
     return type == IR_I8 ? 1 : type == IR_I16 ? 2 : type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
 }
 
+// The width a narrow source's copy reads: I1's canonical storage is its 32 bits, I8 one byte and I16 two. Zero says the
+// type isn't narrow.
+static uint32_t tier1_select_narrow_width(uint32_t type)
+{
+    return type == IR_I1 ? 4 : type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
+}
+
+#define BUSTER_TIER1_SELECT_CANONICAL_PASSES 8
+
+// A narrow SSA value is canonical in its 32-bit storage when every write to the register that holds it leaves the bits
+// past its width zero. These producers write all 32 bits themselves:
+//   IR_CONST, IR_UNDEF   the type's masked bits, in a 32-bit move (or zero)
+//   IR_PARAM             a narrow parameter's entry MOVZX, before any read (tier1_emit_cfg.c; narrow parameters keep the
+//                        function out of the straight-line consumer)
+//   IR_LOAD              MOVZX_R32_RM8/RM16 (byte/word loads zero-extend)
+//   IR_TRUNC             MOVZX_R32_RM8/RM16 (a truncation to I8/I16)
+//   IR_SEXT              MOVSX, then the I16 MOVZX
+//   IR_ICMP              setcc, then MOVZX_R32_RM8
+//   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
+// COPY, BITCAST, ZEXT, SELECT and PHI only move narrow values (MOV, CMOV, edge moves, spill/reload), so they are
+// canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it keeps its clearing
+// move and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
+// The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
+// probes (tier1_narrow_test.c) check the supported producers natively.
+static void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, uint8_t* canonical)
+{
+    const uint32_t count = function->instruction_count;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        canonical[node] = 0;
+        if (tier1_select_narrow_width(function->type[node]) != 0)
+        {
+            switch (function->op[node])
+            {
+            case IR_CONST:
+            case IR_UNDEF:
+            case IR_PARAM:
+            case IR_LOAD:
+            case IR_TRUNC:
+            case IR_SEXT:
+            case IR_ICMP:
+            case IR_CALL:
+            case IR_CALL_INDIRECT:
+                canonical[node] = 1;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
+    {
+        bool changed = false;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            if (canonical[node] == 0 && tier1_select_narrow_width(function->type[node]) != 0)
+            {
+                const uint32_t op = function->op[node];
+                const uint32_t a = function->a[node];
+                bool value = false;
+                if (op == IR_COPY || op == IR_BITCAST || op == IR_ZEXT)
+                {
+                    value = a < count && canonical[a] != 0;
+                }
+                else if (op == IR_SELECT)
+                {
+                    value = function->b[node] < count && function->c[node] < count && canonical[function->b[node]] != 0 && canonical[function->c[node]] != 0;
+                }
+                else if (op == IR_PHI)
+                {
+                    value = true;
+                    const uint32_t operand_count = (uint32_t)ir_operand_count(function, node);
+                    for (uint32_t p = 0; p < operand_count; p += 1)
+                    {
+                        const uint32_t operand = ir_operand(function, node, p, blocks[node]).value;
+                        value = value && operand < count && canonical[operand] != 0;
+                    }
+                }
+                if (value)
+                {
+                    canonical[node] = 1;
+                    changed = true;
+                }
+            }
+        }
+        if (!changed)
+        {
+            break;
+        }
+    }
+}
+
 // This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers, floating-point
 // and aggregates. The shared verifier checks descriptor bounds and actual argument types before this helper runs.
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
-    bool supported = node < function->instruction_count && function->op[node] == IR_CALL;
+    // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
+    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT);
     if (supported)
     {
         const IrCall call = function->calls[function->b[node]];
         const uint32_t type = function->type[node];
-        supported = !call.variadic && call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && call.parameter_count == call.argument_count && (type == IR_VOID || type == IR_I32 || type == IR_I64 || type == IR_PTR);
+        // A variadic call's unnamed arguments are promoted ones: its al says no vector register holds one (tier1_emit_call).
+        // A narrow result is zero-extended after the call.
+        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
+        supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS &&
+                    (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = function->call_types[call.type_first + argument];
@@ -722,11 +912,7 @@ static bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t co
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
 {
-    if (tier1_select_tree_child(forest, parent, value))
-    {
-        assert(pattern->fold_count < BUSTER_TIER1_SELECT_MAX_FOLDS);
-        pattern->folds[pattern->fold_count++] = value;
-    }
+    pattern->fold_count += tier1_select_tree_child(forest, parent, value) ? 1 : 0;
 }
 
 static void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
@@ -761,30 +947,177 @@ static bool tier1_select_constant(const IrFunction* function, uint32_t value, ui
     return result;
 }
 
-// Only an explicit IR address with a representable displacement is folded. No narrowed address or speculative load
-// is introduced. A large offset remains an explicit unsupported operation until its materialization path exists.
-static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
+// Each integer predicate's negation: !(a < b) is a >= b, and so on.
+static const uint8_t tier1_select_negations[IR_PREDICATE_COUNT] = { IR_NE, IR_EQ, IR_GE, IR_GT, IR_LE, IR_LT, IR_UGE, IR_UGT, IR_ULE, IR_ULT };
+
+// C's truth values reach the IR as integers: `a < b` is `zext (icmp lt a, b)`, which `if`, `!` and `&&` test against
+// zero again, `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source nests. The walk follows such a
+// chain back from `value`, an I1, to the value it tests, through links that only `root`'s pattern uses, at most
+// BUSTER_TIER1_SELECT_WALK of them: each a zero extension, a zero and their comparison in consecutive nodes, right after
+// the value it extends, so that nothing the pattern doesn't compute runs between the test and the root. It returns the
+// node it stops at, counts the nodes it passed among the pattern's folds, and says whether an odd number of the links
+// were `eq`, where the root's truth is the stopped node's negation.
+static uint32_t tier1_select_truth(const Tier1SelectForest* forest, uint32_t root, uint32_t value, Tier1SelectPattern* pattern, bool* negated)
 {
     const IrFunction* function = forest->function;
-    bool folded = false;
-    pattern->values[first] = pointer;
-    pattern->values[first + 1] = BUSTER_IR_NONE;
-    pattern->scale = 0;
-    pattern->displacement = 0;
-    if (function->op[pointer] == IR_ADDRESS && tier1_select_tree_child(forest, node, pointer))
+    bool odd = false;
+    bool walking = true;
+    for (uint32_t link = 0; walking && link < BUSTER_TIER1_SELECT_WALK; link += 1)
     {
-        const IrAddress address = function->addresses[function->c[pointer]];
-        if (address.offset == (int64_t)(int32_t)address.offset)
+        uint64_t zero = 1;
+        const uint32_t extended = function->op[value] == IR_ICMP ? function->a[value] : BUSTER_IR_NONE;
+        walking = extended != BUSTER_IR_NONE && function->c[value] <= IR_NE && extended + 2 == value && function->b[value] + 1 == value &&
+                  tier1_select_constant(function, function->b[value], &zero) && zero == 0 && function->op[extended] == IR_ZEXT &&
+                  function->type[function->a[extended]] == IR_I1 && function->a[extended] + 1 == extended && tier1_select_tree_child(forest, root, value) &&
+                  tier1_select_tree_child(forest, root, extended) && tier1_select_tree_child(forest, root, function->b[value]);
+        if (walking)
         {
-            pattern->values[first] = function->a[pointer];
-            pattern->values[first + 1] = function->b[pointer];
-            pattern->scale = (uint8_t)tier1_select_log2(address.scale);
-            pattern->displacement = (int32_t)address.offset;
-            tier1_select_fold(forest, node, pointer, pattern);
-            folded = true;
+            odd ^= function->c[value] == IR_EQ;
+            pattern->fold_count += 3;
+            value = function->a[extended];
         }
     }
-    return folded;
+    *negated = odd;
+    return value;
+}
+
+// The comparison `tested`, an ICMP of 32- or 64-bit integers or pointers that only `root`'s pattern uses, as the pattern's
+// own: its operands, their width, its predicate (with `negated`, its negation) and a constant right operand that fits as
+// the immediate.
+static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, Tier1SelectPattern* pattern)
+{
+    const IrFunction* function = forest->function;
+    const uint32_t left = function->a[tested];
+    const bool result = function->op[tested] == IR_ICMP && tier1_select_tree_child(forest, root, tested) &&
+                        (function->type[left] == IR_I32 || function->type[left] == IR_I64 || function->type[left] == IR_PTR);
+    if (result)
+    {
+        pattern->values[0] = left;
+        pattern->values[1] = function->b[tested];
+        pattern->width = (uint8_t)tier1_select_width(function->type[left]);
+        pattern->condition = negated ? tier1_select_negations[function->c[tested]] : (uint8_t)function->c[tested];
+        tier1_select_fold(forest, root, tested, pattern);
+        uint64_t immediate = 0;
+        if (tier1_select_constant(function, function->b[tested], &immediate) && tier1_select_immediate_fits(pattern->width, immediate))
+        {
+            pattern->values[1] = BUSTER_IR_NONE;
+            pattern->immediate = immediate;
+            pattern->compare_immediate = true;
+            tier1_select_fold(forest, root, function->b[tested], pattern);
+        }
+    }
+    return result;
+}
+
+// A memory operand's address: base + index * 2^scale + displacement, and the nodes its walk passed.
+typedef struct Tier1SelectAddress Tier1SelectAddress;
+struct Tier1SelectAddress
+{
+    int64_t displacement;
+    uint32_t base;
+    uint32_t index;
+    uint8_t scale;
+    uint8_t folds;
+};
+
+// An address's index without the constants added to it: through 64-bit additions of a constant (on either side) and
+// subtractions of one that only `root`'s pattern uses, at most BUSTER_TIER1_SELECT_WALK of them, each constant times
+// `scale` joining `*displacement` while it fits 32 bits, each node passed counted in `*folds` (#977's review: `&p[100 + i]`
+// had its addition's lea). A 32-bit index's addition stays where a sign extension follows it: (i + c) * s isn't
+// i * s + c * s when i + c overflows, which the IR doesn't rule out (and -fwrapv defines).
+static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t root, uint32_t index, int64_t scale, int64_t* displacement, uint8_t* folds)
+{
+    const IrFunction* function = forest->function;
+    bool walking = true;
+    for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
+    {
+        const uint32_t op = function->op[index];
+        uint64_t constant = 0;
+        const bool right = (op == IR_ADD || op == IR_SUB) && tier1_select_constant(function, function->b[index], &constant);
+        const bool left = op == IR_ADD && !right && tier1_select_constant(function, function->a[index], &constant);
+        int64_t term = 0;
+        int64_t sum = 0;
+        walking = (right || left) && function->type[index] == IR_I64 && tier1_select_tree_child(forest, root, index) && !__builtin_mul_overflow((int64_t)constant, scale, &term) &&
+                  (op == IR_SUB ? !__builtin_sub_overflow(*displacement, term, &sum) : !__builtin_add_overflow(*displacement, term, &sum)) && sum == (int64_t)(int32_t)sum;
+        if (walking)
+        {
+            const uint32_t constant_node = right ? function->b[index] : function->a[index];
+            *folds = (uint8_t)(*folds + 1 + (tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
+            *displacement = sum;
+            index = right ? function->a[index] : function->b[index];
+        }
+    }
+    return index;
+}
+
+// The address continued from `address.base` through the nodes that only `root`'s pattern uses, at most
+// BUSTER_TIER1_SELECT_WALK of them: the conversions between a pointer and its 64 bits that the typed stream's integers
+// put around every address (`inttoptr`, `ptrtoint`), a 64-bit addition of a constant, and addresses, each taken whole
+// while the operand has room for its index, a constant index joining the displacement, and while the displacement fits
+// 32 bits. No narrowed address or speculative load is introduced: the walk stops at the base, the first node it can't
+// take.
+static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address)
+{
+    const IrFunction* function = forest->function;
+    bool walking = true;
+    for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
+    {
+        const uint32_t node = address.base;
+        const uint32_t op = function->op[node];
+        const uint32_t a = function->a[node];
+        const uint32_t b = function->b[node];
+        Tier1SelectAddress next = address;
+        uint64_t constant = 0;
+        uint32_t constant_node = BUSTER_IR_NONE;
+        uint8_t peeled = 0;
+        bool taken = tier1_select_tree_child(forest, root, node);
+        if (taken && op == IR_ADDRESS)
+        {
+            const IrAddress operand = function->addresses[function->c[node]];
+            const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+            const bool indexed = b != BUSTER_IR_NONE && !constant_index;
+            int64_t offset = 0;
+            taken = (!indexed || address.index == BUSTER_IR_NONE) && !__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &offset) &&
+                    !__builtin_add_overflow(offset, operand.offset, &offset) && !__builtin_add_overflow(address.displacement, offset, &next.displacement);
+            next.index = indexed && taken ? tier1_select_index(forest, root, b, operand.scale, &next.displacement, &peeled) : address.index;
+            next.scale = indexed ? (uint8_t)tier1_select_log2(operand.scale) : address.scale;
+            next.base = a;
+            constant_node = constant_index ? b : BUSTER_IR_NONE;
+        }
+        else if (taken && op == IR_ADD && function->type[node] == IR_I64)
+        {
+            const bool right = tier1_select_constant(function, b, &constant);
+            const bool left = !right && tier1_select_constant(function, a, &constant);
+            taken = (right || left) && !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
+            next.base = right ? a : b;
+            constant_node = right ? b : a;
+        }
+        else
+        {
+            taken = taken && ((op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && function->type[node] == IR_I64));
+            next.base = a;
+        }
+        walking = taken && next.displacement == (int64_t)(int32_t)next.displacement;
+        if (walking)
+        {
+            next.folds = (uint8_t)(address.folds + 1 + peeled + (constant_node != BUSTER_IR_NONE && tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
+            address = next;
+        }
+    }
+    return address;
+}
+
+// The memory operand of `node`'s access through `pointer`, in values[first] and values[first + 1] (its base and index),
+// with its scale and displacement. Returns whether the walk took anything.
+static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
+{
+    const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE });
+    pattern->values[first] = address.base;
+    pattern->values[first + 1] = address.index;
+    pattern->scale = address.scale;
+    pattern->displacement = (int32_t)address.displacement;
+    pattern->fold_count += address.folds;
+    return address.folds != 0;
 }
 
 static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node)
@@ -800,7 +1133,6 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
-        .folds = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
         .operation = (uint8_t)tier1_select_operation(op),
         .width = (uint8_t)width,
     };
@@ -813,7 +1145,15 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_PARAM && (integer || type == IR_PTR) && a < 6)
+    else if (op == IR_UNDEF && width != 0)
+    {
+        // Any value is an undefined one's: zero, a constant like any other.
+        base.rule = TIER1_RULE_CONSTANT;
+        base.immediate = 0;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_PARAM && (integer || type == IR_PTR || type == IR_I1 || type == IR_I8 || type == IR_I16) && a < 6)
     {
         base.rule = TIER1_RULE_LEAF;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -822,19 +1162,69 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     {
         base.rule = TIER1_RULE_COPY;
         base.values[0] = a;
+        // A copy of a narrow value can vanish in its own register only when the planner's canonical column certifies
+        // that value's 32-bit storage (tier1_select_canonical: an entry MOVZX for narrow parameters, the result MOVZX
+        // for narrow calls, and the producers' own full-width writes). An I32 source keeps its clearing move because a
+        // parameter or call result may arrive with a dirty upper half.
+        const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
+        base.source_width = narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0 ? narrow_width : 0;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A pointer's 64 bits, or the pointer of 64 bits, from an address: the address's lea, or the copy of what the
+        // conversions around it convert.
+        const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE })
+                                                                                  : (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE };
+        if (address.folds != 0)
+        {
+            Tier1SelectPattern walked = base;
+            walked.rule = address.index == BUSTER_IR_NONE && address.displacement == 0 ? TIER1_RULE_COPY : TIER1_RULE_ADDRESS;
+            walked.values[0] = address.base;
+            walked.values[1] = address.index;
+            walked.scale = address.scale;
+            walked.displacement = (int32_t)address.displacement;
+            walked.fold_count = address.folds;
+            walked.source_width = 0;
+            tier1_select_add_candidate(forest, node, &candidates, walked);
+        }
     }
     else if ((op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && tier1_select_memory_width(function->type[a]) != 0 && function->type[a] != IR_PTR) ||
              (op == IR_ZEXT && (type == IR_I8 || type == IR_I16 || integer) && (function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)) ||
              (op == IR_SEXT && (type == IR_I16 || integer) && (function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)))
     {
-        base.rule = op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;
+        // A zero extension of a canonical I1, I8 or I16 value is a copy: the source register already holds the
+        // destination value with zeros past its width (the planner's canonical column, tier1_select_canonical), and a
+        // 32-bit move zeroes the whole 64-bit register. This keeps the second movzx of issue #981's speedtest1 loop out
+        // of the plan on both paths. The copy carries the narrow source width so the emitter can drop it in its own
+        // register; an I32 source keeps its clearing move. For `zext(icmp)` the truth-value candidate below usually wins,
+        // as #140 folds the comparison's own setcc/movzx; this copy covers a comparison the fold leaves alone.
+        const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
+        const bool narrow_copy = op == IR_ZEXT && narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0;
+        base.rule = narrow_copy ? TIER1_RULE_COPY : op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;
         base.values[0] = a;
-        base.width = (uint8_t)tier1_select_memory_width(type);
-        base.source_width = function->type[a] == IR_I1 ? 4 : (uint8_t)tier1_select_memory_width(function->type[a]);
-        base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
+        if (narrow_copy)
+        {
+            base.source_width = narrow_width;
+            base.intrinsic_cost = 1;
+        }
+        else
+        {
+            base.width = (uint8_t)tier1_select_memory_width(type);
+            base.source_width = function->type[a] == IR_I1 ? 4 : (uint8_t)tier1_select_memory_width(function->type[a]);
+            base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
+        }
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
+        // setcc and movzx already the extension's 32 (or 64) bits.
+        Tier1SelectPattern folded = base;
+        bool negated = false;
+        const uint32_t tested = op == IR_ZEXT && function->type[a] == IR_I1 && a + 1 == node ? tier1_select_truth(forest, node, a, &folded, &negated) : BUSTER_IR_NONE;
+        if (tested != BUSTER_IR_NONE && tier1_select_comparison(forest, node, tested, negated, &folded))
+        {
+            folded.rule = folded.compare_immediate ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE;
+            folded.source_width = 0;
+            folded.intrinsic_cost = 3;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if ((op == IR_NEG || op == IR_NOT) && integer)
     {
@@ -955,18 +1345,97 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             tier1_select_fold(forest, node, b, &base);
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
+        else
+        {
+            base.rule = TIER1_RULE_SHIFT;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 4;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if ((op == IR_SDIV || op == IR_UDIV || op == IR_SREM || op == IR_UREM) && integer)
+    {
+        base.rule = TIER1_RULE_DIVIDE;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.immediate = (op == IR_SDIV || op == IR_SREM ? 1u : 0u) | (op == IR_SREM || op == IR_UREM ? 2u : 0u);
+        base.intrinsic_cost = 8;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        // By a power of two 2^k: unsigned, a shift right by k or a mask of k bits (a copy and zero for 2^0), and signed,
+        // TIER1_RULE_DIVIDE_POWER's sequence, for a positive divisor (k at most the width's bits less 2).
+        const uint32_t bits = width * 8;
+        uint64_t divisor = 0;
+        const bool constant = tier1_select_constant(function, b, &divisor);
+        divisor &= bits < 64 ? (UINT64_C(1) << bits) - 1 : UINT64_MAX;
+        const uint32_t shift = constant ? tier1_select_log2(divisor) : UINT32_MAX;
+        const bool is_signed = op == IR_SDIV || op == IR_SREM;
+        const bool remainder = op == IR_SREM || op == IR_UREM;
+        Tier1SelectPattern folded = base;
+        folded.values[1] = BUSTER_IR_NONE;
+        tier1_select_fold(forest, node, b, &folded);
+        const bool unsigned_power = shift < bits && (!is_signed || shift == 0);
+        const bool signed_power = is_signed && shift >= 1 && shift <= bits - 2;
+        const bool mask = (unsigned_power || signed_power) && tier1_select_immediate_fits(width, divisor - 1);
+        if (unsigned_power && !remainder && shift == 0)
+        {
+            folded.rule = TIER1_RULE_COPY;
+            folded.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (unsigned_power && !remainder)
+        {
+            folded.rule = TIER1_RULE_IMMEDIATE;
+            folded.operation = X86_OPERATION_SHR;
+            folded.immediate = shift;
+            folded.intrinsic_cost = 2;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (unsigned_power && mask)
+        {
+            folded.rule = TIER1_RULE_IMMEDIATE;
+            folded.operation = X86_OPERATION_AND;
+            folded.immediate = divisor - 1;
+            folded.intrinsic_cost = 2;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (signed_power && (!remainder || mask))
+        {
+            folded.rule = TIER1_RULE_DIVIDE_POWER;
+            folded.scale = (uint8_t)shift;
+            folded.intrinsic_cost = 5;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (op == IR_ADDRESS)
     {
-        const IrAddress address = function->addresses[c];
-        if (address.offset == (int64_t)(int32_t)address.offset)
+        // The address's lea, its constant index in the displacement, through what its base's walk takes.
+        const IrAddress operand = function->addresses[c];
+        uint64_t constant = 0;
+        const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+        int64_t displacement = 0;
+        if (!__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
+            displacement == (int64_t)(int32_t)displacement)
         {
+            Tier1SelectAddress start = {
+                .displacement = displacement,
+                .base = a,
+                .index = constant_index ? BUSTER_IR_NONE : b,
+                .scale = constant_index ? 0 : (uint8_t)tier1_select_log2(operand.scale),
+            };
+            start.index = start.index != BUSTER_IR_NONE ? tier1_select_index(forest, node, b, operand.scale, &start.displacement, &start.folds) : start.index;
+            const Tier1SelectAddress address = tier1_select_address(forest, node, start);
             base.rule = TIER1_RULE_ADDRESS;
-            base.values[0] = a;
-            base.values[1] = b;
-            base.displacement = (int32_t)address.offset;
-            base.scale = (uint8_t)tier1_select_log2(address.scale);
+            base.values[0] = address.base;
+            base.values[1] = address.index;
+            base.displacement = (int32_t)address.displacement;
+            base.scale = address.scale;
+            base.fold_count = address.folds;
             base.intrinsic_cost = 1;
+            if (constant_index)
+            {
+                tier1_select_fold(forest, node, b, &base);
+            }
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
     }
@@ -1027,27 +1496,17 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.values[0] = a;
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        if (a + 1 == node && function->op[a] == IR_ICMP && tier1_select_tree_child(forest, node, a) && (function->type[function->a[a]] == IR_I32 || function->type[function->a[a]] == IR_I64 || function->type[function->a[a]] == IR_PTR))
+        // The comparison the condition tests, through C's truth values, right before the branch: its jcc.
+        Tier1SelectPattern folded = base;
+        bool negated = false;
+        const uint32_t tested = a + 1 == node ? tier1_select_truth(forest, node, a, &folded, &negated) : BUSTER_IR_NONE;
+        if (tested != BUSTER_IR_NONE && tier1_select_comparison(forest, node, tested, negated, &folded))
         {
-            Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
-            folded.values[0] = function->a[a];
-            folded.values[1] = function->b[a];
-            folded.width = (uint8_t)tier1_select_width(function->type[function->a[a]]);
-            folded.condition = (uint8_t)function->c[a];
-            tier1_select_fold(forest, node, a, &folded);
-            uint64_t immediate = 0;
-            if (tier1_select_constant(function, function->b[a], &immediate) && tier1_select_immediate_fits(folded.width, immediate))
-            {
-                folded.values[1] = BUSTER_IR_NONE;
-                folded.immediate = immediate;
-                folded.compare_immediate = true;
-                tier1_select_fold(forest, node, function->b[a], &folded);
-            }
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
-    else if (op == IR_CALL && tier1_select_call_supported(function, node))
+    else if ((op == IR_CALL || op == IR_CALL_INDIRECT) && tier1_select_call_supported(function, node))
     {
         base.rule = TIER1_RULE_CALL;
         base.immediate = a;
@@ -1055,7 +1514,10 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_RET && (a == BUSTER_IR_NONE || function->type[a] == IR_I1 || function->type[a] == IR_I32 || function->type[a] == IR_I64 || function->type[a] == IR_PTR))
+    // A narrow result leaves in its canonical zero-extended 32 bits: a caller extends it by its own type, as clang's and
+    // Tier 0's do, the psABI leaving the bits past its width unspecified.
+    else if (op == IR_RET && (a == BUSTER_IR_NONE || function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32 ||
+                              function->type[a] == IR_I64 || function->type[a] == IR_PTR))
     {
         base.rule = TIER1_RULE_RETURN;
         base.values[0] = a;
@@ -1072,6 +1534,21 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     else if (op == IR_PHI && width != 0)
     {
         base.rule = TIER1_RULE_PHI;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_STACK_ADDR && a < function->slot_count && (function->slots[a].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0 &&
+             function->slots[a].size <= BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES && function->slots[a].alignment <= BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT)
+    {
+        base.rule = TIER1_RULE_STACK_ADDRESS;
+        base.immediate = a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_SYMBOL_ADDR)
+    {
+        base.rule = TIER1_RULE_SYMBOL_ADDRESS;
+        base.immediate = a;
+        base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;
@@ -1167,6 +1644,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     uint32_t* level_offsets = 0;
     uint32_t* level_nodes = 0;
     uint32_t* positions = 0;
+    uint8_t* canonical = 0;
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
@@ -1177,6 +1655,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         level_offsets = ir_allocate(scratch, (uint64_t)count + 2, 4, &ok);
         level_nodes = ir_allocate(scratch, count, 4, &ok);
         positions = ir_allocate(scratch, (uint64_t)count + 1, 4, &ok);
+        canonical = ir_allocate(scratch, count, 1, &ok);
         plan.patterns = ir_allocate(output, count, sizeof(Tier1SelectPattern), &ok);
         plan.covered = ir_allocate(output, count, 1, &ok);
         plan.costs = ir_allocate(output, count, 4, &ok);
@@ -1188,7 +1667,6 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
-    bool parameter_prefix = true;
     // Labels (whose symbols the frame and the emitter would have to define), by-value aggregates' ABI records and a
     // variadic definition's incoming frame (#131) aren't selected yet.
     if (error == TIER1_SELECT_OK && (function->label_count != 0 || function->parameter_passed != 0 || function->variadic))
@@ -1205,16 +1683,18 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_CALL_INDIRECT || op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_BR_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)))
+        if (op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_BR_INDIRECT || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
-        if (op == IR_PARAM && (!parameter_prefix || blocks[node] != 0))
+        // A parameter anywhere in the entry block: the straight-line consumer takes only a prefix of them, and gives the
+        // others' functions to the CFG consumer, which defines every parameter at the function's start, before any
+        // instruction (tier1_emit_cfg.c).
+        if (op == IR_PARAM && blocks[node] != 0)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
-        parameter_prefix &= op == IR_PARAM;
-        effective_capacity += op == IR_CALL && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count : 3;
+        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : 3;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), and its use counts, but
         // nothing folds into a phi, so its depth doesn't order the phi's choice. Its own loop leaves the others' as it was.
@@ -1261,6 +1741,10 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     if (error == TIER1_SELECT_OK)
     {
+        tier1_select_canonical(function, blocks, canonical);
+    }
+    if (error == TIER1_SELECT_OK)
+    {
         bool ok = effective_capacity <= UINT32_MAX;
         if (!ok)
         {
@@ -1291,6 +1775,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         .uses = uses,
         .costs = plan.costs,
         .barriers = barriers,
+        .canonical = canonical,
     };
     for (uint32_t level = 0; error == TIER1_SELECT_OK && level <= maximum_depth; level += 1)
     {
@@ -1347,17 +1832,51 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     if (error == TIER1_SELECT_OK)
     {
+        // What the code computes, from the last node back: a node with an effect (a store, a call, a terminator, a
+        // volatile load), a parameter, a phi and its operands, which its edges' moves read, a node nothing uses, which the
+        // optimizer kept for a fault it may raise (a load or a division), and each value a computed node's pattern reads.
+        // Every other node is covered: its users' patterns compute it themselves, a constant as an immediate, a load as a
+        // memory operand, an address as a displacement, a truth value's chain as a branch's comparison, however deep their
+        // walks went. A non-phi node's values precede it, so each is final when the walk back reaches it.
+        uint8_t* needed = plan.covered;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            const uint32_t operand_count = function->op[node] == IR_PHI ? (uint32_t)ir_operand_count(function, node) : 0;
+            needed[node] |= function->op[node] == IR_PHI ? 1 : 0;
+            for (uint32_t p = 0; p < operand_count; p += 1)
+            {
+                needed[ir_operand(function, node, p, blocks[node]).value] = 1;
+            }
+        }
         for (uint32_t reverse = count; reverse != 0; reverse -= 1)
         {
             const uint32_t node = reverse - 1;
-            if (plan.covered[node] == 0)
+            const uint32_t op = function->op[node];
+            needed[node] |= tier1_select_barrier(function, node) || op == IR_BR || op == IR_CBR || op == IR_RET || op == IR_UNREACHABLE || op == IR_PARAM || uses[node] == 0 ? 1 : 0;
+            const Tier1SelectPattern* pattern = &plan.patterns[node];
+            if (needed[node] != 0 && pattern->rule == TIER1_RULE_CALL)
             {
-                const Tier1SelectPattern* pattern = &plan.patterns[node];
-                for (uint32_t f = 0; f < pattern->fold_count; f += 1)
+                const IrCall call = function->calls[function->b[node]];
+                for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
                 {
-                    plan.covered[pattern->folds[f]] = 1;
+                    needed[function->extra[call.argument_first + argument]] = 1;
+                }
+                if (op == IR_CALL_INDIRECT)
+                {
+                    needed[function->a[node]] = 1;
                 }
             }
+            for (uint32_t operand = 0; needed[node] != 0 && pattern->rule != TIER1_RULE_CALL && operand < 3; operand += 1)
+            {
+                if (pattern->values[operand] != BUSTER_IR_NONE)
+                {
+                    needed[pattern->values[operand]] = 1;
+                }
+            }
+        }
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            plan.covered[node] = needed[node] ^ 1;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -1372,6 +1891,11 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
                     for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->extra[call.argument_first + argument];
+                    }
+                    // An indirect call's callee after its arguments.
+                    if (function->op[node] == IR_CALL_INDIRECT)
+                    {
+                        plan.effective_use_values[plan.effective_use_count++] = function->a[node];
                     }
                 }
                 else
@@ -1435,6 +1959,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
+        .nops = pattern->nops,
     };
     switch (pattern->rule)
     {
@@ -1493,7 +2018,9 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // spilled.
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
-        if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI)
+        if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
+            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_DIVIDE ||
+            plan->patterns[node].rule == TIER1_RULE_SHIFT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;
@@ -1545,7 +2072,12 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
                 memcpy(code.records + code.count, selected.records, selected.count * sizeof(X86Instruction));
                 tier1_select_requests_add(&requests, &selected, code.count, code.records);
                 code.count += selected.count;
-                if (function->op[node] == IR_BR)
+                if (selected.overflowed)
+                {
+                    error = TIER1_SELECT_ERROR_INVALID;
+                    failed_node = node;
+                }
+                else if (function->op[node] == IR_BR)
                 {
                     code.branches[code.branch_count] = code.count - 1;
                     code.targets[code.branch_count++] = function->block_offsets[function->a[node]];

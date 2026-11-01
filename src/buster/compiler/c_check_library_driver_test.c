@@ -294,8 +294,6 @@ static void check_test_library_refusals(CheckTest* test, const char* executable,
     } refusals[] = {
         { "__builtin_alloca_with_align", "void* f(void){return __builtin_alloca_with_align(16,64);}\n" },
         { "__builtin_alloca_uninitialized", "void* f(unsigned long n){return __builtin_alloca_uninitialized(n);}\n" },
-        { "__builtin_signbitl", "int f(long double x){return __builtin_signbitl(x);}\n" },
-        { "__builtin_signbitf", "int f(float x){return __builtin_signbitf(x);}\n" },
         { "__builtin_nans", "double f(void){return __builtin_nans(\"\");}\n" },
         { "__builtin_nansl", "long double f(void){return __builtin_nansl(\"1\");}\n" },
     };

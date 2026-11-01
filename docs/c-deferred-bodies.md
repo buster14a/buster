@@ -193,7 +193,7 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      scalar twin) through its owner's part: a body's tokens and its
      parameters' through the body's, the rest through the top level's. Every
      item writes places of its own, so the lanes need no sync until the pass
-     ends, and one lane runs it on the caller's thread;
+     ends, and one lane runs it on the caller's thread. On more than one lane, the calling thread first faults in each 2 MB region of the merged stream's columns and the token positions the pass writes (`check_deferred_fault_range`, #874), so that no two lanes allocate and clear a fresh huge page for one at once;
    - the tags' completion positions, before the pass, and linked types,
      predefined types (the earliest maker's by position) and `__func__`
      strings, after it, are mapped too;
@@ -512,7 +512,7 @@ c-testsuite, SQLite and Lua.
 ## Measurements
 
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [--every-lane] [--warm] [preprocessor options] file...` preprocesses each
+LIST] [--every-lane] [--warm] [--cold] [preprocessor options] file...` preprocesses each
 file once, then per pass parses it and checks it by source order's `check_input`
 and by the deferred reader on one lane and on up to `--lanes` (8), in their six
 orders, one a pass in turn: in any six passes in a row, each reading comes
@@ -524,7 +524,10 @@ lane in two passes of three, and the six in 21 passes, as #448's review
 counted, put it there 8 times and after source order's 6. The deferred
 readings share one state, released after each reading, as a process's one
 reading is; with `--warm` the state keeps its memory from one reading to the
-next, as a process's later readings do. It reports the bodies, their tokens,
+next, as a process's later readings do. With `--cold` every reading also takes
+fresh caller arenas (released and reserved again, rather than taken back), so
+that the merge's columns on the caller's scratch are fresh huge pages as in a
+process's one reading (#874). It reports the bodies, their tokens,
 the largest body's and the largest of the others' (`second_body`), the top
 level's tokens and the bodies' tokens that pay for a lane by the rule
 (`lane_tokens`), and medians

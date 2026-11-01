@@ -344,6 +344,7 @@ struct CheckBuiltinFloatEffect
     uint32_t evaluated_operands;
     uint32_t definite_operands;
     uint32_t selected_selector;
+    uint32_t class_mask;
     uint32_t unsupported;
     uint32_t warnings;
     CBuiltinId runtime_builtin;
@@ -683,17 +684,24 @@ static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIn
 static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
 {
     CheckOp op = CHECK_OP_COUNT;
-    if (id == CBUILTIN_BIT_CAST)
+    if (id == CBUILTIN_NONE)
+    {
+        // An ordinary call's, which every call of a unit asks for (check_input's call close): none of the families'.
+        op = CHECK_OP_COUNT;
+    }
+    else if (id == CBUILTIN_BIT_CAST)
     {
         op = CHECK_OP_BUILTIN_BIT_CAST;
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
-        id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR)
+        id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
+        cbuiltin_bits(id))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
     else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) ||
-             check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE)
+             check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE || cbuiltin_float_class(id) || cbuiltin_float_signbit(id) ||
+             cbuiltin_float_canonicalize(id))
     {
         op = CHECK_OP_BUILTIN_FLOAT;
     }
@@ -705,7 +713,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
     }
-    else if (id == CBUILTIN_UMULL_OVERFLOW)
+    else if (check_builtin_typed_overflow_info(id) != NULL)
     {
         op = CHECK_OP_BUILTIN_OVERFLOW;
     }
@@ -1383,6 +1391,10 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
 static void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
     stream->values[node] = result->value;
+    if (stream->graph->ops[node] != CHECK_OP_VALUE && stream->graph->ops[node] != CHECK_OP_SELECT)
+    {
+        stream->values[node].flags &= ~BUSTER_CHECK_LITERAL_ZERO;
+    }
     memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
     stream->conversions[node].store = result->store_conversion;
     stream->diagnostics[node] = result->diagnostic;
@@ -1711,7 +1723,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         *result = checked.action;
         check_builtin_library_fold_memory(types, input.id, action, checked.argument_conversions, result);
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        for (uint32_t i = 0; i < action->argument_count && i < 3; i += 1)
+        for (uint32_t i = 0; i < action->argument_count && i < 4; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }
@@ -1843,6 +1855,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                 .evaluated_operands = checked.evaluated_operands,
                 .definite_operands = checked.definite_operands,
                 .selected_selector = checked.selected_selector,
+                .class_mask = checked.class_mask,
                 .unsupported = checked.unsupported,
                 .warnings = checked.warnings,
                 .runtime_builtin = checked.runtime_builtin,
@@ -2053,8 +2066,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                              action->op == CHECK_OP_BUILTIN_BIT_CAST ? stream->bit_casts[stream->bit_cast_count - 1].evaluated_operands :
                              stream->queries[stream->query_count - 1].evaluated_operands;
         const bool strict_comparison = action->op == CHECK_OP_BUILTIN_FLOAT &&
-                                       (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
-                                       (action->member == CBUILTIN_FPCLASSIFY || action->member == CBUILTIN_ISINF_SIGN);
+                                       (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 && check_builtin_float_strict(action->member);
         if (strict_comparison)
         {
             result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
@@ -2153,7 +2165,8 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
         };
         CheckBuiltinResult checked;
         CheckBuiltinTypedOverflowResult typed = { 0 };
-        if (builtin.id == CBUILTIN_UMULL_OVERFLOW)
+        const bool typed_builtin = check_builtin_typed_overflow_info(builtin.id) != NULL;
+        if (typed_builtin)
         {
             check_builtin_typed_overflow(types, &builtin, &typed, 1, true);
             checked = typed.builtin;
@@ -2174,8 +2187,8 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
                 .node = node,
                 .value = checked.store_value,
                 .destination = checked.store_destination,
-                .runtime_builtin = builtin.id == CBUILTIN_UMULL_OVERFLOW ? typed.runtime_builtin : builtin.id,
-                .evaluated_operands = builtin.id == CBUILTIN_UMULL_OVERFLOW ? typed.evaluated_operands : 7,
+                .runtime_builtin = typed_builtin ? typed.runtime_builtin : builtin.id,
+                .evaluated_operands = typed_builtin ? typed.evaluated_operands : 7,
                 .warnings = typed.warnings,
                 .warning_operands = typed.warning_operands,
                 .unsupported = typed.unsupported,
