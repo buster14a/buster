@@ -1259,7 +1259,10 @@ the page cache, shared with every other process.
   which a list made by hand had missed. `test-baked-tables` makes the same
   check in any executable, a sanitizer build's PIE too, and in a baked one that
   a fresh build gives the file's bytes and build ID; a missing section fails it
-  instead of skipping it.
+  instead of skipping it. Under ThreadSanitizer and MemorySanitizer the
+  runtimes keep the metadata of the globals they instrument in the image's
+  `.bss` and write it as instrumented accesses run, so those builds check the
+  section's bytes alone and say that the outside check was skipped.
 - **The build ID.** The linker's GNU build ID is over the pre-bake file, so
   `bake-tables` recomputes it over the baked bytes, with the note's descriptor
   zeroed. The ID stays stable for a given build and never names bytes other
