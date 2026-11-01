@@ -519,6 +519,7 @@ static void check_query_prove(TypeTable* types, const CheckGraph* graph, const C
     const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
     const bool syntax = child->syntax_effects || (witness != NULL && witness->constant_p_side_effects);
     CheckBuiltinQueryAction input = { .id = CBUILTIN_CONSTANT_P, .argument_count = 1, .node = node,
+        .context = check_graph_context(graph, node, false),
         .string_literal_start = witness != NULL && witness->string_literal_start,
         .absolute_address_constant = witness != NULL && witness->absolute_address_constant };
     bool folded[3] = { false, false, false };

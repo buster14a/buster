@@ -2307,7 +2307,11 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             }
             const char* name = NULL;
             uint32_t length = 0;
-            lines[p] = first < pp.output.count ? pp_presumed(&pp, pp.output.locations[first], &name, &length) : 0;
+            // Compare the primary diagnostic, not a macro-definition spelling. The driver's output diagnostics
+            // materialize history and follow this same invocation/argument/generated-token provenance.
+            const bool history = first >= pp.output.count || pp_history_ensure(&pp);
+            check_test_expect(test, history, "source diagnostic expansion history is available");
+            lines[p] = first < pp.output.count && history ? pp_presumed(&pp, parse_primary_location(&pp, first), &name, &length) : 0;
         }
         char description[320];
         snprintf(description, sizeof(description), "%s: %s expected, %s from %s path, first line %u (clang %u)", fixture->name,

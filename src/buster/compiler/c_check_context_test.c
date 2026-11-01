@@ -119,11 +119,13 @@ static void check_test_context_histories(CheckTest* test, TypeTable* types)
             const CheckBuiltinFloatAction floating = { .context = context };
             const CheckBuiltinAtomicAction atomic = { .context = context };
             const CheckVarargsAction varargs = { .context = context };
+            const CheckBuiltinVectorAction vector = { .context = context };
             check_test_expect(test, check_builtin_source_complete(types, record, &integer) == visible &&
                                    check_builtin_misc_source_complete(types, record, &misc) == visible &&
                                    check_builtin_float_source_complete(types, record, &floating) == visible &&
                                    check_builtin_atomic_source_complete(types, record, &atomic) == visible &&
-                                   check_varargs_source_complete(types, record, &varargs) == visible,
+                                   check_varargs_source_complete(types, record, &varargs) == visible &&
+                                   check_builtin_vector_complete(types, record, &vector) == visible,
                               "all source-completeness consumers share the same nominal visibility boundary");
         }
         context.tag_completion_count = 0;
@@ -187,11 +189,16 @@ static void check_test_context_receipts(CheckTest* test, TypeTable* types)
                 const CheckBuiltinAtomicAction atomic = { .arguments = &operand, .argument_count = 1, .context = context };
                 CheckBuiltinAtomicResult atomic_result = { 0 };
                 const CheckValue atomic_value = check_builtin_atomic_argument(types, &atomic, &atomic_result, 0);
+                const CheckBuiltinVectorAction vector = { .arguments = &operand, .argument_count = 1, .context = context };
+                CheckBuiltinVectorResult vector_result = { 0 };
+                const CheckValue vector_value = check_builtin_vector_argument(types, &vector, &vector_result, 0, true);
                 check_test_expect(test, misc_result.action.diagnostic == CHECK_DIAG_NONE && float_result.action.diagnostic == CHECK_DIAG_NONE && atomic_result.action.diagnostic == CHECK_DIAG_NONE &&
+                                       vector_result.action.diagnostic == CHECK_DIAG_NONE &&
                                        check_test_value_equal(&misc_value, &float_value) && check_test_value_equal(&misc_value, &atomic_value) &&
+                                       check_test_value_equal(&misc_value, &vector_value) &&
                                        (misc_value.constant_kind == CHECK_CONSTANT_INTEGER) == known && (!known || misc_value.integer == value) &&
                                        ((misc_value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0) == effect,
-                                  "miscellaneous, floating and atomic adapters retain the same full receipt context");
+                                  "miscellaneous, floating, atomic and vector adapters retain the same full receipt context");
                 builtins[i] = (CheckBuiltinAction){ .id = CBUILTIN_POPCOUNT, .argument_count = 1, .operands = { operand }, .context = context };
                 check_builtins(types, &builtins[i], &reference[i], 1, true);
                 const CheckValue* folded = &reference[i].action.value;

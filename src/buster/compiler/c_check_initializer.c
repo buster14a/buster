@@ -1839,6 +1839,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             .operands = { check_stream_value(walker->stream, node) },
             .type = destination,
             .node = node,
+            .context = check_init_context(walker, node, token),
         };
         CheckActionResult converted;
         check_action_scalar(walker->types, &action, &converted);

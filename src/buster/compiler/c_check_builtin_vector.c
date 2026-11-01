@@ -153,14 +153,7 @@ static TypeId check_builtin_vector_element(const TypeTable* table, TypeId type)
 static bool check_builtin_vector_complete(const TypeTable* table, TypeId type, const CheckBuiltinVectorAction* input)
 {
     const TypeId plain = type_strip_aligned(table, type);
-    const uint8_t kind = type_kind(table, plain);
-    bool result = type_is_complete(table, plain);
-    if (result && input->context.tag_completions != NULL &&
-        (kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
-    {
-        const uint32_t tag = table->types.index[type_index(plain)];
-        result = tag < input->context.tag_completion_count && input->context.tag_completions[tag] <= input->context.source_position;
-    }
+    const bool result = type_is_complete(table, plain) && check_context_tag_visible(table, plain, &input->context);
     return result;
 }
 
@@ -187,6 +180,7 @@ static CheckValue check_builtin_vector_argument(TypeTable* table, const CheckBui
             {
                 .operands = { value },
                 .node = input->node,
+                .context = input->context,
             };
             CheckActionResult converted = { 0 };
             value = check_action_operand(table, &action, &converted, 0);

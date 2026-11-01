@@ -138,7 +138,8 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 const uint32_t completion = graph->source_positions[node];
                 if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL)
                 {
-                    const CheckAction action = { .op = op, .operands = { check_stream_value(stream, graph->operand0[node]), check_stream_value(stream, graph->operand1[node]) } };
+                    CheckAction action;
+                    check_graph_action(graph, stream, node, NULL, &action);
                     const CheckActionResult checked = { 0 };
                     CheckWarningEvent event;
                     if (check_warning_ordered_event(types, &action, &checked, token, completion, &event))

@@ -44,6 +44,10 @@ Two deliberately different interfaces do not acquire this record:
 * The zero-argument floating-rounds action is an effectful runtime query. It
   cannot become a source constant by receiving an initializer view.
 
+The literal-table decoder's negation acts only on a newly decoded integer
+rvalue, not a source object or nominal type. Its direct action intentionally
+uses no borrowed context; source eligibility remains the caller's responsibility.
+
 Typed-overflow and C11/legacy atomic subfamilies use the atomic adapter. Query
 proof lanes copy the ordinary context, then explicitly override the policies
 that differ for that proof. Operand-selection masks, speculative proof success,
@@ -102,6 +106,10 @@ exercise selection, discarded reads, union activity and pointer restrictions;
 an execution oracle distinguishes body-local constants and runtime volatile and
 atomic operations. Existing deferred/lane, typed-output and diagnostic tests
 remain part of the full qualification and are not replaced by this matrix.
+The source harness resolves macro invocation/argument/generated-token history
+for the primary diagnostic line, as the renderer does. It must not compare a
+macro definition's spelling line with Clang's invocation line. The matrix keeps
+its macros and strict diagnostic-line assertions.
 
 On the local x86-64 Clang 17 structural/focused-test build, `CheckContext` is 48
 bytes. `CheckAction` remains 400 bytes, `CheckValue` 96, `CheckGraph` 432 and
