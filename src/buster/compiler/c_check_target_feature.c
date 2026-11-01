@@ -20,11 +20,13 @@
 // getFunctionFeatureMap), and its attributes those of its declarations before the call (the callee's) or up to its
 // definition (the caller's), as a declaration's inherited attributes are. The calls are those clang emits: the walk
 // of #487's diagnostics (c_check_x86_diagnostic.c) reaches what a constant condition leaves running, not a dead
-// branch's or operand's, sizeof's or what follows a return; a callee is direct where it is the function's name alone,
-// not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). A cleanup attribute's call is one too
+// branch's or operand's — an operand a label can enter aside — sizeof's or what follows a return; a callee is direct
+// where it is the function's name alone, not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). A cleanup attribute's call is one too
 // (CallCleanupFunction::Emit, #147's CHECK_CONTROL_CLEANUP): of the function its argument names, with that function's
 // attributes from its declarations before the argument, reported at the attribute (its first token:
-// [[gnu::cleanup(f)]]'s scope's), and once for each variable whose scope an exit the walk reaches leaves: at the
+// [[gnu::cleanup(f)]]'s scope's), and only where the variable's own declaration was emitted — an `if (0)` arm's is,
+// its cleanup's call among them, where a label's jump could enter it — and once for each variable whose scope an exit
+// the walk reaches leaves: at the
 // scope's end, where clang pops the cleanup and emits its call, after the scope's statements, the innermost variable's
 // first, whichever exits reach it. Clang's errors are unrecoverable: it emits the functions it must
 // emit where the unit defines them (ASTContext::DeclMustBeEmitted: an external definition, by GNU's and C99's rules of
@@ -44,12 +46,17 @@
 // StringMap's and this one predefines_features', so the two may name another feature for the same call.
 //
 // The walk is code generation's emission: #487's walk, Sema's reachability, with code generation's rules where they
-// differ (CheckTargetFeatureEmission): nothing after an expression statement that ends in a call that doesn't return,
-// loops' blocks emitted whatever their conditions, and code after a label whatever precedes it. It still differs where
-// clang emits a statement that holds a label from its start (an if, loop or switch statement after a point where its
-// code stops, or the arm of an if or a switch that a constant condition would leave out), which it walks from the label
-// on; and a call that doesn't return through a pointer, or of one of the C library's functions that clang knows as such
-// (exit, abort) declared without the attribute, goes on (docs/x86-target.md).
+// differ (CheckTargetFeatureEmission): nothing after an expression statement that ends in a call that doesn't return —
+// one through `*` or `&` to a noreturn function's own declaration, or of one of the C library's functions clang knows
+// doesn't return (exit, abort, _Exit, _exit, longjmp and kin, the builtins' attributes, which -ffreestanding,
+// -fno-builtin and -fno-builtin-NAME lift; not a function pointer variable's) — loops' blocks emitted whatever their
+// conditions, and code after a label whatever precedes it: a statement that holds a label from its start (an if, loop
+// or switch after a point where its code stops, or the arm of an if or a switch that a constant condition would leave
+// out), and an operand a constant condition leaves out where a statement expression in it holds a label, which
+// check_program_references keeps (a labeled operand is code clang emits, so its references are the body's). A switch
+// on a constant emits just the case the value takes where its scan can skip the rest — no label a skipped statement
+// holds, no declaration at the body's scope, no case range the list's order puts first, no kept statement's own break
+// — and the whole body where it can't (docs/x86-target.md).
 //
 // The pass is cold and scalar: it runs in a unit with a target attribute (CheckProgram.attribute_keys) or an x86
 // builtin's call, and walks only a body that refers to a callee that may fail or calls a builtin that fails, whose call
@@ -321,6 +328,63 @@ static uint32_t check_target_feature_callee(const CheckProgram* program, uint32_
     return object < program->object_count ? object : 0;
 }
 
+// The call designator's function for the doesn't-return question: the function its expression names, through `*` and
+// `&` (CallExpr::getCalleeDecl, which strips them; EmitCallee's directness is the feature check's, not this one's).
+static uint32_t check_target_feature_noreturn_object(const CheckProgram* program, uint32_t node, uint32_t* name)
+{
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t operand = graph->operand0[node];
+    uint32_t steps = 0;
+    while (operand < graph->count && (graph->ops[operand] == CHECK_OP_DEREFERENCE || graph->ops[operand] == CHECK_OP_ADDRESS) &&
+           steps++ < graph->count)
+    {
+        operand = graph->operand0[operand];
+    }
+    const CheckValue* value = operand < graph->count ? program->stream->values + operand : NULL;
+    *name = operand < graph->count ? graph->tokens[operand] : 0;
+    return value != NULL && graph->ops[operand] == CHECK_OP_VALUE && value->category == CHECK_FUNCTION &&
+                   value->object < program->object_count ?
+               value->object :
+               0;
+}
+
+// Whether a call of `object` doesn't return by the function's name alone: one of the C library's functions clang's
+// builtin table says doesn't ('r' in BuiltinIntrinsicInfo.attributes: exit, abort, _Exit, _exit, longjmp's and their
+// kin), where the name is a library builtin of the unit as clang's builtin resolution makes it: a function with
+// external linkage, under the options that keep the library builtins (check_input_library_enabled's gate: the
+// language's, no features, not -fno-builtin, -ffreestanding or -fno-builtin-NAME). The callee's own noreturn
+// attribute, which needs no name, is asked separately.
+static bool check_target_feature_library_noreturn(const CheckProgram* program, const PPOptions* options, uint32_t object)
+{
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const bool function = declaration < parser->tokens.count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                          input->linkage[declaration] == 2;
+    const uint32_t name = function ? parser->tokens.names[declaration] : 0;
+    const BuiltinIntrinsicInfo* info = name != 0 ? builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name),
+                                                                          intern_length(program->identifiers, name)) :
+                                               NULL;
+    const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL &&
+                         memchr(info->attributes, 'r', info->attributes_length) != NULL;
+    return library && check_input_library_enabled(info, options);
+}
+
+// Whether x86 builtin call `node` doesn't return, as clang's EmitBuiltinExpr of a builtin whose attributes say so
+// leaves nothing reachable after it ('r' in BuiltinIntrinsicInfo.attributes: __builtin_abort, __builtin_longjmp,
+// __builtin_eh_return, __builtin_verbose_trap; __builtin_trap and __builtin_unreachable go by CHECK_OP_BUILTIN_MISC).
+static bool check_target_feature_intrinsic_noreturn(const CheckProgram* program, uint32_t node)
+{
+    const CheckInput* input = program->input;
+    const uint32_t closing = input->graph.tokens[node];
+    const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+    const CheckInputIntrinsicCall* call = id != 0 && id <= input->intrinsic_call_count ? input->intrinsic_calls + id - 1 : NULL;
+    const BuiltinIntrinsicInfo* info = call != NULL && call->declaration < input->intrinsic_declaration_count ?
+                                       input->intrinsic_declarations[call->declaration].info :
+                                       NULL;
+    return info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
+}
+
 // Whether builtin expression `features` (`length` bytes, clang's grammar) fails in a function of features `map`: any
 // answer but available, as clang's map has no other names than predefines_features', which test-checker checks of every
 // x86 builtin's expression (check_test_target_feature_builtins), as it checks the table's names.
@@ -452,19 +516,29 @@ static uint32_t check_target_feature_cleanup_token(const CheckInput* input, cons
 //   doesn't where it is a constant that is true. A do statement's condition and end are emitted whatever its body's
 //   code leaves, and so is a for statement's increment, once their statement's code begins (the extra edges,
 //   check_target_feature_emission_prepare).
-// - A label begins a block whatever code precedes it: each of the body's source labels outside statement expressions is
-//   a root of the walk (CheckProgram.label_positions).
+// - A label begins a block whatever code precedes it: each of the body's source labels is a root of the walk
+//   (CheckProgram.label_positions), a statement expression's own where its expression's statement emits
+//   (check_target_feature_emission_prepare's extra edges), and a statement that holds one emits from its start, as
+//   clang's ContainsLabel leaves no statement's code out.
 typedef struct CheckTargetFeatureEmission CheckTargetFeatureEmission;
 struct CheckTargetFeatureEmission
 {
-    // The dead-end analysis's bits per node, and its stack of `capacity` items.
+    // The dead-end analysis's bits per node, its stack of `capacity` items, and the stack's live length: a statement
+    // expression's own analysis nests inside its statement's, and each frame uses the tail beyond `depth`.
     uint8_t* bits;
     uint64_t* stack;
     uint64_t capacity;
+    uint64_t depth;
     // The body's extra edges: per control, the first control that its statement's code always emits beside it, and per
     // such control, the next of the same control's, BUSTER_CHECK_NONE ending each list.
     uint32_t* first;
     uint32_t* next;
+    // Per statement expression, whether its block's emission reaches its end's block through a path with a
+    // predecessor: 0 uncomputed, 1 where it does (its statement's code goes on), 2 where it doesn't (an orphan block,
+    // as clang's EnsureInsertPoint leaves the result's, or none).
+    uint8_t* regions;
+    // The unit's options, for the library builtins' gate (check_target_feature_library_noreturn).
+    const PPOptions* options;
 };
 
 #define BUSTER_CHECK_TARGET_FEATURE_DEAD 1u
@@ -557,20 +631,112 @@ static uint32_t check_target_feature_operand(CheckProgram* program, uint32_t nod
 // Whether code generation's code of the expression statement `root` ends in a block that nothing branches to
 // (CheckTargetFeatureEmission), by a postorder walk of the operands it evaluates: a node's code is straight-line where
 // none of its own or its operands' joins branches, and ends in such a block where it calls a function that doesn't
-// return, by the callee's declarations before the call, or __builtin_unreachable(), or where an operand's code does and
-// only straight-line code follows. Without room on its stack, false: the statement goes on.
-static bool check_target_feature_dead_end(CheckProgram* program, CheckTargetFeatureEmission* emission, uint32_t root)
+// return — by the callee's declarations before the call, by __builtin_unreachable() or a builtin that doesn't, or by
+// the library's functions clang knows as such (exit, abort, by name and external linkage) — or where an operand's
+// code does and only straight-line code follows, or a statement expression's block ends in one
+// (check_target_feature_region_dead). Without room on its stack, false: the statement goes on.
+static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t root);
+
+// Whether statement expression `region`'s emission reaches its end's block through a path with a predecessor
+// (CheckTargetFeatureEmission.regions): clang's EmitCompoundStmtWithoutScope evaluates the block's last expression
+// where the block's code ends, or in a fresh block that nothing reaches (EnsureInsertPoint) where it doesn't, which
+// the statement's end erases — its code doesn't go on. A label's block has a predecessor where a jump or a fall-
+// through that emitted reaches it — one entered where the code before it stopped has none — and a block a goto's
+// emitted edge reaches has one whatever the goto's own block leaves.
+static bool check_target_feature_region_dead(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t region)
 {
-    const CheckGraph* graph = &program->input->graph;
-    uint64_t depth = 0;
-    bool room = root < graph->count && emission->capacity != 0;
+    CheckProgram* program = walk->program;
+    const CheckProgramBody* body = walk->body;
+    const CheckControl* controls = program->controls + body->first;
+    const CheckProgramRegion* item = program->regions + region - 1;
+    const uint32_t end = item->first + item->count - item->cleanups - 1;
+    const uint64_t mark = walk->calls->length;
+    uint8_t* states = BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint8_t, body->count);
+    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint32_t, (uint64_t)body->count * 2);
+    bool valid = states != NULL && stack != NULL;
+    uint32_t depth = 0;
+    if (valid)
+    {
+        memset(states, 0, (uint64_t)body->count);
+        stack[depth++] = item->first;
+        states[item->first] = 2;
+        // A label's block without an emitted predecessor: emitted, but an orphan.
+        for (uint32_t l = 0; l < body->label_count; l += 1)
+        {
+            const uint32_t position = program->label_positions[body->label_first + l];
+            if (position >= item->first && position < item->first + item->count && states[position] == 0)
+            {
+                states[position] = 1;
+                stack[depth++] = position;
+            }
+        }
+    }
+    while (valid && depth != 0)
+    {
+        const uint32_t index = stack[--depth];
+        const CheckControl* entry = controls + index;
+        const uint8_t state = states[index];
+        if (entry->kind == CHECK_CONTROL_EVALUATE)
+        {
+            // The expression's code ends the block where it ends in a block with no predecessors: nothing follows it.
+            // Where it is straight-line, the next statement's block is this one, whose state stands; a join's block has
+            // its branches' predecessors.
+            const bool ends = check_target_feature_dead_end(walk, emission, entry->node);
+            const uint8_t next = ends ? 0 : (emission->bits[entry->node] & BUSTER_CHECK_TARGET_FEATURE_STRAIGHT) != 0 ? state : 2;
+            if (!ends && index + 1 < item->first + item->count && states[index + 1] < next)
+            {
+                states[index + 1] = next;
+                stack[depth++] = index + 1;
+            }
+        }
+        else if (entry->kind == CHECK_CONTROL_JUMP && entry->target < item->first + item->count)
+        {
+            // The goto's edge emits whatever its own block leaves: its target has a predecessor.
+            if (states[entry->target] < 2)
+            {
+                states[entry->target] = 2;
+                stack[depth++] = entry->target;
+            }
+        }
+        else if (entry->kind >= CHECK_CONTROL_BRANCH_FALSE)
+        {
+            const uint32_t targets[] = { index + 1, entry->target };
+            for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+            {
+                if (targets[t] < item->first + item->count && states[targets[t]] < 2)
+                {
+                    states[targets[t]] = 2;
+                    stack[depth++] = targets[t];
+                }
+            }
+        }
+        else if (index + 1 < item->first + item->count && states[index + 1] < state)
+        {
+            states[index + 1] = state;
+            stack[depth++] = index + 1;
+        }
+    }
+    const bool dead = states != NULL && states[end] != 2;
+    arena_pop_to(walk->calls, mark);
+    return valid && dead;
+}
+
+static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t root)
+{
+    CheckProgram* program = walk->program;
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint64_t base = emission->depth;
+    uint64_t depth = base;
+    bool room = root < graph->count && depth < emission->capacity;
     if (room)
     {
         emission->stack[depth++] = root;
     }
-    while (room && depth != 0)
+    while (room && depth != base)
     {
         const uint64_t item = emission->stack[--depth];
+        emission->depth = depth;
         const uint32_t node = (uint32_t)item;
         uint32_t operand = 0;
         if ((item >> 32) == 0)
@@ -600,15 +766,241 @@ static bool check_target_feature_dead_end(CheckProgram* program, CheckTargetFeat
                 straight = straight && (bits & BUSTER_CHECK_TARGET_FEATURE_STRAIGHT) != 0;
             }
             const CheckOp op = graph->ops[node];
-            const uint32_t callee = op == CHECK_OP_CALL ? check_target_feature_callee(program, node) : 0;
-            const uint32_t token = op == CHECK_OP_CALL && graph->operand0[node] < graph->count ? graph->tokens[graph->operand0[node]] : 0;
-            const bool noreturn = callee != 0 && check_target_feature_attributes(program, callee, token).noreturn;
+            // The doesn't-return question's callee is the function the designator names through `*` and `&`, as
+            // clang's getCalleeDecl strips them — a wider reach than the feature check's direct callee.
+            uint32_t name = 0;
+            const uint32_t callee = op == CHECK_OP_CALL ? check_target_feature_noreturn_object(program, node, &name) : 0;
+            const bool noreturn = callee != 0 && (check_target_feature_attributes(program, callee, name).noreturn ||
+                                                (emission->options != NULL &&
+                                                 check_target_feature_library_noreturn(program, emission->options, callee)));
             const bool unreachable = op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_UNREACHABLE;
-            dead = !join && (dead || noreturn || unreachable);
+            const bool builtin = op == CHECK_OP_BUILTIN_X86 && check_target_feature_intrinsic_noreturn(program, node);
+            const uint32_t region = op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < input->token_count ?
+                                    input->expression_regions[graph->tokens[node]] : 0;
+            const bool region_dead = region != 0 && region <= program->region_count &&
+                                     (emission->regions[region - 1] == 0 ?
+                                          (emission->regions[region - 1] =
+                                               check_target_feature_region_dead(walk, emission, region) ? 2 : 1) == 2 :
+                                          emission->regions[region - 1] == 2);
+            // A join's branches still go on, but a statement expression's whose block ends dead has none left.
+            dead = (!join || region_dead) && (dead || noreturn || unreachable || builtin || region_dead);
             emission->bits[node] = (uint8_t)((dead ? BUSTER_CHECK_TARGET_FEATURE_DEAD : 0) | (straight ? BUSTER_CHECK_TARGET_FEATURE_STRAIGHT : 0));
         }
     }
+    emission->depth = base;
     return room && (emission->bits[root] & BUSTER_CHECK_TARGET_FEATURE_DEAD) != 0;
+}
+
+// The tokens `low`..`high` of `token`'s subtree: the parse tree nests, so a token's descendants are the contiguous
+// tokens whose ancestors pass through it.
+static void check_target_feature_extent(const CheckProgram* program, uint32_t token, uint32_t* low, uint32_t* high)
+{
+    const Parser* parser = program->parser;
+    const uint32_t* parents = parser->tree.parents;
+    const uint32_t count = parser->tokens.count;
+    uint32_t lo = token;
+    uint32_t hi = token;
+    bool bound = false;
+    while (!bound && lo != 0)
+    {
+        uint32_t ancestor = lo - 1;
+        for (uint32_t steps = 0; ancestor < count && ancestor != token && steps++ < count; ancestor = parents[ancestor])
+        {
+        }
+        bound = ancestor != token;
+        lo -= ancestor == token ? 1 : 0;
+    }
+    bound = false;
+    while (!bound && hi + 1 < count)
+    {
+        uint32_t ancestor = hi + 1;
+        for (uint32_t steps = 0; ancestor < count && ancestor != token && steps++ < count; ancestor = parents[ancestor])
+        {
+        }
+        bound = ancestor != token;
+        hi += ancestor == token ? 1 : 0;
+    }
+    *low = lo;
+    *high = hi;
+}
+
+// Whether a jump can enter the statement of tokens `low`..`high` other than at its start: it holds a label, or a case
+// of a switch outside it (check_control_enterable, clang's ContainsLabel).
+static bool check_target_feature_enterable(const CheckProgram* program, uint32_t low, uint32_t high)
+{
+    const Parser* parser = program->parser;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* owners = program->input->control_owners;
+    bool enterable = false;
+    for (uint32_t token = low; !enterable && token <= high && token < parser->tokens.count; token += 1)
+    {
+        enterable = roles[token] == PARSE_ROLE_LABEL ||
+                    (roles[token] == PARSE_ROLE_CLOSE_CASE && (owners[token] < low || owners[token] > high));
+    }
+    return enterable;
+}
+
+// The `)` condition's arms: `*body` the statement it always runs, `*alternate` an if statement's else's, or
+// BUSTER_CHECK_NONE.
+static void check_target_feature_arms(const CheckProgram* program, uint32_t paren, uint32_t* body, uint32_t* alternate)
+{
+    const Parser* parser = program->parser;
+    const uint32_t* parents = parser->tree.parents;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t count = parser->tokens.count;
+    *body = BUSTER_CHECK_NONE;
+    *alternate = BUSTER_CHECK_NONE;
+    // The token after the closing parenthesis is inside the body: its ancestors' child of `paren` is the body's root.
+    uint32_t arm = paren + 1;
+    for (uint32_t steps = 0; arm < count && parents[arm] != paren && steps++ < count; arm = parents[arm])
+    {
+    }
+    uint32_t low = 0;
+    uint32_t high = 0;
+    if (arm < count && arm > paren)
+    {
+        *body = arm;
+        check_target_feature_extent(program, arm, &low, &high);
+    }
+    // An else token is `paren`'s other child; its own child is its arm's root.
+    for (uint32_t token = high + 1; arm != BUSTER_CHECK_NONE && token < count && *alternate == BUSTER_CHECK_NONE; token += 1)
+    {
+        if (parents[token] == paren && roles[token] == PARSE_ROLE_ELSE)
+        {
+            for (uint32_t child = token + 1; child < count && *alternate == BUSTER_CHECK_NONE; child += 1)
+            {
+                *alternate = parents[child] == token ? child : BUSTER_CHECK_NONE;
+            }
+        }
+        else if (parents[token] <= paren)
+        {
+            break;
+        }
+    }
+}
+
+// The control where clang emits the statement of head token `head` from its start: the statement's first control. An
+// if or while statement starts at its condition's branch, a switch at its dispatch, a do statement at its body's start,
+// a for statement at its init or condition, and any other statement at its first control (`index` bound).
+static uint32_t check_target_feature_start(const CheckProgram* program, const CheckProgramBody* body, uint32_t head, uint32_t index)
+{
+    const Parser* parser = program->parser;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* parents = parser->tree.parents;
+    const CheckControl* controls = program->controls + body->first;
+    const uint32_t count = body->entry_count;
+    uint32_t start = BUSTER_CHECK_NONE;
+    if (roles[head] == PARSE_ROLE_TERMINATOR)
+    {
+        // A do statement's `;`: its body's start is the condition's branch's target. Any other statement's `;` (or a
+        // declaration's) starts at its own first control.
+        for (uint32_t i = 0; start == BUSTER_CHECK_NONE && i < count; i += 1)
+        {
+            const CheckControl* entry = controls + i;
+            start = entry->kind == CHECK_CONTROL_BRANCH_TRUE && entry->token < parser->tokens.count && parents[entry->token] == head ?
+                        entry->target :
+                        BUSTER_CHECK_NONE;
+        }
+        if (start == BUSTER_CHECK_NONE)
+        {
+            uint32_t low = 0;
+            uint32_t high = 0;
+            check_target_feature_extent(program, head, &low, &high);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (low <= controls[i].token && controls[i].token <= high)
+                {
+                    start = i;
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; start == BUSTER_CHECK_NONE && i < count; i += 1)
+        {
+            const CheckControl* entry = controls + i;
+            if (entry->kind == CHECK_CONTROL_BRANCH_FALSE && (entry->token == head || parents[entry->token] == head))
+            {
+                // An if or a while's condition's branch, a for's after its init's controls, a switch's dispatch.
+                uint32_t first = i;
+                while (roles[head] == PARSE_ROLE_CLOSE_FOR && first != 0)
+                {
+                    uint32_t ancestor = controls[first - 1].token;
+                    for (uint32_t steps = 0; ancestor < parser->tokens.count && ancestor != head && steps++ < parser->tokens.count;
+                         ancestor = parents[ancestor])
+                    {
+                    }
+                    if (ancestor != head)
+                    {
+                        break;
+                    }
+                    first -= 1;
+                }
+                start = roles[head] == PARSE_ROLE_CLOSE_FOR ? first : i;
+            }
+            else if (entry->kind == CHECK_CONTROL_SWITCH && entry->token == head)
+            {
+                start = i;
+            }
+        }
+    }
+    return start != BUSTER_CHECK_NONE ? start : index;
+}
+
+// The control where clang's emission of the statement that holds the body's control `position` — a label's — starts
+// (ContainsLabel's whole statements): the outermost control statement it is in — an if, while, for, do or switch — is
+// emitted from its start; a block, a label, a case or a statement expression holds it only through the statement that
+// does, and a plain statement's from its first control.
+static uint32_t check_target_feature_label_root(const CheckProgram* program, const CheckProgramBody* body, uint32_t position)
+{
+    const Parser* parser = program->parser;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* parents = parser->tree.parents;
+    const CheckInput* input = program->input;
+    const CheckControl* controls = program->controls + body->first;
+    const uint32_t count = parser->tokens.count;
+    uint32_t outermost = BUSTER_CHECK_NONE;
+    uint32_t statement = BUSTER_CHECK_NONE;
+    const uint32_t token = position < body->count ? controls[position].token : BUSTER_CHECK_NONE;
+    for (uint32_t ancestor = token, steps = 0; ancestor < count && steps++ < count; ancestor = parents[ancestor])
+    {
+        const uint8_t role = roles[ancestor];
+        if (role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR)
+        {
+            outermost = ancestor;
+            statement = statement == BUSTER_CHECK_NONE ? ancestor : statement;
+        }
+        else if (role == PARSE_ROLE_TERMINATOR)
+        {
+            uint32_t low = 0;
+            uint32_t high = 0;
+            check_target_feature_extent(program, ancestor, &low, &high);
+            bool do_while = false;
+            for (uint32_t t = low; !do_while && t <= high && t < count; t += 1)
+            {
+                do_while = roles[t] == PARSE_ROLE_DO;
+            }
+            if (do_while)
+            {
+                outermost = ancestor;
+            }
+            statement = statement == BUSTER_CHECK_NONE ? ancestor : statement;
+        }
+        else if (role == PARSE_ROLE_CLOSE_BODY)
+        {
+            break;
+        }
+        else if (role == PARSE_ROLE_CLOSE_GROUP && input->expression_regions[ancestor] != 0)
+        {
+            // A statement expression's labels are its statement's to hold, not the expression's.
+            continue;
+        }
+    }
+    return outermost != BUSTER_CHECK_NONE ? check_target_feature_start(program, body, outermost, position) :
+           statement != BUSTER_CHECK_NONE ? check_target_feature_start(program, body, statement, position) :
+           position;
 }
 
 // The loop whose condition the body's BRANCH_FALSE control `index` is, by the back edge where it branches to: 1 for a
@@ -675,10 +1067,231 @@ static bool check_target_feature_emission_prepare(CheckX86DiagnosticWalk* walk, 
         const uint32_t position = program->label_positions[body->label_first + l];
         if (position < body->entry_count)
         {
+            // The statement that holds the label emits from its start, as clang's ContainsLabel emits a statement that
+            // holds one (check_target_feature_label_root); and the label's own block emits wherever the code before it
+            // stopped — EmitLabel's block always stands, a predecessor or not.
+            check_x86_diagnostic_push(walk, check_target_feature_label_root(program, body, position), true);
             check_x86_diagnostic_push(walk, position, true);
+        }
+        else if (position < body->count)
+        {
+            // A statement expression's own label begins a block where its expression's statement emits: an extra edge
+            // of its region's first control.
+            uint32_t region = BUSTER_CHECK_NONE;
+            for (uint32_t r = 0; region == BUSTER_CHECK_NONE && r < program->region_count; r += 1)
+            {
+                const CheckProgramRegion* item = program->regions + r;
+                region = item->body == (uint32_t)(body - program->bodies) && item->first <= position &&
+                                 position < item->first + item->count ?
+                             r + 1 :
+                             BUSTER_CHECK_NONE;
+            }
+            if (region != BUSTER_CHECK_NONE)
+            {
+                const uint32_t first = program->regions[region - 1].first;
+                emission->next[position] = emission->first[first];
+                emission->first[first] = position;
+            }
         }
     }
     return valid;
+}
+
+// A label a jump could enter in the body's tokens in [low, high) — what clang's ContainsLabel reports of a skipped
+// statement, or of the whole switch (case labels aren't labels for it: the collection sees them itself).
+static bool check_target_feature_label_between(const Parser* parser, uint32_t low, uint32_t high)
+{
+    bool labeled = false;
+    for (uint32_t token = low; !labeled && token < high; token += 1)
+    {
+        labeled = parser->tree.roles[token] == PARSE_ROLE_LABEL;
+    }
+    return labeled;
+}
+
+// Whether `token`'s statement is the switch body's own of head `body` — its parents to `body` its statement ends, the
+// case labels and, `compounds` for a break, a nested compound's ends, which still ends the kept statements there, or,
+// a declaration's, a `label:`'s and a statement's attributes — not inside a statement that opens a scope, a compound's,
+// an if's, a loop's or a switch's, which clang's collection can't skip a declaration for (mightAddDeclToScope) or keep
+// a break under (containsBreak: a break under a label or a scope fails it).
+static bool check_target_feature_top_level(const Parser* parser, uint32_t token, uint32_t body, bool compounds)
+{
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* parents = parser->tree.parents;
+    bool statement = false;
+    bool top = true;
+    for (uint32_t ancestor = parents[token]; ancestor < parser->tokens.count && ancestor != body && top; ancestor = parents[ancestor])
+    {
+        const uint8_t role = roles[ancestor];
+        if (!statement)
+        {
+            statement = role == PARSE_ROLE_TERMINATOR;
+        }
+        else
+        {
+            top = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_CASE ||
+                  (compounds ? role == PARSE_ROLE_CLOSE_BLOCK :
+                   role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER);
+        }
+    }
+    return top;
+}
+
+// The switch's emission where its dispatch's value is a constant (clang's FindCaseStatementsForValue in
+// EmitSwitchStmt): the statements of the case it selects, the default's where none does, or nothing at all — but
+// where a statement the selection skips holds a label (one a jump could enter, ContainsLabel) or is a declaration
+// the body's scope gains (mightAddDeclToScope), or a break something other than a compound or a case holds
+// (containsBreak), the collection fails and the whole body emits instead, save the dead statements before its
+// first case label.
+static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t index)
+{
+    CheckProgram* program = walk->program;
+    const Parser* parser = program->parser;
+    const CheckControl* controls = program->controls + walk->body->first;
+    const CheckControl* entry = controls + index;
+    const uint32_t node = entry->node;
+    uint32_t next = index + 1;
+    unsigned __int128 value = 0;
+    const bool known = check_program_case_value(program, node, program->stream->values[node].type, &value);
+    while (next < walk->body->count && controls[next].kind == CHECK_CONTROL_CASE)
+    {
+        next += 1;
+    }
+    if (!known)
+    {
+        // No constant: every case's and the fallback's, as #487's walk pushes them.
+        for (uint32_t i = index + 1; i < next; i += 1)
+        {
+            check_x86_diagnostic_push(walk, program->cases[controls[i].target].target, true);
+        }
+        check_x86_diagnostic_push(walk, next, true);
+        return;
+    }
+    // clang's scan takes the switch's case list, the cases in the reverse of their source order — the entries
+    // backwards — and stops at the first match; a case range it meets first fails the selection outright, which has
+    // the whole body's code go, as a switch without a constant's (FindCaseStatementsForValue).
+    bool whole = false;
+    uint32_t selected = BUSTER_CHECK_NONE;
+    uint32_t selected_token = BUSTER_CHECK_NONE;
+    for (uint32_t i = next; !whole && selected == BUSTER_CHECK_NONE && i-- > index + 1;)
+    {
+        const CheckProgramCase* item = program->cases + controls[i].target;
+        whole = item->range;
+        if (!whole)
+        {
+            uint32_t width = 0;
+            bool sign = false;
+            check_action_integer_type(program->types, item->type, &width, &sign);
+            const unsigned __int128 ordered = value ^ (sign ? (unsigned __int128)1 << (width - 1) : 0);
+            if (ordered >= check_program_case_order(program, item, false) && ordered <= check_program_case_order(program, item, true))
+            {
+                selected = item->target;
+                selected_token = item->token;
+            }
+        }
+    }
+    // The control after the case table jumps to the default label or the switch's end.
+    const CheckProgramCase* fallback = NULL;
+    for (uint32_t c = 0; c < program->case_count; c += 1)
+    {
+        const CheckProgramCase* item = program->cases + c;
+        fallback = item->fallback && item->owner == entry->token ? item : fallback;
+    }
+    if (!whole && selected == BUSTER_CHECK_NONE && fallback != NULL)
+    {
+        selected = controls[next].target;
+        selected_token = fallback->token;
+    }
+    // The body's statements, from the control after the table's jump.
+    const uint32_t statements = next + 1;
+    uint32_t body = entry->token + 1;
+    for (uint32_t steps = 0; body < parser->tokens.count && parser->tree.parents[body] != entry->token && steps++ < parser->tokens.count;
+         body = parser->tree.parents[body])
+    {
+    }
+    // The body's own extent and its statements' end — the control after the last whose token is inside.
+    uint32_t low = 0;
+    uint32_t high = 0;
+    check_target_feature_extent(program, body, &low, &high);
+    uint32_t end = statements;
+    for (uint32_t i = statements; i < walk->body->count; i += 1)
+    {
+        end = controls[i].token >= low && controls[i].token <= high ? i + 1 : end;
+    }
+    uint32_t kept_control_end = end;
+    if (!whole)
+    {
+        if (selected == BUSTER_CHECK_NONE)
+        {
+            // No case the value takes, no default: clang emits nothing — unless a jump can enter the body, a label it
+            // holds, which emits the whole switch (its `!ContainsLabel(&S)`).
+            whole = check_target_feature_label_between(parser, low, high + 1);
+        }
+        else
+        {
+            // The kept statements, from the case the value selects or the default, end at the first break the body
+            // itself makes — the switch's end, the control after the body's last. One a compound, an `if`, a label or
+            // another statement holds fails the collection; so does a declaration a skipped statement adds at the
+            // body's own scope — the kept ones may use it — or a label a skipped statement holds.
+            uint32_t kept_end = high + 1;
+            for (uint32_t i = selected; !whole && i < end; i += 1)
+            {
+                if (controls[i].kind == CHECK_CONTROL_JUMP && controls[i].target == end &&
+                    parser->tokens.kinds[controls[i].token] == PARSE_KIND_BREAK)
+                {
+                    if (check_target_feature_top_level(parser, controls[i].token, body, true))
+                    {
+                        const uint32_t terminator = parser->tree.parents[controls[i].token];
+                        kept_end = terminator < parser->tokens.count ? terminator + 1 : kept_end;
+                        kept_control_end = i + 1;
+                    }
+                    else
+                    {
+                        whole = true;
+                    }
+                    break;
+                }
+            }
+            // A declaration a skipped statement adds at the body's own scope (mightAddDeclToScope): clang's collection
+            // fails on it, whether it is a case's own statement or one before the first case.
+            for (uint32_t token = low; !whole && token < selected_token && token <= high; token += 1)
+            {
+                whole = program->input->declaration_kinds[token] != 0 &&
+                        check_target_feature_top_level(parser, token, body, false);
+            }
+            whole = whole || check_target_feature_label_between(parser, low, selected_token) ||
+                    check_target_feature_label_between(parser, kept_end, high + 1);
+        }
+    }
+    if (whole)
+    {
+        // The collection failed: the whole body emits — except the dead statements before its first case label, which
+        // only a label of their own makes reachable (a `goto`'s target, clang's unreachable-code elision).
+        uint32_t first_target = end;
+        uint32_t first_case_token = high;
+        for (uint32_t i = index + 1; i < next; i += 1)
+        {
+            const CheckProgramCase* item = program->cases + controls[i].target;
+            first_target = item->target < first_target ? item->target : first_target;
+            first_case_token = item->token < first_case_token ? item->token : first_case_token;
+        }
+        const uint32_t from = check_target_feature_label_between(parser, low, first_case_token) ? statements : first_target;
+        for (uint32_t i = from; i < end; i += 1)
+        {
+            check_x86_diagnostic_push(walk, i, true);
+        }
+        check_x86_diagnostic_push(walk, controls[next].target, true);
+    }
+    else if (selected != BUSTER_CHECK_NONE)
+    {
+        // The kept statements — each emits where it is (clang emits every one of its CaseStmts, dead or not) — and the
+        // switch's merge, which a break's own jump already reaches.
+        for (uint32_t i = selected; i < kept_control_end; i += 1)
+        {
+            check_x86_diagnostic_push(walk, i, true);
+        }
+        check_x86_diagnostic_push(walk, end, true);
+    }
 }
 
 // The check's walk's step at the body's control `index`: code generation's emission (CheckTargetFeatureEmission) where
@@ -695,16 +1308,17 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
     if (entry->kind == CHECK_CONTROL_EVALUATE)
     {
         check_x86_diagnostic_push(walk, entry->node, false);
-        if (!check_target_feature_dead_end(program, emission, entry->node))
+        if (!check_target_feature_dead_end(walk, emission, entry->node))
         {
             check_x86_diagnostic_push(walk, index + 1, true);
         }
     }
     else if (entry->kind == CHECK_CONTROL_BRANCH_TRUE || loop != 0)
     {
-        // A do statement's condition, which its end follows whatever its value, or a while or for statement's, which its
-        // body follows whatever its value; a constant one has no branch where it can't go: back from `do ... while (0)`,
-        // out of `while (1)`.
+        // A do statement's condition, which its end follows whatever its value — clang's `br i1` reaches the exit even
+        // under `while (1)`, whose block nothing else needs — or a while or for statement's, which its body follows
+        // whatever its value; a constant one has no branch where it can't go: back from `do ... while (0)`, out of
+        // `while (1)`.
         bool truth = false;
         const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth);
         const bool branch = entry->kind == CHECK_CONTROL_BRANCH_TRUE ? !known || truth : loop == 2 || !known || !truth;
@@ -715,10 +1329,164 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
         }
         check_x86_diagnostic_push(walk, index + 1, true);
     }
+    else if (entry->kind == CHECK_CONTROL_BRANCH_FALSE)
+    {
+        // An if statement's condition: the arm a constant one leaves out still emits where a jump can enter it — it
+        // holds a label, or a case of a switch outside it (ConstantFoldsToSimpleInteger and ContainsLabel).
+        bool truth = false;
+        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth);
+        check_x86_diagnostic_push(walk, entry->node, false);
+        uint32_t body = BUSTER_CHECK_NONE;
+        uint32_t alternate = BUSTER_CHECK_NONE;
+        check_target_feature_arms(program, entry->token, &body, &alternate);
+        if (!known)
+        {
+            check_x86_diagnostic_push(walk, entry->target, true);
+            check_x86_diagnostic_push(walk, index + 1, true);
+        }
+        else
+        {
+            const uint32_t skipped = truth ? alternate : body;
+            uint32_t low = 0;
+            uint32_t high = 0;
+            if (skipped != BUSTER_CHECK_NONE)
+            {
+                check_target_feature_extent(program, skipped, &low, &high);
+            }
+            check_x86_diagnostic_push(walk, truth ? index + 1 : entry->target, true);
+            if (skipped != BUSTER_CHECK_NONE && check_target_feature_enterable(program, low, high))
+            {
+                check_x86_diagnostic_push(walk, truth ? entry->target : index + 1, true);
+            }
+        }
+    }
+    else if (entry->kind == CHECK_CONTROL_SWITCH)
+    {
+        check_x86_diagnostic_push(walk, entry->node, false);
+        check_target_feature_switch(walk, index);
+    }
     else
     {
         check_x86_diagnostic_control(walk, index);
     }
+}
+
+// Whether `node`'s code holds a label — a statement expression's whose block does — which code generation emits even
+// in the operand a constant condition leaves out: clang's ContainsLabel is the whole subtree's, and a label is a
+// statement's, so an operand can hold one only through a statement expression.
+static bool check_target_feature_labeled(CheckProgram* program, CheckTargetFeatureEmission* emission, uint32_t node)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    uint64_t depth = 0;
+    bool room = node < graph->count && emission->capacity != 0;
+    if (room)
+    {
+        emission->stack[depth++] = node;
+    }
+    bool labeled = false;
+    while (!labeled && room && depth != 0)
+    {
+        const uint32_t current = (uint32_t)emission->stack[--depth];
+        const CheckOp op = graph->ops[current];
+        if (op == CHECK_OP_STATEMENT_VALUE && graph->tokens[current] < input->token_count)
+        {
+            const uint32_t region = input->expression_regions[graph->tokens[current]];
+            if (region != 0 && region <= input->region_count)
+            {
+                const CheckInputRegion* item = input->regions + region - 1;
+                labeled = check_target_feature_enterable(program, item->opening, item->closing);
+            }
+        }
+        else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+        {
+            const uint32_t operands[] = { graph->operand0[current], graph->operand1[current], graph->operand2[current] };
+            for (uint32_t i = 0; room && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+            {
+                room = depth < emission->capacity;
+                if (room && operands[i] < graph->count)
+                {
+                    emission->stack[depth++] = operands[i];
+                }
+            }
+            if (check_graph_has_arguments(op))
+            {
+                for (uint32_t i = 0; room && i < graph->argument_counts[current]; i += 1)
+                {
+                    room = depth < emission->capacity;
+                    if (room)
+                    {
+                        emission->stack[depth++] = graph->argument_nodes[graph->argument_offsets[current] + i];
+                    }
+                }
+            }
+        }
+    }
+    return labeled;
+}
+
+// The check's walk's step at expression `node`: #487's walk's, and the operand a constant condition leaves out where
+// it holds a label, which code generation still emits (check_target_feature_labeled).
+static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t node)
+{
+    CheckProgram* program = walk->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = graph->ops[node];
+    if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
+    {
+        uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        bool truth = false;
+        if (check_program_runtime_truth(program, node, operands[0], &truth))
+        {
+            const uint32_t skipped = op == CHECK_OP_CONDITIONAL ? operands[truth ? 2 : 1] :
+                                    truth == (op == CHECK_OP_LOGICAL_OR) ? operands[1] : BUSTER_CHECK_NONE;
+            if (skipped < graph->count && check_target_feature_labeled(program, emission, skipped))
+            {
+                check_x86_diagnostic_push(walk, skipped, false);
+            }
+        }
+    }
+    check_x86_diagnostic_expression(walk, node);
+}
+
+// Whether the body's control `index`, visited, always leaves its code into the next one's: an expression statement's
+// where its code goes on (not a dead end, check_target_feature_dead_end), and any control's but a jump's, a return's,
+// a statement expression's END's, or a switch's (whose dispatch's edges are its cases', not a fall).
+static bool check_target_feature_falls(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t index)
+{
+    CheckProgram* program = walk->program;
+    const CheckControl* entry = program->controls + walk->body->first + index;
+    return entry->kind != CHECK_CONTROL_JUMP && entry->kind != CHECK_CONTROL_RETURN && entry->kind != CHECK_CONTROL_END &&
+           entry->kind != CHECK_CONTROL_JUMP_INDIRECT && entry->kind != CHECK_CONTROL_SWITCH &&
+           (entry->kind != CHECK_CONTROL_EVALUATE || !check_target_feature_dead_end(walk, emission, entry->node));
+}
+
+// Whether cleanup `record`'s declaration was emitted — then its call runs at each exit of its scope the walk reached;
+// clang's EmitVarDecl registers it where the declaration's statement emits, and never where that statement's code is
+// left out (a dead path, or a jump that enters its scope past it). A declaration with no controls of its own emits
+// where the code of the statement before it goes on into the one after it: a visited control inside its tokens, or a
+// visited pair of controls the walk's code joins across its first token.
+static bool check_target_feature_cleanup_emitted(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t record)
+{
+    CheckProgram* program = walk->program;
+    const CheckInput* input = program->input;
+    const CheckProgramBody* body = walk->body;
+    const CheckControl* controls = program->controls + body->first;
+    const uint64_t first = (uint64_t)input->graph.count + body->first;
+    uint32_t low = 0;
+    uint32_t high = 0;
+    check_target_feature_extent(program, input->cleanups[record].declaration, &low, &high);
+    bool emitted = controls[0].token < input->token_count && low < controls[0].token && walk->seen[first] != 0;
+    for (uint32_t i = 0; !emitted && i < body->count; i += 1)
+    {
+        emitted = walk->seen[first + i] != 0 && low <= controls[i].token && controls[i].token <= high;
+    }
+    for (uint32_t i = 1; !emitted && i < body->count; i += 1)
+    {
+        emitted = walk->seen[first + i] != 0 && walk->seen[first + i - 1] != 0 && controls[i - 1].token <= low &&
+                  low < controls[i].token && check_target_feature_falls(walk, emission, i - 1);
+    }
+    return emitted;
 }
 
 // Checks body `b`'s calls, which its walk reached (`calls`, `count` of them in clang's emission order: a call's node in
@@ -794,8 +1562,8 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
 // `output`, as clang reports them: the first function's to have any of those it emits where the unit defines them
 // (CheckProgram.body_eager, by the declarations up to each definition), or else every deferred one's. Returns false
 // without room in either arena.
-static __attribute__((unused)) bool check_program_target_features(CheckProgram* program, const PredefinesOptions* options, bool scalar, Arena* output,
-                                                                  Arena* scratch, CheckTargetFeatureError** errors, uint32_t* count)
+static __attribute__((unused)) bool check_program_target_features(CheckProgram* program, const PPOptions* pp, const PredefinesOptions* options, bool scalar,
+                                                                  Arena* output, Arena* scratch, CheckTargetFeatureError** errors, uint32_t* count)
 {
     *errors = 0;
     *count = 0;
@@ -920,8 +1688,10 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     emission.bits = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->graph.count);
                     emission.capacity = (uint64_t)input->graph.count * 2;
                     emission.stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, emission.capacity);
+                    emission.regions = program->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->region_count) : 0;
+                    emission.options = pp;
                     valid = walk.seen != 0 && walk.stack != 0 && (input->cleanup_count == 0 || walk.cleanup_tags != 0) && emission.bits != 0 &&
-                            emission.stack != 0;
+                            emission.stack != 0 && (program->region_count == 0 || emission.regions != 0);
                     if (valid)
                     {
                         memset(walk.seen, 0, items);
@@ -929,6 +1699,10 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     if (valid && walk.cleanup_tags != 0)
                     {
                         memset(walk.cleanup_tags, 0, (uint64_t)input->cleanup_count * sizeof(uint32_t));
+                    }
+                    if (valid && emission.regions != 0)
+                    {
+                        memset(emission.regions, 0, program->region_count);
                     }
                 }
                 if (valid && candidate)
@@ -954,7 +1728,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                         walk.tag = control < body->entry_count ? control + 1 : (uint32_t)(entry >> 32);
                         if (item < input->graph.count)
                         {
-                            check_x86_diagnostic_expression(&walk, (uint32_t)item);
+                            check_target_feature_expression(&walk, &emission, (uint32_t)item);
                         }
                         else
                         {
@@ -976,13 +1750,18 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                         const uint32_t scope = record < input->cleanup_count ? input->cleanups[record].scope : BUSTER_CHECK_NONE;
                         if (scope < program->parser->tokens.count && walk.cleanup_tags[record] != 0 && control->token == program->parser->tree.parents[scope])
                         {
-                            uint64_t* item = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1);
-                            valid = item != 0;
-                            if (valid)
+                            // The call runs only where the variable's declaration emitted (clang's registered
+                            // cleanups, check_target_feature_cleanup_emitted): a reached exit alone doesn't make one.
+                            if (check_target_feature_cleanup_emitted(&walk, &emission, record))
                             {
-                                const uint32_t statement = i < body->entry_count ? i + 1 : walk.cleanup_tags[record];
-                                *item = ((uint64_t)statement << 32) | i;
-                                item_count += 1;
+                                uint64_t* item = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1);
+                                valid = item != 0;
+                                if (valid)
+                                {
+                                    const uint32_t statement = i < body->entry_count ? i + 1 : walk.cleanup_tags[record];
+                                    *item = ((uint64_t)statement << 32) | i;
+                                    item_count += 1;
+                                }
                             }
                             walk.cleanup_tags[record] = 0;
                             walk.cleanup_count -= 1;

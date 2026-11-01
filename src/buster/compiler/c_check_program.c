@@ -2145,6 +2145,71 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
     return reference_count;
 }
 
+// Whether `root`'s code holds a label — a statement expression's whose block does — which code generation emits even
+// where a constant condition leaves the operand out (clang's ContainsLabel: a label is a statement's, so an operand
+// can hold one only through a statement expression, or a case of a switch outside it). The scan's marks in `nodes` are
+// `tag`, disjoint from the run's epochs, so they don't hide a node the run hasn't pushed; `stack`/`depth` start where
+// the run's does and return to it.
+static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t tag, uint32_t* nodes, uint32_t* stack, uint32_t depth)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = program->parser;
+    uint32_t count = 0;
+    bool labeled = false;
+    if (root < graph->count && nodes[root] != tag)
+    {
+        nodes[root] = tag;
+        stack[depth + count++] = root;
+    }
+    // The scan runs out: a mark means the node's subtree was explored whole, so later queries skip it soundly.
+    while (count != 0)
+    {
+        const uint32_t node = stack[depth + --count];
+        const CheckOp op = graph->ops[node];
+        if (op == CHECK_OP_STATEMENT_VALUE)
+        {
+            const uint32_t token = graph->tokens[node];
+            const uint32_t region = token < input->token_count ? input->expression_regions[token] : 0;
+            if (region != 0 && region <= input->region_count)
+            {
+                const CheckInputRegion* item = input->regions + region - 1;
+                for (uint32_t t = item->opening; !labeled && t <= item->closing; t += 1)
+                {
+                    labeled = parser->tree.roles[t] == PARSE_ROLE_LABEL ||
+                              (parser->tree.roles[t] == PARSE_ROLE_CLOSE_CASE &&
+                               (input->control_owners[t] < item->opening || input->control_owners[t] > item->closing));
+                }
+            }
+        }
+        else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+        {
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+            {
+                if (operands[k] < graph->count && nodes[operands[k]] != tag)
+                {
+                    nodes[operands[k]] = tag;
+                    stack[depth + count++] = operands[k];
+                }
+            }
+            if (check_graph_has_arguments(op))
+            {
+                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
+                {
+                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
+                    if (nodes[argument] != tag)
+                    {
+                        nodes[argument] = tag;
+                        stack[depth + count++] = argument;
+                    }
+                }
+            }
+        }
+    }
+    return labeled;
+}
+
 static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
                                          uint32_t* seen, uint32_t* nodes, uint32_t* stack, uint64_t* references, uint8_t* needed)
 {
@@ -2248,13 +2313,15 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && !program->unselected_operands &&
                 check_program_runtime_truth(program, node, operands[0], &truth))
             {
-                if (op == CHECK_OP_CONDITIONAL)
+                // The operand a constant condition leaves out still emits — and so refers — where it holds a label
+                // (check_program_labeled): a statement expression's block's, or a case of a switch outside it — which
+                // only a unit with a statement expression can have.
+                const uint32_t dropped = op == CHECK_OP_CONDITIONAL ? (truth ? 2 : 1) : 1;
+                const bool leaves = op == CHECK_OP_CONDITIONAL || (op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth);
+                if (leaves && (program->input->region_count == 0 ||
+                               !check_program_labeled(program, operands[dropped], epoch | UINT32_C(0x40000000), nodes, stack, depth)))
                 {
-                    operands[truth ? 2 : 1] = BUSTER_CHECK_NONE;
-                }
-                else if ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth))
-                {
-                    operands[1] = BUSTER_CHECK_NONE;
+                    operands[dropped] = BUSTER_CHECK_NONE;
                 }
             }
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
@@ -2891,7 +2958,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
     uint32_t* label_positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+    // The label scan a constant condition's dead operand can need nests inside the run's traversal, on marks of its
+    // own: each set of pushes is bounded by node_count.
+    uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count * 2 + 2) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     // A body's references: its nodes', and its cleanups' functions.

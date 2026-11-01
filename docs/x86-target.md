@@ -401,14 +401,25 @@ including `[[gnu::noreturn]]`, changes the function type instead, and the C
 their effect. A shared specifier list is copied per declarator before any
 record is marked ignored.
 
-It still differs where clang emits a statement that holds a label from its
-start: an `if`, loop or `switch` statement after a point where emission stops,
-and an `if`'s or a `switch`'s arm that a constant condition would leave out,
-which the walk takes from the label on; and a statement expression holding a
-label in an operand a constant condition leaves out. A call through a pointer
-to a function that doesn't return, and a call of a C library function that
-clang knows doesn't return (`exit`, `abort`) where its declaration lacks the
-attribute (glibc's headers have it), go on (#891 has the rest).
+And it emits a statement that holds a label from its start: an `if`, loop or
+`switch` statement after a point where emission stops, an `if`'s or a
+`switch`'s arm that a constant condition would leave out — the check walks the
+whole statement or arm then, as a source label makes it, `ContainsLabel`'s
+rule — and an operand a constant condition leaves out where a statement
+expression in it holds a label, which its references keep (`0 && ({ l: h(x); })`
+emits). A call through a pointer to a function that doesn't return, and a call
+of a C library function that clang knows doesn't return (`exit`, `abort`,
+`_Exit`, `_exit`, `longjmp` and kin, by the builtins' attributes, which
+`-ffreestanding`, `-fno-builtin` and `-fno-builtin-NAME` lift) where its
+declaration lacks the attribute, end what follows them too; a call through a
+function pointer variable doesn't. A `switch` on a constant emits just the
+case the value takes — its statements until the body's first break — where the
+scan that finds it can skip the rest, which a label a skipped statement holds,
+a declaration at the body's own scope the kept statements may use, a case
+range the list's order puts first, or a kept statement's own break means it
+can't; then the whole body's code goes, as a switch without a constant's. It
+still differs for a `case` inside a nested `if` or compound, which clang's
+scan doesn't reach, and for `goto` into a label inside one.
 
 Clang's errors are unrecoverable. It emits the functions it must emit where the
 unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
