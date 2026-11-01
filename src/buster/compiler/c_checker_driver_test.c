@@ -4771,6 +4771,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // of section.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
+#include "c_check_tier1_driver_test.c"
 
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
@@ -5059,6 +5060,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
         unlink(source);
     }
 }
+#include "c_check_initializer_warning_test.c"
+#include "c_check_warning_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -5705,6 +5708,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_cleanup_errors(&test, clang, executable, directory);
         check_test_driver_musttail_errors(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
+        check_test_driver_initializer_warnings(&test, clang, executable, directory);
+        check_test_driver_default_warnings(&test, clang, executable, directory);
+        check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
@@ -5741,6 +5747,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_array_alignment(&test, clang, executable, directory);
+            check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
             check_test_driver_float_classify(&test, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);

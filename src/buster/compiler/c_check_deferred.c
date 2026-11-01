@@ -164,6 +164,7 @@ typedef struct CheckDeferredArenas CheckDeferredArenas;
 struct CheckDeferredArenas
 {
     uint8_t* mapping;
+    uint64_t mapping_bytes;
     Arena output;
     Arena scratch;
     Arena results;
@@ -446,21 +447,45 @@ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
     const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32, UINT64_C(1) << 32 };
     if (arenas->mapping == 0)
     {
-        uint8_t* mapping = mmap(0, BUSTER_CHECK_DEFERRED_LANE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (mapping != MAP_FAILED)
+        uint64_t limit = arena_reservation_limit();
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
         {
-            // The advice only chooses the page size, as arena_reserve's does: the arenas work whether or not the
-            // kernel takes it.
-            madvise(mapping, BUSTER_CHECK_DEFERRED_LANE_BYTES, MADV_NOHUGEPAGE);
-            arenas->mapping = mapping;
+            total += capacities[i] < limit ? capacities[i] : limit;
+        }
+        // A single inaccessible reservation retains the lane's stable contiguous layout, without charging its
+        // unused hundreds of GiB against CommitLimit. Each slice commits only its own pushes. Release the original
+        // mapping directly: the parent descriptor does not track the children's writable prefixes.
+        Arena storage = arena_reserve_exact(total, total);
+#if !BUSTER_SANITIZER_RESOURCES
+        if (storage.base == 0 && (errno == ENOMEM || errno == EINVAL) && limit > BUSTER_ARENA_COMPACT_BYTES)
+        {
+            arena_compact = true;
+            limit = arena_reservation_limit();
+            total = 0;
+            for (uint32_t i = 0; i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
+            {
+                total += capacities[i] < limit ? capacities[i] : limit;
+            }
+            storage = arena_reserve_exact(total, total);
+        }
+#endif
+        if (storage.base != 0)
+        {
+            arenas->mapping = storage.base;
+            arenas->mapping_bytes = storage.mapping_bytes;
             uint64_t offset = 0;
             for (uint32_t i = 0; i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
             {
+                const uint64_t capacity = capacities[i] < limit ? capacities[i] : limit;
                 *list[i] = (Arena){
-                    .base = mapping + offset,
-                    .capacity = capacities[i],
+                    .base = storage.base + offset,
+                    .capacity = capacity,
+                    .small = capacity,
+                    .mapping_bytes = capacity,
+                    .requested_capacity = capacities[i],
                 };
-                offset += capacities[i];
+                offset += capacity;
             }
         }
     }
@@ -608,9 +633,19 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->types = &lane->types;
     reader->arena = &arenas->output;
     reader->scratch = &arenas->scratch;
+    reader->warning_query_arena = &arenas->results;
     reader->warning_events = (CheckWarningBuffer){ .arena = &arenas->output };
     reader->const_values = (CheckConstBuffer){ .arena = &arenas->output, .prefix = &top->output->const_values };
     input->const_values = check_const_view(&reader->const_values);
+    reader->literal_warnings = top->literal_warnings;
+    reader->literal_warnings.arena = &arenas->output;
+    reader->literal_warnings.borrowed = true;
+    reader->source_warning_keys = top->source_warning_keys;
+    reader->source_warning_keys.arena = &arenas->output;
+    reader->source_warning_keys.borrowed = true;
+    reader->variable_sized_records = top->variable_sized_records;
+    reader->variable_sized_records.arena = &arenas->output;
+    reader->variable_sized_records.borrowed = true;
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->deferred = 0;
     reader->lane = true;
@@ -972,6 +1007,16 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->warning_events = (CheckWarningBuffer){ .arena = reader->arena };
     reader->const_values = (CheckConstBuffer){ .arena = reader->arena, .prefix = &top_input->const_values };
     input->const_values = check_const_view(&reader->const_values);
+    reader->literal_warnings = top->literal_warnings;
+    reader->literal_warnings.arena = reader->arena;
+    reader->literal_warnings.borrowed = true;
+    reader->warning_bound_open = BUSTER_CHECK_NONE;
+    reader->source_warning_keys = top->source_warning_keys;
+    reader->source_warning_keys.arena = reader->arena;
+    reader->source_warning_keys.borrowed = true;
+    reader->variable_sized_records = top->variable_sized_records;
+    reader->variable_sized_records.arena = reader->arena;
+    reader->variable_sized_records.borrowed = true;
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->cached_constant_count = top->cached_constant_count;
     reader->vararg_count = top->vararg_count;
@@ -1347,7 +1392,7 @@ static bool check_deferred_const_values(CheckConstBuffer* output, const CheckCon
                 unions[u] = input->unions[object.union_first + u];
                 unions[u].type = check_deferred_type(remap, unions[u].type);
             }
-            valid = check_const_append(output, object, parts, object.part_count, unions, object.union_count);
+            valid = check_const_append(output, object, parts, object.part_count, unions, object.union_count, true);
         }
         arena_pop_to(scratch, mark);
     }
@@ -1669,6 +1714,23 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
     // Lanes share disjoint token columns but own their reader counters: the count of the tokens with a constant's
     // warning, which later declaration-time warning mutations keep through the same helper.
     return check_deferred_count_bytes(reader->output->constant_warnings, begin, finish < count ? finish : count, pass->vector);
+}
+
+// A 2 MB region of the merged stream's columns, faulted in on the calling thread before the lanes write them: a
+// store of 0 at the range's start and at every region's start it reaches, so that each region has its page before any
+// lane writes it. The pass writes every event of the columns on the lanes that read the bodies, into fresh huge pages
+// of the caller's scratch on a process's one reading, and lanes that write a fresh region at once each allocate and
+// clear a huge page for it, of which the kernel maps one (#874, as #764's race in the walks). The stores land in pages
+// already in place on a reading whose arenas are reused, and every byte they write the pass writes again.
+static void check_deferred_fault_range(void* begin, uint64_t bytes)
+{
+    uint8_t* end = (uint8_t*)begin + bytes;
+    uintptr_t region = (uintptr_t)begin & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+    while (bytes != 0 && region < (uintptr_t)end)
+    {
+        *(volatile uint8_t*)(region < (uintptr_t)begin ? begin : (void*)region) = 0;
+        region += BUSTER_ARENA_HUGE_PAGE_BYTES;
+    }
 }
 
 // A lane's share of the pass: its items by their tokens.
@@ -2115,8 +2177,23 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         costs[bodies] = (uint64_t)count + 1;
     }
-    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake.
+    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake. On more than
+    // one lane, fault in the columns the pass writes first, on this thread (check_deferred_fault_range): the merged
+    // stream's events, every one of which the pass writes, and the token positions, which its scans fill from their
+    // start. On one lane this thread writes them alone, and needs no fault-in.
     const uint32_t lanes = deferred->active > 1 ? deferred->active : 1;
+    if (valid && lanes > 1)
+    {
+        check_deferred_fault_range(key, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(declaration, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(point, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(end, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(previous, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(depth, (uint64_t)event_total * sizeof(uint32_t));
+        check_deferred_fault_range(operation, (uint64_t)event_total);
+        check_deferred_fault_range(kind, (uint64_t)event_total);
+        check_deferred_fault_range(positions, ((uint64_t)count + 1) * sizeof(uint32_t));
+    }
     if (valid && lanes == 1)
     {
         input->constant_warning_count = check_deferred_pass_items(&pass, 0, bodies + 1);
@@ -2466,7 +2543,7 @@ static void check_deferred_release(CheckDeferred* deferred)
         CheckDeferredArenas* arenas = memory->lanes + lane;
         if (arenas->mapping != 0)
         {
-            munmap(arenas->mapping, BUSTER_CHECK_DEFERRED_LANE_BYTES);
+            munmap(arenas->mapping, arenas->mapping_bytes);
         }
         *arenas = (CheckDeferredArenas){ 0 };
     }

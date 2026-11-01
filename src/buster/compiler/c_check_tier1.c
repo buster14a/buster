@@ -56,7 +56,7 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
+                                           bool rematerialize, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
 {
     *operation = 0;
     *counts = (CheckTier1Counts){ 0 };
@@ -126,7 +126,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = !scalar,
-            .rematerialize = true,
+            .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
         };
@@ -149,10 +149,20 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
-        memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
-        memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
-        memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        // An empty column's producer may hold no pointer at all: copying nothing from null is still undefined behavior.
+        if (selected->count != 0)
+        {
+            memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
+        }
+        if (selected->branch_count != 0)
+        {
+            memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
+            memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
+        }
+        if (emitted.reference_count != 0)
+        {
+            memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        }
         *counts = (CheckTier1Counts){
             .records = selected->count,
             .spill_stores = emitted.spill_stores,
@@ -160,7 +170,10 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .call_stores = emitted.call_stores,
             .call_loads = emitted.call_loads,
             .rematerializations = emitted.rematerializations,
+            .dropped_definitions = emitted.dropped_definitions,
             .edge_moves = emitted.edge_moves,
+            .spill_slots = emitted.allocation.spill_count,
+            .frame_bytes = emitted.frame.maximum_stack_bytes,
         };
         *code = (Tier0Code){
             .records = records,
@@ -224,6 +237,7 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
         }
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
-                    "\tedge_moves=%" PRIu64 "\n",
-            report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations, report->edge_moves);
+                    "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\n",
+            report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
+            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes);
 }

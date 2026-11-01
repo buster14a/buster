@@ -702,7 +702,7 @@ static int pp_benchmark_defines(char** paths, int path_count, uint32_t only)
     }
     // The files become the preprocessor's file data, which definitions point into.
     const uint32_t first_data = tables.pp.data_count;
-    ran = ran && first_data + tables.count <= BUSTER_PP_MAX_FILES;
+    ran = ran && first_data + tables.count <= (BUSTER_PP_MAX_FILES >> tables.pp.capacity_shift);
     for (uint32_t f = 0; ran && f < tables.count; f += 1)
     {
         tables.pp.datas[first_data + f] = tables.datas[f];

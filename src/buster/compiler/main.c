@@ -147,6 +147,7 @@ int run_dataflow_benchmark(int argc, char** argv);
 
 // Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
 #include "buster/compiler/dominators.c"
+#include "buster/compiler/dominators_export.c"
 #include "buster/compiler/dominators_test.c"
 int run_dominator_benchmark(int argc, char** argv);
 
@@ -382,6 +383,7 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text"
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_checker.c"
 #include "buster/compiler/c_check_literals.c"
+#include "buster/compiler/c_check_warning_source.c"
 #include "buster/compiler/c_check_initializer.c"
 #include "buster/compiler/c_check_data.c"
 #include "buster/compiler/c_check_input.c"

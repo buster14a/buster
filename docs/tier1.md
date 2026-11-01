@@ -101,8 +101,11 @@ step, and for the selector the IR operation, that refused each of the others,
 and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
 that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
 1's code: its records, its spills' stores and reloads, the saves and restores
-around its calls and fixed registers' sequences, its recomputed constants and its
-edges' moves:
+around its calls and fixed registers' sequences, its recomputed values and the
+definitions of them it left out, its edges' moves, its spill slots and its
+frames' bytes. `--tier1-no-rematerialize` compiles Tier 1's functions spilling
+what they would recompute (#178's comparison: [the allocation
+guide](tier1-allocation.md)'s "Rematerialization"):
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
@@ -138,7 +141,11 @@ rather than caller-saved ones that every call saves and restores around itself
 interval covers a call is allocated again with the callee-saved registers alone,
 every other with the caller-saved ones; the first allocation stands where the
 second fails). On speedtest1 that halved the saves around calls (41,464 to 20,710
-records) and the spills' stores and reloads (15,028 to 7,550). Still refused: floating point, narrow
+records) and the spills' stores and reloads (15,028 to 7,550). A constant, a
+symbol's address or a frame object's address, or a copy of one, is recomputed
+where the allocator takes it out of a register, rather than stored and reloaded
+(#178), which took a third of those stores and reloads again, with no change in
+speedtest1's run time. Still refused: floating point, narrow
 call arguments (the IR doesn't keep their signedness, which the callee's
 extension needs), stack arguments, labels, switches, aggregates by value and
 variadic definitions.
@@ -147,19 +154,29 @@ variadic definitions.
 `test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
 #142's campaigns.
 
-Measured on the 9700X ([the
-record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)):
-speedtest1, with 2,207 of its 2,709 functions by Tier 1, gives Tier 0's
-verification hash by both paths and runs in 285.0 ms, against Tier 0's 256.1
-ms, clang -O0's 289.6 ms and clang -O2's 131.5 ms. The functions Tier 1 compiles
-take 843 M cycles as its code against 667 M as Tier 0's: comparisons stay
-`setcc`/`movzx`/`test` chains through the IR's `zext` of C's comparison-as-int,
-constant offsets are added rather than folded into addresses, and parameters'
-definition intervals keep their caller-saved registers across the entry block's
-calls. 80 of #142's programs, 40 per generator, gave 66 passes at both tiers and
-14 failures, all in clang's own steps. The default path's compile time is
-unchanged, but the checker's unit, which now compiles Tier 1's modules for the
-driver, takes 40.0 s to build against 36.6 to 36.9 s.
+Measured on the 9700X ([step 5's
+record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)
+and [step
+6's](https://github.com/buster14a/buster-performance/tree/ca1c5a8/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step6)):
+speedtest1, with 2,208 of its 2,709 functions by Tier 1, gives Tier 0's
+verification hash by both paths and runs in 226.9 ms, against Tier 0's 257.1
+ms, clang -O0's 293.6 ms and clang -O2's 131.4 ms. Before the selection's walks
+of C's truth values, addresses and divisions by powers of two (#141's items in
+`tier1_select.c`) it ran in 285.7 ms. By sampled cycles, the functions Tier 1
+compiles take 26% fewer as its code than as Tier 0's (41% fewer than before the
+walks). What still costs: a narrow value's zero extension is a `movzx`, though
+its register is zero-extended already; `&&`, `||` and `?:` results whose depth
+slot carries values of several types stay in memory (single-type ones promote
+since #983); a frame
+object's address is a `lea` rather than part of its users' memory operands; the
+pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
+function, is Tier 0's (its switch). 80 of #142's programs, 40 per generator, gave
+66 passes at both tiers and 14 failures, all in clang's own steps, and 40 more by
+the scalar path alone 36 passes and 4 such failures. The default path's compile
+time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
+the walks, which leave 40% fewer records to emit); the checker's unit, which
+compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
+36.9 s without them.
 
 ## Current integration boundary
 

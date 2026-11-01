@@ -1,0 +1,62 @@
+name: Tier 1 machine-problem interchange
+
+on:
+  pull_request:
+    paths:
+      - 'src/buster/compiler/tier1_problem*.c'
+      - 'src/buster/compiler/tier1_allocate.c'
+      - 'src/buster/compiler/lane.c'
+      - 'src/buster/compiler/host_isa.h'
+      - 'tests/tier1-problem/**'
+      - '.github/workflows/tier1-problem.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/buster/compiler/tier1_problem*.c'
+      - 'src/buster/compiler/tier1_allocate.c'
+      - 'src/buster/compiler/lane.c'
+      - 'src/buster/compiler/host_isa.h'
+      - 'tests/tier1-problem/**'
+      - '.github/workflows/tier1-problem.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier1-problem-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  correctness:
+    # Correctness only: these hosted runs make no Zen 5 performance claims.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86-64, native]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Report the hosted compiler
+        run: clang --version
+      - name: Round trips, refusals and the real allocator
+        run: |
+          clang -std=c17 -O2 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem"
+          "$RUNNER_TEMP/tier1-problem"
+      - name: Address and undefined-behavior sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=address,undefined -fno-sanitize-recover=all tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem-sanitize"
+          "$RUNNER_TEMP/tier1-problem-sanitize"
+      - name: Seeded bounded wire-format fuzzing
+        run: |
+          clang -std=c17 -O2 -Wall -Wextra -Werror -Wno-unused-function tests/tier1-problem/seed.c -o "$RUNNER_TEMP/tier1-problem-seed"
+          mkdir "$RUNNER_TEMP/problem-corpus"
+          for kind in straight cfg form; do "$RUNNER_TEMP/tier1-problem-seed" "$kind" > "$RUNNER_TEMP/problem-corpus/$kind"; done
+          clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all tests/tier1-problem/fuzz.c -o "$RUNNER_TEMP/tier1-problem-fuzz"
+          "$RUNNER_TEMP/tier1-problem-fuzz" -seed=938 -runs=100000 -max_len=8192 "$RUNNER_TEMP/problem-corpus"

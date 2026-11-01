@@ -129,6 +129,15 @@ struct CheckConstantAttributes
 };
 
 typedef struct CheckConstantInput CheckConstantInput;
+typedef struct CheckConstantRange CheckConstantRange;
+struct CheckConstantRange
+{
+    uint32_t first;
+    uint32_t end;
+    // Exact function-designator identifier plus one. Source ranges may also contain unrelated same-set calls.
+    uint32_t overload_token;
+};
+
 struct CheckConstantInput
 {
     CheckInputReader* reader;
@@ -165,6 +174,59 @@ struct CheckConstantInput
     bool cached;
     bool deferred_tags;
 };
+
+static uint32_t check_constant_overload_token(const CheckConstantInput* input, uint32_t root)
+{
+    const CheckInputReader* reader = input->reader;
+    uint32_t result = 0;
+    for (uint32_t steps = 0; root >= input->first && root < input->end && steps < input->end - input->first; steps += 1)
+    {
+        const uint8_t kind = reader->parser->tokens.kinds[root];
+        const uint8_t role = reader->parser->tree.roles[root];
+        if (kind == PARSE_KIND_IDENTIFIER && reader->output->overload_heads != NULL && reader->output->overload_heads[root] != 0)
+        {
+            result = root + 1;
+            break;
+        }
+        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
+        if (chosen != BUSTER_CHECK_NONE && selected >= input->first && selected < input->end && selected != root)
+        {
+            root = selected;
+        }
+        else if (role == PARSE_ROLE_CLOSE_GROUP || (role == PARSE_ROLE_PREFIX && (kind == PARSE_KIND_AMP || kind == PARSE_KIND_EXTENSION)))
+        {
+            uint32_t value = BUSTER_CHECK_NONE;
+            bool unique = true;
+            for (uint32_t child = reader->first_child[root]; child != BUSTER_CHECK_NONE && unique; child = reader->next_child[child])
+            {
+                if (child >= input->first && child < input->end && input->present[child - input->first])
+                {
+                    unique = value == BUSTER_CHECK_NONE;
+                    value = child;
+                }
+            }
+            root = unique && value != root ? value : BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return result;
+}
+
+static void check_constant_selected_uses(CheckConstantInput* input, uint32_t head, const CheckOverloadResult* selected,
+                                          CheckConstantRange range, uint32_t completion)
+{
+    const uint32_t token = range.overload_token != 0 ? range.overload_token - 1 : BUSTER_CHECK_NONE;
+    if (head != 0 && selected->status == CHECK_OVERLOAD_OK && token >= range.first && token < range.end &&
+        range.first >= input->first && range.end <= input->end && input->reader->output->overload_heads != NULL &&
+        input->reader->output->overload_heads[token] == head)
+    {
+        check_input_selected_overload_use(input->reader, token, completion, selected);
+    }
+}
 
 static CheckOverloadResult check_constant_address(CheckConstantInput* input, const CheckValue* source, TypeId target, CheckValue* resolved)
 {
@@ -741,8 +803,14 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             {
                 CheckValue bound = { 0 };
                 int64_t extent = 0;
+                // The bound is an evaluated expression, not a language query's operand. Opening it here reopens a
+                // variably modified sizeof or _Alignof whose operand contains this type name, while a query nested
+                // inside the bound starts after it and stays unevaluated.
+                const uint32_t previous_warning_bound = reader->warning_bound_open;
+                reader->warning_bound_open = i;
                 valid = check_constant_range_value(input, i + 1, close, &bound) && check_input_const_rvalue(reader, close, &bound) &&
                         check_action_is_integer(reader->types, bound.type);
+                reader->warning_bound_open = previous_warning_bound;
                 if (valid && (check_input_integer_attribute(reader, &bound) || (bound.flags & BUSTER_CHECK_ICE) != 0))
                 {
                     valid = check_action_i64(reader->types, &bound, &extent) && extent >= 0;
@@ -1877,7 +1945,34 @@ static uint32_t check_constant_overload_head(const CheckConstantInput* input, ui
     return head;
 }
 
-static void check_constant_action(CheckConstantInput* input, const CheckAction* action, uint32_t callee, CheckActionResult* checked)
+static CheckConstantRange check_constant_action_source(const CheckConstantInput* input, uint32_t first, const CheckConstantRange* ranges, uint32_t slot)
+{
+    CheckConstantRange result = { .first = BUSTER_CHECK_NONE, .end = BUSTER_CHECK_NONE };
+    if (ranges != NULL)
+    {
+        result = ranges[slot];
+    }
+    else if (!input->raw)
+    {
+        for (uint32_t i = 0; i < slot && first >= input->first && first < input->end; i += 1)
+        {
+            first = input->next_value[first - input->first];
+        }
+        if (first >= input->first && first < input->end)
+        {
+            result = (CheckConstantRange){ .first = first, .end = input->reader->ends[first] + 1,
+                                           .overload_token = check_constant_overload_token(input, first) };
+            while (input->reader->first_child[result.first] < result.first)
+            {
+                result.first = input->reader->first_child[result.first];
+            }
+        }
+    }
+    return result;
+}
+
+static void check_constant_action(CheckConstantInput* input, const CheckAction* action, uint32_t callee,
+                                   const CheckConstantRange* ranges, CheckActionResult* checked)
 {
     CheckInputReader* reader = input->reader;
     CheckAction known;
@@ -1980,8 +2075,29 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     else if (head != 0 || pending_arguments)
     {
         const CheckGraph* graph = &reader->output->graph;
-        check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
-                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, 0, 0);
+        const uint64_t mark = reader->scratch->length;
+        CheckOverloadResult* arguments = pending_arguments ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckOverloadResult, (uint64_t)action->argument_count + 1) : NULL;
+        const bool storage = !pending_arguments || arguments != NULL;
+        if (storage)
+        {
+            const CheckOverloadResult selected = check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
+                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, arguments, NULL);
+            if (checked->diagnostic == CHECK_DIAG_NONE)
+            {
+                check_constant_selected_uses(input, head, &selected, check_constant_action_source(input, callee, ranges, 0), action->source_position);
+                for (uint32_t i = 0; pending_arguments && i < action->argument_count; i += 1)
+                {
+                    check_constant_selected_uses(input, action->arguments[i].overload_head, arguments + i,
+                                                  check_constant_action_source(input, callee, ranges, i + 1), action->source_position);
+                }
+            }
+        }
+        else
+        {
+            reader->output->resource = true;
+            *checked = (CheckActionResult){ .diagnostic = CHECK_DIAG_RESOURCE };
+        }
+        arena_pop_to(reader->scratch, mark);
     }
     else
     {
@@ -1995,7 +2111,13 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             {
                 const TypeId target = (i == 0 && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT)) ? action->type :
                                       (i == 1 && action->op == CHECK_OP_ASSIGN) ? action->operands[0].type : 0;
-                valid = check_constant_resolve(input, action->operands + i, target, resolved.operands + i);
+                const CheckOverloadResult selected = check_constant_address(input, action->operands + i, target, resolved.operands + i);
+                valid = selected.status == CHECK_OVERLOAD_OK;
+                if (valid)
+                {
+                    check_constant_selected_uses(input, action->operands[i].overload_head, &selected,
+                                                  check_constant_action_source(input, callee, ranges, i), action->source_position);
+                }
             }
         }
         if (valid)
@@ -2017,6 +2139,28 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning);
     }
+    if (action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT)
+    {
+        checked->value.flags &= ~BUSTER_CHECK_LITERAL_ZERO;
+    }
+    if (checked->diagnostic == CHECK_DIAG_NONE && action->op == CHECK_OP_CALL && action->argument_conversions != NULL)
+    {
+        const uint32_t close = reader->parser->tokens.kinds[action->node] == PARSE_KIND_L_PAREN ?
+                               reader->parser->tree.parents[action->node] : action->node;
+        for (uint32_t i = 0; i < action->argument_count; i += 1)
+        {
+            const CheckConstantRange source = check_constant_action_source(input, callee, ranges, i + 1);
+            if (source.first >= input->first && source.first < source.end && source.end <= input->end)
+            {
+                check_input_null_warning(reader, action->argument_conversions[i].type, action->arguments + i, source.first, source.end, close);
+            }
+        }
+    }
+    CheckWarningEvent event;
+    if (check_warning_ordered_event(reader->types, action, checked, action->node, reader->ends[action->node] + 1, &event))
+    {
+        check_input_warning_once(reader, &event);
+    }
 }
 
 // These values exist only in constant_p argument closures. Ordinary actions and their diagnostics remain the
@@ -2028,7 +2172,7 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     CheckAction speculative = *action;
     speculative.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
     CheckActionResult checked;
-    check_constant_action(input, &speculative, callee, &checked);
+    check_constant_action(input, &speculative, callee, NULL, &checked);
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
@@ -2175,7 +2319,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             CheckLiteral literal;
             check_input_literal(reader, token, &literal);
             valid = literal.valid;
-            input->values[index] = check_literal_value(literal);
+            input->values[index] = check_input_literal_value(reader, token, literal);
             produced = true;
         }
         else if (role == PARSE_ROLE_OPERAND && (kind == PARSE_KIND_STRING || check_input_function_name_token(parser, token)))
@@ -2275,6 +2419,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     input->values[index].overload_head = 0;
                 }
                 valid = check_constant_designator(input, &input->values[index]);
+                check_input_internal_bound_use(reader, token, declaration);
                 input->abi_origins[index] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
                 produced = true;
             }
@@ -2608,7 +2753,20 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 }
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
-                check_constant_action(input, &action, first, &checked);
+                check_constant_action(input, &action, first, NULL, &checked);
+                if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && first >= input->first && first < input->end)
+                {
+                    const uint32_t source = input->next_value[first - input->first];
+                    uint32_t begin = source;
+                    while (begin < input->end && reader->first_child[begin] < begin)
+                    {
+                        begin = reader->first_child[begin];
+                    }
+                    if (source >= input->first && source < input->end)
+                    {
+                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, begin, reader->ends[source] + 1, action.source_position);
+                    }
+                }
                 check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
@@ -2677,13 +2835,6 @@ struct CheckConstantOperator
     uint8_t marker;
     uint16_t builtin;
     uint8_t abi_origin;
-};
-
-typedef struct CheckConstantRange CheckConstantRange;
-struct CheckConstantRange
-{
-    uint32_t first;
-    uint32_t end;
 };
 
 static uint8_t check_constant_precedence(CheckOp op)
@@ -2765,6 +2916,10 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                     check_input_constant_warning_clear(reader, child.first, child.end, check_constant_unevaluated_warnings());
                 }
             }
+            if (operation.arity != 0 && (action.op == CHECK_OP_ADDRESS || action.op == CHECK_OP_SELECT))
+            {
+                range.overload_token = ranges[*value_count].overload_token;
+            }
             if (action.op == CHECK_OP_ALIGNOF && action.type == 0 && operation.arity == 1)
             {
                 const TypeId aligned = check_constant_object_alignment(reader, operation.token, action.operands[0].type);
@@ -2819,7 +2974,12 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 checked = (CheckActionResult){ 0 };
                 if (valid)
                 {
-                    check_constant_action(input, &action, callee, &checked);
+                    check_constant_action(input, &action, callee, ranges + *value_count, &checked);
+                    if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && operation.arity == 2)
+                    {
+                        const CheckConstantRange right = ranges[*value_count + 1];
+                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, right.first, right.end, range.end);
+                    }
                     if (checked.diagnostic == CHECK_DIAG_NONE && proofs != 0 && input->proof_active[operation.token - input->first])
                     {
                         speculative.arguments = action.arguments;
@@ -2888,7 +3048,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             check_input_literal(reader, token, &literal);
             valid = literal.valid;
             ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
-            values[value_count++] = check_literal_value(literal);
+            values[value_count++] = check_input_literal_value(reader, token, literal);
             if (proofs != 0)
             {
                 proofs[value_count - 1] = values[value_count - 1];
@@ -2949,7 +3109,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             if (valid)
             {
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
+                ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1, .overload_token = token + 1 };
                 values[value_count++] = (CheckValue)
                 {
                     .type = type,
@@ -2962,6 +3122,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                 };
                 valid = check_constant_designator(input, &values[value_count - 1]);
+                check_input_internal_bound_use(reader, token, declaration);
                 input->abi_origins[token - input->first] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
                 if (proofs != 0)
                 {
@@ -3021,7 +3182,17 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             const bool query = kind == PARSE_KIND_SIZEOF;
             const uint32_t open = query ? token + 1 : token;
             const uint32_t close = open < end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN ? parser->tree.parents[open] : BUSTER_CHECK_NONE;
-            const TypeId type = close > open && close < end ? input->queries[close - input->first] : 0;
+            TypeId type = close > open && close < end ? input->queries[close - input->first] : 0;
+            if (query && type == 0 && close > open + 1 && close < input->end && check_constant_raw_type_start(input, open + 1))
+            {
+                // A type-name query read here before its source-order pass: form it now, so that a variably modified
+                // operand's bounds are evaluated rather than taken for a discarded zero-arity operand.
+                type = check_constant_type(input, open + 1, close);
+                if (type != 0)
+                {
+                    input->queries[close - input->first] = type;
+                }
+            }
             if (type != 0)
             {
                 operators[operator_count++] = (CheckConstantOperator)

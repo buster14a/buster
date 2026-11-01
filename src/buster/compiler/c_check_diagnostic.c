@@ -16,6 +16,8 @@
 
 #include "c_check_packed_diagnostic.c"
 #include "c_check_warning_ids.c"
+#include "c_check_warning_graph.c"
+#include "c_check_warning_undefined.c"
 
 typedef enum CheckWarningSeverity
 {
