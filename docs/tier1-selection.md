@@ -462,6 +462,21 @@ unknown model IDs, spill slots, stores, reloads, rematerialized copies, peak
 retained arena bytes and the maximum of liveness and transition scratch bounds.
 The latter is not a whole-pipeline peak-memory measurement.
 
+`benchmark-tier1-select-source [--only select|select-scalar] [--after-scalar MS]
+[preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
+selection on real C: every function `-c` compiles of the files, lowered, promoted
+and optimized as the C driver's `--tier1` takes it, with its dominance, outside
+the time; then `tier1_select_plan` of each, the IR verification it runs included,
+by both paths, in 21 passes that alternate which path runs first, as nanoseconds,
+core cycles, instructions and the throttle (PMCx1A0's umask 0x08, #199) per IR
+instruction and cycles per typed entry. A function a step before selection
+refuses, or either path's selection refuses, is left out of both and counted;
+any other failure fails the command, which then reports no time. `--only` times
+one path alone, and `--after-scalar MS` runs the scalar path before each of the
+vector path's passes. Of the frozen `sqlite3.c`'s 2,668 functions, both paths
+select the 2,181 that the driver's `--tier1-report` gives Tier 1 (244,036 IR
+instructions).
+
 Run each build, test and measurement on the approved 9700X under its shared
 `~/buster-fast-bench/exclusive.sh` lock, with owner/title/link metadata; pin each
 benchmark to CPU 2. Use separate fresh processes for sustained `--only vector`
