@@ -3219,18 +3219,36 @@ Each uses the shared warning policy, so a default or group option, a
 sparse warnings do. A token from a system-header macro is suppressed by its
 spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
 for it. The `-Wswitch` check needs a named enum's source definition and literal
-enumerator `case` labels; a computed case leaves the switch to a full constant
-evaluator. `-Wuninitialized` is the source-order case where a local scalar
-object is read before any write and its address is not taken; an unmodeled
-write through inline assembly or a builtin suppresses it. `-Wformat` checks the
-four `printf`-family names, a declaration's `format(printf, ...)` attribute, and
-literal formats' common conversions and sizes.
+enumerator `case` labels; it compares the enumerators' checked values, so
+aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
+computed case leaves the switch to a full constant evaluator.
+`-Wuninitialized` follows graph evaluation order: a local scalar object read
+before any write and not address-taken warns; a `sizeof` operand, a void cast,
+an unselected constant `&&`/`||`/`?:` arm, an address computation and an
+assignment target are not reads, while an initializer's value, a compound
+assignment and an increment are, with the write ordered after the read. An
+unmodeled write through inline assembly or a builtin suppresses it.
+`-Wformat` checks the four `printf`-family names, a declaration's
+`format(printf, ...)` attribute, wide `%ls`/`%lc` (and `%S`/`%C`) arguments with
+`wchar_t`/`wint_t`, and literal formats' common conversions and sizes.
+`-Wunused-value` covers a bare identifier or literal and a parenthesized
+comparison as well as an unparenthesized one.
+`-Warray-bounds` reports a direct array object, including a nested subscript
+such as `b[1][5]` at `b`, and leaves struct-member arrays to a full bounds
+analysis. `-Wunused-function` reports a declaration chain once, at its definition
+when it has one and otherwise at its first declaration; a shadowing local use
+does not keep a file-scope variable used. `-Wreturn-stack-address` traces
+`&x[0]` and `&s.m` to their local object but not `&p->m` through a pointer.
+The return-flow walk runs for non-aggregate functions only where
+`-Wreturn-type` is enabled.
 
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
-`-Werror=unused-function`, `-Wno-*`, a warning-clean unit and a header whose
-file-scope variables no unit reports line for line against Clang on both check
-paths. The semantics are also covered by
+`-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
+uninitialized evaluation contexts and read-modify-writes, wide formats, enum
+aliases, zero sign comparisons, array-member/nested bounds, declaration chains,
+bare/parenthesized unused values and returned stack addresses line for line
+against Clang on both check paths. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
 

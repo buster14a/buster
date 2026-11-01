@@ -2780,7 +2780,7 @@ static void check_test_program_return_marks(CheckTest* test)
             CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, marks, stack, NULL);
+            check_program_return_flow(&writer, &body, marks, stack, NULL, true);
             const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
             bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
                         marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);

@@ -342,6 +342,53 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char promoted[] = "int f(int x) { if (x = 1) return 1; return 0; }\n";
     static const char unused_function[] = "static int f(void) { return 0; }\n";
     static const char unused_const[] = "static const int unused_const = 3;\n";
+    static const char uninit_contexts[] =
+        "int a(void) { int x; return sizeof x; }\n"
+        "int b(void) { int x; return (void)x, 1; }\n"
+        "int c(void) { int x; return 1 || x; }\n"
+        "int d(void) { int x; return 0 ? x : 1; }\n"
+        "int e(void) { int x; return 1 ? 1 : x; }\n"
+        "int f(void) { int x; int y = x; return y; }\n"
+        "int g(void) { int x; x++; return x; }\n"
+        "int h(void) { int x; x += 1; return x; }\n"
+        "int i(void) { int x; x = x + 1; return x; }\n";
+    static const char format_wide[] =
+        "#include <stdio.h>\n#include <wchar.h>\n"
+        "void f(void) { printf(\"%ls\\n\", L\"x\"); }\n"
+        "void g(void) { printf(\"%lc\\n\", (wint_t)L'x'); }\n";
+    static const char switch_alias[] =
+        "enum E { A = 1, B = 1, C = 2 };\n"
+        "int f(enum E e) { switch (e) { case A: return 1; case C: return 2; } return 0; }\n";
+    static const char sign_zero[] =
+        "int a(int i) { return i < 0u; }\n"
+        "int b(int i) { return i >= 0u; }\n"
+        "int c(int i) { return 0u <= i; }\n"
+        "int d(int i) { return 0u > i; }\n"
+        "int e(int x) { return x <= 0u; }\n"
+        "int f(int x) { return x > 0u; }\n"
+        "int g(int x) { return 0u < x; }\n"
+        "int h(int x) { return 0u >= x; }\n";
+    static const char array_shapes[] =
+        "struct S { int a[3]; };\n"
+        "int f(struct S *s) { return s->a[5]; }\n"
+        "int g(struct S s) { return s.a[5]; }\n"
+        "int h(void) { int b[2][3]; return b[1][5]; }\n";
+    static const char unused_chains[] =
+        "static int f(void);\n"
+        "static int f(void) { return 1; }\n"
+        "static int g(void);\n"
+        "static int g(void);\n"
+        "static int x;\n"
+        "int h(void) { int x = 1; return x; }\n";
+    static const char unused_values[] =
+        "int f(int x) { x; return 0; }\n"
+        "int g(int x) { (x == 1); return 0; }\n"
+        "int h(int x) { (void)x; return 0; }\n"
+        "int i(int x) { x + 1; return 0; }\n";
+    static const char return_stack[] =
+        "int *a(void) { int x[3]; return &x[0]; }\n"
+        "struct S { int m; };\n"
+        "int *c(void) { struct S s; return &s.m; }\n";
     static const struct
     {
         const char* source;
@@ -353,6 +400,14 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { promoted, { "-Werror", NULL, NULL, NULL } },
         { unused_function, { "-Werror=unused-function", NULL, NULL, NULL } },
         { unused_const, { "-Wall", NULL, NULL, NULL } },
+        { uninit_contexts, { "-Wall", NULL, NULL, NULL } },
+        { format_wide, { "-Wall", NULL, NULL, NULL } },
+        { switch_alias, { "-Wall", NULL, NULL, NULL } },
+        { sign_zero, { "-Wextra", NULL, NULL, NULL } },
+        { array_shapes, { "-Wall", NULL, NULL, NULL } },
+        { unused_chains, { "-Wall", NULL, NULL, NULL } },
+        { unused_values, { "-Wall", NULL, NULL, NULL } },
+        { return_stack, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
     };
@@ -390,15 +445,14 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
             char filtered_actual[16384];
             check_test_driver_common_output(expected != NULL ? expected : "", filtered_expected, sizeof(filtered_expected));
             check_test_driver_common_output(actual != NULL ? actual : "", filtered_actual, sizeof(filtered_actual));
+            const char* path = mode == 0 ? "scalar" : "vector";
             char description[160];
-            snprintf(description, sizeof(description), "common warning case %u %s diagnostics agree with Clang", c,
-                     mode == 0 ? "vector" : "scalar");
+            snprintf(description, sizeof(description), "common warning case %u %s diagnostics agree with Clang", c, path);
             const bool same = oracle >= 0 && result == oracle && strcmp(filtered_expected, filtered_actual) == 0;
             check_test_expect(test, same, description);
             if (!same)
             {
-                fprintf(stderr, "common warning case %u %s:\nClang:\n%s\nCheck:\n%s\n", c, mode == 0 ? "vector" : "scalar",
-                        filtered_expected, filtered_actual);
+                fprintf(stderr, "common warning case %u %s:\nClang:\n%s\nCheck:\n%s\n", c, path, filtered_expected, filtered_actual);
             }
             free(actual);
             free(expected);
@@ -429,8 +483,8 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         check_test_driver_common_output(expected != NULL ? expected : "", filtered_expected, sizeof(filtered_expected));
         check_test_driver_common_output(actual != NULL ? actual : "", filtered_actual, sizeof(filtered_actual));
         const bool same = oracle >= 0 && result == oracle && strcmp(filtered_expected, filtered_actual) == 0;
-        check_test_expect(test, same, mode == 0 ? "header file-scope variables stay unused in the vector path"
-                                                : "header file-scope variables stay unused in the scalar path");
+        check_test_expect(test, same, mode == 0 ? "header file-scope variables stay unused in the scalar path"
+                                                : "header file-scope variables stay unused in the vector path");
         free(actual);
         free(expected);
     }

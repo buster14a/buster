@@ -2740,6 +2740,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
                         .scalar = scalar,
+                        .return_warnings = !quiet && return_warning,
                         .target = options->target,
                         .predefines = &options->predefines,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).

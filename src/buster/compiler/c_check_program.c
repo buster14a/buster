@@ -122,6 +122,9 @@ struct CheckProgramOptions
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
     bool scalar;
+    // Give non-aggregate functions the return-flow walk that -Wreturn-type needs. A warning-suppressed command leaves
+    // it out, so its checking cost stays where it was before the warning existed.
+    bool return_warnings;
     // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
     // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129).
     bool unselected_operands;
@@ -1929,14 +1932,15 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work,
+                                     bool return_warnings)
 {
     CheckProgram* program = writer->program;
     const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
     // main returns 0 without a return statement, so it has no -Wreturn-type fall-off warning.
-    const bool scalar = result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main;
+    const bool scalar = return_warnings && result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main;
     if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar) && body->count != 0 && body->count == body->entry_count)
     {
         CheckControl* entries = writer->entries + body->first;
@@ -3294,7 +3298,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work);
+        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work, options.return_warnings);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
