@@ -126,6 +126,27 @@ static void check_test_warning_render(CheckTest* test)
                 check_test_expect(test, !check_driver_warning_events(&parser, &pp, &input, &types.table, &one, NULL, &limited) &&
                                        limited.length == scratch.length && pp.errors == errors,
                                   "renderer allocation failure publishes no partial primary and releases all temporary text");
+                // #992: the pass's spelling columns and tag rows exist only for a rendered type. An empty view and
+                // a typeless message therefore succeed with no scratch left, where a visible type still fails
+                // above; a clean unit with an anonymous tag pays no scan for its warnings.
+                const CheckWarningEvents none = { 0 };
+                check_test_expect(test, check_driver_warning_events(&parser, &pp, &input, &types.table, &none, NULL, &limited) &&
+                                       limited.length == scratch.length && pp.errors == errors,
+                                  "an empty sparse view returns before building a pass's spelling columns");
+                const CheckWarningEvent message = {
+                    .id = CHECK_WARNING_ID_KR_TOO_FEW,
+                    .kind = CHECK_WARNING_EVENT_MESSAGE,
+                    .token = 1,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .flags = BUSTER_CHECK_WARNING_SUPPRESSED,
+                    .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
+                    .completion = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                const CheckWarningEvents messages = { .events = &message, .count = 1 };
+                check_test_expect(test, check_driver_warning_events(&parser, &pp, &input, &types.table, &messages, NULL, &limited) &&
+                                       limited.length == scratch.length && pp.errors == errors,
+                                  "a pass of typeless messages builds no spelling columns and allocates no scratch");
             }
         }
         if (output != NULL)

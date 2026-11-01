@@ -337,30 +337,52 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                             const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch)
 {
     bool valid = view != NULL && (view->count == 0 || view->events != NULL) && (view->note_count == 0 || view->notes != NULL);
-    // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks: every
-    // event's mark then sits above them, so per-event release keeps them, and each event's rendered type pays
-    // nothing for what the pass already scanned. A unit with no unnamed tag skips the spelling rows entirely.
+    // A pass with no event publishes nothing and builds nothing (#992): an empty view returns before any
+    // allocation, so a clean unit pays neither the name columns nor a token scan.
+    if (!valid || view->count == 0)
+    {
+        return valid;
+    }
+    // Only these three facts render a type (#992); a pass of typeless messages, pragmas or notes needs no
+    // spelling rows at all.
+    bool renders = false;
+    for (uint32_t i = 0; !renders && i < view->count; i += 1)
+    {
+        const CheckWarningEvent* event = view->events + i;
+        renders = event->kind != CHECK_WARNING_EVENT_MESSAGE &&
+                  (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
+                  (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+                  (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
+                   event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER);
+    }
+    // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks when some
+    // event renders a type: every event's mark then sits above them, so per-event release keeps them, and each
+    // rendered type pays nothing for what the pass already scanned. A unit with no unnamed tag skips the
+    // spelling rows entirely.
     const uint64_t spelling_mark = scratch->length;
     CheckWarningSpelling spell = { .count = pp->table->count };
-    spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
-    spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
-    if (valid && spell.count != 0)
+    if (renders)
     {
-        valid = spell.lengths != NULL;
-    }
-    for (uint32_t i = 0; valid && i < spell.count; i += 1)
-    {
-        spell.bytes[i] = intern_bytes(pp->table, i);
-        spell.lengths[i] = intern_length(pp->table, i);
-    }
-    bool unnamed = false;
-    for (uint32_t t = 1; types != NULL && t < types->tags.count; t += 1)
-    {
-        unnamed |= types->tags.name[t] == 0;
-    }
-    if (valid && unnamed)
-    {
-        valid = check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+        spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+        spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+        if (spell.count != 0)
+        {
+            valid = spell.lengths != NULL;
+        }
+        for (uint32_t i = 0; valid && i < spell.count; i += 1)
+        {
+            spell.bytes[i] = intern_bytes(pp->table, i);
+            spell.lengths[i] = intern_length(pp->table, i);
+        }
+        bool unnamed = false;
+        for (uint32_t t = 1; types != NULL && t < types->tags.count; t += 1)
+        {
+            unnamed |= types->tags.name[t] == 0;
+        }
+        if (valid && unnamed)
+        {
+            valid = check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+        }
     }
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
