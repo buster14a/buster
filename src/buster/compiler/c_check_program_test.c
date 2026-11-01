@@ -70,11 +70,15 @@ static void check_test_program_addressed(CheckTest* test)
 // declarations have no statement, each column, plan_first and the `planned` bitset ending at a PROT_NONE page, and
 // plan_first and plan_next poisoned. Against an oracle that walks each initializer's parents with a set of the tokens it
 // saw: a statement's bit is set exactly when some plan is its, its list is its plans in order, and no other entry of
-// plan_first or of plan_next is written; a compound literal's plan joins no list, and one with no statement fails.
-static void check_test_program_plans(CheckTest* test, const CheckInput* base, const Parser* parser, uint8_t* const* mappings, uint64_t page)
+// plan_first or of plan_next is written; a compound literal's plan joins no list, and one with no statement fails. With
+// `listed`, `plan_count` plans: as many as the tokens, at random tokens, or fewer, at ascending tokens as the producer writes
+// them, with plan_next sized for them alone. Without, no CheckInitializers and no plan_next, as check_program passes for a
+// unit without plans: nothing is written or marked.
+static void check_test_program_plans(CheckTest* test, const CheckInput* base, const Parser* parser, uint8_t* const* mappings, uint64_t page, uint32_t plan_count,
+                                     bool listed)
 {
     const uint32_t count = base->token_count;
-    const uint32_t plans = count;
+    const uint32_t plans = listed ? plan_count : 0;
     const uint32_t words = (count + 64) / 64;
     uint8_t* compound_objects = mappings[0] + page - count;
     uint32_t* initializer_begins = (uint32_t*)(mappings[1] + page - (uint64_t)count * sizeof(uint32_t));
@@ -92,12 +96,15 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     for (uint32_t i = 0; i < plans; i += 1)
     {
         const uint32_t draw = check_test_random(test);
-        declaration_tokens[i] = draw % 9 == 0 ? count + draw % 3 : (draw >> 4) % (count != 0 ? count : 1);
+        const uint32_t step = count / plans;
+        declaration_tokens[i] = plans < count ? i * step + draw % step : draw % 9 == 0 ? count + draw % 3 : (draw >> 4) % (count != 0 ? count : 1);
     }
     CheckInput input = *base;
     input.compound_objects = compound_objects;
     input.initializer_begins = initializer_begins;
     const CheckInitializers initializers = { .declaration_tokens = declaration_tokens, .count = plans, .token_count = count };
+    const CheckInitializers* given = listed ? &initializers : NULL;
+    uint32_t* next = listed ? plan_next : NULL;
     for (uint32_t token = 0; token <= count; token += 1)
     {
         plan_first[token] = poison;
@@ -108,7 +115,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     }
     memset(planned, 0, (uint64_t)words * sizeof(uint64_t));
     CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
-    const bool compound = check_program_plans(&program, parser, &initializers, plan_first, planned, plan_next);
+    const bool compound = check_program_plans(&program, parser, given, plan_first, planned, next);
     // The oracle: each plan's statement, or a compound literal's mark, or none.
     uint32_t statements[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
     bool expected_compound = false;
@@ -165,7 +172,8 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     }
     same &= plan_first[count] == poison && plan_next[plans] == poison;
     check_test_expect(test, same && compound == expected_compound && program.status == expected_status && program.token == expected_token,
-                      "check_program's plans link each statement's initializers in order and mark exactly those statements");
+                      listed ? "check_program's plans link each statement's initializers in order and mark exactly those statements"
+                             : "check_program's plans write and mark nothing for a unit without initializer plans");
 }
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
@@ -357,7 +365,9 @@ static void check_test_program_scans(CheckTest* test)
                                    memcmp(allocation_next[0], allocation_next[1], sizeof(allocation_next[0])) == 0 &&
                                    memcmp(vla_blocks[0], vla_blocks[1], sizeof(vla_blocks[0])) == 0 && memcmp(vla_saves[0], vla_saves[1], sizeof(vla_saves[0])) == 0,
                               "check_program's variable-length array declarations agree with their scalar twin at every guarded tail");
-            check_test_program_plans(test, &input, &parser, mappings + 18, page);
+            check_test_program_plans(test, &input, &parser, mappings + 18, page, count, true);
+            check_test_program_plans(test, &input, &parser, mappings + 18, page, count / 3, true);
+            check_test_program_plans(test, &input, &parser, mappings + 18, page, 0, false);
             const CheckGraph graph = { .ops = ops, .count = node_count };
             uint32_t builtins[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t builtin_counts[2];

@@ -845,7 +845,8 @@ run. The existing program fixtures of variable-length arrays (jumps out of their
 statement expressions run through the columns, and every unit without them skips them. The bitsets are checked against
 readings of their own too, each ending at a `PROT_NONE` page: `initialized` against the tokens' initializer nodes on
 random columns; `planned` against a walk of random initializers' parents to their statements, whose lists must be their
-plans in order and which may write no other entry of `plan_first` or `plan_next` (`check_program_plans`); and `locals`
+plans in order and which may write no other entry of `plan_first` or `plan_next` (`check_program_plans`), with as many
+plans as tokens, fewer, and none; and `locals`
 against each program fixture's bodies' parameters and automatic declarations, and through its accessors on random
 objects.
 
