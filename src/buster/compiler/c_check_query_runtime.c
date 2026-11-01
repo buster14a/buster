@@ -392,7 +392,8 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     {
         const CheckBuiltinAction input = { .id = (CBuiltinId)action.member, .operands = { action.operands[0] }, .argument_count = 1,
                                           .node = node, .tag_completions = action.tag_completions, .tag_completion_count = action.tag_completion_count,
-                                          .source_position = action.source_position, .extensions = action.extensions };
+                                          .source_position = action.source_position, .extensions = action.extensions,
+                                          .const_values = action.const_values, .constant_evaluated = action.constant_evaluated };
         CheckBuiltinResult output;
         check_builtins(types, &input, &output, 1, true);
         result = output.action;

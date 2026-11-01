@@ -2178,6 +2178,8 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
             .tag_completion_count = action.tag_completion_count,
             .source_position = action.source_position,
             .extensions = action.extensions,
+            .const_values = action.const_values,
+            .constant_evaluated = action.constant_evaluated,
         };
         CheckBuiltinResult checked;
         CheckBuiltinTypedOverflowResult typed = { 0 };

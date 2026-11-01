@@ -225,6 +225,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .id = builtin, .argument_count = count, .node = closing,
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
+            .const_values = &reader->output->const_values, .constant_evaluated = true,
         };
         for (uint32_t i = 0; i < count && i < 3; i += 1)
         {

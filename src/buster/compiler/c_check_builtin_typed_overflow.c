@@ -175,6 +175,8 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
             converted->tag_completion_count = input->tag_completion_count;
             converted->source_position = input->source_position;
             converted->extensions = input->extensions;
+            converted->const_values = input->const_values;
+            converted->constant_evaluated = input->constant_evaluated;
             output->evaluated_operands = 7;
             output->runtime_builtin = info->generic;
         }

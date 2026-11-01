@@ -38,6 +38,26 @@ static __attribute__((noinline)) void check_test_bits_sources(CheckTest* test, c
           "int a[__builtin_clzs(1)];\n"
           "enum { E1 = __builtin_ctzs(8), E2 = __builtin_stdc_bit_width(5u) };\n"
           "static int s = __builtin_stdc_count_zeros((unsigned short)0x0f0f) + __builtin_ctzg(0u, 9);\n" },
+        { .name = "bits: folds through const objects (#990)", .source =
+          "static const unsigned ku=7u;\n"
+          "static const unsigned _BitInt(37) kw=37;\n"
+          "static const unsigned _BitInt(16) kw16=0x1234;\n"
+          "static const unsigned short ks=0x1234;\n"
+          "static const unsigned char kc=0xf0;\n"
+          "_Static_assert(__builtin_popcountg(ku)==3 && __builtin_clzg(ku,99)==29 && __builtin_ctzg(ku,99)==0, \"\");\n"
+          "_Static_assert(__builtin_bswapg(ks)==0x3412 && __builtin_bitreverseg((unsigned char)ku)==0xe0, \"\");\n"
+          "_Static_assert(__builtin_stdc_count_ones(ku)==3 && __builtin_stdc_bit_width(ku)==3 && __builtin_stdc_bit_ceil(ku)==8, \"\");\n"
+          "_Static_assert(__builtin_popcountg(kw)==3 && __builtin_bswapg(kw16)==0x3412 && __builtin_stdc_rotate_left(kc,4)==0x0f, \"\");\n"
+          "int ga[__builtin_popcountg(ku)];\n"
+          "enum { GE=__builtin_stdc_bit_floor(ku) };\n"
+          "struct GF { unsigned field:__builtin_stdc_bit_width(ku); };\n"
+          "unsigned f(unsigned n) { switch (n) { case __builtin_stdc_count_ones(ku): return 1; } return 0; }\n" },
+        { .name = "bits: fold of a volatile object is no constant", .source =
+          "static const volatile unsigned kv=7u;\n"
+          "int gv[__builtin_popcountg(kv)];\n", .rejected = true },
+        { .name = "bits: fold of a mutable object is no constant", .source =
+          "static unsigned kn=7u;\n"
+          "_Static_assert(__builtin_clzg(kn,0)==29, \"\");\n", .rejected = true },
         { .name = "bits: clzg of zero without a fallback is no constant", .source = "int z =\n__builtin_clzg(0u);\n", .rejected = true },
         { .name = "bits: popcountg of an int", .source = "int f(int i)\n{\nreturn __builtin_popcountg(i);\n}\n", .rejected = true },
         { .name = "bits: popcountg of plain char where it is signed", .source = "int f(char c)\n{\nreturn __builtin_popcountg(c);\n}\n", .rejected = true },
