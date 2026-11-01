@@ -120,7 +120,8 @@ static bool check_input_unused_marked_chain(const CheckInput* input, const CBind
     for (uint32_t steps = 0; !marked && at != 0 && steps < events->count; steps += 1)
     {
         const uint32_t previous = events->previous[at - 1];
-        if (previous == 0 || events->operation[previous - 1] != C_BINDING_DECLARE || events->key[previous - 1] != events->key[event])
+        if (previous == 0 || events->operation[previous - 1] != C_BINDING_DECLARE || events->key[previous - 1] != events->key[event] ||
+            events->depth[previous - 1] != events->depth[event])
         {
             break;
         }
@@ -133,14 +134,40 @@ static bool check_input_unused_marked_chain(const CheckInput* input, const CBind
 
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. The declaration's own body decides the completion, as clang reports it after the function.
-static void check_input_unused_events(CheckInputReader* reader, const uint32_t* resolved, const uint8_t* used_tokens, const uint8_t* used_names,
-                                      const uint8_t* parameters, uint8_t* reported)
+static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* parameters,
+                                      uint8_t* reported)
 {
     CheckInput* output = reader->output;
     const Parser* parser = reader->parser;
     const CBindings* events = &reader->bindings;
     const uint32_t count = parser->tokens.count;
-    for (uint32_t event = 0; event < events->count; event += 1)
+    uint32_t* chain_first = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
+    uint32_t* chain_definition = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
+    bool valid = chain_first != NULL && chain_definition != NULL;
+    if (valid)
+    {
+        memset(chain_definition, 0, (uint64_t)events->count * sizeof(uint32_t));
+        for (uint32_t event = 0; event < events->count; event += 1)
+        {
+            if (events->operation[event] != C_BINDING_DECLARE)
+            {
+                continue;
+            }
+            const uint32_t previous = events->previous[event];
+            const bool linked = previous != 0 && previous <= events->count && events->operation[previous - 1] == C_BINDING_DECLARE &&
+                                events->key[previous - 1] == events->key[event] && events->depth[previous - 1] == events->depth[event];
+            chain_first[event] = linked ? chain_first[previous - 1] : event;
+        }
+        for (uint32_t event = 0; valid && event < events->count; event += 1)
+        {
+            const uint32_t token = events->declaration[event];
+            if (events->operation[event] == C_BINDING_DECLARE && token < count && output->defined != NULL && output->defined[token] != 0)
+            {
+                chain_definition[chain_first[event]] = token;
+            }
+        }
+    }
+    for (uint32_t event = 0; valid && event < events->count; event += 1)
     {
         const uint32_t token = events->declaration[event];
         const uint32_t kind = events->kind[event];
@@ -150,22 +177,22 @@ static void check_input_unused_events(CheckInputReader* reader, const uint32_t* 
                               (output->function_flags[token] & (CHECK_INPUT_FUNCTION_IMPLICIT | CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY)) != 0;
         const bool inline_function = kind == C_BINDING_FUNCTION && token < count && output->function_flags != NULL &&
                                      (output->function_flags[token] & CHECK_INPUT_FUNCTION_INLINE) != 0;
-        const uint32_t name = events->key[event] % events->name_capacity;
-        const bool name_used = name < events->name_capacity && used_names != NULL && used_names[name] != 0;
-        const bool used = parameter || local ? used_tokens[token] != 0 : name_used;
         const bool file_scope = !local && kind == C_BINDING_OBJECT;
         const bool main_file = !file_scope || check_input_in_main_file(reader, token);
         const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
+        const bool declaration_used = parameter || local ? used_tokens[token] != 0 : used[event] != 0;
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
-                              token < count && !implicit && !inline_function && !used && !reported[token] && !check_input_unused_suppressed(output, token, kind) &&
+                              token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
                               !check_input_unused_marked_chain(output, events, event, kind) && main_file &&
                               (parameter || local || (token < count && output->linkage[token] == 1));
+        const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
+        const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
         const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
                             parameter ? CHECK_WARNING_ID_UNUSED_PARAMETER :
                             const_variable ? CHECK_WARNING_ID_UNUSED_CONST_VARIABLE : CHECK_WARNING_ID_UNUSED_VARIABLE;
         const uint32_t event_kind = kind == C_BINDING_FUNCTION ? CHECK_WARNING_EVENT_UNUSED_FUNCTION :
                                     parameter ? CHECK_WARNING_EVENT_UNUSED_PARAMETER : CHECK_WARNING_EVENT_UNUSED_VARIABLE;
-        if (selected)
+        if (selected && token == chosen && !reported[token])
         {
             const uint32_t body = output->declaration_bodies[token];
             const uint32_t closing = body < count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
@@ -189,6 +216,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint32_t* 
             }
         }
     }
+    output->resource |= !valid;
 }
 
 // `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is
@@ -254,14 +282,12 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     {
         uint8_t* used = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
         uint8_t* used_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
-        uint8_t* used_names = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->name_capacity);
         uint8_t* parameters = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
         uint8_t* reported = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
-        if (used != NULL && used_tokens != NULL && used_names != NULL && parameters != NULL && reported != NULL)
+        if (used != NULL && used_tokens != NULL && parameters != NULL && reported != NULL)
         {
             memset(used, 0, events->count);
             memset(used_tokens, 0, count);
-            memset(used_names, 0, events->name_capacity);
             memset(parameters, 0, count);
             memset(reported, 0, count);
             for (uint32_t event = 0; event < events->count; event += 1)
@@ -271,22 +297,41 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                     const uint32_t handle = resolved[event];
                     if (handle != 0 && handle <= events->count && events->operation[handle - 1] == C_BINDING_DECLARE)
                     {
-                        used[handle - 1] = 1;
-                        if (events->declaration[handle - 1] < count)
+                        // A use binds the whole declaration chain: a prototype and its definition are one entity,
+                        // and a use of either makes every declaration in the chain used.
+                        uint32_t at = handle;
+                        for (uint32_t steps = 0; at != 0 && steps < events->count; steps += 1)
                         {
-                            used_tokens[events->declaration[handle - 1]] = 1;
-                        }
-                        const uint32_t name = events->key[handle - 1] % events->name_capacity;
-                        if (events->key[handle - 1] / events->name_capacity == C_BINDING_ORDINARY && name < events->name_capacity)
-                        {
-                            used_names[name] = 1;
+                            const uint32_t declaration = at - 1;
+                            if (events->operation[declaration] != C_BINDING_DECLARE || events->key[declaration] != events->key[handle - 1] ||
+                                events->depth[declaration] != events->depth[handle - 1])
+                            {
+                                break;
+                            }
+                            used[declaration] = 1;
+                            if (events->declaration[declaration] < count)
+                            {
+                                used_tokens[events->declaration[declaration]] = 1;
+                            }
+                            at = events->previous[declaration];
                         }
                     }
                 }
             }
+            // A use that bound an earlier declaration also keeps a later definition of the same entity used.
+            for (uint32_t event = 0; event < events->count; event += 1)
+            {
+                const uint32_t previous = events->previous[event];
+                if (events->operation[event] == C_BINDING_DECLARE && previous != 0 && previous <= events->count &&
+                    events->operation[previous - 1] == C_BINDING_DECLARE && events->key[previous - 1] == events->key[event] &&
+                    events->depth[previous - 1] == events->depth[event] && used[previous - 1] != 0)
+                {
+                    used[event] = 1;
+                }
+            }
             if (check_input_parameter_marks(output, parser, parameters))
             {
-                check_input_unused_events(reader, resolved, used_tokens, used_names, parameters, reported);
+                check_input_unused_events(reader, used, used_tokens, parameters, reported);
             }
         }
     }
