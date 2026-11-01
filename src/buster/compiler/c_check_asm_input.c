@@ -755,8 +755,10 @@ static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint3
     {
         for (uint32_t token = 0; token < limit; token += 1)
         {
-            tokens[found] = token;
-            found += input->attributes[token] != NULL;
+            if (input->attributes[token] != NULL)
+            {
+                tokens[found++] = token;
+            }
         }
     }
     else
@@ -802,6 +804,10 @@ static void check_input_asm_labelled_tokens(const CheckInput* input, const uint3
     }
     else
     {
+        // A group's 16 bits are a 16-bit half of `declared`'s 32-bit words: on x86-64's little-endian words, group g is
+        // tokens 16g to 16g + 15, bits 16(g % 2) to 16(g % 2) + 15 of word g / 2, the scalar path's bits. The build's
+        // -fno-strict-aliasing allows the 16-bit stores into the words, and an odd last group's other half is zeroed
+        // below, so that every word the tokens reach is whole.
         uint16_t* halves = (uint16_t*)declared;
         const __m512i ones = _mm512_set1_epi32(1);
         for (uint32_t first = 0; first < count; first += 16)

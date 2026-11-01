@@ -692,13 +692,15 @@ every token for constructs that the unit has a handful of, or none. Its label ta
 (#920) merged on their own. This change handles the rest of its items and the attributes comment's reader sweeps.
 Every change keeps both paths' objects and diagnostics byte for byte.
 
-- **Selections** (`check_input_selections`). The pass visited every token in postorder to find the closes whose first
-  child is `_Generic` or `__builtin_choose_expr`. Its body is now `check_input_selection`, for one close.
+- **Selections** (`check_input_selections`). In a unit that spells `_Generic` or `__builtin_choose_expr` (the pass
+  doesn't run otherwise), the pass visited every token in postorder to find the closes whose first child is one of them.
+  Its body is now `check_input_selection`, for one close.
   - **Vector path.** `check_input_selection_positions` compares 16 tokens' names at a time with the two names. Each
     such keyword maps to its parent, of which it must be the first child, and sets a bit at that close's postorder
     position. The pass visits those bits' closes in order, which is the order the walk would visit them in, so a
     selection's operands are still selected before it.
-  - **Scalar path.** The walk, which is the kernel's twin too.
+  - **Scalar path.** The walk. The kernel's own scalar path tests every close as the walk does: its twin in
+    `test-checker`.
   - **Fallback.** Without room for the bits (`(count + 63) / 64` words of scratch), the vector path walks.
 - **`check_program`'s columns.** `vla_first`, `allocation_first`, `allocation_next`, `vla_blocks` and `vla_saves`, and the
   allocations' pass over every token, are made only where the unit may have a variable-length array
@@ -706,8 +708,8 @@ Every change keeps both paths' objects and diagnostics byte for byte.
   The condition is exact, since `check_action_runtime_size` needs such a type. `asm_statements` is made only with asm
   statements, and `region_first` only with regions. Each reader tests the column's presence first, as
   `check_lower_prepare` already did for `vla_identities`. A jump's search for the blocks it leaves
-  (`check_control_leave`) is skipped without the variable-length arrays' columns. Each column was 4 bytes a token,
-  2.9 MB of `sqlite3.c`.
+  (`check_control_leave`) is skipped without the variable-length arrays' columns. Each column is 4 bytes a token, 2.9 MB
+  of `sqlite3.c`'s. Six of them were filled whole, 17 MB together; `allocation_next` took address space only.
 - **The lowering's tables.** `switch_locals` is set to none only at the cases' owners, its only reads. `local_first` is
   set to none only at the bodies' openings, where it is read, and at the locals' bodies, where it is written. Both used
   to be filled at every token. `local_map` keeps its fill: an expression's object may be any object (a global's
@@ -727,8 +729,38 @@ Every change keeps both paths' objects and diagnostics byte for byte.
 `test-checker` checks the selections' kernel against a reading of random forests of up to 1,100 tokens, and the asm
 labels' three kernels against a reading of random columns. Every column ends at a `PROT_NONE` page, and both paths
 run. The existing program fixtures of variable-length arrays (jumps out of their blocks among them), asm statements and
-statement expressions run through the columns, and every unit without them skips them. The 9700X numbers come from the
-pull request's `compile_time` step.
+statement expressions run through the columns, and every unit without them skips them.
+
+**On the 9700X.** The pull request's `compile_time` step, at its first head (`f0084098`,
+[job 124825289835](https://github.com/buster14a/buster/actions/runs/41297067398/job/124825289835)), on the frozen
+`sqlite3.c` with the step's options: `-c` took 130.239 ms wall (129.656 to 131.298), the median of 11 runs pinned to
+CPU 2. Its stages' medians:
+
+| stage | ms | range |
+| --- | ---: | --- |
+| `check-input` | 56.694 | 56.288 to 57.042 |
+| `check-program` | 11.992 | 11.892 to 12.021 |
+| `lower` | 14.114 | 13.918 to 14.355 |
+
+`main`'s pushes that day were cancelled or stopped before the 9700X job, so there is no base from the same step and day.
+A matched comparison of the stages, interleaved and over code placements (`time-runs`, #509), is still to be made.
+
+**Instructions.** Callgrind counted the same compile's user instructions on baseline (`-march=x86-64`) builds of `main`
+(`91cfe9e0`) and of this change. Those builds take the scalar paths, so the selections' change doesn't show; the
+other three are on both paths. Both wrote the same object.
+
+| | `main` | this change | change |
+| --- | ---: | ---: | ---: |
+| the whole compile | 5,890.9 M | 5,846.6 M | -44.2 M (-0.75%) |
+| glibc's `memset` | 188.9 M | 160.0 M | -28.9 M |
+| `check_program`, inclusive | 170.5 M | 148.6 M | -21.9 M |
+| `check_input_run`, inclusive | 1,697.0 M | 1,679.8 M | -17.1 M |
+| `check_input_asm_labels`, inclusive | 29.1 M | 22.3 M | -6.8 M |
+| `check_lower_prepare`, inclusive | 54.9 M | 49.7 M | -5.2 M |
+
+`check_program_allocations` (6.1 M) no longer runs, and `check_control_leave` fell from 391 K to 7.5 K. These are
+instruction counts, not time: the fills cost the 9700X mostly memory traffic and fresh pages, which only its own
+comparison shows. Callgrind needs a finite address space to run the compiler (`ulimit -v 67108864`, docs/arena-memory.md).
 
 ## Linking is not in the 194.8 ms
 

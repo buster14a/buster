@@ -10813,6 +10813,14 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
 // caller.
+// Whether `token` declares a body's own object, which its body's locals' list holds (CheckLowerShared.local_first): the
+// list's links and the clearing of its heads before them test the same tokens.
+static bool check_lower_local_declaration(const CheckInput* input, uint32_t token)
+{
+    return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count &&
+           input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
+}
+
 static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
                                 Arena* output, Arena* scratch)
 {
@@ -11075,11 +11083,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
-            const uint32_t token = declaring[d];
-            const uint32_t body = input->declaration_bodies[token];
-            if (input->declarations[token] == token && body < count && input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token])
+            if (check_lower_local_declaration(input, declaring[d]))
             {
-                shared->local_first[body] = BUSTER_CHECK_NONE;
+                shared->local_first[input->declaration_bodies[declaring[d]]] = BUSTER_CHECK_NONE;
             }
         }
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
@@ -11091,7 +11097,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 shared->initializer_declarations[input->initializer_nodes[token]] = token;
             }
             const uint32_t body = input->declaration_bodies[token];
-            if (input->declarations[token] == token && body < count && input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token])
+            if (check_lower_local_declaration(input, token))
             {
                 shared->local_next[token] = shared->local_first[body];
                 shared->local_first[body] = token;

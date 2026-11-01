@@ -213,8 +213,8 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
 // The postorder positions of the closes whose first child is a _Generic or __builtin_choose_expr token, as bits of
 // `positions` ((count + 63) / 64 words, zeroed), and how many there are (#877). AVX-512 compares 16 tokens' names at a
 // time with the two names and maps each such token to its parent, of which it must be the first child: a unit has few
-// of them, where the walk visited every token. The scalar path, its twin, tests every close of the postorder as the
-// walk does.
+// of them, where the walk visited every token. The scalar path tests every close of the postorder as the walk does: the
+// kernel's twin in test-checker, since check_input_selections' own scalar path walks instead.
 static uint32_t check_input_selection_positions(const uint32_t* names, const uint32_t* parents, const uint32_t* first_child, const uint32_t* postorder,
                                                 const uint32_t* postorder_positions, uint32_t count, uint64_t* positions, bool scalar)
 {
@@ -261,7 +261,7 @@ static uint32_t check_input_selection_positions(const uint32_t* names, const uin
 
 // Each _Generic's and __builtin_choose_expr's selection, in postorder, so that a selection's operands are selected
 // before it. The vector path visits only the closes check_input_selection_positions finds, in the order of their bits,
-// the order the walk would visit them in; the scalar path, its twin, visits every token. Where the vector path has no
+// the order the walk would visit them in; the scalar path, its twin, walks every token. Where the vector path has no
 // room for its bits, it walks too: the same visits.
 static bool check_input_selections(CheckInputReader* reader)
 {
