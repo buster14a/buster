@@ -141,8 +141,9 @@ patterns are:
   16 bytes past RBP where the frame has a frame pointer, and otherwise past
   RSP's reservation, the callee-saved registers the prologue pushed and the
   return address, plus the named arguments' stack bytes
-  (`tier1_emit_cfg_incoming`). Every variadic definition goes to the CFG
-  consumer. A function with its own ABI records is still refused whole.
+  (`tier1_emit_cfg_incoming`). Every variadic definition that selection
+  accepts goes to the CFG consumer. A function with its own ABI records is
+  still refused whole.
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and
 four-byte spill slots. Their logical memory widths remain one/two bytes.
