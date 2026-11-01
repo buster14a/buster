@@ -5057,10 +5057,10 @@ vectorized kernels with the printer's spellings by `pp_print_spellings`
 warm-up print, with markers or without, must give the same bytes, whatever the
 implementation and the read limit. With line markers the
 general loop prints in the time the printer before #649 took; with `-P`, it
-printed 7–17% slower than that printer on an AVX-512 Xeon, so `main.c`'s `-P`
-history is `-P`'s before. The 9700X job runs both, with and without
-`--markers`, on `main.c` and the frozen `sqlite3.c` where it measures the
-preprocessor, about 10 s.
+printed 7–17% slower than that printer on an AVX-512 Xeon and 6% slower a
+token on the 9700X, so `main.c`'s `-P` history is `-P`'s before. The 9700X
+job runs both, with and without `--markers`, on `main.c` and the frozen
+`sqlite3.c` where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under
