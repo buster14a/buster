@@ -1498,6 +1498,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1 = command->tier1,
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_gvn = command->tier1_gvn,
+            .tier1_no_lifetimes = command->tier1_no_lifetimes,
             .tier1_refusals = command->tier1_refusals,
         };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };

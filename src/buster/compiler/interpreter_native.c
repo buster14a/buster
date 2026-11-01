@@ -338,39 +338,10 @@ struct InterpreterNativeRange
 };
 
 // Object-representation transfers check bounds and permissions without consuming values or changing definedness.
-// Unknown ranges are allowed only when memory checking is disabled. A range that touches a known allocation still
-// has to fit a registered allocation, even in that mode; an unchecked tail cannot escape a known object's bounds.
+// interpreter_memory_range is the shared policy; this adapts it to the native bridge's range record.
 static bool interpreter_native_range(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write, InterpreterNativeRange* range)
 {
-    range->memory = 0;
-    range->offset = 0;
-    bool result = bytes == 0;
-    if (bytes != 0 && address != 0 && bytes <= UINT64_MAX - address)
-    {
-        bool known = false;
-        bool found = false;
-        const uint64_t end = address + bytes;
-        for (uint32_t i = 0; i < runtime->memory_count && !found; i += 1)
-        {
-            InterpreterMemory* memory = &runtime->memories[i];
-            const uint64_t base = (uint64_t)(uintptr_t)memory->bytes;
-            const uint64_t offset = address - base;
-            const uint64_t memory_end = base + memory->size;
-            known |= (address >= base && offset <= memory->size) || (address < memory_end && base < end);
-            if (address >= base && offset <= memory->size && bytes <= memory->size - offset)
-            {
-                range->memory = memory;
-                range->offset = offset;
-                found = true;
-                result = !write || memory->writable;
-            }
-        }
-        if (!found)
-        {
-            result = !known && !runtime->check_memory;
-        }
-    }
-    return result;
+    return interpreter_memory_range(runtime, address, bytes, write, &range->memory, &range->offset);
 }
 
 static bool interpreter_native_memory_prepare(const InterpreterNativeRequest* request)

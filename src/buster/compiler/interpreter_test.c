@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Handwritten execution and failure oracles for #176. Include after interpreter.c and interpreter_native.c.
+// Handwritten execution and failure oracles for #176. Include after interpreter.c, interpreter_native.c and tier0_test.c.
 // Native-code comparison uses the same production engine from tier0_test.c; these cases exercise its independent
 // arithmetic boundaries, recursive frames, allocation lifetimes, undefined reads, exact input tails and budgets.
+// interpreter_copy_test.c below also reuses that engine's Tier0TestTally, tier0_test_build and tier0_test_run.
 
 typedef struct InterpreterTestTally InterpreterTestTally;
 struct InterpreterTestTally
@@ -1171,6 +1172,8 @@ static void interpreter_test_text_native(InterpreterTestTally* tally, Arena* scr
     arena_release(&source);
 }
 
+#include "interpreter_copy_test.c"
+
 static int run_interpreter_tests(int argc, char** argv)
 {
     uint64_t seed = 176;
@@ -1212,6 +1215,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);
