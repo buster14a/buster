@@ -91,11 +91,12 @@ static bool check_test_x86_range_lines(const char* path, const char* source, cha
 
 #define BUSTER_X86_RANGE_8 "argument value 8 is outside the valid range [0, 7] [-Wargument-outside-range]\n3:13: note: expanded from macro 'BAD'\n"
 
-// The x86 range diagnostic under each of clang's mappings of `-Wargument-outside-range` (#1079): by default, with `-Werror`,
-// by clang's and GCC's pragmas (a warning, which `-Werror` leaves a warning, an error and a fatal error, and across a push
-// and a pop), and deferred to the end of its function's body. The warning is an error by default, so clang prints its
-// option alone after each, never `-Werror,`. Each fixture's text is clang 23's, every diagnostic and its notes line for
-// line without the path, which clang and both of the driver's paths must give, with its exit status.
+// The x86 range diagnostic under each of clang's mappings of `-Wargument-outside-range` (#1079): by default, with `-Werror`
+// and `-Werror=argument-outside-range`, by clang's and GCC's warning, error and fatal pragmas (a warning, which `-Werror`
+// leaves a warning), across a push and a pop, and deferred to the end of its function's body. The warning is an error by
+// default, so clang prints its option alone after each, never `-Werror,`. Each fixture's text is clang 23's, every
+// diagnostic and its notes line for line without the path, which clang and both of the driver's paths must give, with its
+// exit status.
 static void check_test_x86_range_mappings(CheckTest* test, const char* clang)
 {
     static const struct
@@ -109,6 +110,8 @@ static void check_test_x86_range_mappings(CheckTest* test, const char* clang)
     {
         { "default", "unsigned f(V a){return BAD;}", NULL, 1, "4:24: error: " BUSTER_X86_RANGE_8 },
         { "-Werror", "unsigned f(V a){return BAD;}", "-Werror", 1, "4:24: error: " BUSTER_X86_RANGE_8 },
+        { "-Werror=argument-outside-range", "unsigned f(V a){return BAD;}", "-Werror=argument-outside-range", 1,
+          "4:24: error: " BUSTER_X86_RANGE_8 },
         { "pragma warning", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 0,
           "5:24: warning: " BUSTER_X86_RANGE_8 },
         { "pragma warning with -Werror", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", "-Werror", 0,
@@ -117,7 +120,11 @@ static void check_test_x86_range_mappings(CheckTest* test, const char* clang)
           "5:24: warning: " BUSTER_X86_RANGE_8 },
         { "pragma error", "#pragma clang diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 1,
           "5:24: error: " BUSTER_X86_RANGE_8 },
+        { "GCC pragma error", "#pragma GCC diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 1,
+          "5:24: error: " BUSTER_X86_RANGE_8 },
         { "pragma fatal", "#pragma clang diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\nunsigned g(V a){return BAD;}",
+          NULL, 1, "5:24: fatal error: " BUSTER_X86_RANGE_8 },
+        { "GCC pragma fatal", "#pragma GCC diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\nunsigned g(V a){return BAD;}",
           NULL, 1, "5:24: fatal error: " BUSTER_X86_RANGE_8 },
         { "push and pop",
           "#pragma clang diagnostic push\n#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\n"
