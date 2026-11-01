@@ -162,9 +162,14 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
     const uint64_t scratch_mark = test->scratch.length;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, test->scratch.length == scratch_mark && (error == TIER1_EMIT_OK || test->output.length == output_mark), "the review's fixtures leave the arenas as they were");
+    // An emitted fixture must keep both labels' records and load: only a host that can't run its records skips it.
     void* executable = MAP_FAILED;
     uint64_t bytes = 0;
-    if (error == TIER1_EMIT_OK && fixture != 1 && emitted.label_count == 2 && tier1_labels_load(test, &emitted, &executable, &bytes))
+    const uint64_t skipped = test->native_skipped;
+    const bool kept = error == TIER1_EMIT_OK && fixture != 1 && emitted.label_count == 2;
+    const bool loaded = kept && tier1_labels_load(test, &emitted, &executable, &bytes);
+    tier1_emit_test_expect(test, error != TIER1_EMIT_OK || fixture == 1 || (kept && (loaded || test->native_skipped > skipped)), "an emitted review fixture keeps both labels' records and runs");
+    if (loaded)
     {
         uint64_t random = UINT64_C(0x3c5e7a91b2d4f608) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ ((uint64_t)fixture << 32);
         for (uint32_t sample = 0; sample < BUSTER_TIER1_LABELS_SAMPLES; sample += 1)
