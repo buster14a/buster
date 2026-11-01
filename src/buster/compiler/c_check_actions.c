@@ -462,7 +462,7 @@ static bool check_action_discard_evaluable(const TypeTable* table, const CheckVa
 static bool check_action_integer_constant(const CheckValue* value, uint32_t extensions)
 {
     return value->fault == CHECK_FAULT_NONE && value->constant_kind == CHECK_CONSTANT_INTEGER &&
-           (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
            ((value->flags & BUSTER_CHECK_ICE) != 0 || (extensions & BUSTER_CHECK_EXTENSION_GNU_CONSTANT) != 0);
 }
 

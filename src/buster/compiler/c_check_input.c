@@ -790,6 +790,9 @@ struct CheckInputReader
     uint32_t cached_constant_count;
     uint16_t* builtin_names;
     uint32_t* intrinsic_names;
+    // Per row of the intrinsic catalogue (builtin_intrinsic_infos), whether a declared name's builtin stays the builtin
+    // (cbuiltin_source_intrinsic's verdict): 0 not yet asked, 1 it does, 2 it doesn't; null where a reader has none.
+    uint8_t* intrinsic_source;
     // The identifiers of the plain library builtins that clang folds (cbuiltin_library_plain_folds), 0 for one the unit never
     // spells, looked up at the first call that asks (`library_names_known`, check_input_library_names), and a bit of
     // `library_names_mask` for each spelled one's low 6 bits, which most calls' callees miss.
@@ -6738,6 +6741,13 @@ static void check_input_expressions(CheckInputReader* reader)
                         .object = reader->objects[declaration],
                     };
                 }
+                // A file-scope compound literal's elements are constant expressions, like a static
+                // initializer's: their constant evaluation supplies no context report of its own.
+                for (uint32_t value = reader->static_objects[declaration] ? first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE;
+                     value = reader->value_next[value])
+                {
+                    graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+                }
             }
         }
         else if (role == PARSE_ROLE_RANGE)
@@ -7068,6 +7078,15 @@ static void check_input_expressions(CheckInputReader* reader)
             reader->first_value[token] = first;
             reader->last_value[token] = last;
             reader->value_counts[token] = count;
+            if (reader->static_initializers[token])
+            {
+                // A braced static initializer's elements are constant expressions, which initializer
+                // planning diagnoses: the same constant evaluation its scalar form's INITIALIZE gets.
+                for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+                {
+                    graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+                }
+            }
         }
     }
 }

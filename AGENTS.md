@@ -227,12 +227,13 @@ designs and the compilers already built this way.
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
-  stores and constants of every width) and allocated in the opmask class by the
-  CFG consumer, which moves and spills them at their widths and saves them around
-  calls; vectors are refused (#141). Run
+  stores, constants and bitcasts to and from integers of every width) and
+  allocated in the opmask class by the CFG consumer, which moves and spills them
+  at their widths and saves them around calls; vectors are refused (#141). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
-  natively against the IR's interpreter) for bounded typed-stream/native
+  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
+  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -1307,7 +1308,10 @@ designs and the compilers already built this way.
   number; rows take them by role (`MASK(j)`, `MASK_RESULT`, `MASK_SCRATCH(k)`,
   borrowing k1 on past k7), and the stack's depths are a column of their own
   in a function with masks (`Tier0Function.masks`, `tier0_vector_mask_depths`
-  and its twin). `interpreter.c` runs them; `ir_lower.c` refuses them; the
+  and its twin). `interpreter.c` runs them; `ir_lower.c` lowers them to the
+  IR's `m8` to `m64`, its rows of the front end's `_k*` builtins through
+  `ir_simd_typed.c`'s decoder, so `--tier1` compiles them by Tier 1
+  (docs/ir-simd.md's "Masks from the typed stream"); the
   front end's AVX-512 builtins are their first user (`check_x86_lower_masks`);
   `test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over
   them natively against the interpreter and a model of its own. The
@@ -2911,6 +2915,15 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   20,000 times, pausing together now and then, while lane 0 waits on it with
   `lane_wait` for every advance, sleeping on its futex with more than one lane:
   each value it sees even and larger than the last, and no advance lost;
+- groups that share CPUs (#824): `lane_group_shares_cpus` against this thread's
+  affinity mask — a group of exactly the process's CPUs doesn't share them, one
+  of more does unless every lane is pinned, and one lane never does — and a
+  group of two lanes on one CPU, which the test cuts this thread's mask to: both
+  lanes must read their group as sharing it, and the lane that waited for lane
+  0's stall must have slept, its group's wait leaving `mwaitx` and the spin that
+  takes its place without it at once, since either holds the CPU the late lane
+  needs; two lanes on the process's own CPUs, where it has more than one, read
+  theirs as not sharing them;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
@@ -5556,9 +5569,14 @@ lazy session.
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
-every run one lane's code. Run it under the 9700X's lock without `taskset`,
-with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
-and the benchmark on the frozen SQLite source where the emission changes.
+every run one lane's code, for the target its options give (#1045:
+`test-checker` measures a unit of 512-bit vectors with `-march=znver5` and
+refuses the same unit for the baseline profile, and measures a baseline
+unit's function whose target attribute takes AVX2's vectors,
+`c_check_lanes_benchmark_test.c`). Run it under the 9700X's lock without
+`taskset`, with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job
+runs the test, and the benchmark on the frozen SQLite source where the
+emission changes, on the lane counts of the guide's table (#1069).
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
 measurements.
 
@@ -5629,7 +5647,12 @@ it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
 each alone, and with `--generate DIR` it writes a program of synth's shape
 (512 units of 200 functions by default) for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
-measurements.
+measurements. The end-to-end single- and multi-unit contract, with the
+mixed-tier and actual command-team receipts, is
+[the multicore acceptance guide](docs/multicore-acceptance.md);
+`tests/driver/multicore.c` runs it in the shared correctness suite. What
+#149's remaining whole-process performance acceptance still needs is there
+too.
 
 ## Selective lowering
 
@@ -6230,7 +6253,9 @@ pinned to one allowed CPU; like the others, its measurements are informational.
 vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
-it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+it, and the definitions `-c` lowers are lowered and emitted for the target its
+options give (`-march`, the `-m` features: #1041), each function with a target
+attribute for the attribute's, outside the time;
 their typed streams, with the symbols' access the emission gave them
 (`check_program_access`), make one corpus with the other files' functions, which
 both paths must agree on before the same medians are reported. A file the

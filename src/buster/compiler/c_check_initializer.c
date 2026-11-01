@@ -1793,7 +1793,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
         }
         else if (walker->static_storage && (converted.value.constant_kind == CHECK_CONSTANT_NONE || converted.value.fault != CHECK_FAULT_NONE ||
-                 (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0))
+                 (converted.value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0))
         {
             check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
         }
@@ -2147,7 +2147,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
             }
             else if (walker->static_storage && !walker->defer_constants && (converted.value.constant_kind == CHECK_CONSTANT_NONE ||
-                     converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 ||
+                     converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0 ||
                      (converted.value.constant_kind == CHECK_CONSTANT_ADDRESS && converted.value.object != 0 &&
                      ((converted.value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || selected->width != 0))))
             {
@@ -2596,7 +2596,8 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                 const CheckInitPart* part = result->parts + p;
                 const CheckValue* value = &part->value;
                 if (part->kind == CHECK_INIT_VALUE && (value->constant_kind == CHECK_CONSTANT_NONE || value->fault != CHECK_FAULT_NONE ||
-                    (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 || (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 &&
+                    (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0 ||
+                    (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 &&
                     ((value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || part->bit_width != 0))))
                 {
                     result->status = CHECK_INIT_NON_CONSTANT;
