@@ -986,10 +986,10 @@ static __attribute__((noinline)) CheckLowerLimbRoom check_lower_limb_room(const 
     {
         const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
         bool complex = false;
-        uint32_t units = check_lower_limb_room_units(types, stream->values[node].type, &complex);
+        uint32_t units = check_lower_limb_room_units(types, check_stream_type(stream, node), &complex);
         for (uint32_t i = 0; i < 2; i += 1)
         {
-            const uint32_t own = operands[i] < graph->count ? check_lower_limb_room_units(types, stream->values[operands[i]].type, &complex) : 0;
+            const uint32_t own = operands[i] < graph->count ? check_lower_limb_room_units(types, check_stream_type(stream, operands[i]), &complex) : 0;
             const uint32_t converted = check_lower_limb_room_units(types, stream->conversions[node].operands[i].type, &complex);
             units = own > units ? own : units;
             units = converted > units ? converted : units;
@@ -1906,7 +1906,7 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
 static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
-    if (node < program->stream->count && program->stream->values[node].overload_head == 0)
+    if (node < program->stream->count && check_stream_overload_head(program->stream, node) == 0)
     {
         // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
         // bit-field (an update's too) leaves no value. A discarded comma discards its right operand in its place.
@@ -1914,12 +1914,12 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
         const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
         const uint32_t destination = program->input->graph.operand0[node];
         const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) &&
-                               destination < program->stream->count && (program->stream->values[destination].flags & BUSTER_CHECK_BIT_FIELD) != 0;
+                               destination < program->stream->count && (check_stream_flags(program->stream, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
         const bool discard = !address && target == BUSTER_TYPE_VOID &&
-                             ((store && check_lower_aggregate(writer, program->stream->values[node].type)) || bit_field || op == CHECK_OP_COMMA);
+                             ((store && check_lower_aggregate(writer, check_stream_type(program->stream, node))) || bit_field || op == CHECK_OP_COMMA);
         if (!address && !discard)
         {
-            check_lower_convert(writer, program->stream->values[node].type, target);
+            check_lower_convert(writer, check_stream_type(program->stream, node), target);
         }
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .discard = discard });
     }
@@ -2191,7 +2191,7 @@ static void check_lower_vector_half_chain(CheckLowerWriter* writer, TypeId vecto
         const CheckOp kind = operand != BUSTER_CHECK_NONE ? graph->ops[operand] : CHECK_OP_VALUE;
         const bool link = kind == CHECK_OP_ADD || kind == CHECK_OP_SUBTRACT || kind == CHECK_OP_MULTIPLY || kind == CHECK_OP_DIVIDE || kind == CHECK_OP_NEGATIVE ||
                           kind == CHECK_OP_POSITIVE;
-        const TypeId type = link ? program->stream->values[operand].type : 0;
+        const TypeId type = link ? check_stream_type(program->stream, operand) : 0;
         const CheckVectorElement linked = link ? check_vector_lower_element(program->types, type) : (CheckVectorElement){ 0 };
         chained |= brain ? link && check_vector_lower_brain(program->types, type) : linked.floating && linked.bytes == 2;
     }
@@ -2433,7 +2433,8 @@ static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t
     while (!volatile_copy && at < stream->count && budget != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         budget -= 1;
-        volatile_copy = check_lower_copy_volatile(writer, &stream->values[at], 0);
+        const CheckValue value = check_stream_value(stream, at);
+        volatile_copy = check_lower_copy_volatile(writer, &value, 0);
         uint32_t next = BUSTER_CHECK_NONE;
         if (!volatile_copy)
         {
@@ -2479,7 +2480,8 @@ static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t
 
 static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t node, TypeId destination)
 {
-    const CheckValue* source = &writer->program->stream->values[node];
+    const CheckValue source_value = check_stream_value(writer->program->stream, node);
+    const CheckValue* source = &source_value;
     bool volatile_copy = check_lower_copy_volatile(writer, source, destination);
     if (!volatile_copy && (source->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
     {
@@ -2670,7 +2672,7 @@ static bool check_lower_bit_member(const CheckProgram* program, uint32_t node, C
 {
     const CheckStream* stream = program->stream;
     return stream->diagnostics[node] == CHECK_DIAG_NONE &&
-           check_lower_bit_place(program->types, stream->member_offsets[node], stream->values[node].bit_width, stream->values[node].type, field);
+           check_lower_bit_place(program->types, stream->member_offsets[node], check_stream_value(stream, node).bit_width, check_stream_type(stream, node), field);
 }
 
 // The MEMBER or ARROW node of the bit-field that a store's destination `node` designates, through _Generic's
@@ -3156,7 +3158,7 @@ static void check_lower_vector_operand(CheckLowerWriter* writer, uint32_t node, 
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const uint32_t child = operand == 0 ? graph->operand0[node] : operand == 1 ? graph->operand1[node] : graph->operand2[node];
-    const TypeId from = child < program->stream->count ? program->stream->values[child].type : 0;
+    const TypeId from = child < program->stream->count ? check_stream_type(program->stream, child) : 0;
     if (from != 0 && check_lower_vector_bytes(program->types, from) == 0 && check_lower_vector_bytes(program->types, type) != 0)
     {
         check_lower_vector_splat(writer, from, type);
@@ -3802,7 +3804,7 @@ static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node
     const CheckOp op = graph->ops[node];
     const CheckOp computed = op == CHECK_OP_ADD_ASSIGN ? CHECK_OP_ADD : op == CHECK_OP_SUBTRACT_ASSIGN ? CHECK_OP_SUBTRACT :
                              op == CHECK_OP_MULTIPLY_ASSIGN ? CHECK_OP_MULTIPLY : CHECK_OP_DIVIDE;
-    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const bool stored_quad = check_lower_quad(writer, stored);
     const CheckLowerLimbs stored_limbs = check_lower_limbs(writer, stored);
@@ -4479,7 +4481,7 @@ static void check_lower_limb_update_emit(CheckLowerWriter* writer, uint32_t node
     const CheckOp computed = increment ? (op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT ? CHECK_OP_ADD : CHECK_OP_SUBTRACT) :
                              op <= CHECK_OP_SHIFT_RIGHT_ASSIGN ? (CheckOp)(CHECK_OP_ADD + (op - CHECK_OP_ADD_ASSIGN)) :
                                                                  (CheckOp)(CHECK_OP_BIT_AND + (op - CHECK_OP_BIT_AND_ASSIGN));
-    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const TypeId count = increment ? BUSTER_TYPE_INT : stream->conversions[node].operands[1].type;
     const CheckLowerLimbs stored_limbs = check_lower_limbs(writer, stored);
@@ -4543,7 +4545,7 @@ static void check_lower_limb_scalar_update_emit(CheckLowerWriter* writer, uint32
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
-    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const uint8_t class = check_lower_value_class(writer, calculated);
     const uint32_t value = (uint32_t)locals;
@@ -4872,11 +4874,11 @@ static void check_lower_complex_parts_update_emit(CheckLowerWriter* writer, uint
     const CheckOp op = graph->ops[node];
     const CheckOp computed = op == CHECK_OP_ADD_ASSIGN ? CHECK_OP_ADD : op == CHECK_OP_SUBTRACT_ASSIGN ? CHECK_OP_SUBTRACT :
                              op == CHECK_OP_MULTIPLY_ASSIGN ? CHECK_OP_MULTIPLY : CHECK_OP_DIVIDE;
-    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const bool converted = type_unqualified(type_strip_aligned(types, stored)) != type_unqualified(type_strip_aligned(types, calculated));
     const bool stored_aggregate = check_lower_aggregate(writer, stored);
-    const CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = check_lower_complex(writer, stream->values[graph->operand1[node]].type) };
+    const CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = check_lower_complex(writer, check_stream_type(stream, graph->operand1[node])) };
     const uint32_t destination = (uint32_t)(locals >> 32);
     const CheckLowerComplexOperand current = { .local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), .complex = true };
     const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
@@ -5206,7 +5208,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
     // parenthesis, which a call across lines ends on).
     check_lower_source(writer, graph->tokens[callee]);
-    CheckValue value = builtin ? (CheckValue){ .type = graph->types[node], .category = CHECK_FUNCTION } : stream->values[callee];
+    CheckValue value = builtin ? (CheckValue){ .type = graph->types[node], .category = CHECK_FUNCTION } : check_stream_value(stream, callee);
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
     if (overload != BUSTER_CHECK_NONE)
     {
@@ -5244,7 +5246,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     }
     // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
     // 128-bit integer's and a vector's, which LOCAL then reads.
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     const bool aggregate_result = check_lower_aggregate(writer, result);
     const bool wide_result = check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0;
     const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) :
@@ -5477,7 +5479,7 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             // A floating value crosses an atomic helper's integer registers as its bits, through a frame temporary, as the
             // math helpers' do: the helpers move bits, so a numeric conversion would change the value. A vector leaf's
             // result lands in a frame object of the call's own, which LOCAL then reads.
-            const uint8_t result_class = check_lower_class(writer, stream->values[node].type);
+            const uint8_t result_class = check_lower_class(writer, check_stream_type(stream, node));
             const bool vector_result = check_lower_vector_of(writer, helper->result_type) != 0;
             const uint32_t object = vector_result ? check_lower_temporary_of(writer, helper->result_type) : BUSTER_CHECK_NONE;
             writer->call_result_objects[call] = vector_result ? object + 1 : 0;
@@ -5499,7 +5501,7 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             }
             else
             {
-                check_lower_convert(writer, helper->result_type, stream->values[node].type);
+                check_lower_convert(writer, helper->result_type, check_stream_type(stream, node));
             }
             check_lower_instruction(writer, BUSTER_TYPED_CALL, vector_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, helper->result_type), call);
             if (scoped != 0)
@@ -5878,7 +5880,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
     const uint32_t left = graph->operand0[node];
-    const TypeId stored = stream->values[left].type;
+    const TypeId stored = check_stream_type(stream, left);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const TypeId right_type = stream->conversions[node].operands[1].type;
     const uint8_t stored_class = check_lower_class(writer, stored);
@@ -5908,7 +5910,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
     const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT || op == CHECK_OP_SUBTRACT_ASSIGN;
     const bool pointer = (check_lower_facts(writer, stored) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
-    const uint32_t object = graph->ops[left] == CHECK_OP_VALUE ? stream->values[left].object : 0;
+    const uint32_t object = graph->ops[left] == CHECK_OP_VALUE ? check_stream_object(stream, left) : 0;
     const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
     const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
     // A global of a memory class goes through its address, as memory does (a local's object takes LOCAL and STORE_LOCAL),
@@ -5933,7 +5935,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     {
         if (stored_class == BUSTER_TYPED_CLASS_VECTOR)
         {
-            const bool scalar = check_lower_vector_bytes(program->types, stream->values[graph->operand1[node]].type) == 0;
+            const bool scalar = check_lower_vector_bytes(program->types, check_stream_type(stream, graph->operand1[node])) == 0;
             check_lower_vector_half_chain(writer, calculated, vector_op, BUSTER_CHECK_NONE, graph->operand1[node]);
             check_lower_vector_row(writer, vector_op, calculated, 0);
             check_lower_vector_operand(writer, node, 1, scalar ? calculated : right_type);
@@ -6084,7 +6086,7 @@ static void check_lower_complex_update(CheckLowerWriter* writer, uint32_t node)
         // The destination's address and the value each into a temporary as it is evaluated (check_lower_expand's complex
         // operations say why).
         const TypeTable* types = program->types;
-        const TypeId own = increment ? calculated : program->stream->values[graph->operand1[node]].type;
+        const TypeId own = increment ? calculated : check_stream_type(program->stream, graph->operand1[node]);
         const TypeId converted = increment ? calculated : program->stream->conversions[node].operands[1].type;
         const uint8_t class = limbs ? check_lower_value_class(writer, converted) :
                               check_lower_complex(writer, own) || check_lower_quad(writer, calculated) || check_lower_complex_parts(writer, calculated) ?
@@ -6114,8 +6116,8 @@ static void check_lower_complex_emit(CheckLowerWriter* writer, uint32_t node, ui
     const CheckOp op = graph->ops[node];
     const bool unary = op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT;
     const TypeId type = stream->conversions[node].operands[0].type;
-    const CheckLowerComplexOperand first = { .local = (uint32_t)locals, .complex = check_lower_complex(writer, stream->values[graph->operand0[node]].type) };
-    const CheckLowerComplexOperand last = unary ? first : (CheckLowerComplexOperand){ .local = (uint32_t)(locals >> 32), .complex = check_lower_complex(writer, stream->values[graph->operand1[node]].type) };
+    const CheckLowerComplexOperand first = { .local = (uint32_t)locals, .complex = check_lower_complex(writer, check_stream_type(stream, graph->operand0[node])) };
+    const CheckLowerComplexOperand last = unary ? first : (CheckLowerComplexOperand){ .local = (uint32_t)(locals >> 32), .complex = check_lower_complex(writer, check_stream_type(stream, graph->operand1[node])) };
     if (check_lower_quad(writer, type))
     {
         check_lower_quad_compute(writer, op, first.local, last.local);
@@ -6151,14 +6153,14 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
     const CheckOp op = graph->ops[node];
     const CheckOp computed = op == CHECK_OP_ADD_ASSIGN ? CHECK_OP_ADD : op == CHECK_OP_SUBTRACT_ASSIGN ? CHECK_OP_SUBTRACT :
                              op == CHECK_OP_MULTIPLY_ASSIGN ? CHECK_OP_MULTIPLY : CHECK_OP_DIVIDE;
-    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const TypeId element = check_lower_complex_element(types, calculated);
     const uint8_t class = check_lower_class(writer, element);
     const bool stored_complex = check_lower_complex(writer, stored);
     const TypeId stored_element = stored_complex ? check_lower_complex_element(types, stored) : stored;
     const bool stored_aggregate = check_lower_aggregate(writer, stored_element);
-    const bool value_complex = check_lower_complex(writer, stream->values[graph->operand1[node]].type);
+    const bool value_complex = check_lower_complex(writer, check_stream_type(stream, graph->operand1[node]));
     const uint8_t current_class = stored_complex ? BUSTER_TYPED_CLASS_U64 : class;
     const CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = value_complex };
     const uint32_t destination = (uint32_t)(locals >> 32);
@@ -6285,7 +6287,7 @@ static void check_lower_bit_assign(CheckLowerWriter* writer, uint32_t node, bool
     {
         const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_STORE, .type = check_lower_bit_pack(&field), .value = address, .discard = discard });
-        check_lower_operand(writer, node, 1, false, program->stream->values[node].type);
+        check_lower_operand(writer, node, 1, false, check_stream_type(program->stream, node));
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
         check_lower_operand(writer, node, 0, true, 0);
     }
@@ -6300,7 +6302,7 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
-    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const uint8_t calculated_class = check_lower_class(writer, calculated);
     const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
@@ -6471,7 +6473,7 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
     call->a_type = check_lower_builtin_type(program->types, conversions->operands[0].type);
     call->b_type = overflow ? check_lower_builtin_type(program->types, conversions->operands[1].type) : 0;
     call->result_type = overflow ? check_lower_builtin_type(program->types, conversions->store.type) : 0;
-    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN, .node = index, .type = program->stream->values[node].type });
+    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN, .node = index, .type = check_stream_type(program->stream, node) });
     for (uint32_t i = count; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
     {
         // A 128-bit operand's object is a local of class VOID that SET_LOCAL of its value's class writes.
@@ -6647,7 +6649,7 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, requested_class, check_lower_access_value(types, requested_class, requested));
         }
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_VARARGS, .node = index, .type = bytes ? BUSTER_TYPE_ULONG : stream->values[node].type });
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_VARARGS, .node = index, .type = bytes ? BUSTER_TYPE_ULONG : check_stream_type(stream, node) });
         if (start)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->overflow_arg_area);
@@ -6718,7 +6720,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         {
             // An alignment builtin's recipe takes its source's, alignment's and result's descriptors, of up to 128 bits (the
             // checker refuses wider _BitInts), a pointer's 64, and a result past 64 bits' frame object.
-            const TypeId result_type = stream->values[node].type;
+            const TypeId result_type = check_stream_type(stream, node);
             call->result_type = check_lower_align_type(program->types, result_type);
             call->argument_types[0] = check_lower_align_type(program->types, stream->argument_conversions[first].type);
             call->argument_types[1] = check_lower_align_type(program->types, stream->argument_conversions[first + 1].type);
@@ -6735,7 +6737,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         {
             // A bit builtin's recipe (c_builtin_bits_lower.c) takes its arguments' and result's descriptors, of up to 128
             // bits (the checker refuses wider _BitInts), and a result past 64 bits' frame object, whose value it is.
-            const TypeId result_type = stream->values[node].type;
+            const TypeId result_type = check_stream_type(stream, node);
             const uint32_t result = check_lower_builtin_type(program->types, result_type);
             bool described = cbuiltin_carry(call->id) || result != 0;
             for (uint32_t i = 0; i < evaluated; i += 1)
@@ -6759,7 +6761,8 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         {
             const uint32_t size_node = graph->argument_nodes[first + 2];
             const CheckOp size_op = graph->ops[size_node];
-            const CheckValue* size = stream->values + size_node;
+            const CheckValue size_value = check_stream_value(stream, size_node);
+            const CheckValue* size = &size_value;
             // Match ordinary constant emission's proof: a retained folded value is not a runtime size when a
             // floating environment or evaluation effect still matters. Argument evaluation remains below.
             if (size_op != CHECK_OP_BUILTIN_QUERY && size_op != CHECK_OP_STATEMENT_VALUE && size_op != CHECK_OP_INITIALIZE &&
@@ -6781,7 +6784,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             }
             call->arguments[i] = check_lower_temporary(writer, check_lower_class(writer, type));
         }
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = stream->values[node].type });
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = check_stream_type(stream, node) });
         for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             // A frame object's value is its value class's (a 128-bit integer's), as SET_LOCAL writes it.
@@ -7049,7 +7052,7 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         // isfpclass's mask (its second argument) is a constant the effect holds, never evaluated. Its first may be a vector.
         const uint32_t arguments = selectors ? 6u : id == CBUILTIN_ISFPCLASS ? 2u : 1u;
         const TypeId operand = id == CBUILTIN_ISFPCLASS && count == 2 ?
-                               type_unqualified(type_strip_aligned(program->types, stream->values[graph->argument_nodes[graph->argument_offsets[node]]].type)) : 0;
+                               type_unqualified(type_strip_aligned(program->types, check_stream_type(stream, graph->argument_nodes[graph->argument_offsets[node]]))) : 0;
         const uint8_t operand_kind = operand != 0 ? type_kind(program->types, operand) : BUSTER_TYPE_KIND_VOID;
         const bool vector = operand_kind == BUSTER_TYPE_KIND_VECTOR || operand_kind == BUSTER_TYPE_KIND_EXT_VECTOR;
         if (effect->unsupported != 0 || (classify && count != arguments) || (compare && count != 2))
@@ -7110,11 +7113,11 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                     .fenv_access = fenv_access,
                     .class_mask = effect->class_mask,
                     .vector_local = vector_local,
-                    .result_local = check_lower_temporary_of(writer, stream->values[node].type),
+                    .result_local = check_lower_temporary_of(writer, check_stream_type(stream, node)),
                     .lanes = shape.lanes,
                     .lane_bytes = shape.element,
                 };
-                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = stream->values[node].type });
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = check_stream_type(stream, node) });
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector_local);
                 check_lower_operand(writer, node, 3, false, operand);
                 writer->vectors = true;
@@ -7162,13 +7165,13 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             check_lower_push(writer, (CheckLowerTask){
                 .kind = effect->may_raise_fp_exceptions ? CHECK_LOWER_BUILTIN_FLOAT_STRICT : CHECK_LOWER_BUILTIN_FLOAT,
                 .node = index,
-                .type = stream->values[node].type,
+                .type = check_stream_type(stream, node),
             });
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, argument);
             check_lower_operand(writer, node, selectors ? 8 : 3, false, effect->floating_type);
         }
-        else if (stream->values[node].constant_kind == CHECK_CONSTANT_FLOATING &&
-                 (stream->values[node].flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0)
+        else if (check_stream_constant_kind(stream, node) == CHECK_CONSTANT_FLOATING &&
+                 (check_stream_flags(stream, node) & BUSTER_CHECK_FP_ENVIRONMENT) == 0)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONSTANT, .node = node });
             for (uint32_t i = count; i-- > 0;)
@@ -7210,7 +7213,7 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, local);
         }
         const uint32_t end = writer->local_count;
-        const TypeId type = program->stream->values[task.node].type;
+        const TypeId type = check_stream_type(program->stream, task.node);
         const uint8_t class = task.address ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, type);
         const uint32_t result = class == BUSTER_TYPED_CLASS_VOID ? BUSTER_CHECK_NONE :
                                 task.address                     ? check_lower_temporary(writer, class) :
@@ -7270,7 +7273,7 @@ static __attribute__((noinline)) void check_lower_bit_int_node(CheckLowerWriter*
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const CheckOp op = graph->ops[node];
-    const CheckValue value = stream->values[node];
+    const CheckValue value = check_stream_value(stream, node);
     const TypeId type_a = stream->conversions[node].operands[0].type;
     const TypeId type_b = stream->conversions[node].operands[1].type;
     const uint8_t value_kind = type_kind(types, type_strip_aligned(types, value.type));
@@ -7435,7 +7438,7 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     const CheckOp op = graph->ops[node];
     const uint32_t a = graph->operand0[node];
     const uint32_t b = graph->operand1[node];
-    const uint8_t class = check_lower_class(writer, stream->values[node].type);
+    const uint8_t class = check_lower_class(writer, check_stream_type(stream, node));
     const CheckHalf half = check_lower_class_half(class);
     if (class != BUSTER_TYPED_CLASS_VECTOR)
     {
@@ -7460,12 +7463,13 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     }
     else if (op == CHECK_OP_CONDITIONAL)
     {
+        const CheckValue value = check_stream_value(stream, node);
         check_lower_logical(writer, program, node, op, a, b, stream->conversions[node].operands[0].type, stream->conversions[node].operands[1].type,
-                            stream->values + node, BUSTER_TYPED_CLASS_VECTOR, true);
+                            &value, BUSTER_TYPED_CLASS_VECTOR, true);
     }
     else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
     {
-        const TypeId vector = stream->values[a].type;
+        const TypeId vector = check_stream_type(stream, a);
         const CheckVectorElement element = check_vector_lower_element(types, vector);
         check_lower_vector_half_chain(writer, vector, op, a, BUSTER_CHECK_NONE);
         if (op == CHECK_OP_NEGATIVE && element.floating)
@@ -7485,7 +7489,7 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     {
         const TypeId vector = stream->conversions[node].operands[0].type;
         const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
-        const bool scalar_count = shift && check_lower_vector_bytes(types, stream->values[b].type) == 0;
+        const bool scalar_count = shift && check_lower_vector_bytes(types, check_stream_type(stream, b)) == 0;
         check_lower_vector_half_chain(writer, vector, op, a, b);
         check_lower_vector_row(writer, op, vector, 0);
         check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
@@ -7583,7 +7587,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         {
             // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
             // integer converted to the scale's int may be 1, 2, 4 or 8 even when its original payload is not.
-            immediates[i] = stream->values[graph->argument_nodes[first + a]];
+            immediates[i] = check_stream_value(stream, graph->argument_nodes[first + a]);
             check_action_convert_value(program->types, &immediates[i], stream->argument_conversions[first + a].type, node);
             constants &= immediates[i].constant_kind == CHECK_CONSTANT_INTEGER;
         }
@@ -7599,7 +7603,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     {
         const uint32_t last = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
         const uint32_t a = last == skipped ? last - 1 : last;
-        CheckValue value = stream->values[graph->argument_nodes[first + a]];
+        CheckValue value = check_stream_value(stream, graph->argument_nodes[first + a]);
         check_action_convert_value(program->types, &value, stream->argument_conversions[first + a].type, node);
         mask = value.constant_kind == CHECK_CONSTANT_INTEGER ? (uint64_t)value.integer : 0;
     }
@@ -7644,7 +7648,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         const uint32_t index = check_lower_operation_index(writer, &row);
         const uint32_t last = reduce ? check_lower_operation_index(writer, &tail) : index;
         const uint8_t result_class = reduce ? tail.result_class : row.result_class;
-        const TypeId result = check_lower_x86_bits_type(writer, stream->values[node].type);
+        const TypeId result = check_lower_x86_bits_type(writer, check_stream_type(stream, node));
         // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
         const bool zero_test = rule->zero_test;
         if (result_class != BUSTER_TYPED_CLASS_VOID && result_class != BUSTER_TYPED_CLASS_VECTOR)
@@ -7695,7 +7699,7 @@ static void check_lower_amx_helper(CheckLowerWriter* writer, uint32_t node, cons
     const uint32_t first = graph->argument_offsets[node];
     const bool output = info->output_bytes != 0;
     const uint32_t parameters = count + output;
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     CheckLowerAbi* abi = writer->abi;
     if (selected == BUSTER_CHECK_NONE || helpers->uses[selected].helper >= helpers->count || parameters != info->parameter_count)
     {
@@ -7806,7 +7810,7 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     else if (check_lower_x86_named(info, "__builtin_unpredictable") && program->input->graph.argument_counts[node] == 1)
     {
         const TypeId type = stream->argument_conversions[first].type;
-        check_lower_convert(writer, type, stream->values[node].type);
+        check_lower_convert(writer, type, check_stream_type(stream, node));
         check_lower_operand(writer, node, 3, false, type);
     }
     else if (!check_lower_x86_named(info, "__builtin_assume"))
@@ -7862,7 +7866,8 @@ static bool check_lower_shuffle_indices(const CheckProgram* program, uint32_t no
     bool constant = lanes <= BUSTER_CHECK_VECTOR_SHUFFLE_LANES;
     for (uint32_t i = 0; constant && i < lanes; i += 1)
     {
-        const CheckValue* value = program->stream->values + graph->argument_nodes[first + 2 + i];
+        const CheckValue checked_value = check_stream_value(program->stream, graph->argument_nodes[first + 2 + i]);
+        const CheckValue* value = &checked_value;
         uint32_t width = 0;
         bool is_signed = false;
         constant = value->constant_kind == CHECK_CONSTANT_INTEGER && check_action_integer_type(program->types, value->type, &width, &is_signed);
@@ -7887,7 +7892,8 @@ static bool check_lower_constant_bytes(const CheckLowerWriter* writer, uint32_t 
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
-    const CheckValue* value = node < program->stream->count ? program->stream->values + node : NULL;
+    const CheckValue node_value = node < program->stream->count ? check_stream_value(program->stream, node) : (CheckValue){ 0 };
+    const CheckValue* value = node < program->stream->count ? &node_value : NULL;
     bool result = value != NULL && !check_lower_copy_volatile(writer, value, 0) && program->input->graph.ops[node] == CHECK_OP_VALUE && value->object != 0 && value->object < program->object_count &&
                   program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1] &&
                   program->initializers != 0 && size != 0 && size <= 64;
@@ -7938,8 +7944,8 @@ static uint32_t check_lower_brain_negations(const CheckProgram* program, uint32_
     {
         const uint32_t argument = graph->argument_nodes[first + a];
         const bool negation = argument < stream->count && graph->ops[argument] == CHECK_OP_NEGATIVE;
-        const TypeId operand = negation && graph->operand0[argument] < stream->count ? stream->values[graph->operand0[argument]].type : 0;
-        const bool folds = negation && operand != 0 && check_vector_lower_brain(types, stream->values[argument].type) && check_vector_lower_brain(types, operand) &&
+        const TypeId operand = negation && graph->operand0[argument] < stream->count ? check_stream_type(stream, graph->operand0[argument]) : 0;
+        const bool folds = negation && operand != 0 && check_vector_lower_brain(types, check_stream_type(stream, argument)) && check_vector_lower_brain(types, operand) &&
                            check_lower_vector_bytes(types, operand) == bytes;
         negated |= folds ? 1u << a : 0;
     }
@@ -8028,7 +8034,7 @@ static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CB
     const CheckProgram* program = writer->program;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     const uint32_t first = program->input->graph.argument_offsets[node];
     const uint32_t bytes = check_lower_vector_of(writer, result);
     const CheckVectorShape shape = check_vector_builtin_shape(types, result);
@@ -8130,7 +8136,7 @@ static void check_lower_vector_deposit(CheckLowerWriter* writer, uint32_t node, 
 {
     const CheckProgram* program = writer->program;
     const CheckStream* stream = program->stream;
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     const uint32_t first = program->input->graph.argument_offsets[node];
     const CheckVectorShape shape = check_vector_builtin_shape(program->types, result);
     if (check_lower_vector_of(writer, result) == 0)
@@ -8207,7 +8213,7 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
     const CheckProgram* program = writer->program;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     const uint32_t first = program->input->graph.argument_offsets[node];
     const uint32_t bytes = check_lower_vector_of(writer, result);
     const uint8_t class = check_lower_class(writer, result);
@@ -8321,7 +8327,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     const uint32_t selected = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
     const CheckBuiltinVectorEffect* effect = selected != BUSTER_CHECK_NONE ? stream->vectors + selected : NULL;
     const CBuiltinId builtin = effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE;
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t count = graph->argument_counts[node];
     const char* reason = NULL;
@@ -8344,7 +8350,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const TypeId source = stream->argument_conversions[first].type;
         const uint32_t b = graph->argument_nodes[first + 1];
         const bool b_undefined = check_lower_nondeterministic(program, b);
-        const bool b_effects = !b_undefined && (stream->values[b].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        const bool b_effects = !b_undefined && (check_stream_flags(stream, b) & BUSTER_CHECK_SIDE_EFFECT) != 0;
         uint32_t indices[BUSTER_CHECK_VECTOR_SHUFFLE_LANES];
         CheckVectorShuffle plan;
         // A shuffle of a conversion into a vector Tier 0 has no class for (of 2 bytes): its row reads the conversion's
@@ -8416,7 +8422,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             uint32_t indices[BUSTER_CHECK_VECTOR_SHUFFLE_LANES];
             bool prefix = inner != BUSTER_CHECK_NONE && stream->vectors[inner].runtime_builtin == CBUILTIN_SHUFFLEVECTOR && stream->vectors[inner].unsupported == 0 &&
                           check_lower_vector_of(writer, inner_source) != 0 &&
-                          (check_lower_nondeterministic(program, inner_b) || (stream->values[inner_b].flags & BUSTER_CHECK_SIDE_EFFECT) == 0) &&
+                          (check_lower_nondeterministic(program, inner_b) || (check_stream_flags(stream, inner_b) & BUSTER_CHECK_SIDE_EFFECT) == 0) &&
                           check_lower_shuffle_indices(program, argument, lanes, check_builtin_vector_lanes(types, inner_source), true, indices);
             for (uint32_t i = 0; prefix && i < lanes; i += 1)
             {
@@ -8655,7 +8661,7 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = writer->program->stream;
     const uint32_t selected = check_program_builtin_index(stream->bit_casts, stream->bit_cast_count, sizeof(CheckBuiltinBitCastEffect), node);
     const CheckBuiltinBitCastEffect* effect = selected != BUSTER_CHECK_NONE ? stream->bit_casts + selected : NULL;
-    const TypeId result = stream->values[node].type;
+    const TypeId result = check_stream_type(stream, node);
     const uint8_t from = effect != NULL ? check_lower_bit_cast_class(writer, effect->source_type) : UINT8_MAX;
     const uint8_t to = result != 0 ? check_lower_bit_cast_class(writer, result) : UINT8_MAX;
     const bool source_complex = effect != NULL && check_lower_complex_half(writer->program->types, effect->source_type);
@@ -8772,7 +8778,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const CheckOp op = graph->ops[node];
-    const CheckValue* value = stream->values + node;
+    const CheckValue checked_value = check_stream_value(stream, node);
+    const CheckValue* value = &checked_value;
     const uint32_t a = graph->operand0[node];
     const uint32_t b = graph->operand1[node];
     const TypeId type_a = stream->conversions[node].operands[0].type;
@@ -8875,7 +8882,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY)
     {
-        const TypeId input_type = stream->values[a].type;
+        const TypeId input_type = check_stream_type(stream, a);
         const bool complex = type_kind(types, type_strip_aligned(types, input_type)) == BUSTER_TYPE_KIND_COMPLEX;
         if (!complex && op == CHECK_OP_REAL)
         {
@@ -8896,7 +8903,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             }
             check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
         }
-        else if (stream->values[a].category == CHECK_LVALUE || check_lower_complex(writer, input_type))
+        else if (check_stream_category(stream, a) == CHECK_LVALUE || check_lower_complex(writer, input_type))
         {
             // The part at its offset from the value's address: an lvalue's, or a complex rvalue's, whose value is its
             // object's address. An aggregate part's value (a __float128's, a _BitInt's past 128 bits) is its address.
@@ -8909,7 +8916,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                 check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
                 check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, type_size(types, type_element(types, input_type)));
             }
-            check_lower_operand(writer, node, 0, stream->values[a].category == CHECK_LVALUE, 0);
+            check_lower_operand(writer, node, 0, check_stream_category(stream, a) == CHECK_LVALUE, 0);
         }
         else
         {
@@ -9052,7 +9059,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         // A struct's or union's member, at the offset the checker found it at (CheckStream.member_offsets), for a node it
         // checked without a diagnostic; not a vector's elements (`v.y`), which share the operator. A bit-field's address,
         // which only its stores ask for, is its first byte's.
-        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : stream->values[a].type;
+        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : check_stream_type(stream, a);
         const uint8_t record_kind = check_action_kind(types, record);
         const uint64_t offset = stream->member_offsets[node];
         const bool bit_field = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0;
@@ -9114,8 +9121,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const uint8_t element_class = check_lower_quad(writer, type_a) || limbs || check_lower_complex_parts(writer, type_a) ?
                                           BUSTER_TYPED_CLASS_U64 :
                                           check_lower_class(writer, check_lower_complex_element(types, type_a));
-        const uint8_t class_a = check_lower_complex(writer, stream->values[a].type) ? BUSTER_TYPED_CLASS_U64 : element_class;
-        const uint8_t class_b = !unary && check_lower_complex(writer, stream->values[b].type) ? BUSTER_TYPED_CLASS_U64 :
+        const uint8_t class_a = check_lower_complex(writer, check_stream_type(stream, a)) ? BUSTER_TYPED_CLASS_U64 : element_class;
+        const uint8_t class_b = !unary && check_lower_complex(writer, check_stream_type(stream, b)) ? BUSTER_TYPED_CLASS_U64 :
                                 limbs && !unary ? check_lower_value_class(writer, type_b) : element_class;
         const uint32_t first = check_lower_temporary(writer, class_a);
         const uint32_t last = unary ? first : check_lower_temporary(writer, class_b);
@@ -9123,10 +9130,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         if (!unary)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class_b, last);
-            check_lower_operand(writer, node, 1, false, check_lower_complex_target(writer, stream->values[b].type, type_b));
+            check_lower_operand(writer, node, 1, false, check_lower_complex_target(writer, check_stream_type(stream, b), type_b));
         }
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class_a, first);
-        check_lower_operand(writer, node, 0, false, check_lower_complex_target(writer, stream->values[a].type, type_a));
+        check_lower_operand(writer, node, 0, false, check_lower_complex_target(writer, check_stream_type(stream, a), type_a));
     }
     else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
     {
@@ -9164,9 +9171,9 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         check_lower_varargs_prepare(writer, node);
     }
     else if ((op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) &&
-             (check_lower_facts(writer, stream->values[a].type) & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
+             (check_lower_facts(writer, check_stream_type(stream, a)) & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
     {
-        if (op != CHECK_OP_ASSIGN && check_lower_vector_of(writer, stream->values[a].type) != 0)
+        if (op != CHECK_OP_ASSIGN && check_lower_vector_of(writer, check_stream_type(stream, a)) != 0)
         {
             check_lower_unsupported(writer, "updates of atomic vector values");
         }
@@ -9175,11 +9182,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             check_lower_atomic_prepare(writer, node, false, discard);
         }
     }
-    else if (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    else if (op == CHECK_OP_ASSIGN && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0)
     {
         check_lower_bit_assign(writer, node, discard);
     }
-    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0)
     {
         check_lower_bit_update(writer, node, discard);
     }
@@ -9187,10 +9194,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
-        const TypeId destination = op == CHECK_OP_ASSIGN ? stream->values[a].type :
+        const TypeId destination = op == CHECK_OP_ASSIGN ? check_stream_type(stream, a) :
                                    declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
         const bool volatile_copy = check_lower_copy_node_volatile(writer, op == CHECK_OP_INITIALIZE ? a : b, destination) ||
-                                   (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_VOLATILE_PART) != 0);
+                                   (op == CHECK_OP_ASSIGN && (check_stream_flags(stream, a) & BUSTER_CHECK_VOLATILE_PART) != 0);
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !discard, .volatile_copy = volatile_copy });
         check_lower_operand(writer, node, op == CHECK_OP_INITIALIZE ? 0 : 1, false, value->type);
         if (op == CHECK_OP_ASSIGN)
@@ -9209,7 +9216,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE)
     {
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
-        const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? stream->values[a].object : 0;
+        const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
         const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
         const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
         // A global of a memory class is stored through its address, which goes first (check_lower_memory_class).
@@ -9237,7 +9244,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
         }
     }
-    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (check_lower_aggregate(writer, stream->values[a].type) || check_lower_aggregate(writer, type_a)))
+    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (check_lower_aggregate(writer, check_stream_type(stream, a)) || check_lower_aggregate(writer, type_a)))
     {
         check_lower_complex_update(writer, node);
     }
@@ -9249,8 +9256,9 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         // A vector's element, at its index's place in the vector's bytes: the vector's own place when it is an lvalue, or
         // a temporary's that the value is stored into.
-        const TypeId vector = stream->values[a].type;
-        const CheckValue* base = stream->values + a;
+        const TypeId vector = check_stream_type(stream, a);
+        const CheckValue base_value = check_stream_value(stream, a);
+        const CheckValue* base = &base_value;
         if (base->category == CHECK_LVALUE && check_lower_copy_volatile(writer, base, 0))
         {
             // Clang reads the whole volatile vector, and writes an element through a whole-vector read/insert/store.
@@ -9264,7 +9272,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, type_size(types, value->type));
         check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);
-        if (stream->values[a].category == CHECK_LVALUE)
+        if (check_stream_category(stream, a) == CHECK_LVALUE)
         {
             check_lower_operand(writer, node, 0, true, 0);
         }
@@ -9443,7 +9451,8 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_CONSTANT)
         {
-            check_lower_constant(writer, writer->program->stream->values + node);
+            const CheckValue value = check_stream_value(writer->program->stream, node);
+            check_lower_constant(writer, &value);
         }
         else if (kind == CHECK_LOWER_ADDRESS)
         {
@@ -9888,7 +9897,7 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
             for (; valid && s < program->switch_count && program->switches[s] - body->first < body->count; s += 1)
             {
                 const CheckControl control = program->controls[program->switches[s]];
-                const uint8_t class = check_lower_type_class(program->types, program->stream->values[control.node].type);
+                const uint8_t class = check_lower_type_class(program->types, check_stream_type(program->stream, control.node));
                 valid = check_lower_switch_table(lowered, capacity, program, b, program->switches[s] - body->first, class, cases, sorted, output);
             }
         }
@@ -10488,7 +10497,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_SWITCH)
     {
         // A narrow _BitInt's value is kept in its computing class, which its cases compare in (check_lower_computed).
-        const TypeId type = program->stream->values[control.node].type;
+        const TypeId type = check_stream_type(program->stream, control.node);
         const uint8_t own = check_lower_class(writer, type);
         const uint8_t class = check_lower_computed(own);
         const uint32_t local = check_lower_temporary(writer, class);
@@ -10841,8 +10850,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         const CheckOp op = input->graph.ops[node];
         const uint32_t left = input->graph.operand0[node];
         const bool update = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
-        const TypeId type = program->stream != NULL && program->stream->values != NULL ? program->stream->values[node].type : 0;
-        const TypeId target = update && left < node && program->stream != NULL ? program->stream->values[left].type : 0;
+        const TypeId type = program->stream != NULL && check_stream_has_values(program->stream) ? check_stream_type(program->stream, node) : 0;
+        const TypeId target = update && left < node && program->stream != NULL ? check_stream_type(program->stream, left) : 0;
         atomic_capacity += op == CHECK_OP_BUILTIN_ATOMIC ||
                            (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
                            (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
@@ -11247,25 +11256,48 @@ static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool so
 
 // Prefetches the checked values and conversions of the nodes from `from` to `node`, a statement's root (the last
 // BUSTER_CHECK_LOWER_PREFETCH_NODES of them): a statement's nodes come before its root in the graph, and the tasks' loop
-// waited on its first touch of each node's 96 bytes of checked value and 32 of conversions (#531). Returns the node after
-// the last one prefetched, or `from` for a root that isn't past it.
+// waited on its first touch of each node's checked value and 32 bytes of conversions (#531): the value's columns, and its
+// payload row's index (a row itself is wherever the run wrote it, #628). Returns the node after the last one prefetched, or
+// `from` for a root that isn't past it.
 static uint32_t check_lower_prefetch(const CheckProgram* program, uint32_t from, uint32_t node)
 {
     uint32_t result = from;
     if (node != BUSTER_CHECK_NONE && node < program->stream->count && node >= from)
     {
         const uint32_t first = node - from >= BUSTER_CHECK_LOWER_PREFETCH_NODES ? node + 1 - BUSTER_CHECK_LOWER_PREFETCH_NODES : from;
-        const uintptr_t ranges[2][2] = {
+        const CheckStream* stream = program->stream;
+        const bool dense = stream->dense_values != NULL;
+        const uintptr_t ranges[][2] = {
             {
-                (uintptr_t)(program->stream->values + first),
-                (uintptr_t)(program->stream->values + node + 1),
+                (uintptr_t)(stream->conversions + first),
+                (uintptr_t)(stream->conversions + node + 1),
             },
             {
-                (uintptr_t)(program->stream->conversions + first),
-                (uintptr_t)(program->stream->conversions + node + 1),
+                dense ? (uintptr_t)(stream->dense_values + first) : (uintptr_t)(stream->value_types + first),
+                dense ? (uintptr_t)(stream->dense_values + node + 1) : (uintptr_t)(stream->value_types + node + 1),
+            },
+            {
+                dense ? 0 : (uintptr_t)(stream->value_flags + first),
+                dense ? 0 : (uintptr_t)(stream->value_flags + node + 1),
+            },
+            {
+                dense ? 0 : (uintptr_t)(stream->value_objects + first),
+                dense ? 0 : (uintptr_t)(stream->value_objects + node + 1),
+            },
+            {
+                dense ? 0 : (uintptr_t)(stream->payload_rows + first),
+                dense ? 0 : (uintptr_t)(stream->payload_rows + node + 1),
+            },
+            {
+                dense ? 0 : (uintptr_t)(stream->value_categories + first),
+                dense ? 0 : (uintptr_t)(stream->value_categories + node + 1),
+            },
+            {
+                dense ? 0 : (uintptr_t)(stream->value_constants + first),
+                dense ? 0 : (uintptr_t)(stream->value_constants + node + 1),
             },
         };
-        for (uint32_t r = 0; r < 2; r += 1)
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(ranges); r += 1)
         {
             for (uintptr_t line = ranges[r][0] & ~(uintptr_t)63; line < ranges[r][1]; line += 64)
             {

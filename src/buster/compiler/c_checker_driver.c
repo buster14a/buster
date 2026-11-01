@@ -1110,7 +1110,8 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
     for (uint32_t node = 0; node < stream->count; node += 1)
     {
         const uint64_t mark = scratch->length;
-        const CheckValue* value = stream->values + node;
+        const CheckValue checked_value = check_stream_value(stream, node);
+        const CheckValue* value = &checked_value;
         const String8 type = value->type != 0 ? type_print(types, scratch, value->type, (String8){ 0 }, &names, 0) : (String8){ 0 };
         printf("%u token=%u op=%u type=%.*s category=%u", node, graph->tokens[node], graph->ops[node], (int)type.length, type.pointer != 0 ? type.pointer : "", value->category);
         if (value->constant_kind == CHECK_CONSTANT_INTEGER)
