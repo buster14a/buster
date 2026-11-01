@@ -24,12 +24,20 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. Returns false if one can't be reserved.
-static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target)
+// for a target other than the last one's. The solver's arena (#866, step 6) is reserved only when `gvn` asks for it, so
+// that --tier1 alone maps no address space it never uses. Returns false if one can't be reserved.
+static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, bool gvn)
 {
-    if (!lane->reserved)
+    const uint32_t steps = gvn ? BUSTER_CHECK_TIER1_STEPS : BUSTER_CHECK_TIER1_STEPS - 1;
+    if (!lane->reserved || lane->gvn_reserved != gvn)
     {
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+        {
+            arena_release(&lane->steps[k]);
+        }
+        arena_release(&lane->scratch);
+        arena_release(&lane->forms);
+        for (uint32_t k = 0; k < steps; k += 1)
         {
             lane->steps[k] = arena_reserve(UINT64_C(1) << 34);
         }
@@ -37,9 +45,12 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
         lane->forms = arena_reserve_small(X86_FORM_COUNT, X86_FORM_COUNT);
         lane->allowed = BUSTER_ARENA_PUSH_ARRAY(&lane->forms, uint8_t, X86_FORM_COUNT);
         lane->reserved = true;
+        lane->gvn_reserved = gvn;
+        // The new forms arena is empty: the target's forms must be built again even for the same target.
+        lane->targeted = false;
     }
     bool valid = lane->scratch.base != 0 && lane->allowed != 0;
-    for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+    for (uint32_t k = 0; k < steps; k += 1)
     {
         valid = valid && lane->steps[k].base != 0;
         arena_pop_to(&lane->steps[k], 0);
@@ -105,11 +116,11 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
+                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
 {
     *operation = 0;
     *counts = (CheckTier1Counts){ 0 };
-    CheckTier1Stage stage = check_tier1_lane_prepare(lane, target) ? CHECK_TIER1_COMPILED : CHECK_TIER1_RESOURCE;
+    CheckTier1Stage stage = check_tier1_lane_prepare(lane, target, gvn) ? CHECK_TIER1_COMPILED : CHECK_TIER1_RESOURCE;
     Arena* scratch = &lane->scratch;
     const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
     IrFunction lowered = { 0 };
@@ -120,9 +131,23 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         stage = check.error == IR_OK ? stage : CHECK_TIER1_LOWERING;
     }
     IrFunction promoted = { 0 };
+    // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
+    // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
+    // pays for in moves and spills. Its rewritten function is verified; a body it refuses is Tier 0's, as one
+    // ir_optimize refuses is, so no second, quieter path decides what Tier 1 compiles.
+    IrGvnResult gvn_result = { 0 };
+    bool gvn_applied = false;
+    if (stage == CHECK_TIER1_COMPILED && gvn)
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.scalar = scalar;
+        gvn_applied = ir_optimize_gvn(&lowered, &lane->steps[6], scratch, options, &gvn_result).error == IR_OK;
+        stage = gvn_applied ? stage : CHECK_TIER1_OPTIMIZATION;
+    }
+    const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ssa_ir_promote_scalar(&lowered, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(&lowered, &lane->steps[1], scratch, &promoted);
+        const IrCheck check = scalar ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
         stage = check.error == IR_OK ? stage : CHECK_TIER1_PROMOTION;
     }
     IrOptimizeResult optimized = { 0 };
@@ -132,6 +157,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         options.scalar = scalar;
         stage = ir_optimize(&promoted, &lane->steps[2], scratch, options, &optimized).error == IR_OK ? stage : CHECK_TIER1_OPTIMIZATION;
     }
+    // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
     const IrFunction* ir = &optimized.function;
     IrCfg cfg = { 0 };
     Dominators dominators = { 0 };

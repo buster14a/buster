@@ -743,9 +743,9 @@ jobs:
                   # Both modules, including the scaling fixture's include, use the same harness and generator.
                   cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
                       "$ab_dir/$side/src/buster/compiler/"
-                  # The shared harness includes the host-ISA adapter. Keep each revision's headers when present;
-                  # a base predating the adapter uses the current compatibility headers on this vector-only host.
-                  for header in host_isa.h host_scalar.h host_scalar_vectors.h; do
+                  # The shared harness includes the host-ISA adapter and the encoder's baked-table header. Keep each
+                  # revision's headers when present; a base predating one uses the current header on this host.
+                  for header in host_isa.h host_scalar.h host_scalar_vectors.h baked.h; do
                       dest="$ab_dir/$side/src/buster/compiler/$header"
                       if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
                           git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
@@ -998,9 +998,8 @@ jobs:
 
       - name: Benchmark the printer on main.c and the frozen sqlite3.c, with line markers and without
         # #649: -E -P's and -E's printing (--markers runs and prints as the -E driver does) by pp_print_spellings against
-        # the printer's general loop for every chunk (--spelling-cost), which with line markers prints in the time the
-        # printer before #649 took (with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon and 6% slower
-        # a token on the 9700X: main.c's history in the step above is -P's before). About 13 s.
+        # the printer's general loop for every chunk (--spelling-cost), with the printer's own copies either way: each
+        # row's history is its before. About 13 s.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
         run: |
           unset CPATH C_INCLUDE_PATH

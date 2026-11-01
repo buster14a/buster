@@ -238,6 +238,29 @@ link_program()
     else
         clang "${link_mode[@]}" "${sanitizer_flags[@]}" "${linker_flags[@]}" "$@" "${fuzz_libraries[@]}" -lm -ldl -o "$output"
     fi
+    if [ "${BUSTER_BAKE:-1}" != 0 ]; then
+        bake_program "$output"
+    fi
+}
+
+# Has the executable $1 write itself with the backend's tables built (bake-tables, src/buster/compiler/baked.c, #590),
+# so that a compile starts with them rather than building them: about 2 ms of a small file's compile on a Xeon VM whose
+# kernel only madvises huge pages. A PIE (the sanitizers' builds) keeps building them when it runs (status 77), and so
+# does every executable with BUSTER_BAKE=0. Any other failure, an initializer's state outside the section among them,
+# fails the build.
+bake_program()
+{
+    local status=0
+    "$1" bake-tables "$1.baked" || status=$?
+    if [ "$status" -eq 0 ]; then
+        mv -f "$1.baked" "$1"
+    else
+        rm -f "$1.baked"
+        if [ "$status" -ne 77 ]; then
+            echo "build.sh: $1 couldn't bake its tables" >&2
+            return 1
+        fi
+    fi
 }
 
 # Builds build/compiler from the sources, with the flags in `defines`, and the objects in "$@" after theirs. The sources'

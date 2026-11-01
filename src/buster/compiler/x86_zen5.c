@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include "host_isa.h"
+#include "baked.h"
 
 #define BUSTER_X86_COST_UNKNOWN UINT16_MAX
 #define BUSTER_X86_COST_SCALE 256
@@ -134,32 +135,38 @@ static const X86CostCase x86_zen5_cases[X86_COST_COUNT] = {
 #undef BUSTER_X86_COST_CASE
 };
 
-static uint8_t x86_zen5_form_ids[X86_FORM_COUNT][X86_COST_OPERANDS_COUNT];
+static BUSTER_BAKED_UNIT uint8_t x86_zen5_form_ids[X86_FORM_COUNT][X86_COST_OPERANDS_COUNT];
 // Bits identify fields observed by this repository's 9700X harness. Zero means no observation, not a zero cost.
-static uint8_t x86_zen5_measured_fields[BUSTER_X86_COST_CAPACITY];
-static uint16_t x86_zen5_columns[X86_COST_COLUMN_COUNT][BUSTER_X86_COST_CAPACITY] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t x86_zen5_measured_fields[BUSTER_X86_COST_CAPACITY];
+static BUSTER_BAKED_UNIT uint16_t x86_zen5_columns[X86_COST_COLUMN_COUNT][BUSTER_X86_COST_CAPACITY] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT bool x86_zen5_initialized;
 
-// Startup only, before worker threads. Reinitialization is deterministic. No allocation or encoder mutation.
+// Startup only, before worker threads. Reinitialization is deterministic. No allocation or encoder mutation. The bake
+// (baked.c) runs this too, so a baked executable returns at the first call.
 static bool x86_zen5_initialize(void)
 {
-    memset(x86_zen5_form_ids, 0, sizeof(x86_zen5_form_ids));
-    memset(x86_zen5_measured_fields, 0, sizeof(x86_zen5_measured_fields));
-    memset(x86_zen5_columns, 0xff, sizeof(x86_zen5_columns));
-    bool valid = true;
-    for (uint32_t id = 1; id < X86_COST_COUNT; id += 1)
+    if (!x86_zen5_initialized)
     {
-        const X86CostCase* entry = &x86_zen5_cases[id];
-        valid &= x86_zen5_form_ids[entry->form][entry->operands] == 0;
-        x86_zen5_form_ids[entry->form][entry->operands] = id;
-        x86_zen5_columns[X86_COST_GPR_LATENCY][id] = entry->latency;
-        x86_zen5_columns[X86_COST_THROUGHPUT][id] = entry->throughput;
-        x86_zen5_columns[X86_COST_RETIRED_OPS][id] = entry->retired_ops;
-        for (uint32_t column = X86_COST_GPR_LATENCY; column <= X86_COST_RETIRED_OPS; column += 1)
+        memset(x86_zen5_form_ids, 0, sizeof(x86_zen5_form_ids));
+        memset(x86_zen5_measured_fields, 0, sizeof(x86_zen5_measured_fields));
+        memset(x86_zen5_columns, 0xff, sizeof(x86_zen5_columns));
+        bool valid = true;
+        for (uint32_t id = 1; id < X86_COST_COUNT; id += 1)
         {
-            x86_zen5_measured_fields[id] |= (x86_zen5_columns[column][id] != BUSTER_X86_COST_UNKNOWN) << column;
+            const X86CostCase* entry = &x86_zen5_cases[id];
+            valid &= x86_zen5_form_ids[entry->form][entry->operands] == 0;
+            x86_zen5_form_ids[entry->form][entry->operands] = id;
+            x86_zen5_columns[X86_COST_GPR_LATENCY][id] = entry->latency;
+            x86_zen5_columns[X86_COST_THROUGHPUT][id] = entry->throughput;
+            x86_zen5_columns[X86_COST_RETIRED_OPS][id] = entry->retired_ops;
+            for (uint32_t column = X86_COST_GPR_LATENCY; column <= X86_COST_RETIRED_OPS; column += 1)
+            {
+                x86_zen5_measured_fields[id] |= (x86_zen5_columns[column][id] != BUSTER_X86_COST_UNKNOWN) << column;
+            }
         }
+        x86_zen5_initialized = valid;
     }
-    return valid;
+    return x86_zen5_initialized;
 }
 
 // Accepts validated 64-bit-mode records, and fails closed on unsupported cases. L1_LOAD assumes an aligned,

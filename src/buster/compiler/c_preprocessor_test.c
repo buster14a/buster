@@ -8134,6 +8134,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_print_unspliced();
         passed_all &= pp_test_print_batches(directory);
         passed_all &= pp_test_print_spelling_paths(directory);
+        passed_all &= pp_test_print_lines(directory);
         passed_all &= pp_test_system_warnings(directory, with_clang);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);

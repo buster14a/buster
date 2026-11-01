@@ -465,6 +465,9 @@ int run_backend_benchmark(int argc, char** argv);
 // The driver's commands of several source files (#152): their units on lanes, and one executable of them all.
 #include "buster/compiler/c_checker_units.c"
 #pragma clang section text = ""
+// bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
+// unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
+#include "buster/compiler/baked.c"
 // The checker unit's own tests compile unoptimized, between `optimize off` and `on` (#681). On the 9700X, the measured
 // 716c980d to 4ce693ad pair's checker-unit mean fell from 33.7 to 27.35 s, and compilation-phase wall from 33.7 to
 // 28.5 s (two builds per role, excluding final linking and remaining script overhead). AGENTS.md links the frozen
@@ -1134,6 +1137,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "bake-tables") == 0)
+    {
+        result = run_bake_command(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-baked-tables") == 0)
+    {
+        result = run_baked_tables_test(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
