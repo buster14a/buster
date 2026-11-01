@@ -1,85 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Temporary focused validation for #1054; removed from the implementation PR.
+# Isolated validation branch only; not part of PR #1094.
 name: Issue 1054 workspace
 on:
   push:
-    branches: [chatgpt/1054-tier1-outcomes]
+    branches: [chatgpt/1054-validation]
     paths: [.github/workflows/issue-1054-workspace.yml]
 permissions:
   contents: read
 jobs:
-  apply:
+  source:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.patch.outputs.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: chatgpt/1054-tier1-outcomes
-      - id: patch
-        run: |
-          set -euo pipefail
-          if test -f .github/1054-fixture.patch; then
-              git apply --check .github/1054-fixture.patch
-              git apply .github/1054-fixture.patch
-              git rm .github/1054-fixture.patch
-              git diff --check
-              git add src/buster/compiler/c_check_tier1.c src/buster/compiler/c_check_tier1_outcome_test.c
-              git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'test: prepare symbol access before direct Tier 1 rollback checks'
-              git push origin HEAD:refs/heads/chatgpt/1054-tier1-outcomes
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-  correctness:
-    needs: apply
-    runs-on: ubuntu-26.04
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: native
-            sanitizer: none
-          - arch: x86-64
-            sanitizer: address
-    env:
-      BUSTER_HOST_ARCH: ${{ matrix.arch }}
-      BUSTER_SANITIZER: ${{ matrix.sanitizer }}
-      BUSTER_SANITIZER_OPTIMIZATION: 1
-      BUSTER_DEBUG_INFO: 0
-      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          ref: ${{ needs.apply.outputs.sha }}
+          ref: 890627cbf958fa9bf1cb19930e1211e0ac91cbe3
           persist-credentials: false
-      - name: Install pinned Clang and test dependencies
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build production sources
-        run: ./build.sh
-      - name: Explicit outcomes, strict coverage and rollback
-        run: ./build/compiler test-check-lanes --tier1-outcomes --keep
-      - name: Existing emitter and pipeline regressions
-        if: success() || failure()
-        run: ./build/compiler test-tier1-emit && ./build/compiler test-tier1-pipeline
-      - name: Full lane regressions
-        if: success() || failure()
-        run: ./build/compiler test-check-lanes --keep
-      - name: Multi-unit driver regressions
-        if: success() || failure()
-        run: ./build/compiler test-check-units --keep
-      - name: Preserve exact tested source and logs
-        if: always()
-        run: git archive --format=tar HEAD > "$RUNNER_TEMP/buster-1054-tested.tar"
+      - name: Archive current main without credentials or build products
+        run: git archive --format=tar HEAD > "$RUNNER_TEMP/buster-main-890627.tar"
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: issue-1054-${{ matrix.arch }}-${{ matrix.sanitizer }}
-          path: |
-            ${{ runner.temp }}/buster-1054-tested.tar
-            /tmp/buster-check-lanes-*
-            /tmp/buster-check-units-*
-          retention-days: 3
+          name: issue-1054-main-890627
+          path: ${{ runner.temp }}/buster-main-890627.tar
+          retention-days: 1
