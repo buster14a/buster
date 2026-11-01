@@ -58,7 +58,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on checked functions' typed streams
-  of C files, `sqlite3.c`'s among them ("Measurements", below).
+  of C files, `sqlite3.c`'s among them ("Measurements", below), compiled for the target their options give (`-march`
+  and the `-m` features), and each function with a target attribute for the attribute's, as `-c` compiles them (#1041).
   The source benchmark admits the reachable functions through typed emission.
   Static-data publication and object-section placement, including assembled
   file-scope atoms' section descriptors, are outside its validation scope.
@@ -1708,7 +1709,10 @@ path's 11.1.
   - the homes, the frame, the prologue and the per-function setup 15%.
 
 **On `sqlite3.c`** (`benchmark-backend-source`, [record](https://github.com/buster14a/buster-performance/tree/9a5bad45a0e39305ee4f426f98b171a105d0f659/docs/measurements/backend-source-136-2026-10-26)):
-the functions `-c` lowers of the frozen SQLite 3.53.2 amalgamation, with the 9700X job's options. That is 2,602
+the functions `-c` lowers of the frozen SQLite 3.53.2 amalgamation, with the 9700X job's options. Until #1041 the
+benchmark compiled every file for the baseline x86-64 profile, whatever `-march` said, so these numbers, and the
+job's before #1041's merge, are of baseline code, not of the `-march=znver5` code the job's options ask for; from
+that merge the job times znver5's, and its numbers are not comparable across it. That is 2,602
 functions, 400,995 typed entries and 366,044 records (0.91 per entry, against the generated programs' 1.15), with
 3.49% of the entries deferred. The 9700X, CPU 2, medians of 21 passes, the range over three processes:
 
