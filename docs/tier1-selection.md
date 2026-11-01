@@ -39,8 +39,10 @@ patterns are:
   conversions, two `lea`s and the constants' moves; a pointer that is a value
   (a ptrtoint or an inttoptr of such a chain) is one `lea`. The index sheds the
   constants added to it (`tier1_select_index`): a 64-bit addition of a constant
-  on either side, or a subtraction of one, joins the displacement scaled, so
-  that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`. A 32-bit `int` index
+  on either side, or a subtraction of one, joins the displacement scaled while
+  it fits 32 bits, so that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`
+  and `p[i - 100]` is `[p + i * 4 - 400]`; a subtraction from a constant stays
+  a node of its own. A 32-bit `int` index
   keeps its addition, which comes before its sign extension: `(i + c) * s` isn't
   `i * s + c * s` when `i + c` overflows, which the IR doesn't rule out (and
   `-fwrapv` defines). A walk that reaches a frame object's address
