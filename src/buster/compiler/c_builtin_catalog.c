@@ -58,8 +58,10 @@
 // take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
 // stdc ones and the carry chains) 0x3a0 to 0x3c7, its floating builtins past the first ones (c_check_builtin_float.c:
 // isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9, and the alignment builtins and
-// __builtin_expect_with_probability 0x3e0 to 0x3e3. Those last two families are the table's last rows: a lookup scans the
-// table's names in order, so rows that few units call cost least after the others.
+// __builtin_expect_with_probability 0x3e0 to 0x3e3, the signaling NaNs and the _Float16 and __float128 constants 0x3e4 to
+// 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa and launder (c_check_builtin_misc.c's) 0x3f0 to 0x3f3. Those
+// last families are the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
+// least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -421,7 +423,11 @@
     X(NANF128, 0x3ebu, "__builtin_nanf128", BUSTER_CBUILTIN_SOURCE) \
     X(NANSF128, 0x3ecu, "__builtin_nansf128", BUSTER_CBUILTIN_SOURCE) \
     X(INFF128, 0x3edu, "__builtin_inff128", BUSTER_CBUILTIN_SOURCE) \
-    X(HUGE_VALF128, 0x3eeu, "__builtin_huge_valf128", BUSTER_CBUILTIN_SOURCE)
+    X(HUGE_VALF128, 0x3eeu, "__builtin_huge_valf128", BUSTER_CBUILTIN_SOURCE) \
+    X(CLASSIFY_TYPE, 0x3f0u, "__builtin_classify_type", BUSTER_CBUILTIN_CONSTANT) \
+    X(EH_RETURN_DATA_REGNO, 0x3f1u, "__builtin_eh_return_data_regno", BUSTER_CBUILTIN_CONSTANT) \
+    X(DWARF_CFA, 0x3f2u, "__builtin_dwarf_cfa", BUSTER_CBUILTIN_SOURCE) \
+    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {

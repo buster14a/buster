@@ -1074,6 +1074,62 @@ width by alignments of every width, 128-bit and wide `_BitInt` sources,
 addresses in static data and in frames, and `expect`'s and
 `expect_with_probability`'s arguments evaluated once, in order, or not at all.
 
+## Generic builtins of clang's own checks and of an instruction or two
+
+The checker takes `__builtin_classify_type`, `__builtin_eh_return_data_regno`,
+`__builtin_dwarf_cfa` and `__builtin_launder` (catalog codes 0x3f0 to 0x3f3,
+after the NaN constants) as miscellaneous builtins, by clang 23's Sema and
+evaluator (`check_builtin_misc_generic`):
+
+- `classify_type(e)` is its operand's GCC type class, as clang's evaluator gives
+  it in C: `void` 0, an integer or an enumeration 1, `bool` 4, a pointer, an
+  array or a function 5, a floating type 8, a complex one 9, a struct 12, a union
+  13, a `_BitInt` 18, a vector 19, and `nullptr_t` -1. An `_Atomic` type is its
+  value type's class. The operand is any expression, of an incomplete type too,
+  read by its type before any conversion, and never runs (`classify_type(i++)`
+  leaves `i`). The call is an int constant expression;
+- `eh_return_data_regno(n)` is x86-64's DWARF register of the n-th exception
+  data register, rax's 0 and rdx's 1, and -1 for any other n, which must be an
+  integer constant expression. The call is an int constant expression;
+- `dwarf_cfa()` is the function's canonical frame address, which clang -O0's
+  code computes as rbp + 16: Tier 0's `FRAME_ADDRESS` plus 16, which gives the
+  function a frame pointer as `__builtin_frame_address` does;
+- `launder(p)` is p, of its type, which must be a pointer to a complete object
+  type: not `void`'s, not a function's, and not an incomplete struct's. An
+  address constant stays one (`int* p = __builtin_launder(&g);` at file scope).
+
+Eleven others are leaves, per-unit helpers of clang -O0's instructions
+(`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
+features. Their prototypes are clang's metadata's:
+
+- `__builtin_debugtrap`: `int3`, whose trap returns past it;
+- `__builtin_readcyclecounter`: `rdtsc`, as `__builtin_ia32_rdtsc`;
+- `__builtin_readsteadycounter`: 0, since x86's code reads no counter for it;
+- `__builtin_thread_pointer`: `fs:[0]`;
+- `__builtin_stack_address`: the caller's rsp at the call, past the leaf's
+  return address;
+- `__builtin_dwarf_sp_column`: 7, rsp's DWARF register;
+- `__builtin___clear_cache`, `__builtin_assume_separate_storage` and
+  `__builtin_assume_dereferenceable`: nothing past their arguments, which the
+  call evaluates as clang's does;
+- `__builtin_memcpy_inline` and `__builtin_memset_inline`: their constant
+  size's bytes, by `rep movsb` and `rep stosb`, where clang's code stores them
+  itself.
+
+A call's size of `memcpy_inline` and `memset_inline` must be an integer
+constant expression (the prototype's `I`). A non-constant one is refused at the
+argument, as the x86 builtins' are; clang's message ("argument to ... must be
+a constant integer", at the call) is pending for both. `__builtin_verbose_trap`,
+whose two arguments clang requires to be string literals, is pending too.
+
+`test-checker --program-align` checks source fixtures of their classes,
+registers, types and refusals by both paths against clang, and runs programs
+natively against clang -O0's build: the folds, launder's pointers, a callee's
+CFA against its caller's stack address, debugtrap's trap counted by a SIGTRAP
+handler, the counters, the thread and stack pointers, the no-ops' arguments
+evaluated once in order, and the inline copy's and fill's bytes
+(`c_check_program_generic_builtins_test.c`).
+
 ## Intrinsic checking contracts
 
 The later maintainer decision in #156 includes target intrinsics in #148's

@@ -838,7 +838,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY)
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_LAUNDER))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
