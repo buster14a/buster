@@ -125,6 +125,74 @@ capacity, or an address scale when no index exists. Parsing normalizes those
 details by occurrence and infers the smallest exclusive symbol bound; physical
 side-table identity and arena addresses are not text-format properties.
 
+## Pass fixtures in the text form
+
+`tests/ir/optimize/*.ir` are [#175](https://github.com/buster14a/buster/issues/175)'s
+first [#139](https://github.com/buster14a/buster/issues/139) tests written in
+this text form: a hand-written `<name>-before.ir` and `<name>-after.ir` pair per
+pass, one function a file, both written as the printer writes them.
+`test-ir-optimize` runs them after its constructed fixtures; no other command or
+CI step is needed.
+
+For each pair, the test reads both files, requires that they differ (a pair that
+tests no transformation fails), and requires each file to be exactly one
+function that both parser paths accept and agree on column for column
+(`ir_parse` and `ir_parse_scalar`). It then runs the pass on the parsed before
+function by both optimizer twins, requires the vector twin's non-zero
+transformation counter, prints the vector result and requires its bytes to equal
+the after file's, parses that text again and requires it to be the after file's
+function, prints the reparsed function and requires the after bytes again, and
+runs both the before function and the transformed ones through
+`ir_optimize_test.c`'s independent interpreter on eighteen inputs, which must
+give the same returns, statuses and stores. The scalar twin's result must be
+structurally the vector result's, except for value numbering: its scalar twin is
+the available-expression oracle, which may find fewer congruences than the
+partition refinement and may never find more (the same rule as `test-ir-gvn`).
+
+The pairs, and what each records:
+
+- `sccp-constant-branch` (SCCP alone): a constant fold through an integer
+  addition and comparison retargets the conditional branch to its single
+  executable successor, and the arm the constant condition excludes is
+  unreachable and goes. DCE is not in this pass set, so live-but-unused
+  instructions, including the other constant, stay.
+- `dce-roots` (DCE alone): a dead multiply chain goes; the store, the load and
+  the copy that the return reads stay. Loads remain roots: there is no
+  dereferenceability proof.
+- `cfg-threading` (CFG cleanup alone): a chain of empty jump blocks is threaded
+  to its target and its blocks compact, leaving the entry block, the block with
+  the computation and the return block.
+- `combined-switch` (the driver's `--tier1` set, SCCP with DCE and CFG): a
+  switch on a constant operand collapses to the taken edge, the case it selects
+  branches straight to, and the default and other case blocks go with their
+  computations and constants.
+- `gvn-congruence` (value numbering): two additions that repeat a dominating
+  expression, one in each arm of a diamond, become that expression's value, and
+  their operands renumber with them.
+- `licm-hoist` (loop-invariant motion): a loop with an existing preheader, a
+  header, a latch and one exit; the header's two invariant computations move
+  into the preheader before its branch, in dependency order, and every value
+  id renumbers by its position.
+- `sroa-private-fields` (private-field replacement): a 16-byte slot whose only
+  uses are an address, constant-offset addresses, stores and loads splits into
+  two 8-byte slots at offsets 0 and 8, the original slot compacts away, and
+  each address becomes a stack address of its field's slot. This pass's stores
+  legitimately move to another slot's address, so this pair compares values and
+  statuses but not the executor's address-keyed store trace.
+
+The text form carries no unused sparse rows: the passes keep the original
+constant, slot, address and call-type indices (only new folded constants append,
+and CFG cleanup compacts blocks), while a parsed file's tables hold exactly what
+its text names. So the canonical bytes, not a whole-struct comparison, are the
+structural contract with an after file; the reparsed text is compared with the
+parsed after file as well, which checks the same structure through two parses of
+two texts.
+
+`./build/compiler test-ir-optimize --print-text` prints each before file's
+vector result instead of running the checks, for maintaining the pairs: a review
+of the printed text is what turns it into an after file; the command writes no
+file and runs no transformation the normal test would not.
+
 ## Execution contract
 
 Both fronts use `InterpreterValue` with low/high 64-bit words, explicit frame

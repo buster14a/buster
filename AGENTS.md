@@ -209,13 +209,18 @@ designs and the compilers already built this way.
   and conservative loop-invariant motion, private-field replacement and bounded
   translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
   `test-ir-sroa` and `test-ir-inline` verify transformations against independent
-  semantic fixtures and the upstream SSA promoter. `benchmark-ir-optimize`
+  semantic fixtures and the upstream SSA promoter; `test-ir-optimize` also runs
+  #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
+  through both parser paths, both twins, the canonical printer and the
+  independent executor (`--print-text` prints them for review).
+  `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](docs/ir-optimization.md) records supported inputs
   and the source-corpus and target measurements still required for #139.
 
 - `ir_parse.c` reads the shared printer format through bounded scalar/vector
-  paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics.
+  paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics;
+  `test-ir-optimize` runs the pass fixtures in that form.
   `test-ir-reduce` checks deterministic structural reduction, exact failure classes,
   allocation rollback and canonical replay; `reduce-ir` writes a new reproducer
   bundle without requiring the C frontend. See [IR reduction](docs/ir-reduce.md).
