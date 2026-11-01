@@ -1153,7 +1153,8 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
     for (uint32_t node = 0; node < stream->count; node += 1)
     {
         const uint64_t mark = scratch->length;
-        const CheckValue* value = stream->values + node;
+        const CheckValue checked_value = check_stream_value(stream, node);
+        const CheckValue* value = &checked_value;
         const String8 type = value->type != 0 ? type_print(types, scratch, value->type, (String8){ 0 }, &names, 0) : (String8){ 0 };
         printf("%u token=%u op=%u type=%.*s category=%u", node, graph->tokens[node], graph->ops[node], (int)type.length, type.pointer != 0 ? type.pointer : "", value->category);
         if (value->constant_kind == CHECK_CONSTANT_INTEGER)
@@ -3431,10 +3432,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (lanes.tier1 && source_rows)
     {
         fprintf(stderr, "error: --tier1 doesn't support -g: Tier 1's code has no source rows yet\n");
-    }
-    else if (lanes.tier1 && unwind_tables && (emit_object || link))
-    {
-        fprintf(stderr, "error: --tier1 needs -fno-asynchronous-unwind-tables: Tier 1's frames have no unwind tables yet\n");
     }
     else
     {

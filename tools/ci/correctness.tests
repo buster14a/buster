@@ -73,8 +73,9 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Test c-testsuite's programs with Tier 1's code [4 CPUs]
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
-# others by Tier 0), by both paths, whose allocators assign registers differently, both programs run; the scalar
-# path's executable the same bytes with the ids in source order and in another (#153). The declared subset must pass.
+# others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
+# both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
+# The declared subset must pass.
 ./build/compiler test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
@@ -316,7 +317,7 @@ clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -W
 ./build/compiler test-inflate
 == Test the C driver's source rows and DWARF
 # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb; and the unwind tables,
-# through backtrace() and gdb at every instruction.
+# through backtrace() and gdb at every instruction, Tier 1's frames' among them (#177).
 ./build/compiler test-check-debug --cross-check
 == Test the x86-64 disassembler against GNU tools
 corpus="$(mktemp -d)"
@@ -351,6 +352,11 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 ./build/compiler test-tier1-liveness
 ./build/compiler test-tier1-emit
 ./build/compiler test-tier1-pipeline --cross-check
+# #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
+# interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
+./build/compiler test-tier1-masks
+# #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
+./build/compiler test-mask-spills
 ./build/compiler test-tier1-model
 ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
 == Test shared IR local promotion and typed-stream semantics
@@ -376,6 +382,8 @@ export SOURCE_DATE_EPOCH=1792454400
 corpus=$BUSTER_CORPUS
 musl="$corpus/libc/musl"
 ./build/compiler test-tier1-cfg-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+# #179: #732's SIMD functions, which the SSA promoter refuses, allocated as lowered, their vcmp masks in the opmask class.
+./build/compiler test-tier1-cfg-source --simd -march=x86-64-v4 tests/ir/vector-i32.c
 ./build/compiler test-tier1-cfg-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 ./build/compiler test-tier1-cfg-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \

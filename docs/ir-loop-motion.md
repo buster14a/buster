@@ -32,10 +32,16 @@ The caller-facing IR columns need no padding. Value spaces above `INT32_MAX`
 use the scalar path because hardware dword gather indices are signed.
 
 The independent scalar path queues candidates, then revisits their users
-when a value becomes invariant. A vector sweep limit (64 by default) switches
-to that worklist to complete the same fixed point. The output set is exact,
-including dependencies that span partial batches. Neither path publishes
-partially converged motion decisions.
+when a value becomes invariant. Each vector sweep reports newly available
+values, counting only 0-to-1 discoveries. Completion continues whole-function
+sweeps only while at least one value per 16 visited instructions becomes
+available, otherwise it preserves the sweeps' discoveries and completes
+through the exact worklist to the same least fixed point. A zero-progress
+sweep is already a fixed point, and an explicit zero sweep limit forces
+worklist completion. The vector sweep limit (64 by default) therefore bounds
+productive sweeps rather than paying the whole limit for a thin chain. The
+output set is exact, including dependencies that span partial batches.
+Neither path publishes partially converged motion decisions.
 
 The rewrite appends moved computations before each preheader terminator.
 Original reverse postorder and in-block order topologically order all moved
@@ -53,9 +59,12 @@ command in `argv[0]`. Include its file after `ir_optimize_licm.c` and
 the independent bounded interpreter, dependent arithmetic chains, nested
 hoisting, missing dedicated preheaders, zero-iteration faulting division and
 loads, undef dependence, no-loop functions, random arithmetic loops, every
-guarded readiness tail and partial allocation rollback. Target-host cost,
-register-pressure and complete generated-code measurements remain pending;
-the current motion policy has no measured profitability model.
+guarded readiness tail and partial allocation rollback. Whole-pass progress
+fixtures cover thin, wide, mixed and phi-dependent chains at 255/256/257/4096
+lengths, asserting identical output and motion with bounded sweeps, visits
+and fallback. Target-host cost, register-pressure and complete generated-code
+measurements remain pending; the current motion policy has no measured
+profitability model.
 
 The implementation is original. LLVM's [loop terminology](
 https://llvm.org/docs/LoopTerminology.html) was consulted for the preheader,

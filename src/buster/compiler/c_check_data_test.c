@@ -366,7 +366,7 @@ static void check_data_test_objects(CheckTest* test, TypeTable* types, const cha
     CheckValue values[COUNT];
     CheckDiagnostic diagnostics[COUNT] = { 0 };
     CheckStream stream = {
-        .values = values,
+        .dense_values = values,
         .diagnostics = diagnostics,
         .count = COUNT,
     };
@@ -550,7 +550,7 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
             };
             CheckDiagnostic diagnostics[2] = { 0 };
             CheckStream stream = {
-                .values = values,
+                .dense_values = values,
                 .diagnostics = diagnostics,
                 .count = 2,
             };
@@ -807,7 +807,7 @@ static void check_data_test_composite(CheckTest* test, TypeTable* types)
             .token = 14,
         };
         const CheckStream stream = {
-            .values = values,
+            .dense_values = values,
             .diagnostics = diagnostics,
             .count = 4,
         };
@@ -887,7 +887,7 @@ static void check_data_test_partitions(CheckTest* test, TypeTable* types)
             diagnostics[i] = CHECK_DIAG_NONE;
         }
         const CheckStream stream = {
-            .values = values,
+            .dense_values = values,
             .diagnostics = diagnostics,
             .count = count,
         };
@@ -1427,7 +1427,7 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
             };
             CheckDiagnostic diagnostics[2] = { 0 };
             CheckStream stream = {
-                .values = values,
+                .dense_values = values,
                 .diagnostics = diagnostics,
                 .count = 2,
             };
@@ -1537,7 +1537,7 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
         value.imaginary = -2.0L;
         CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
         const CheckStream stream = {
-            .values = &value,
+            .dense_values = &value,
             .diagnostics = &diagnostic,
             .count = 1,
         };
@@ -1587,7 +1587,7 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
                 .imaginary = imaginary[i],
             };
             CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
-            const CheckStream stream = { .values = &value, .diagnostics = &diagnostic, .count = 1 };
+            const CheckStream stream = { .dense_values = &value, .diagnostics = &diagnostic, .count = 1 };
             const CheckDataObject object = { .type = complex_half, .object = 1, .initializer = 0 };
             CheckDataResult result = { 0 };
             const bool emitted = check_data_emit(types, &stream, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,

@@ -249,6 +249,7 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
         arena_pop_to(&input_arena, 0);
     }
     arena_release(&scratch);
+    arena_release(&outputs[2]);
     arena_release(&outputs[1]);
     arena_release(&outputs[0]);
     arena_release(&input_arena);

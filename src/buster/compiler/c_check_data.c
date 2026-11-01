@@ -146,8 +146,9 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(base) != CHECK_HALF_NONE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
-        // A __float128 object's bytes are zeros without an initializer (#137); the checker folds none of its constants, so
-        // that one with an initializer is refused below as not constant.
+        // A __float128 object's bytes are zeros without an initializer (#137). The checker folds none of its arithmetic or
+        // conversions, so that one with such an initializer is refused below as not constant; the constant builtins'
+        // values are its constants (__builtin_inff128, __builtin_nanf128 and the others, #148).
         quad = base == BUSTER_TYPE_FLOAT128;
         const uint64_t size = type_size(types, object->type);
         const uint32_t natural = type_alignment_log2(types, object->type);
@@ -184,7 +185,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     }
     if (status == CHECK_DATA_OK && object->initializer != BUSTER_CHECK_NONE)
     {
-        if (stream == 0 || object->initializer >= stream->count || stream->values == 0 || stream->diagnostics == 0)
+        if (stream == 0 || object->initializer >= stream->count || !check_stream_has_values(stream) || stream->diagnostics == 0)
         {
             status = CHECK_DATA_INVALID;
         }
@@ -194,7 +195,8 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         }
         else
         {
-            const CheckValue* value = &stream->values[object->initializer];
+            const CheckValue checked_value = check_stream_value(stream, object->initializer);
+            const CheckValue* value = &checked_value;
             const bool valid_type = type_is_valid(types, value->type);
             const TypeId value_type = valid_type ? type_unqualified(type_strip_aligned(types, value->type)) : 0;
             TypeAnswer compatible = value_type == base ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
@@ -231,7 +233,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                     check_data_integer_bytes(plan->bytes, bits, plan->size);
                 }
             }
-            else if (floating && value->constant_kind == CHECK_CONSTANT_FLOATING)
+            else if ((floating || quad) && value->constant_kind == CHECK_CONSTANT_FLOATING)
             {
                 const long double rounded = check_action_round_float(base, value->floating);
                 if (!isnan(value->floating) && (rounded != value->floating || signbit(rounded) != signbit(value->floating)))
@@ -860,7 +862,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
             CheckValue value = part->value;
             const CheckStream scalar_stream = {
-                .values = &value,
+                .dense_values = &value,
                 .diagnostics = &diagnostic,
                 .count = 1,
             };

@@ -48,7 +48,8 @@ static void check_warning_graph_null(CheckInputReader* reader, const CheckStream
                                      uint32_t lvalue, TypeId declared, uint32_t completion)
 {
     const CheckGraph* graph = &reader->output->graph;
-    if (source < graph->count && check_warning_null_integer(reader->types, destination, stream->values + source))
+    const CheckValue value = source < graph->count ? check_stream_value(stream, source) : (CheckValue){ 0 };
+    if (source < graph->count && check_warning_null_integer(reader->types, destination, &value))
     {
         uint32_t first = check_warning_graph_first(graph, reader->parser, source);
         uint32_t end = graph->source_positions[source];
@@ -83,7 +84,7 @@ static void check_warning_graph_null(CheckInputReader* reader, const CheckStream
         // typedef specifier's declaration where its base was a typedef name.
         uint32_t spelling = 0;
         const TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser, lvalue, declared, destination, &spelling);
-        check_input_null_spelling(reader, destination, printed, spelling, stream->values + source, first, end, completion);
+        check_input_null_spelling(reader, destination, printed, spelling, &value, first, end, completion);
     }
 }
 
@@ -145,7 +146,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 const uint32_t completion = graph->source_positions[node];
                 if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL)
                 {
-                    const CheckAction action = { .op = op, .operands = { stream->values[graph->operand0[node]], stream->values[graph->operand1[node]] } };
+                    const CheckAction action = { .op = op, .operands = { check_stream_value(stream, graph->operand0[node]), check_stream_value(stream, graph->operand1[node]) } };
                     const CheckActionResult checked = { 0 };
                     CheckWarningEvent event;
                     if (check_warning_ordered_event(types, &action, &checked, token, completion, &event))

@@ -857,8 +857,19 @@ readers.
 and operand edges stay in `CheckGraph`; the stream adds node-indexed semantic
 columns without renumbering or expanding the graph:
 
-- `values` stores each node's `TypeId`, value category, constant representation,
-  flags, optional object/addend, bit width and deferred evaluation fault.
+- Each node's value (`CheckValue`: its `TypeId`, value category, constant
+  representation, flags, optional object/addend, bit width and deferred
+  evaluation fault) is in columns (#628). `value_types`, `value_flags`,
+  `value_objects`, `value_categories` and `value_constants` hold the fields
+  that most readers read alone. A node whose value has more (a constant's
+  payload, an address constant's offset, a bit-field's place, an overload set,
+  a fault) also has its whole value as a row of `payloads`, its row's index
+  plus one in `payload_rows`, 0 for none. On `sqlite3.c` 12% of the nodes have
+  a row, where 36% have an object. `check_stream_value` gives a node's whole
+  value, and `check_stream_type`, `check_stream_flags`,
+  `check_stream_category`, `check_stream_constant_kind` and
+  `check_stream_object` its fields. A hand-built stream may hold a whole value
+  per node in `dense_values` instead, which the accessors read the same way.
 - `conversions` contains three operand records and a separate store record per
   node. Each records the
   destination type and the applicable lvalue, array/function decay, promotion,
@@ -1961,8 +1972,16 @@ What the lowering covers past scalars (#145's programs):
   low bits' direction for 8 to 11, as clang's code does.
 
   A function with an X86
-  entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
-  opmask's are integers. A builtin the table doesn't name is refused by name
+  entry has vectors (`Tier0Function.vectors`) whatever its values' classes. Its
+  masks are C's integers (`__mmask16` is an `unsigned short`), and where the
+  unit's target has AVX-512 BW and DQ, a row's masks are Tier 0's mask class
+  (#179, `check_x86_lower_masks`): a mask operand its records would move into
+  an opmask register from its integer is taken there by role, a mask result
+  they would move out is left there, their other opmask registers are scratch
+  roles, and the moves are Tier 0's conversions from and to the C type around
+  the row, so that the function has masks (`Tier0Function.masks`). A row whose
+  registers don't map onto roles (VP2INTERSECT's pair, a mask's integer read
+  otherwise) keeps the moves, its opmask registers by number. A builtin the table doesn't name is refused by name
   ("this x86 builtin"), and so are one whose instructions the target hasn't and
   a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
   instructions name fixed registers, or would write the vector registers
@@ -3416,19 +3435,28 @@ they do per token where little of it was per declaration or expression:
   byte copies, the initializers' expression re-evaluation
   (`check_input_evaluate_cached`), the liveness walk
   (`check_initializer_live_writes`) and the constant-fold warnings. On #872's
-  M7-style units, #754 is the whole measured `bc11fddb`..`d11a91d2`
-  difference (local Ryzen 9 7940HS instruction counts, `perf stat -e
-  instructions:u` over `benchmark-checker-deferred --passes 6 --lanes 1`
-  runs with the frozen corpus's pinned predefines and headers, three repeats,
-  all within 0.02%: `00213.c` +6.3%, `00182.c` +0.7%, `00204.c` +3.7%,
-  `00200.c` +1.6%, `sqlite3.c` +4.1%; the K&R stack #735+#752+#756 with the
-  six non-reader merges is +0.0 to +0.2%, and #831 is unchanged, so the
-  endpoint sums match). The `fresh` skip itself removes 0.06% of `sqlite3.c`'s
-  run (`00204.c` 0.20%, `00200.c` 0.07%, `00213.c` 0.13%, `00182.c` 0.00%).
-  `perf` on `sqlite3.c` puts `check_const_append` at 1.2 to 1.4% of the
-  reading's cycles. A locked-9700X five-round M7-style campaign with
-  `ns/token` medians is still needed for qualification numbers; these local
-  counts are attribution only.
+  M7-style units, the locked-9700X campaign
+  ([the record](https://github.com/buster14a/buster-performance/tree/275811e54bff6b12698311e9480325a0b7399e5f/docs/measurements/checker-872-qualification-2026-11-01))
+  reads `bc11fddb`..`d11a91d2` as #754's own work and nothing else: #754 is
+  +1.6% by the median of the ten units' one-lane readings (+2.1% in source
+  order), `sqlite3.c` +4.9% (source order +3.0%), `00204.c` +15.0%,
+  `00200.c` +7.3% and `00213.c` +12.9%, while each of the other ten
+  first-parent merges' median change is within ±1.2% one lane and ±1.6% in
+  source order, and their cumulative `m754..d11a91d2` change is +0.4% by the
+  token-weighted total. In the
+  feature's own units that is 2.1 ns per input token on `sqlite3.c` in source
+  order and 4.0 in the deferred reader's one lane, 9.7 on `00204.c`, 2.9 on
+  `00200.c` and 23.5 on `00213.c`; `perf stat` counts +4.06% instructions and
+  +3.74% cycles on `sqlite3.c` and +3.82% and +11.19% on `00204.c`. The
+  `fresh` skip itself removes 0.5% by the ten units' median one-lane change,
+  0.4% of `sqlite3.c`'s one-lane reading and 0.06% of its instructions
+  (0.20% of `00204.c`'s); on the rule's multi-lane reading the fixed head's
+  token-weighted total is `bc11fddb`'s (54.13 against 54.11 ms). The
+  campaign's main, `97824e90`, is 148 first-parent merges past `d11a91d2`;
+  its further +2.8% token-weighted one-lane reading over `d11a91d2`'s
+  (+3.9% of `sqlite3.c`'s instructions) accumulates over that range's later
+  checker features (#927, #966, #968 and #1002 among them), outside this
+  change.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a

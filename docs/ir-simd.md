@@ -97,12 +97,13 @@ native opmask registers. Step/value limits and scratch rollback remain active.
 First-class vector entry arguments/results and vector/mask call signatures still
 refuse before executing a frame: the 16-byte scalar argument/result API and native
 bridge have no such ABI contract. Existing aggregate-by-pointer machinery is not
-replaced. The SSA promoter, SCCP/DCE/CFG, GVN, LICM, SROA, inliner and native Tier 1
-selection continue to reject the whole SIMD function before rewriting, including
-SIMD in unused ABI/slot metadata. Register
-assignment/spilling and native SIMD selection
-remain [#179](https://github.com/buster14a/buster/issues/179) and
-[#141](https://github.com/buster14a/buster/issues/141), respectively.
+replaced. The SSA promoter, SCCP/DCE/CFG, GVN, LICM, SROA and inliner continue to
+reject the whole SIMD function before rewriting, including SIMD in unused
+ABI/slot metadata. Native Tier 1 selection rejects a function with vectors, which
+are [#141](https://github.com/buster14a/buster/issues/141)'s, and takes masks:
+[#179](https://github.com/buster14a/buster/issues/179) selects their operations
+and allocates them in the opmask class ([the selection
+guide](tier1-selection.md)'s "AVX-512's masks").
 
 The original model tests compare integer arithmetic with Clang C vector
 operators, selection and comparisons with independent lane expectations, and
@@ -137,7 +138,8 @@ continues to require promotion. Source preparation retains each function's
 selected output-target features rather than inferring them from the host.
 
 For #141, the handoff is verified shape-qualified IR with explicit `vcmp`/`vselect`
-and wide memory transports. The selector's current SIMD refusal remains in place.
-For #179, masks have explicit `m8`/`m16`/`m32`/`m64` types and exact-bit semantics;
-no k-register identity, k0 special case, allocation, physical spill policy or ABI
-is implied. This change makes no native Tier 1 quality or throughput claim.
+and wide memory transports. The selector's refusal of vectors remains in place.
+For #179, masks have explicit `m8`/`m16`/`m32`/`m64` types and exact-bit semantics,
+which Tier 1 keeps in the opmask registers (k1 to k7, k0 the class's scratch), moved
+and spilled at their widths; no ABI passes one. This change makes no native Tier 1
+quality or throughput claim.

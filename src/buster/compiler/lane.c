@@ -206,6 +206,11 @@ static __attribute__((unused)) void arena_pop_to(Arena* arena, uint64_t length);
 // Sets every byte pushes have taken (to the arena's peak) to `value`, and empties the arena: a test's way to make what
 // reuses the arena find no byte it didn't write as a fresh arena's zero (#152's --poison-arenas).
 static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
+// Whether every byte past the arena's length is still as the kernel mapped it, zero: the arena owns its mapping (not
+// borrowed storage, whose owner may have written it), and no push through it has reached past its length since its pages
+// were mapped, or discarded by the pool. A push through a copy of the arena doesn't move its peak, so only a caller that
+// knows no copy pushed past its length may take the answer for its next pushes' bytes (#628: the C driver's arena).
+static __attribute__((unused)) bool arena_untouched(const Arena* arena);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages.
@@ -565,6 +570,11 @@ static void arena_pop_to(Arena* arena, uint64_t length)
 {
     assert(length <= arena->length);
     arena->length = length;
+}
+
+static bool arena_untouched(const Arena* arena)
+{
+    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
 }
 
 static void arena_poison(Arena* arena, uint8_t value)

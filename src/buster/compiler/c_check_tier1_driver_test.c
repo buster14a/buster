@@ -113,6 +113,115 @@ static const char check_test_tier1_divide_main[] =
     "    return 0;\n"
     "}\n";
 
+// The labels fixture (#789): every function in it has labels and indirect jumps, each one's shape another.
+// tier1_interpret's computed gotos go through its dispatch block, which the lowering puts last, with values live across
+// it in a loop; tier1_classify's switch is a jump table, with values live across it; tier1_pick jumps once through a ?:
+// of two labels' addresses; tier1_both enters a label directly and through its table, where a phi meets values that stay
+// live apart, so that each edge into it has moves and the indirect jump's has a stub, where the label's symbol goes;
+// tier1_once loads its target from its table; tier1_single can jump to one label alone.
+static const char check_test_tier1_labels_source[] =
+    "#include <stdio.h>\n"
+    "static long tier1_interpret(const unsigned char* code, long n)\n"
+    "{\n"
+    "    static void* const table[] = { &&op_add, &&op_mul, &&op_sub, &&op_halt };\n"
+    "    long acc = 1;\n"
+    "    long steps = 0;\n"
+    "    const unsigned char* pc = code;\n"
+    "    goto *table[*pc];\n"
+    "op_add:\n"
+    "    acc += n + steps;\n"
+    "    steps += 1;\n"
+    "    goto *table[*++pc];\n"
+    "op_mul:\n"
+    "    acc *= 3;\n"
+    "    steps += 1;\n"
+    "    goto *table[*++pc];\n"
+    "op_sub:\n"
+    "    acc -= n;\n"
+    "    steps += 1;\n"
+    "    goto *table[*++pc];\n"
+    "op_halt:\n"
+    "    return acc * 1000 + steps;\n"
+    "}\n"
+    "static long tier1_classify(long x, long y)\n"
+    "{\n"
+    "    long r = y;\n"
+    "    long q = x ^ y;\n"
+    "    for (long i = 0; i < x; i += 1)\n"
+    "    {\n"
+    "        switch ((i * 7 + y) % 12)\n"
+    "        {\n"
+    "        case 0: r += 3; break;\n"
+    "        case 1: r ^= i; break;\n"
+    "        case 2: r -= 5; q += r; break;\n"
+    "        case 3: r *= 2; break;\n"
+    "        case 4: r += i * i; break;\n"
+    "        case 5: r >>= 1; break;\n"
+    "        case 6: r += 11; q ^= i; break;\n"
+    "        case 7: r -= i; break;\n"
+    "        case 8: r |= 4; break;\n"
+    "        case 9: r &= 0xffff; break;\n"
+    "        case 10: r += 100; break;\n"
+    "        default: r -= 1; break;\n"
+    "        }\n"
+    "    }\n"
+    "    return r * 31 + q;\n"
+    "}\n"
+    "static int tier1_pick(int p)\n"
+    "{\n"
+    "    void* t = p ? &&a : &&b;\n"
+    "    goto *t;\n"
+    "a:\n"
+    "    return 10;\n"
+    "b:\n"
+    "    return 20;\n"
+    "}\n"
+    "static long tier1_both(long x)\n"
+    "{\n"
+    "    static void* const targets[] = { &&first, &&second };\n"
+    "    long a = x * 3;\n"
+    "    long b = x * 5 + 1;\n"
+    "    long r;\n"
+    "    if (x & 1)\n"
+    "    {\n"
+    "        r = a;\n"
+    "        goto first;\n"
+    "    }\n"
+    "    r = b;\n"
+    "    goto *targets[(x >> 1) & 1];\n"
+    "first:\n"
+    "    return r * 7 + (a ^ b);\n"
+    "second:\n"
+    "    return r - a;\n"
+    "}\n"
+    "static int tier1_once(int i)\n"
+    "{\n"
+    "    static void* const table[] = { &&a, &&b, &&c };\n"
+    "    goto *table[i];\n"
+    "a:\n"
+    "    return 1;\n"
+    "b:\n"
+    "    return 2;\n"
+    "c:\n"
+    "    return 3;\n"
+    "}\n"
+    "static int tier1_single(int x)\n"
+    "{\n"
+    "    void* t = &&only;\n"
+    "    goto *t;\n"
+    "only:\n"
+    "    return x + 1;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    static const unsigned char program[] = { 0, 1, 2, 0, 1, 1, 2, 0, 3 };\n"
+    "    printf(\"%ld %ld %ld\\n\", tier1_interpret(program, 5), tier1_classify(1000, 3), tier1_classify(77, 9));\n"
+    "    printf(\"%d %d\\n\", tier1_pick(1), tier1_pick(0));\n"
+    "    printf(\"%ld %ld %ld %ld\\n\", tier1_both(5), tier1_both(6), tier1_both(8), tier1_both(-3));\n"
+    "    printf(\"%d %d %d %d\\n\", tier1_once(0), tier1_once(1), tier1_once(2), tier1_single(41));\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -247,11 +356,11 @@ struct CheckTestTier1Build
 
 // A fixture compiled by --tier1 with and without rematerialization (`rematerialize`) by each path, into an executable
 // (`-o output`) or with `object` an object (-c), whose report goes into *build: whether it compiled with its function
-// `name` by Tier 1 (no refusal line names it).
+// `name` by Tier 1 (no refusal line names it), or with an empty name every function.
 static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, CheckTestTier1Build* build)
 {
-    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "-fno-asynchronous-unwind-tables", "--verify" };
-    uint32_t count = 6;
+    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
+    uint32_t count = 5;
     if (!rematerialize)
     {
         arguments[count++] = "--tier1-no-rematerialize";
@@ -276,7 +385,7 @@ static bool check_test_tier1_build(const char* executable, const char* source, c
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
                       check_test_tier1_field(text, "call_stores", &build->call_stores);
     char refused[128];
-    snprintf(refused, sizeof(refused), "tier1-refused\t%s\t", name);
+    snprintf(refused, sizeof(refused), "tier1-refused\t%s%s", name, name[0] == 0 ? "" : "\t");
     const bool taken = text != NULL && strstr(text, refused) == NULL;
     if (status != 0 && text != NULL)
     {
@@ -520,4 +629,104 @@ static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, c
     unlink(source);
     unlink(main_source);
     unlink(reference);
+}
+
+// The labels fixture's function `name` in the object at `path`: its indirect jumps through a register and through
+// memory, into *registers and *memory, and into *trailing the direct jumps after its last indirect jump: its edges'
+// stubs, each of which ends in one to its label's block, since the dispatch block is laid out last (#1016's review).
+// Whether it was found.
+static bool check_test_tier1_jumps(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* registers, uint32_t* memory,
+                                   uint32_t* trailing)
+{
+    uint32_t relocations = 0;
+    const uint32_t count = check_test_tier1_function(path, name, records, capacity, offsets, types, &relocations);
+    *registers = 0;
+    *memory = 0;
+    *trailing = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t form = records[i].instruction.form & BUSTER_X86_FORM_NUMBER;
+        const bool jump = form == X86_FORM_JMP_RM64;
+        *registers += jump && records[i].instruction.mode == BUSTER_X86_REGISTER_DIRECT;
+        *memory += jump && records[i].instruction.mode != BUSTER_X86_REGISTER_DIRECT;
+        *trailing = jump ? 0 : *trailing + (form == X86_FORM_JMP_REL8 || form == X86_FORM_JMP_REL32);
+    }
+    return count != 0;
+}
+
+// The labels fixture (#789): by --tier1, every function Tier 1's, by each path with and without rematerialization, and
+// its program prints what clang -O0's and Tier 0's builds of it print. Tier 1's indirect jumps are each function's own:
+// one through a register where computed gotos share their dispatch block or a switch's table dispatches, none where the
+// jump can go to one label alone, and one with a stub after it where an edge into a label has moves.
+static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_LABELS_RECORDS = 4096,
+    };
+    char source[512];
+    char reference[512];
+    char tier0[512];
+    snprintf(source, sizeof(source), "%s/tier1-labels.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-labels-clang", directory);
+    snprintf(tier0, sizeof(tier0), "%s/tier1-labels-tier0", directory);
+    const bool written = parse_test_write(source, check_test_tier1_labels_source, sizeof(check_test_tier1_labels_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* tier0_arguments[] = { (char*)executable, "--verify", "-o", tier0, source, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool tier0_built = written && check_test_driver_spawn(tier0_arguments, &text) == 0;
+    free(text);
+    char expected[512] = { 0 };
+    char tier0_output[512] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the labels fixture runs");
+    check_test_expect(test, ran && tier0_built && check_test_driver_capture(tier0, tier0_output, sizeof(tier0_output)) && strcmp(tier0_output, expected) == 0,
+                      "Tier 0's build of the labels fixture prints clang's build's output");
+    const bool ready = ran && x86_disassembler_initialize();
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_LABELS_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_LABELS_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_LABELS_RECORDS, sizeof(uint32_t));
+    for (uint32_t rematerialize = 0; ready && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            char object[512];
+            snprintf(output, sizeof(output), "%s/tier1-labels-%u-%u", directory, rematerialize, path);
+            snprintf(object, sizeof(object), "%s/tier1-labels-%u-%u.o", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            CheckTestTier1Build object_build;
+            const bool built = check_test_tier1_build(executable, source, "", output, rematerialize != 0, path != 0, false, &build);
+            const bool compiled = check_test_tier1_build(executable, source, "", object, rematerialize != 0, path != 0, true, &object_build);
+            check_test_expect(test, built && compiled, "the labels fixture compiles by --tier1, every function Tier 1's");
+            char actual[512] = { 0 };
+            check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "the labels fixture prints clang's build's output");
+            static const char* const names[5] = { "tier1_interpret", "tier1_classify", "tier1_once", "tier1_single", "tier1_both" };
+            uint32_t registers[5] = { 0 };
+            uint32_t memory[5] = { 0 };
+            uint32_t trailing[5] = { 0 };
+            bool decoded = compiled && records != NULL && offsets != NULL && types != NULL;
+            for (uint32_t f = 0; decoded && f < BUSTER_ARRAY_LENGTH(names); f += 1)
+            {
+                decoded = check_test_tier1_jumps(object, names[f], records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &registers[f], &memory[f], &trailing[f]);
+            }
+            check_test_expect(test, decoded && registers[0] == 1 && memory[0] == 0 && registers[2] == 1 && memory[2] == 0,
+                              "a function's computed gotos share one indirect jump through a register, in their dispatch block");
+            check_test_expect(test, decoded && registers[1] == 1 && memory[1] == 0, "tier1_classify's switch is one indirect jump through a register");
+            check_test_expect(test, decoded && registers[3] == 0 && memory[3] == 0, "tier1_single's jump to its one label is a direct jump");
+            check_test_expect(test, decoded && registers[4] == 1 && trailing[4] != 0, "tier1_both's indirect jump has a stub after it, for the label its edge moves into");
+            unlink(output);
+            unlink(object);
+        }
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(reference);
+    unlink(tier0);
 }

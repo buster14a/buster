@@ -2,8 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #141's selection on real C (benchmark-tier1-select-source): the time per IR instruction of selecting every function -c
-// compiles of a set of files (tier1_select_plan), by both paths. Each function is lowered, promoted and optimized as the C
-// driver's --tier1 takes it (c_check_tier1.c), and its dominance found, outside the time; a function a step before
+// compiles of a set of files (tier1_select_plan_verified, as the C driver plans the optimizer's verified result), by both
+// paths. Each function is lowered, promoted and optimized as the C driver's --tier1 takes it (c_check_tier1.c), and its
+// dominance found, outside the time; a function a step before
 // selection refuses, or that either path's selection refuses, is left out of both variants and counted by the step. Any
 // other failure fails the benchmark, which then reports no time. Each variant's run selects every function once, after a
 // warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which path runs first; --only times one alone, back to
@@ -47,7 +48,8 @@ static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tie
     {
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        failures += tier1_select_plan(&corpus->functions[f], &corpus->dominance[f], output, scratch, variant == BUSTER_TIER1_SELECT_SOURCE_VECTOR, &plan, &node) != TIER1_SELECT_OK;
+        // As the driver's --tier1 plans the optimizer's verified result (c_check_tier1.c).
+        failures += tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], output, scratch, variant == BUSTER_TIER1_SELECT_SOURCE_VECTOR, &plan, &node) != TIER1_SELECT_OK;
         arena_pop_to(output, output_mark);
     }
     const Tier0BenchmarkReading end = tier0_benchmark_read(counters);

@@ -7,6 +7,8 @@
 typedef struct CheckRegionValues CheckRegionValues;
 struct CheckRegionValues
 {
+    // A typed stream's values (check_stream_value), or else a value every `stride` bytes from `values`.
+    const struct CheckStream* stream;
     const CheckValue* values;
     const bool* valid;
     const uint32_t* indices;
@@ -44,7 +46,7 @@ static const CheckRegionProof* check_graph_region_proof(const CheckGraph* graph,
 static CheckValue check_region_value(const CheckRegionValues* values, uint32_t node)
 {
     const uint32_t index = values->indices != NULL ? values->indices[node] : node;
-    return *(const CheckValue*)((const uint8_t*)values->values + (size_t)index * values->stride);
+    return values->stream != NULL ? check_stream_value(values->stream, index) : *(const CheckValue*)((const uint8_t*)values->values + (size_t)index * values->stride);
 }
 
 static CheckValue check_region_operand(TypeTable* types, const CheckGraph* graph, const CheckRegionValues* values,
@@ -236,7 +238,7 @@ static void check_graph_region_effects(TypeTable* types, const CheckGraph* graph
     const CheckRegionProof* region = check_graph_region_proof(graph, node);
     if (region != NULL && result->diagnostic == CHECK_DIAG_NONE)
     {
-        const CheckRegionValues values = { .values = stream->values, .stride = sizeof(CheckValue) };
+        const CheckRegionValues values = { .stream = stream };
         CheckRegionResult checked;
         if (!check_region_walk(types, graph, region, &values, true, true, scratch, &stream->statistics.scratch_bytes, &checked))
         {

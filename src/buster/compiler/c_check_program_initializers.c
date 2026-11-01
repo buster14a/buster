@@ -84,7 +84,7 @@ static uint32_t check_lower_init_prefix(const CheckProgram* program, const Check
                    part->bit_offset / 8 <= plan->object_size && bits / 8 <= plan->object_size - part->bit_offset / 8;
         if (constant && part->kind == CHECK_INIT_VALUE)
         {
-            const uint32_t flags = part->value.flags | (part->node < program->stream->count ? program->stream->values[part->node].flags : 0);
+            const uint32_t flags = part->value.flags | (part->node < program->stream->count ? check_stream_flags(program->stream, part->node) : 0);
             constant = (flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
                        bits <= 128 && check_init_scalar_bytes(program->types, &part->value, scalar);
         }

@@ -192,18 +192,22 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
     const uint32_t fixed_start[] = {
         31,
         120,
+        60,
     };
     const uint32_t fixed_end[] = {
         33,
         121,
+        62,
     };
     const uint32_t fixed_regs[] = {
         0x3,
         0x1,
+        0x2,
     };
     const uint8_t fixed_classes[] = {
-        0,
-        1,
+        BUSTER_TIER1_ALLOCATE_GPR,
+        BUSTER_TIER1_ALLOCATE_VECTOR,
+        BUSTER_TIER1_ALLOCATE_MASK,
     };
     uint64_t compared = 0;
     for (uint32_t iteration = 0; iteration < 3000; iteration += 1)
@@ -211,12 +215,16 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         const uint32_t value_count = 1 + tier1_allocation_test_random(&seed) % 24;
         const uint32_t gpr_mask = (1u << (1 + iteration % 9)) - 1;
         const uint32_t vector_mask = (1u << (1 + iteration % 5)) - 1;
+        // k1 up to k7: no mask value takes k0, the class's scratch register.
+        const uint32_t mask_mask = ((1u << (1 + iteration % 7)) - 1) << 1;
         const bool constrained = iteration % 4 == 0;
         uint8_t value_classes[24];
         uint32_t count = 0;
         for (uint32_t v = 0; v < value_count; v += 1)
         {
-            value_classes[v] = (uint8_t)(tier1_allocation_test_random(&seed) % 3 == 0);
+            // A third vector values, a sixth masks, the rest general.
+            const uint32_t draw = (uint32_t)(tier1_allocation_test_random(&seed) % 6);
+            value_classes[v] = draw < 2 ? BUSTER_TIER1_ALLOCATE_VECTOR : draw == 2 ? BUSTER_TIER1_ALLOCATE_MASK : BUSTER_TIER1_ALLOCATE_GPR;
         }
         // Each value's ranges, in position order: the next starts where the last ended, or later.
         for (uint32_t v = 0; v < value_count && count < 120; v += 1)
@@ -230,7 +238,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
                 ends[count] = ends[count] > 200 ? 200 : ends[count];
                 values[count] = v;
                 classes[count] = value_classes[v];
-                allowed[count] = classes[count] == 0 ? gpr_mask : vector_mask;
+                allowed[count] = classes[count] == BUSTER_TIER1_ALLOCATE_GPR ? gpr_mask : classes[count] == BUSTER_TIER1_ALLOCATE_VECTOR ? vector_mask : mask_mask;
                 position = ends[count] + (tier1_allocation_test_random(&seed) % 3 == 0 ? tier1_allocation_test_random(&seed) % 8 : 0);
                 count += 1;
             }
@@ -272,13 +280,14 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             .registers = {
                 gpr_mask,
                 vector_mask,
+                mask_mask,
             },
             .fixed = {
                 .starts = fixed_start,
                 .ends = fixed_end,
                 .registers = fixed_regs,
                 .classes = fixed_classes,
-                .count = constrained ? 2 : 0,
+                .count = constrained ? BUSTER_ARRAY_LENGTH(fixed_classes) : 0,
             },
         };
         const uint64_t saved = arena->length;

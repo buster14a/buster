@@ -7550,6 +7550,17 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ALIGN_DOWN, "__builtin_align_down", false, true, true },
         { CBUILTIN_IS_ALIGNED, "__builtin_is_aligned", false, true, true },
         { CBUILTIN_EXPECT_WITH_PROBABILITY, "__builtin_expect_with_probability", false, true, true },
+        { CBUILTIN_NANS, "__builtin_nans", false, true, false },
+        { CBUILTIN_NANSF, "__builtin_nansf", false, true, false },
+        { CBUILTIN_NANSL, "__builtin_nansl", false, true, false },
+        { CBUILTIN_NANF16, "__builtin_nanf16", false, true, false },
+        { CBUILTIN_NANSF16, "__builtin_nansf16", false, true, false },
+        { CBUILTIN_INFF16, "__builtin_inff16", false, true, false },
+        { CBUILTIN_HUGE_VALF16, "__builtin_huge_valf16", false, true, false },
+        { CBUILTIN_NANF128, "__builtin_nanf128", false, true, false },
+        { CBUILTIN_NANSF128, "__builtin_nansf128", false, true, false },
+        { CBUILTIN_INFF128, "__builtin_inff128", false, true, false },
+        { CBUILTIN_HUGE_VALF128, "__builtin_huge_valf128", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
@@ -8115,7 +8126,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_print_offsets();
+        passed_all &= pp_test_print_spellings();
+        passed_all &= pp_test_print_unspliced();
         passed_all &= pp_test_print_batches(directory);
+        passed_all &= pp_test_print_spelling_paths(directory);
         passed_all &= pp_test_system_warnings(directory, with_clang);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);

@@ -51,7 +51,9 @@ static void tier1_frame_test_valid(Tier1FrameTest* test, const Tier1FrameRequest
     uint64_t minimum_bytes = 0;
     uint32_t minimum_slots = 0;
     uint32_t classes = 0;
-    const int64_t base_residue = frame->red_zone ? 8 : 0;
+    // A red zone's base is rsp after the pushes: entry RSP (8 modulo 16) less 8 per push.
+    const int64_t saves = 8 * (int64_t)__builtin_popcount(frame->saved_registers);
+    const int64_t base_residue = frame->red_zone ? (8 + saves) % 16 : 0;
     for (uint32_t i = 0; i < input->count; i += 1)
     {
         const uint32_t row = input->indices != 0 ? input->indices[i] : i;
@@ -67,7 +69,7 @@ static void tier1_frame_test_valid(Tier1FrameTest* test, const Tier1FrameRequest
         }
         else if (frame->base_register == BUSTER_ABI_RBP)
         {
-            tier1_frame_test_expect(test, begin >= -(int64_t)frame->stack_adjust_bytes && end <= 0, "dynamic fixed object inside RBP extent");
+            tier1_frame_test_expect(test, begin >= -(int64_t)frame->stack_adjust_bytes - saves && end <= -saves, "dynamic fixed object inside RBP extent, below the pushes");
         }
         else
         {
@@ -122,11 +124,41 @@ static void tier1_frame_test_valid(Tier1FrameTest* test, const Tier1FrameRequest
     tier1_frame_test_expect(test, !frame->realigned || frame->frame_pointer, "realignment retains frame pointer");
     tier1_frame_test_expect(test, (request->flags & BUSTER_TIER1_FRAME_DYNAMIC_STACK) == 0 || frame->frame_pointer, "dynamic stack retains frame pointer");
     tier1_frame_test_expect(test, frame->maximum_stack_bytes <= INT32_MAX, "bounded stack extent");
-    const uint32_t prefix = frame->frame_pointer ? 0 : 8;
+    // Entry RSP is 8 modulo 16; the return address, rbp's push and the callee-saved registers' pushes come before the
+    // subtraction, after which rsp is 16-aligned (and a realigned frame's `and` aligns it further).
+    const uint64_t pushed = 8 + 8 * (uint64_t)__builtin_popcount(frame->saved_registers) + (frame->frame_pointer ? 8 : 0);
     if (!frame->red_zone && (frame->payload_bytes != 0 || request->call_count != 0))
     {
-        tier1_frame_test_expect(test, (frame->stack_adjust_bytes + prefix) % frame->alignment == 0, "stack alignment after prologue");
+        tier1_frame_test_expect(test, (frame->stack_adjust_bytes + pushed) % 16 == 0, "stack alignment after prologue");
     }
+    // The steps are Tier 0's frame protocol, which the unwind tables describe: rbp's push and mov, the registers' pushes
+    // in ascending order, one subtraction, the realignment and its base's copy; then the release (or the reset from rbp)
+    // and the pops in reverse.
+    uint32_t order = 0;
+    uint32_t phase = 0;
+    uint32_t last_push = 0;
+    for (uint32_t i = 0; i < frame->prologue_count; i += 1)
+    {
+        const Tier1FrameStep* step = &frame->prologue[i];
+        const uint32_t step_phase = step->kind == TIER1_FRAME_PUSH_POINTER ? 0 : step->kind == TIER1_FRAME_SET_POINTER ? 1 : step->kind == TIER1_FRAME_PUSH_REGISTER ? 2 :
+                                    step->kind == TIER1_FRAME_ALLOCATE || step->kind == TIER1_FRAME_PROBE_ALLOCATE ? 3 :
+                                    step->kind == TIER1_FRAME_ALIGN_STACK || step->kind == TIER1_FRAME_PROBE_ALIGN ? 4 : step->kind == TIER1_FRAME_SET_REALIGN_BASE ? 5 : 6;
+        order += step_phase < phase || (step_phase == 2 && phase == 2 && step->reg <= last_push);
+        phase = step_phase;
+        last_push = step->kind == TIER1_FRAME_PUSH_REGISTER ? step->reg : last_push;
+    }
+    tier1_frame_test_expect(test, order == 0, "prologue follows the unwind tables' protocol");
+    const uint32_t pops = (uint32_t)__builtin_popcount(frame->saved_registers);
+    const uint32_t release = frame->frame_pointer || frame->stack_adjust_bytes != 0 ? 1 : 0;
+    bool epilogue = frame->epilogue_count == release + pops + (frame->frame_pointer ? 1 : 0);
+    epilogue = epilogue && (release == 0 || frame->epilogue[0].kind == (frame->frame_pointer ? TIER1_FRAME_RESET_STACK : TIER1_FRAME_RELEASE));
+    epilogue = epilogue && (!frame->frame_pointer || (frame->epilogue[0].offset == -8 * (int32_t)pops && frame->epilogue[frame->epilogue_count - 1].kind == TIER1_FRAME_POP_POINTER));
+    for (uint32_t k = 0; epilogue && k < pops; k += 1)
+    {
+        const Tier1FrameStep* step = &frame->epilogue[release + k];
+        epilogue = step->kind == TIER1_FRAME_POP_REGISTER && (k == 0 || step->reg < frame->epilogue[release + k - 1].reg);
+    }
+    tier1_frame_test_expect(test, epilogue, "epilogue follows the unwind tables' protocol");
 }
 
 typedef struct Tier1FrameTestMemory Tier1FrameTestMemory;
@@ -162,11 +194,18 @@ static void tier1_frame_test_steps(Tier1FrameTest* test, const Tier1FrameRequest
         switch (step.kind)
         {
             case TIER1_FRAME_PUSH_POINTER:
+            case TIER1_FRAME_PUSH_REGISTER:
             {
                 registers[BUSTER_ABI_RSP] -= 8;
                 address = registers[BUSTER_ABI_RSP];
-                value = registers[BUSTER_ABI_RBP];
+                value = registers[step.reg];
                 write = true;
+                // A saved register's slot, as the plan publishes it: from rbp with a frame pointer, else from the
+                // post-prologue rsp, which the steps after it reach (checked below).
+                if (step.kind == TIER1_FRAME_PUSH_REGISTER && frame->frame_pointer)
+                {
+                    tier1_frame_test_expect(test, address == registers[BUSTER_ABI_RBP] + (uint64_t)(int64_t)frame->save_offset[step.reg], "a push writes its published slot");
+                }
             } break;
             case TIER1_FRAME_SET_POINTER:
             case TIER1_FRAME_SET_REALIGN_BASE:
@@ -183,7 +222,6 @@ static void tier1_frame_test_steps(Tier1FrameTest* test, const Tier1FrameRequest
             {
                 registers[BUSTER_ABI_RSP] -= step.amount;
             } break;
-            case TIER1_FRAME_SAVE_REGISTER:
             case TIER1_FRAME_SAVE_VARIADIC_INTEGER:
             {
                 value = registers[step.reg];
@@ -221,6 +259,18 @@ static void tier1_frame_test_steps(Tier1FrameTest* test, const Tier1FrameRequest
         }
     }
     tier1_frame_test_expect(test, vector_saves == (frame->variadic && entry_al != 0 ? 8u : 0u), "entry AL controls all vector save steps");
+    for (uint32_t reg = 0; !frame->frame_pointer && reg < 16; reg += 1)
+    {
+        if ((frame->saved_registers & (1u << reg)) != 0)
+        {
+            bool found = false;
+            for (uint32_t j = 0; j < writes; j += 1)
+            {
+                found |= memory[j].address == registers[BUSTER_ABI_RSP] + (uint64_t)(int64_t)frame->save_offset[reg] && memory[j].value == original[reg];
+            }
+            tier1_frame_test_expect(test, found, "a push writes its published slot");
+        }
+    }
     for (uint32_t i = 0; i < request->slots.count; i += 1)
     {
         const uint32_t row = request->slots.indices != 0 ? request->slots.indices[i] : i;
@@ -252,7 +302,7 @@ static void tier1_frame_test_steps(Tier1FrameTest* test, const Tier1FrameRequest
         const Tier1FrameStep step = frame->epilogue[i];
         switch (step.kind)
         {
-            case TIER1_FRAME_RESTORE_REGISTER:
+            case TIER1_FRAME_POP_REGISTER:
             case TIER1_FRAME_POP_POINTER:
             {
                 const uint64_t address = registers[step.base] + step.offset;
@@ -266,10 +316,7 @@ static void tier1_frame_test_steps(Tier1FrameTest* test, const Tier1FrameRequest
                     }
                 }
                 tier1_frame_test_expect(test, found, "restoration addresses a saved value");
-                if (step.kind == TIER1_FRAME_POP_POINTER)
-                {
-                    registers[BUSTER_ABI_RSP] += 8;
-                }
+                registers[BUSTER_ABI_RSP] += 8;
             } break;
             case TIER1_FRAME_RELEASE:
             {
@@ -277,7 +324,7 @@ static void tier1_frame_test_steps(Tier1FrameTest* test, const Tier1FrameRequest
             } break;
             case TIER1_FRAME_RESET_STACK:
             {
-                registers[BUSTER_ABI_RSP] = registers[step.base];
+                registers[BUSTER_ABI_RSP] = registers[step.base] + (uint64_t)(int64_t)step.offset;
             } break;
             default:
             {
@@ -580,7 +627,8 @@ static void tier1_frame_test_boundaries(Tier1FrameTest* test, Arena* output, Are
     size = 19;
     alignment = 8192;
     request.flags = BUSTER_TIER1_FRAME_PROBE_STACK | BUSTER_TIER1_FRAME_DYNAMIC_STACK | BUSTER_TIER1_FRAME_VARIADIC;
-    request.used_callee_saved = (1u << BUSTER_ABI_RBX) | (1u << BUSTER_ABI_R12) | (1u << BUSTER_ABI_R14) | (1u << BUSTER_ABI_R15);
+    // R15 is this dynamic realigned frame's base (BUSTER_TIER1_FRAME_REALIGN_BASE).
+    request.used_callee_saved = (1u << BUSTER_ABI_RBX) | (1u << BUSTER_ABI_R12) | (1u << BUSTER_ABI_R13) | (1u << BUSTER_ABI_R14);
     AbiCall calls[3] = {
         {.stack_bytes = 8, .stack_alignment_log2 = 4},
         {.stack_bytes = 40, .stack_alignment_log2 = 6},
@@ -697,7 +745,8 @@ static int run_tier1_frame_tests(int argc, char** argv)
                     },
                     .calls = &call,
                     .call_count = round >= 4 ? 1 : 0,
-                    .used_callee_saved = (round & 2) != 0 ? (1u << BUSTER_ABI_RBX) | (1u << BUSTER_ABI_R15) : 0,
+                    // R15 is a dynamic realigned frame's base (BUSTER_TIER1_FRAME_REALIGN_BASE), which allocation can't use.
+                    .used_callee_saved = (round & 2) != 0 ? (1u << BUSTER_ABI_RBX) | (1u << BUSTER_ABI_R13) | ((round & 4) == 0 ? 1u << BUSTER_ABI_R15 : 0) : 0,
                     .flags = (round & 4) != 0 ? BUSTER_TIER1_FRAME_VARIADIC | BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0,
                 };
                 tier1_frame_test_case(&test, &request, &output, &scratch, count < 33);
