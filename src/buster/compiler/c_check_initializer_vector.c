@@ -104,7 +104,7 @@ static CheckValue check_init_constant_value(const CheckInitWalker* walker, uint3
 static bool check_init_constant_known(const CheckValue* value)
 {
     return (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING) &&
-           value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+           value->fault == CHECK_FAULT_NONE && (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
 }
 
 static unsigned __int128 check_init_bytes_integer(const uint8_t* bytes, uint32_t size)
@@ -618,7 +618,8 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                     {
                         bool truth = false;
                         const CheckValue condition = source < node ? check_init_constant_value(walker, source) : (CheckValue){ 0 };
-                        valid = source < node && condition.fault == CHECK_FAULT_NONE && (condition.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                        valid = source < node && condition.fault == CHECK_FAULT_NONE &&
+                                (condition.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                                 check_action_truth(walker->types, &condition, &truth);
                         selected = truth ? graph->operand1[node] : graph->operand2[node];
                     }

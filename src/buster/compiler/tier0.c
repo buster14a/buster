@@ -523,7 +523,16 @@ struct Tier0Function
     const uint8_t* call_tails;
     bool entry_records;
     bool choice_requests;
+    // Optional lifetimes of the frame's objects (#177), which Tier 0 ignores and ir_lower turns into IR_LIFETIME markers
+    // before their entries: lifetime_count events, event k before entry lifetime_entries[k] (nondecreasing, below
+    // count), of local lifetime_locals[k] without BUSTER_TIER0_LIFETIME_END, the end of its object's lifetime where that
+    // bit is set and its start otherwise. A local without events lives throughout its function.
+    const uint32_t* lifetime_entries;
+    const uint32_t* lifetime_locals;
+    uint32_t lifetime_count;
 };
+
+#define BUSTER_TIER0_LIFETIME_END 0x80000000u
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
 static bool tier0_is_object(const Tier0Function* function, uint64_t local)

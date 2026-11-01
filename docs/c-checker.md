@@ -2558,6 +2558,14 @@ What the lowering covers past scalars (#145's programs):
   of 39 fixtures with clang's, its place and its message, on both paths
   (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
   the deferred reader's fixtures and the selection's take a cleanup too.
+- **A block's objects' lifetimes**, for Tier 1's frame (#177, the C driver's
+  `--tier1`, `CheckProgramOptions.lifetimes`): `CHECK_CONTROL_LIFETIME` entries
+  where a block's statements begin and end (after its cleanups) and before each
+  `break`, `continue` or `goto` that leaves it (after the jump's cleanups),
+  which the lowering turns into its locals' events
+  (`Tier0Function.lifetime_entries`). A block a jump can enter past its opening
+  brace has none: [the frame guide](tier1-frame.md)'s "Slot sharing between
+  objects".
 - **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
   emission's attribute pass). A weak declaration's symbol is weak, defined
   or undefined; on a declaration without external linkage it is clang's error
@@ -3481,6 +3489,46 @@ they do per token where little of it was per declaration or expression:
   (+3.9% of `sqlite3.c`'s instructions) accumulates over that range's later
   checker features (#927, #966, #968 and #1002 among them), outside this
   change.
+- **Store-to-load round trips in the receipts and the liveness walks (#873).**
+  Samples of `ls_bad_status2.stli_other` on the 9700X and the 7940HS placed
+  loads that can't take an older store's data in both. `check_const_append`
+  wrote each trie node's new child into a stack copy of the node with a 4-byte
+  store and reread the copy with an 8-byte load, at each of the 32 depths, and
+  copied its object and its buffer out with wide loads right after narrower
+  stores into them. `check_initializer_live_writes`'s radix sort zeroed its
+  1 KiB of counts with vector stores and read them back with 4-byte loads, in
+  each of its eight passes, and so did `check_initializer_live`'s sort of the
+  address candidates. Now each new node is its old node's two children as one
+  64-bit word, so that the trie loop's depths reread no node from the stack
+  (its last depth reads two spilled values, stored long before). The object is
+  copied before its places are written into the array. The capacities that the
+  storage calls grow are locals, so that nothing takes the buffer's address and
+  its copy into `*buffer` is a store per field. Both sorts run a pass only over
+  a digit in which some offset differs from the first one's, and none when the
+  offsets are in order already, as a single write's two ends and a table's
+  pointers in source order are. All of it is exact: the frozen `sqlite3.c`'s
+  `-c` objects (both paths, `-g`, `--lower-all`) and diagnostics, 1,337 musl
+  sources' objects and c-testsuite's 220 programs' are main's, byte for byte.
+  On that `sqlite3.c`'s `-c`, the 4,231 liveness walks (4,023 of them a single
+  write) run 158 of the 33,848 passes that main ran, and the 104 sorts of
+  address candidates none of their 832. Callgrind on a baseline
+  (`BUSTER_HOST_ARCH=x86-64`) build counts 39.7M fewer instructions of 5,964M
+  (−0.66%): the walk's 43.9M became 5.3M, the address sorts' 3.7M became 2.4M,
+  and the appends' 4.01M became 4.29M, a few more instructions per depth for no
+  stack round trip. On the 7940HS, `perf stat -r 5` of the native build before the address
+  sorts' change counted 2.25% fewer instructions and 9.62% fewer `stli_other`
+  ([buster14a/buster#1037's review](https://github.com/buster14a/buster/pull/1037#pullrequestreview-5727977655)).
+  On the 9700X, against main at its fork point, with the same objects
+  ([the record](https://github.com/buster14a/buster-performance/tree/d2f5d31761d6f67cdcfe862306e29b0451bb2ae6/docs/measurements/checker-store-forwarding-873-2026-11-01)):
+  `-c` of that `sqlite3.c` took 2.15% fewer user cycles, 2.34% fewer
+  instructions and 18.1% fewer `stli_other` (`-fsyntax-only` 2.35%, 2.90% and
+  18.6%), the medians of 10 interleaved processes each; over six placements of
+  the checker's unit and two copies, in two rounds, −1.82% and −2.11% of
+  `-c`'s user cycles and −2.29% and −2.56% of `-fsyntax-only`'s, where main
+  against itself read within ±0.27%. `--time-stages` puts it in
+  `check-declarations`, 3.67 ms down to 1.90; `check_initializer_live_writes`
+  and `check_const_append`, which took 15.1% of main's `stli_other` samples,
+  are no longer among those over 0.41%.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a

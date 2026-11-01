@@ -32,6 +32,18 @@
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_SETCSR, BUSTER_CBUILTIN_X86_HELPER("_mm_setcsr", 1, false, cbuiltin_x86_helper_ldmxcsr, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_M_PREFETCH, BUSTER_CBUILTIN_X86_HELPER("_m_prefetch", 1, false, cbuiltin_x86_helper_prefetch, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_M_PREFETCHW, BUSTER_CBUILTIN_X86_HELPER("_m_prefetchw", 1, false, cbuiltin_x86_helper_prefetchw, 0))
+    // The generic builtins of an instruction or two (#148, c_builtin_x86_helpers.c's).
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_DEBUGTRAP, BUSTER_CBUILTIN_X86_HELPER("__builtin_debugtrap", 0, false, cbuiltin_x86_helper_debugtrap, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_READCYCLECOUNTER, BUSTER_CBUILTIN_X86_HELPER("__builtin_readcyclecounter", 0, true, cbuiltin_x86_helper_rdtsc, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_READSTEADYCOUNTER, BUSTER_CBUILTIN_X86_HELPER("__builtin_readsteadycounter", 0, true, cbuiltin_x86_helper_zero, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_THREAD_POINTER, BUSTER_CBUILTIN_X86_HELPER("__builtin_thread_pointer", 0, true, cbuiltin_x86_helper_thread_pointer, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_STACK_ADDRESS, BUSTER_CBUILTIN_X86_HELPER("__builtin_stack_address", 0, true, cbuiltin_x86_helper_stack_address, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_DWARF_SP_COLUMN, BUSTER_CBUILTIN_X86_HELPER("__builtin_dwarf_sp_column", 0, true, cbuiltin_x86_helper_dwarf_sp_column, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_CLEAR_CACHE, BUSTER_CBUILTIN_X86_HELPER("__builtin___clear_cache", 2, false, cbuiltin_x86_helper_nothing, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_ASSUME_SEPARATE_STORAGE, BUSTER_CBUILTIN_X86_HELPER("__builtin_assume_separate_storage", 2, false, cbuiltin_x86_helper_nothing, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_ASSUME_DEREFERENCEABLE, BUSTER_CBUILTIN_X86_HELPER("__builtin_assume_dereferenceable", 2, false, cbuiltin_x86_helper_nothing, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MEMCPY_INLINE, BUSTER_CBUILTIN_X86_HELPER("__builtin_memcpy_inline", 3, false, cbuiltin_x86_helper_memcpy_inline, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MEMSET_INLINE, BUSTER_CBUILTIN_X86_HELPER("__builtin_memset_inline", 3, false, cbuiltin_x86_helper_memset_inline, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_PAUSE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XGETBV, "__builtin_ia32_xgetbv", sizeof("__builtin_ia32_xgetbv") - 1, 1, true, cbuiltin_x86_helper_xgetbv,
                                      BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false, false)

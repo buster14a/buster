@@ -10,7 +10,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-_Static_assert(IR_OP_COUNT == 60, "audit the independent dataflow operand oracle for a new IR operation");
+_Static_assert(IR_OP_COUNT == 61, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests

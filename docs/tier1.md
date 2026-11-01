@@ -117,7 +117,10 @@ definitions of them it left out, its edges' moves, its spill slots, its
 frames' bytes, and its unwind tables' shapes: open frames, returns published as
 tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`). `--tier1-no-rematerialize` compiles Tier 1's functions spilling
 what they would recompute (#178's comparison: [the allocation
-guide](tier1-allocation.md)'s "Rematerialization"):
+guide](tier1-allocation.md)'s "Rematerialization"), and `--tier1-no-lifetimes`
+without their objects' lifetimes, every object a slot of its own (#177's
+comparison: [the frame guide](tier1-frame.md)'s "Slot sharing between
+objects"):
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
@@ -168,10 +171,12 @@ where the allocator takes it out of a register, rather than stored and reloaded
 (#178), which took a third of those stores and reloads again, with no change in
 speedtest1's run time. Labels and indirect jumps (#789) go through the CFG
 consumer too: an indirect jump's edge moves at each label's block, or in a stub
-after the jump, and each label's symbol where the jump enters it. Still refused:
-floating point, narrow call arguments (the IR doesn't keep their signedness,
-which the callee's extension needs), stack arguments, switches, aggregates by
-value and variadic definitions.
+after the jump, and each label's symbol where the jump enters it. So do variadic
+definitions (#789): the frame's register save area, which the prologue fills
+from the argument registers, and the overflow area past the incoming stack
+arguments. Still refused: floating point, narrow call arguments (the IR doesn't
+keep their signedness, which the callee's extension needs), stack arguments,
+switches and aggregates by value.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

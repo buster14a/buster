@@ -2,13 +2,19 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The x86 builtins of the source scope past the frozen own-main inventory (docs/builtin-metadata/own-main.names.txt):
-// #799's immediate forms and #148's others, which no build of this compiler calls. Clang 23.1.1's metadata supplies their
+// #799's immediate forms and #148's others, which no build of this compiler calls, and #148's generic builtins whose code
+// is a leaf of c_builtin_x86_leaves.inc (__builtin_debugtrap, __builtin_memcpy_inline and the others), of no features. Clang 23.1.1's metadata supplies their
 // prototypes, c_check_builtin_x86.c their audited SemaX86 constraints, and each name's second field is its required target
 // features in that metadata, which __has_builtin evaluates (#148). This does not alter the frozen inventory.
 //
 // The names are in strcmp's order, which the scope's lookups search (builtin_intrinsic_supplementary_in_scope and
 // cbuiltin_source_scope), and none is the inventory's: test-builtin-intrinsic-catalog checks both, and
 // test-preprocessor --clang each name's features against the metadata's.
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin___clear_cache", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_assume_dereferenceable", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_assume_separate_storage", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_debugtrap", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_dwarf_sp_column", "")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_addpd512", "avx512f")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_addps512", "avx512f")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_addsd_round_mask", "avx512f")
@@ -352,6 +358,12 @@ BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_vpshrdw128", "avx512vl,avx512
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_vpshrdw256", "avx512vl,avx512vbmi2")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_vpshrdw512", "avx512vbmi2")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_ia32_xsetbv", "xsave")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_memcpy_inline", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_memset_inline", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_readcyclecounter", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_readsteadycounter", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_stack_address", "")
+BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("__builtin_thread_pointer", "")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("_m_prefetch", "")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("_m_prefetchw", "")
 BUSTER_CBUILTIN_SUPPLEMENTARY_NAME("_mm_clflush", "")
