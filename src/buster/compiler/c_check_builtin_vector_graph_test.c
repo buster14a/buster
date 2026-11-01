@@ -289,7 +289,8 @@ static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest*
         for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
         {
             const CheckBuiltinVectorEffect* effect = scalar.vectors + i;
-            const CheckValue* value = scalar.values + nodes[i];
+            const CheckValue node_value = check_stream_value(&scalar, nodes[i]);
+            const CheckValue* value = &node_value;
             check_test_expect(test, effect->node == nodes[i] && value->type == fixtures[i].expected &&
                                    value->constant_kind == CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                                    effect->runtime_builtin == fixtures[i].id && effect->evaluated_argument_count == fixtures[i].evaluated,
@@ -299,7 +300,7 @@ static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest*
         {
             check_test_expect(test, scalar.vectors[4].reads_fp_environment && scalar.vectors[4].may_raise_fp_exceptions &&
                                    scalar.vectors[19].reads_fp_environment && scalar.vectors[19].may_raise_fp_exceptions &&
-                                   scalar.vectors[20].nondeterministic && (scalar.values[nodes[20]].flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+                                   scalar.vectors[20].nondeterministic && (check_stream_flags(&scalar, nodes[20]) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    scalar.vectors[21].reads_memory && scalar.vectors[22].writes_memory &&
                                    scalar.vectors[22].memory_type == BUSTER_TYPE_INT,
                               "floating conversion, nondeterminism and nontemporal memory effects remain explicit");

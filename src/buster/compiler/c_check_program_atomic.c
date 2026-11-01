@@ -397,7 +397,8 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
     {
         const CheckGraph* graph = &writer->program->input->graph;
         const uint32_t argument = graph->argument_nodes[graph->argument_offsets[plan->node]];
-        const CheckValue* source = writer->program->stream->values + argument;
+        const CheckValue source_value = check_stream_value(writer->program->stream, argument);
+        const CheckValue* source = &source_value;
         const bool small = source->constant_kind == CHECK_CONSTANT_INTEGER && source->fault == CHECK_FAULT_NONE && source->integer <= 8;
         if (small)
         {
@@ -523,7 +524,7 @@ static void check_lower_atomic_query(CheckLowerWriter* writer, uint32_t node)
     }
     if (answer >= 0)
     {
-        const CheckValue constant = { .type = stream->values[node].type, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = (unsigned)answer };
+        const CheckValue constant = { .type = check_stream_type(stream, node), .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = (unsigned)answer };
         check_lower_constant(writer, &constant);
     }
     else if ((CBuiltinId)graph->members[node] == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE)
@@ -535,7 +536,7 @@ static void check_lower_atomic_query(CheckLowerWriter* writer, uint32_t node)
         const TypeId arguments[2] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG };
         const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_ATOMIC_IS_LOCK_FREE, BUSTER_TYPE_BOOL, arguments, 2, BUSTER_CHECK_NONE);
         const uint32_t first = graph->argument_offsets[node];
-        check_lower_convert(writer, BUSTER_TYPE_BOOL, stream->values[node].type);
+        check_lower_convert(writer, BUSTER_TYPE_BOOL, check_stream_type(stream, node));
         check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, BUSTER_TYPE_BOOL), call);
         for (uint32_t a = 2; a-- > 0;)
         {
@@ -601,7 +602,7 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
                               : op == CHECK_OP_ASSIGN ? BUSTER_CHECK_ATOMIC_STORE
                               : target == node        ? BUSTER_CHECK_ATOMIC_LOAD
                                                       : BUSTER_CHECK_ATOMIC_UPDATE;
-    const TypeId object = builtin ? effect != NULL ? effect->object_type : 0 : stream->values[target].type;
+    const TypeId object = builtin ? effect != NULL ? effect->object_type : 0 : check_stream_type(stream, target);
     const TypeId value = object != 0 ? type_conversion_operand(types, object) : BUSTER_TYPE_VOID;
     const uint64_t size = object != 0 ? type_size(types, object) : 0;
     const uint64_t bytes = size < 16 ? 16 : size;
@@ -679,7 +680,7 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         }
         else if (operation == BUSTER_CHECK_ATOMIC_UPDATE && !(op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT))
         {
-            const TypeId own = stream->values[graph->operand1[node]].type;
+            const TypeId own = check_stream_type(stream, graph->operand1[node]);
             const TypeId converted = stream->conversions[node].operands[1].type;
             plan->operand_type = check_action_kind(types, value) == BUSTER_TYPE_KIND_POINTER ? BUSTER_TYPE_LONG
                                  : check_lower_complex(writer, stream->conversions[node].operands[0].type)

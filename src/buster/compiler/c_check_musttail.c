@@ -198,7 +198,7 @@ static uint32_t check_musttail_rule(const CheckInput* input, const CheckStream* 
         *callee_name = check_musttail_callee_name(input, callee);
         const uint32_t declaration = input->body_declarations[musttail->body];
         const TypeId caller = declaration != BUSTER_CHECK_NONE ? check_musttail_function(types, input->declared_types[declaration]) : 0;
-        const TypeId target = callee < graph->count ? check_musttail_function(types, stream->values[callee].type) : 0;
+        const TypeId target = callee < graph->count ? check_musttail_function(types, check_stream_type(stream, callee)) : 0;
         const uint8_t caller_flags = caller != 0 ? types->types.flags[type_index(caller)] : 0;
         const uint8_t target_flags = target != 0 ? types->types.flags[type_index(target)] : 0;
         uint32_t caller_count = 0;
