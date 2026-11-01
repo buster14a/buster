@@ -3191,7 +3191,7 @@ static uint32_t tier1_select_test_append(IrFunction* function, uint32_t* next, u
     return node;
 }
 
-#define BUSTER_TIER1_SELECT_TEST_VARIADIC_SHAPES 3
+#define BUSTER_TIER1_SELECT_TEST_VARIADIC_SHAPES 4
 
 // A variadic definition (#789), f(n, ...), which reads its incoming frame through its anchors as va_start's lowering
 // reaches them: its register save area (slot 0) and its overflow area (slot 1). It folds, as h = h * 31 + v from the
@@ -3199,16 +3199,23 @@ static uint32_t tier1_select_test_append(IrFunction* function, uint32_t* next, u
 // unnamed arguments on the stack) and, for shapes 1 and 2, the low eightbyte of the save area's first vector slot,
 // xmm0's, which the prologue saves where al isn't zero. Shape 2 also stores h into a 64-byte object aligned to 64
 // (slot 2) and returns it from there: its frame is realigned, with a frame pointer, from which the overflow area's
-// address comes. With `records`, it has its own ABI records too (n's location), which selection doesn't take yet.
+// address comes. Shape 3 folds, in the second general slot's place, the result of a call through the pointer that slot
+// holds (rsi's, the first unnamed argument) of the first slot's value, the others live across the call: in callee-saved
+// registers, which the prologue pushes before its subtraction, past which the overflow area's address comes where the
+// frame keeps no pointer. With `records`, it has its own ABI records too (n's location), which selection doesn't take.
 static bool tier1_select_test_variadic_function(Arena* input, uint32_t shape, bool records, IrFunction* function)
 {
-    const bool vector = shape != 0;
+    const bool vector = shape == 1 || shape == 2;
+    const bool calls = shape == 3;
     const IrSizes sizes = {
-        .instruction_count = shape == 0 ? 33 : shape == 1 ? 37 : 40,
+        .instruction_count = shape == 0 ? 33 : shape == 1 ? 37 : shape == 2 ? 40 : 35,
         .block_count = 1,
+        .extra_count = calls ? 1 : 0,
         .constant_count = 1,
         .slot_count = shape == 2 ? 3 : 2,
         .address_count = 7,
+        .call_count = calls ? 1 : 0,
+        .call_type_count = calls ? 1 : 0,
         .parameter_count = 1,
         .passed_count = records ? 1 : 0,
     };
@@ -3250,6 +3257,14 @@ static bool tier1_select_test_variadic_function(Arena* input, uint32_t shape, bo
             const uint32_t address = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, save, BUSTER_IR_NONE, k);
             values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
+        if (calls)
+        {
+            const uint32_t callee = tier1_select_test_append(function, &next, IR_INTTOPTR, IR_PTR, values[1], BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function->extra[0] = values[0];
+            function->call_types[0] = IR_I64;
+            function->calls[0] = (IrCall){ .argument_first = 0, .argument_count = 1, .type_first = 0, .parameter_count = 1, .result_type = IR_I64 };
+            values[1] = tier1_select_test_append(function, &next, IR_CALL_INDIRECT, IR_I64, callee, 0, BUSTER_IR_NONE);
+        }
         values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, overflow, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t second = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, overflow, BUSTER_IR_NONE, 5);
         values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, second, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -3277,18 +3292,25 @@ static bool tier1_select_test_variadic_function(Arena* input, uint32_t shape, bo
     return created;
 }
 
+// Shape 3's callee, whose address the native samples pass as the first unnamed argument (tier1_variadic_test.c).
+static __attribute__((noinline)) uint64_t tier1_select_test_variadic_callee(uint64_t x)
+{
+    return x * 3 + 7;
+}
+
 // tier1_select_test_variadic_function's result for its incoming frame: the six general argument registers (`integers`,
-// n's rdi first), the first two stack arguments past them (`stacked`) and, for shapes 1 and 2, xmm0's low eightbyte.
+// n's rdi first; for shape 3 the second's place takes its callee's result of the first), the first two stack arguments
+// past them (`stacked`) and, for shapes 1 and 2, xmm0's low eightbyte.
 static uint64_t tier1_select_test_variadic_oracle(uint32_t shape, const uint64_t* integers, const uint64_t* stacked, uint64_t vector)
 {
     uint64_t h = integers[0];
     for (uint32_t k = 1; k < 6; k += 1)
     {
-        h = h * 31 + integers[k];
+        h = h * 31 + (shape == 3 && k == 1 ? tier1_select_test_variadic_callee(integers[0]) : integers[k]);
     }
     h = h * 31 + stacked[0];
     h = h * 31 + stacked[1];
-    return shape != 0 ? h * 31 + vector : h;
+    return shape == 1 || shape == 2 ? h * 31 + vector : h;
 }
 
 // The variadic definition's plan (#789), by both paths: the overflow area's address a value of its own, its lea

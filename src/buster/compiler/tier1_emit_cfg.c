@@ -669,12 +669,13 @@ static bool tier1_emit_cfg_object(const IrFunction* function, const Tier1EmitRes
 // A variadic definition's overflow area's address (#789): its unnamed stack arguments start past its named ones
 // (IrFunction.incoming.stack_bytes) in the incoming argument area, 8 bytes past the return address's slot. That is 16
 // past rbp, where the prologue pushed it, in a frame with a frame pointer, a realigned one's among them; and otherwise
-// past rsp's reservation, which nothing moves until the epilogue (the saves are stores, and the red zone too is below
-// the entry's rsp).
+// past rsp's reservation and the callee-saved registers the prologue pushed before it (#177's protocol), which nothing
+// moves until the epilogue (the red zone too is below the entry's rsp).
 static bool tier1_emit_cfg_incoming(const IrFunction* function, const Tier1EmitResult* emitted, uint8_t* base, int32_t* offset)
 {
     const Tier1Frame* frame = &emitted->frame;
-    const uint64_t above = frame->frame_pointer ? 16 : (uint64_t)frame->stack_adjust_bytes + 8;
+    const uint64_t pushed = 8 * (uint64_t)__builtin_popcount(frame->saved_registers);
+    const uint64_t above = frame->frame_pointer ? 16 : (uint64_t)frame->stack_adjust_bytes + pushed + 8;
     const uint64_t total = above + function->incoming.stack_bytes;
     const bool found = total <= INT32_MAX && (frame->frame_pointer || (frame->base_register == X86_REGISTER_RSP && !frame->realigned));
     *base = frame->frame_pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;

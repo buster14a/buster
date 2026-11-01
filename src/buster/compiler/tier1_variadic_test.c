@@ -6,7 +6,9 @@
 // with constants rematerialized and not, with every register and with four, and with and without a kept frame pointer.
 // Each is called natively as C calls a variadic function, uint64_t (*)(uint64_t, ...): n and five unnamed integers in
 // rdi to r9, two more on the stack and, for shapes 1 and 2, a double in xmm0 with al 1, which the prologue saves in the
-// register save area; shape 0 is called without the double too, with al 0, which skips the vector saves. Every compile
+// register save area; shapes 0 and 3 are called without the double too, with al 0, which skips the vector saves. Shape
+// 3's first unnamed argument is its callee's address, and its values live across the call make its prologue push
+// callee-saved registers, which the overflow area's address must count past where the frame keeps no pointer. Every compile
 // must save the six argument registers and the eight vector ones in its prologue, those behind al's test, in the
 // frame's save area. tier1_select_test_variadic_oracle reads only the arguments; the code runs in a bounded child
 // (tier1_variadic_tests).
@@ -79,6 +81,7 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
     {
         tier1_emit_test_expect(test, emitted.general && tier1_variadic_prologue(&emitted), "the prologue saves the argument registers, and the vector ones behind al's test, in the frame's save area");
         tier1_emit_test_expect(test, (shape == 2 || keep_pointer) == emitted.frame.frame_pointer, "a realigned frame or a kept frame pointer gives the overflow area's address its base");
+        tier1_emit_test_expect(test, shape != 3 || emitted.frame.saved_registers != 0, "the values live across shape 3's call are in callee-saved registers, which its prologue pushes");
         void* executable = MAP_FAILED;
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
@@ -92,14 +95,15 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
                 {
                     integers[k] = sample < 2 ? (sample == 0 ? k + 1 : UINT64_MAX - k) : tier1_emit_test_random(&random);
                 }
+                integers[1] = shape == 3 ? (uint64_t)(uintptr_t)tier1_select_test_variadic_callee : integers[1];
                 stacked[0] = tier1_emit_test_random(&random);
                 stacked[1] = tier1_emit_test_random(&random);
                 // A double whose bits the oracle reads as xmm0's low eightbyte: any finite value's.
                 const double value = (double)(int64_t)tier1_emit_test_random(&random) / 3.0;
                 uint64_t bits = 0;
                 memcpy(&bits, &value, sizeof(bits));
-                // Shape 0 reads no vector slot: called with the double (al 1) and without it (al 0) in turn.
-                const bool with_vector = shape != 0 || (sample & 1) != 0;
+                // Shapes 0 and 3 read no vector slot: called with the double (al 1) and without it (al 0) in turn.
+                const bool with_vector = shape == 1 || shape == 2 || (sample & 1) != 0;
                 const uint64_t expected = tier1_select_test_variadic_oracle(shape, integers, stacked, bits);
                 const uint64_t actual = tier1_variadic_call(executable, integers, stacked, value, with_vector);
                 if (actual != expected && test->failures < 20)
