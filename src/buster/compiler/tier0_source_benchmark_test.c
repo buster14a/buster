@@ -11,9 +11,10 @@
 // intrinsics, which -march=znver5 compiles (its masks Tier 0's opmask class, #179) and the baseline profile refuses by
 // name, leaving it out; and, without -march, a function whose target("bmi2") attribute its BMI2 builtin needs, measured
 // as -c compiles it for its attribute's target (#1041's review), where the unit's would refuse the builtin by name.
-// Each case's corpus, counts, exit status and report lines are checked, the totals last with the measurement's outcome. Then the command's repeated --only, and tier0_benchmark_add at its
-// corpus's capacity, which must write nothing. Include after tier0_source_benchmark.c and
-// c_lowering_source_benchmark_test.c; test-checker calls this through its forward declaration.
+// Each case's corpus, counts, exit status and report lines are checked, the totals last with the measurement's
+// outcome. Then the command's repeated --only, and tier0_benchmark_add at its corpus's capacity, which must write
+// nothing. Include after tier0_source_benchmark.c and c_lowering_source_benchmark_test.c; test-checker calls this
+// through its forward declaration.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 
