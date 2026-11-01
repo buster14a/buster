@@ -137,13 +137,13 @@ consumer; the shared interpreter is not routed through it.
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c`
 drives real C through the checker, typed producer, both adapters and both text
-parsers. This explicit
-mode also requires transactional refusal of a function with vectors by both SSA
-promoters, which it doesn't count as promoted; a function whose only SIMD values
-are masks must promote, as any other does (#179): `mask-builtins.c`'s four
-functions of the `_k*` builtins at every width, one of them a loop. Without `--simd`, source-corpus
-acceptance continues to require promotion. Source preparation retains each function's
-selected output-target features rather than inferring them from the host.
+parsers. This explicit mode also requires transactional refusal of a function
+with vectors by both SSA promoters, which it doesn't count as promoted; a
+function whose only SIMD values are masks must promote, as any other does
+(#179): `mask-builtins.c`'s four functions of the `_k*` builtins at every width,
+one of them a loop. Without `--simd`, source-corpus acceptance continues to
+require promotion. Source preparation retains each function's selected
+output-target features rather than inferring them from the host.
 
 For #141, the handoff is verified shape-qualified IR with explicit `vcmp`/`vselect`
 and wide memory transports. The selector's refusal of vectors remains in place.
