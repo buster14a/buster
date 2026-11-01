@@ -5602,7 +5602,10 @@ _Static_assert(BUSTER_X86_TEMPLATE_MARGIN * sizeof(X86TemplateEntry) % BUSTER_X8
 BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_TABLE + BUSTER_X86_TEMPLATE_MARGIN]
     __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
 static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
-BUSTER_X86_SHARED bool x86_encoder_initialized;
+// In .data rather than .bss, as lane.c's LaneProcess is: in .bss it follows the storage's margin, in a 2 MB region that
+// nothing else a compile writes is in, whose huge page a kernel that uses them `always` cleared for this one flag (2 MB
+// of peak RSS on the 9700X, #590).
+BUSTER_X86_SHARED bool x86_encoder_initialized __attribute__((section(".data")));
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
 BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_TABLE] __attribute__((aligned(64)));
 static X86TemplateEntry* const x86_templates_address32 = x86_template_storage_address32 + BUSTER_X86_TEMPLATE_PADDING;
