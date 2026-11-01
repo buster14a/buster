@@ -1910,7 +1910,7 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
     }
     else
     {
-        fprintf(stderr, "fatal error: can't reserve memory for the libraries\n");
+        arena_report_failure(stderr, "the libraries", UINT64_C(1) << 36);
     }
 }
 
@@ -1983,7 +1983,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         else if (!valid)
         {
-            fprintf(stderr, "fatal error: can't reserve linker memory\n");
+            arena_report_failure(stderr, "linking", UINT64_C(1) << 36);
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
         // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
@@ -2319,8 +2319,9 @@ struct CheckDriverCommand
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
-    // --tier1-refusals' stream, or null.
+    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize.
     bool tier1;
+    bool tier1_no_rematerialize;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
 };
@@ -2367,7 +2368,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                  parse_initialize(parser, &parser_options, options->language);
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
-        fprintf(errors, "fatal error: can't reserve checker memory\n");
+        arena_report_failure(errors, "checking", UINT64_C(1) << 36);
     }
     else
     {
@@ -3001,6 +3002,7 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
 static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
 {
+    arena_failure = (ArenaFailure){ 0 };
     WorkerBudget worker_budget;
     // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
     // option: a compile without it reads neither the clocks nor its resource use. A value that spells the option (`-o
@@ -3074,7 +3076,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool invalid_lanes = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
-    // function Tier 0 compiled with the step that refused it, on standard error.
+    // function Tier 0 compiled with the step that refused it, on standard error; --tier1-no-rematerialize compiles Tier
+    // 1's functions spilling the values it would recompute (#178's comparison: the report's spills and frames).
     bool tier1_report = false;
     // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
     // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
@@ -3202,6 +3205,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--tier1-refusals") == 0)
         {
             lanes.tier1_refusals = stderr;
+        }
+        else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
+        {
+            lanes.tier1_no_rematerialize = true;
         }
         else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
         {
@@ -3336,6 +3343,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .output = output,
         .libraries = &libraries,
         .tier1 = lanes.tier1,
+        .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
     };
@@ -3347,9 +3355,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
     }
-    else if (!arguments_ready)
+    else if (!arguments_ready || (!parsed && arena_failure.bytes != 0))
     {
-        fprintf(stderr, "fatal error: can't allocate checker argument storage\n");
+        arena_report_failure(stderr, "checker arguments", (uint64_t)(count + 1) * sizeof(char*));
     }
     else if (unsupported_codegen != NULL)
     {
@@ -3358,7 +3366,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
     {
@@ -3373,9 +3381,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
-    else if ((tier1_report || lanes.tier1_refusals != NULL) && !lanes.tier1)
+    else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize) && !lanes.tier1)
     {
-        fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : "--tier1-refusals");
+        fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" : "--tier1-no-rematerialize");
     }
     else if (lanes.tier1 && source_rows)
     {

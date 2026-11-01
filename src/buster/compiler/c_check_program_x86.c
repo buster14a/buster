@@ -1454,6 +1454,29 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             row->result_bytes = 0;
         }
     }
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    if (reason == NULL && (target->features & evex) != evex)
+    {
+        Tier0Operation baseline;
+        const bool older = rule->family == CHECK_X86_LOWER_BINARY || rule->family == CHECK_X86_LOWER_SHIFT ||
+                           rule->family == CHECK_X86_LOWER_EXTRACT || rule->family == CHECK_X86_LOWER_INSERT ||
+                           rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE || rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE ||
+                           rule->family == CHECK_X86_LOWER_UNARY;
+        if (older && check_vector_baseline_row(target, row, &baseline))
+        {
+            *row = baseline;
+            // These two were requirements of the EVEX implementation, not of the reviewed SSE/VEX operation.
+            needed &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ));
+            if (rule->form == X86_FORM_VSHUFPD_X_X_XM128_IMM8)
+            {
+                needed &= ~BUSTER_X86_FEATURE(AVX);
+            }
+        }
+        else if (older)
+        {
+            reason = "x86 builtins whose instructions the target hasn't";
+        }
+    }
     if (reason == NULL && ((target->features & needed) != needed || rule == NULL || (target->extensions & rule->extensions) != rule->extensions))
     {
         reason = "x86 builtins whose instructions the target hasn't";

@@ -43,7 +43,17 @@ patterns are:
   that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`. A 32-bit `int` index
   keeps its addition, which comes before its sign extension: `(i + c) * s` isn't
   `i * s + c * s` when `i + c` overflows, which the IR doesn't rule out (and
-  `-fwrapv` defines).
+  `-fwrapv` defines). A walk that reaches a frame object's address
+  (`IR_STACK_ADDR`) ends there instead (#982): the load, store or address takes the frame's base register in its memory operand,
+  with the object's offset plus the walked displacement, which the CFG consumer
+  fills in at emission from the frame's layout, as it does the object's `lea`.
+  The folded pattern reads no base value, so the object needs no `lea` of its
+  own; realigned frames and base-register frames work through the same base and
+  offset the `lea` takes. The object may live in the entry block past the
+  walk's block: the producer materializes every slot address in the preheader,
+  which dominates every use, and the address is pure with a function-global
+  offset. Longer cross-block chains stay unfolded. A displacement the object's
+  offset pushes past 32 bits refuses emission rather than truncating.
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source

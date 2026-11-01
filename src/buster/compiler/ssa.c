@@ -319,7 +319,8 @@ static void ssa_promote(SsaWork* work, bool vector)
 
 // The shared analyzer needs two disjoint arenas, including when ssa_verify has only one caller scratch arena.
 // Reserve its exact tree/frontier output extent at the current tail, then lend the remaining tail as temporary
-// scratch. Both are non-owning views: the parent arena alone owns their mapping and restores the whole phase.
+// scratch through the parent, which commits its growing tail. Only the already-pushed output is a borrowed view;
+// the parent arena owns the mapping and restores the whole phase.
 // The output layout is seven u32 columns (tree_offsets has one extra element), followed by an optional aligned
 // frontier matrix. No loops are requested. This bound follows dominators.c's published column/storage contract.
 static SsaError ssa_analyze(SsaWork* work, bool vector)
@@ -345,10 +346,6 @@ static SsaError ssa_analyze(SsaWork* work, bool vector)
             .base = storage,
             .capacity = capacity,
         };
-        Arena temporary = {
-            .base = scratch->base + scratch->length,
-            .capacity = scratch->capacity - scratch->length,
-        };
         const DominatorCfg cfg = {
             .block_count = blocks,
             .edge_count = input->edge_count,
@@ -363,7 +360,7 @@ static SsaError ssa_analyze(SsaWork* work, bool vector)
             .outputs = BUSTER_VECTOR_PATH(vector) ? BUSTER_DOMINATOR_FRONTIERS : 0,
             .max_matrix_bytes = BUSTER_SSA_DOMINANCE_BYTES,
         };
-        const DominatorStatus status = dominators_analyze(&output, &temporary, &cfg, options, &work->dominators);
+        const DominatorStatus status = dominators_analyze(&output, scratch, &cfg, options, &work->dominators);
         if (status == DOMINATOR_OK)
         {
             // Temporary pointers never escape the analyzer. All retained pointers precede output.length, so any

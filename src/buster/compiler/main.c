@@ -147,6 +147,7 @@ int run_dataflow_benchmark(int argc, char** argv);
 
 // Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
 #include "buster/compiler/dominators.c"
+#include "buster/compiler/dominators_export.c"
 #include "buster/compiler/dominators_test.c"
 int run_dominator_benchmark(int argc, char** argv);
 

@@ -473,6 +473,10 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .sources = "debug[a-z0-9_]*|lane",
     },
     {
+        .name = "dominators",
+        .unit = "dominators_benchmark.c",
+    },
+    {
         .name = "environments",
         .sources = "c_bindings[a-z0-9_]*|c_environment[a-z0-9_]*|c_types[a-z0-9_]*|lane",
     },

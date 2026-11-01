@@ -164,6 +164,7 @@ typedef struct CheckDeferredArenas CheckDeferredArenas;
 struct CheckDeferredArenas
 {
     uint8_t* mapping;
+    uint64_t mapping_bytes;
     Arena output;
     Arena scratch;
     Arena results;
@@ -446,21 +447,45 @@ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
     const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32, UINT64_C(1) << 32 };
     if (arenas->mapping == 0)
     {
-        uint8_t* mapping = mmap(0, BUSTER_CHECK_DEFERRED_LANE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (mapping != MAP_FAILED)
+        uint64_t limit = arena_reservation_limit();
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
         {
-            // The advice only chooses the page size, as arena_reserve's does: the arenas work whether or not the
-            // kernel takes it.
-            madvise(mapping, BUSTER_CHECK_DEFERRED_LANE_BYTES, MADV_NOHUGEPAGE);
-            arenas->mapping = mapping;
+            total += capacities[i] < limit ? capacities[i] : limit;
+        }
+        // A single inaccessible reservation retains the lane's stable contiguous layout, without charging its
+        // unused hundreds of GiB against CommitLimit. Each slice commits only its own pushes. Release the original
+        // mapping directly: the parent descriptor does not track the children's writable prefixes.
+        Arena storage = arena_reserve_exact(total, total);
+#if !BUSTER_SANITIZER_RESOURCES
+        if (storage.base == 0 && (errno == ENOMEM || errno == EINVAL) && limit > BUSTER_ARENA_COMPACT_BYTES)
+        {
+            arena_compact = true;
+            limit = arena_reservation_limit();
+            total = 0;
+            for (uint32_t i = 0; i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
+            {
+                total += capacities[i] < limit ? capacities[i] : limit;
+            }
+            storage = arena_reserve_exact(total, total);
+        }
+#endif
+        if (storage.base != 0)
+        {
+            arenas->mapping = storage.base;
+            arenas->mapping_bytes = storage.mapping_bytes;
             uint64_t offset = 0;
             for (uint32_t i = 0; i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
             {
+                const uint64_t capacity = capacities[i] < limit ? capacities[i] : limit;
                 *list[i] = (Arena){
-                    .base = mapping + offset,
-                    .capacity = capacities[i],
+                    .base = storage.base + offset,
+                    .capacity = capacity,
+                    .small = capacity,
+                    .mapping_bytes = capacity,
+                    .requested_capacity = capacities[i],
                 };
-                offset += capacities[i];
+                offset += capacity;
             }
         }
     }
@@ -2518,7 +2543,7 @@ static void check_deferred_release(CheckDeferred* deferred)
         CheckDeferredArenas* arenas = memory->lanes + lane;
         if (arenas->mapping != 0)
         {
-            munmap(arenas->mapping, BUSTER_CHECK_DEFERRED_LANE_BYTES);
+            munmap(arenas->mapping, arenas->mapping_bytes);
         }
         *arenas = (CheckDeferredArenas){ 0 };
     }

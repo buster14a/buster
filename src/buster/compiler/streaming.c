@@ -375,8 +375,10 @@ struct StreamCode
 {
     const StreamProgram* program;
     Arena* scratch;
+    // The reservation the .text is written into: pushes commit its used prefix, since its pages are otherwise
+    // inaccessible, and its length is the committed high-water mark, not the .text's size.
+    Arena* text_arena;
     uint8_t* text;
-    uint64_t text_capacity;
     uint64_t text_size;
     uint64_t text_address;
     uint64_t data_address;
@@ -403,11 +405,22 @@ struct StreamCode
     uint64_t pending;
     uint64_t forward;
     uint64_t records;
-    // The DWARF so far (stream_write's): each section's units, of the first `debugged` functions in the order.
+    // The DWARF so far (stream_write's): each section's units, of the first `debugged` functions in the order. The
+    // sections' own reservations, which a unit's exact sizes commit before they are written, as text_arena's.
+    Arena* debug_arenas;
     uint8_t* debug[BUSTER_DEBUG_SECTIONS];
     uint64_t debug_sizes[BUSTER_DEBUG_SECTIONS];
     uint32_t debugged;
 };
+
+// Commits the text reservation's prefix through `end`, which every write into it needs under the arenas' lazy
+// commitment; the pushes only move the committed high-water mark. Returns false when `end` is past the reservation,
+// as the capacity check it replaces did.
+static bool stream_text_room(StreamCode* code, uint64_t end)
+{
+    Arena* text = code->text_arena;
+    return end <= text->length || arena_push(text, end - text->length, 1) != 0;
+}
 
 // Room for `count` more fields, in the columns' arenas (each column its own, so that it stays one array).
 static bool stream_fixup_room(StreamCode* code, Arena* columns, uint64_t count)
@@ -535,11 +548,14 @@ static StreamError stream_compile(StreamCode* code, Arena* columns, uint32_t fun
     const uint32_t unit_index = program->function_units[function];
     const bool is_start = unit_index == program->unit_count;
     const uint64_t start_bytes = BUSTER_STREAM_START_PROLOGUE + (uint64_t)program->unit_count * BUSTER_STREAM_START_PER_UNIT + BUSTER_STREAM_START_EPILOGUE;
-    StreamError error = STREAM_OK;
-    memset(code->text + code->text_size, BUSTER_EXECUTABLE_INT3, start - code->text_size);
-    if (is_start)
+    StreamError error = stream_text_room(code, start) ? STREAM_OK : STREAM_ERROR_LIMIT;
+    if (error == STREAM_OK)
     {
-        error = start + start_bytes <= code->text_capacity && stream_fixup_room(code, columns, program->unit_count + 2) ? STREAM_OK : STREAM_ERROR_LIMIT;
+        memset(code->text + code->text_size, BUSTER_EXECUTABLE_INT3, start - code->text_size);
+    }
+    if (error == STREAM_OK && is_start)
+    {
+        error = stream_text_room(code, start + start_bytes) && stream_fixup_room(code, columns, program->unit_count + 2) ? STREAM_OK : STREAM_ERROR_LIMIT;
         if (error == STREAM_OK)
         {
             const uint32_t length = stream_compile_start(code, (uint32_t)start, streamed);
@@ -549,7 +565,7 @@ static StreamError stream_compile(StreamCode* code, Arena* columns, uint32_t fun
             memset(&code->unwind[function], 0, sizeof(UnwindFunction));
         }
     }
-    else
+    else if (error == STREAM_OK)
     {
         const StreamUnit* unit = &program->units[unit_index];
         const uint32_t local = function - unit->first_function;
@@ -561,7 +577,7 @@ static StreamError stream_compile(StreamCode* code, Arena* columns, uint32_t fun
         const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(compiled.count);
         if (error == STREAM_OK)
         {
-            error = start + capacity <= code->text_capacity && stream_fixup_room(code, columns, compiled.reference_count) ? STREAM_OK : STREAM_ERROR_LIMIT;
+            error = stream_text_room(code, start + capacity) && stream_fixup_room(code, columns, compiled.reference_count) ? STREAM_OK : STREAM_ERROR_LIMIT;
         }
         if (error == STREAM_OK)
         {
@@ -709,7 +725,20 @@ static StreamError stream_debug_unit(const StreamCode* code, uint32_t first, uin
         .lines = lines,
         .row_count = count,
     };
-    const DebugError written = error == STREAM_OK ? debug_write(&unit, output, false) : DEBUG_ERROR_INPUT;
+    DebugPlan plan;
+    DebugError written = error == STREAM_OK ? debug_prepare(&unit, output->bases, &plan, false) : DEBUG_ERROR_INPUT;
+    // Each section's reservation commits exactly the unit's measured bytes before emit writes into it (stream_write's
+    // debug_arenas; the direct path's destinations are pushes already).
+    for (uint32_t section = 0; written == DEBUG_OK && code->debug_arenas != 0 && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        Arena* arena = code->debug_arenas + section;
+        const uint64_t need = output->bases[section] + plan.sizes[section];
+        if (need > arena->length && arena_push(arena, need - arena->length, 1) == 0)
+        {
+            written = DEBUG_ERROR_CAPACITY;
+        }
+    }
+    written = written == DEBUG_OK ? debug_emit(&plan, output) : written;
     const DebugError finalized = written == DEBUG_OK && addresses != 0 ? debug_finalize(&unit, output, addresses) : written;
     return error != STREAM_OK ? error : finalized == DEBUG_OK ? STREAM_OK : STREAM_ERROR_DEBUG;
 }
@@ -1186,12 +1215,13 @@ static bool stream_write(const StreamProgram* program, const StreamOptions* opti
     StreamCode* code = &write.code;
     code->program = program;
     code->scratch = &arena;
+    code->text_arena = &text;
     code->text = text.base;
-    code->text_capacity = text.capacity;
     code->order = options->order;
     code->eh_capacity = (uint64_t)program->function_count * BUSTER_UNWIND_TEMPLATE_BYTES + 64;
     code->eh = arena_push(&arena, code->eh_capacity, 64);
     code->eh_locations = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, program->function_count);
+    code->debug_arenas = debug;
     for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         code->debug[section] = debug[section].base;
@@ -1322,8 +1352,8 @@ static bool stream_write_link(const StreamProgram* program, String8 path, Stream
     memset(&code, 0, sizeof(code));
     code.program = program;
     code.scratch = &arena;
+    code.text_arena = &text;
     code.text = text.base;
-    code.text_capacity = text.capacity;
     code.order = order;
     code.eh_capacity = (uint64_t)program->function_count * BUSTER_UNWIND_TEMPLATE_BYTES + 64;
     code.eh = arena_push(&arena, code.eh_capacity, 64);

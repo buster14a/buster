@@ -4293,8 +4293,11 @@ static bool type_test_scratch_exhaustion(void)
             for (uint64_t room = 0; room <= BUSTER_TYPE_TEST_SCRATCH_ROOM; room += 16)
             {
                 const uint64_t length = arena->length;
-                const uint64_t left_bytes = arena->capacity - arena->length;
-                arena_push_array(arena, left_bytes > room ? left_bytes - room : 0, 1, 1);
+                const uint64_t capacity = arena->capacity;
+                // Leave `room` bytes by narrowing the arena's bound: pushing capacity - room would need a commit as
+                // large as the reservation, which hosted commit limits refuse, and the sweep would see every room.
+                const uint64_t left = arena->length + room;
+                arena->capacity = left < capacity ? left : capacity;
                 char what[96];
                 snprintf(what, sizeof(what), "%" PRIu64 " bytes left in scratch arena %u", room, which);
                 for (uint32_t pair = 0; pair < 2; pair += 1)
@@ -4311,6 +4314,7 @@ static bool type_test_scratch_exhaustion(void)
                 const TypeAnswer different = type_same_canonical(table, lefts[1], rights[1]);
                 type_test_expect(&tally, same == TYPE_ANSWER_YES || same == TYPE_ANSWER_FULL, "scratch exhaustion canonical", what);
                 type_test_expect(&tally, different == TYPE_ANSWER_NO || different == TYPE_ANSWER_FULL, "scratch exhaustion canonical", what);
+                arena->capacity = capacity;
                 arena_pop_to(arena, length);
             }
         }

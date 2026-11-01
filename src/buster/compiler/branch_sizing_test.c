@@ -1068,10 +1068,13 @@ static bool branch_sizing_test_memory(Arena* arena, uint64_t seed)
             memcpy(records, function.records, function.count * sizeof(X86Instruction));
             memset(offsets, 0xa5, function.count * sizeof(uint32_t));
             Scratch scratch = scratch_begin(0);
-            const uint64_t free_bytes = scratch.arena->capacity - scratch.arena->length;
-            arena_push(scratch.arena, free_bytes - room, 1);
+            const uint64_t capacity = scratch.arena->capacity;
+            // `room` bytes left for the run, by the arena's bound rather than by pushing the rest of its reservation
+            // (a commit that large may refuse where the reservation's address space did not).
+            scratch.arena->capacity = room < capacity - scratch.arena->length ? scratch.arena->length + room : capacity;
             const BranchSizing result = branch_sizing_run(records, function.count, function.branches, function.targets, function.branch_count, offsets,
                                                           path == BRANCH_SIZING_TEST_VECTOR, BUSTER_BRANCH_SIZING_ROUNDS);
+            scratch.arena->capacity = capacity;
             scratch_end(scratch);
             sized = result.error == BRANCH_SIZING_OK;
             if (!sized)

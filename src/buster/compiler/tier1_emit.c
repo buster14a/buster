@@ -8,8 +8,9 @@
 // Every selected input and definition requires a register at its machine phase. At an input phase, all evicted
 // register values are stored before any reload reuses those registers. Definition-phase evictions are stored before
 // the instruction writes its destination; source registers were captured at the preceding input phase, so the
-// selector's destructive-operand repairs still apply. Integer constants may be recomputed after eviction, with all
-// flags conservatively live. Initial definitions are still emitted. Direct scalar calls publish symbolic CALL
+// selector's destructive-operand repairs still apply. Integer constants may be recomputed after eviction, a zero by a
+// zeroing xor: no flag is live between two nodes' records (BUSTER_TIER1_EMIT_BOUNDARY_FLAGS). Initial definitions are
+// still emitted. Direct scalar calls publish symbolic CALL
 // references, save live caller registers in fixed frame rows and resolve argument moves with reserved R11.
 //
 // This consumer accepts a straight-line chain ending in RET, UNREACHABLE or an empty self-loop sink; every earlier
@@ -72,6 +73,9 @@ struct Tier1EmitPrepared
 {
     Tier1AllocationInput allocation;
     Tier1RematerializationInput recipes;
+    // The recipes' values, which the CFG consumer completes after the frame's layout: a frame object's address's
+    // displacement (tier1_emit_cfg_frame).
+    uint64_t* recipe_values;
     uint32_t* value_intervals;
     uint32_t* starts;
     uint32_t* ends;
@@ -131,6 +135,8 @@ struct Tier1EmitResult
     uint32_t* node_values;
     uint32_t edge_moves;
     uint32_t edge_stubs;
+    // Recomputed values' definitions that nothing read, which the CFG consumer leaves out (tier1_emit_cfg_dead_definition).
+    uint32_t dropped_definitions;
     uint32_t jumps;
 };
 
@@ -174,6 +180,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     uint8_t* flags = 0;
     uint8_t* marks = 0;
     uint64_t* values = 0;
+    uint16_t* costs = 0;
+    uint16_t* reload_costs = 0;
     if (error == TIER1_EMIT_OK)
     {
         bool ok = true;
@@ -192,6 +200,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         flags = ir_allocate(output, count, 1, &ok);
         marks = ir_allocate(output, count, 1, &ok);
         values = ir_allocate(output, count, 8, &ok);
+        costs = ir_allocate(output, count, 2, &ok);
+        reload_costs = ir_allocate(output, count, 2, &ok);
         if (!ok)
         {
             error = TIER1_EMIT_MEMORY;
@@ -223,7 +233,12 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             .values = values,
             .count = count,
         };
-        const bool marked = BUSTER_VECTOR_PATH(options->vector) ? tier1_rematerialization_marks(&prepared.recipes, marks) : tier1_rematerialization_marks_scalar(&prepared.recipes, marks);
+        prepared.recipe_values = values;
+        // The model's costs, where it has them, before the marks read them (tier1_rematerialization_model_costs).
+        const bool costed = tier1_rematerialization_model_costs(&prepared.recipes, X86_REGISTER_RSP, costs, reload_costs, options->vector);
+        prepared.recipes.costs = costs;
+        prepared.recipes.reload_costs = reload_costs;
+        const bool marked = costed && (BUSTER_VECTOR_PATH(options->vector) ? tier1_rematerialization_marks(&prepared.recipes, marks) : tier1_rematerialization_marks_scalar(&prepared.recipes, marks));
         if (!marked)
         {
             error = TIER1_EMIT_INVALID;
@@ -394,6 +409,37 @@ static bool tier1_emit_append(Tier1EmitBuffer* buffer, X86Instruction instructio
     return room;
 }
 
+// The flags live between two nodes' records, where fragment transitions and edge moves run: none. Selection keeps each
+// flag's producer and its readers in one node's records (a compare and its setcc, conditional jump or cmov), as its
+// constants' immediate requests already assume (tier1_select_request's live_flags 0), so that a recomputed zero is a
+// zeroing xor there rather than a mov (tier1_rematerialize).
+#define BUSTER_TIER1_EMIT_BOUNDARY_FLAGS 0
+
+// A recomputed value's copy (tier1_rematerialize's) at the end of `buffer`, with its reference where it is a symbol's: a
+// PC32 for its lea from rip, a LOAD_GOT for its GOT slot's load, each copy one more for link_add_code_fixups (#98).
+// TIER1_EMIT_ALLOCATION where the copy can't be made or has no room for its reference, which the consumers count before
+// they emit.
+static Tier1EmitError tier1_emit_copy(Tier1EmitResult* result, const Tier1RematerializationInput* recipes, uint32_t index, uint8_t destination, uint8_t frame_base, Tier1EmitBuffer* buffer)
+{
+    Tier1Rematerialized copy = { 0 };
+    const bool made = tier1_rematerialize(recipes, index, destination, frame_base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy);
+    const bool symbolic = made && copy.symbol != BUSTER_TIER1_REMAT_NO_SYMBOL;
+    Tier1EmitError error = made && (!symbolic || result->reference_count < result->reference_capacity) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    if (error == TIER1_EMIT_OK && symbolic)
+    {
+        result->references[result->reference_count++] = (LinkReference){
+            .instruction = buffer->count,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = copy.got ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
+            .target = copy.symbol,
+            .addend = copy.addend,
+        };
+    }
+    error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, copy.instruction) ? error : TIER1_EMIT_MEMORY;
+    result->rematerializations += error == TIER1_EMIT_OK;
+    return error;
+}
+
 // A value's class: the CFG consumer's columns', or general.
 static uint32_t tier1_emit_class(const Tier1EmitPrepared* prepared, uint32_t value)
 {
@@ -458,35 +504,22 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
         {
             transitions->owners[base_location + allocation->registers[f - 1]] = BUSTER_IR_NONE;
         }
-        if (kind == BUSTER_TIER1_ALLOCATE_REGISTER)
+        if (kind == BUSTER_TIER1_ALLOCATE_REGISTER && previous == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
         {
-            X86Instruction instruction = {0};
-            if (previous == BUSTER_TIER1_ALLOCATE_SPILL && allocation->spill_ids[value] < frame->count)
-            {
-                instruction = tier1_emit_spill(prepared, allocation, frame, value, reg, true);
-                result->spill_loads += 1;
-            }
-            else if (previous == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !mask)
-            {
-                Tier1Rematerialized copy;
-                if (!tier1_rematerialize(&prepared->recipes, value, reg, (uint8_t)frame->base_register, UINT8_MAX, &copy) || copy.symbol != BUSTER_TIER1_REMAT_NO_SYMBOL)
-                {
-                    error = TIER1_EMIT_ALLOCATION;
-                }
-                else
-                {
-                    instruction = copy.instruction;
-                    result->rematerializations += 1;
-                }
-            }
-            else
-            {
-                error = TIER1_EMIT_ALLOCATION;
-            }
-            if (error == TIER1_EMIT_OK && !tier1_emit_append(buffer, instruction))
+            // The value's definition again, rather than a reload: it has no slot. No mask has a recipe (#179): their
+            // patterns are the opmask class's own, none a constant's, an address's or a copy of one.
+            error = mask ? TIER1_EMIT_ALLOCATION : tier1_emit_copy(result, &prepared->recipes, value, reg, (uint8_t)frame->base_register, buffer);
+            transitions->owners[base_location + reg] = value;
+        }
+        else if (kind == BUSTER_TIER1_ALLOCATE_REGISTER)
+        {
+            const bool reload = previous == BUSTER_TIER1_ALLOCATE_SPILL && allocation->spill_ids[value] < frame->count;
+            error = reload ? error : TIER1_EMIT_ALLOCATION;
+            if (error == TIER1_EMIT_OK && !tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, reg, true)))
             {
                 error = TIER1_EMIT_MEMORY;
             }
+            result->spill_loads += error == TIER1_EMIT_OK;
             transitions->owners[base_location + reg] = value;
         }
         transitions->registers[value] = kind == BUSTER_TIER1_ALLOCATE_REGISTER ? (uint8_t)(base_location + reg) : UINT8_MAX;

@@ -109,8 +109,11 @@ step, and for the selector the IR operation, that refused each of the others,
 and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
 that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
 1's code: its records, its spills' stores and reloads, the saves and restores
-around its calls and fixed registers' sequences, its recomputed constants and its
-edges' moves:
+around its calls and fixed registers' sequences, its recomputed values and the
+definitions of them it left out, its edges' moves, its spill slots and its
+frames' bytes. `--tier1-no-rematerialize` compiles Tier 1's functions spilling
+what they would recompute (#178's comparison: [the allocation
+guide](tier1-allocation.md)'s "Rematerialization"):
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
@@ -146,7 +149,11 @@ rather than caller-saved ones that every call saves and restores around itself
 interval covers a call is allocated again with the callee-saved registers alone,
 every other with the caller-saved ones; the first allocation stands where the
 second fails). On speedtest1 that halved the saves around calls (41,464 to 20,710
-records) and the spills' stores and reloads (15,028 to 7,550). Still refused: floating point, narrow
+records) and the spills' stores and reloads (15,028 to 7,550). A constant, a
+symbol's address or a frame object's address, or a copy of one, is recomputed
+where the allocator takes it out of a register, rather than stored and reloaded
+(#178), which took a third of those stores and reloads again, with no change in
+speedtest1's run time. Still refused: floating point, narrow
 call arguments (the IR doesn't keep their signedness, which the callee's
 extension needs), stack arguments, labels, switches, aggregates by value and
 variadic definitions.

@@ -479,6 +479,9 @@ struct Tier0Function
     const Tier0Operation* operations;
     uint32_t operation_count;
     bool vectors;
+    // Vector transport: 0 preserves the EVEX path; 16 uses SSE2 and 32 uses AVX.
+    // This is the generated function's target, never the compiler host's ISA.
+    uint8_t vector_bytes;
     const uint32_t* label_entries;
     uint32_t label_count;
     const uint32_t* label_tables;
@@ -6237,6 +6240,26 @@ static uint32_t tier0_vector_store(uint32_t bytes)
                          : X86_FORM_VMOVDQU64_ZM512_Z;
 }
 
+// A non-EVEX function's exact-width moves. Loads of 4 or 8 bytes zero the remaining XMM bytes; a VEX load also
+// zeroes the upper YMM bytes. Wider values' transport is split by tier0_emit_vector_baseline, never read past them.
+static uint32_t tier0_vector_target_load(const Tier0Function* function, uint32_t bytes)
+{
+    const bool avx = function->vector_bytes == 32;
+    return function->vector_bytes == 0 ? tier0_vector_load(bytes) :
+           bytes == 4 ? (avx ? X86_FORM_VMOVD_X_RM32 : X86_FORM_MOVD_X_RM32) :
+           bytes == 8 ? (avx ? X86_FORM_VMOVQ_X_XM64 : X86_FORM_MOVQ_X_XM64) :
+           bytes == 16 ? (avx ? X86_FORM_VMOVUPS_X_XM128 : X86_FORM_MOVUPS_X_XM) : X86_FORM_VMOVDQU_Y_YM256;
+}
+
+static uint32_t tier0_vector_target_store(const Tier0Function* function, uint32_t bytes)
+{
+    const bool avx = function->vector_bytes == 32;
+    return function->vector_bytes == 0 ? tier0_vector_store(bytes) :
+           bytes == 4 ? (avx ? X86_FORM_VMOVD_RM32_X : X86_FORM_MOVD_RM32_X) :
+           bytes == 8 ? (avx ? X86_FORM_VMOVQ_XM64_X : X86_FORM_MOVQ_XM64_X) :
+           bytes == 16 ? (avx ? X86_FORM_VMOVUPS_XM128_X : X86_FORM_MOVUPS_XM_X) : X86_FORM_VMOVDQU_YM256_Y;
+}
+
 // The 8-byte words of vector constant k that its bytes reach: a constant of 4 bytes has its word's low half, and the
 // slot's bytes past a value's are unspecified, so its word is stored whole.
 static uint32_t tier0_vector_words(const Tier0Function* function, uint64_t k)
@@ -6262,6 +6285,8 @@ static bool tier0_vector_zero(const Tier0Function* function, uint64_t k)
     return bits == 0;
 }
 
+#include "tier0_vector_baseline.inc"
+
 // A VECTOR entry's records (tier0_vector_entry's but X86's), its value through zmm16 (BUSTER_TIER0_VECTOR_SCRATCH), with
 // d the entry's integer depth:
 //   - CONST: zeros by vpxord and a store into slot d; any other constant, its words up to its bytes stored into slot d as
@@ -6278,7 +6303,11 @@ static void tier0_emit_vector_value(const Tier0Function* function, const Tier0En
     const uint32_t depth = entries->depths[i];
     const uint64_t value = function->values[i];
     const uint8_t scratch = BUSTER_TIER0_VECTOR_SCRATCH;
-    if (kind == BUSTER_TYPED_CONST && tier0_vector_zero(function, value))
+    if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
+    {
+        tier0_emit_vector_baseline(function, entries, frame, homes, i, writer);
+    }
+    else if (kind == BUSTER_TYPED_CONST && tier0_vector_zero(function, value))
     {
         tier0_put(writer, (X86Instruction){ .form = X86_FORM_VPXORD_X_X_XM128, .reg = scratch, .vvvv = scratch, .rm = scratch });
         tier0_put(writer, tier0_vector_slot(X86_FORM_VMOVDQU64_ZM512_Z, frame, depth, scratch));
@@ -6348,6 +6377,12 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
         {
             count += tier0_vector_word_fits(function, value, w) ? 1 : 2;
         }
+    }
+    if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
+    {
+        const uint32_t bytes = tier0_vector_baseline_copy_bytes(function, kind, value);
+        const uint32_t chunks = (bytes + function->vector_bytes - 1) / function->vector_bytes;
+        count = kind == BUSTER_TYPED_CONST ? 1 + chunks : chunks * (kind == BUSTER_TYPED_STORE ? 3 : 2);
     }
     return count;
 }
@@ -6583,7 +6618,7 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
     {
         if (tier0_class_vector(operation->operand_classes[j]))
         {
-            tier0_put(writer, tier0_vector_slot(tier0_vector_load(operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
+            tier0_put(writer, tier0_vector_slot(tier0_vector_target_load(function, operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
         }
     }
     for (uint32_t r = 0; r < operation->record_count; r += 1)
@@ -6592,7 +6627,7 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
     }
     if (tier0_class_vector(operation->result_class))
     {
-        tier0_put(writer, tier0_vector_slot(X86_FORM_VMOVDQU64_ZM512_Z, frame, (uint32_t)placement.result_depth, placement.vector));
+        tier0_put(writer, tier0_vector_slot(tier0_vector_target_store(function, function->vector_bytes == 0 ? 64 : operation->result_bytes), frame, (uint32_t)placement.result_depth, placement.vector));
     }
 }
 
@@ -6650,9 +6685,16 @@ static void tier0_vector_tops(const Tier0Function* function, const Tier0Entries*
         integer = reach.scratch != 0 && placement.scratch_depth + (int32_t)reach.scratch - 1 > integer ? placement.scratch_depth + (int32_t)reach.scratch - 1 : integer;
         floating = tier0_stack(result) == 2 ? placement.result_depth : -1;
         const int32_t vectors = reach.vectors != 0 ? placement.vector + (int32_t)reach.vectors - 1 : -1;
-        const bool fits = placement.vector + reach.vex_vectors <= BUSTER_TIER0_FLOATING_DEPTHS && placement.vector + reach.vectors <= 32;
+        const bool fits = placement.vector + reach.vex_vectors <= BUSTER_TIER0_FLOATING_DEPTHS &&
+                          placement.vector + reach.vectors <= (function->vector_bytes == 0 ? 32u : BUSTER_TIER0_FLOATING_DEPTHS);
         floating = !fits ? BUSTER_TIER0_FLOATING_DEPTHS : vectors > floating ? (vectors < BUSTER_TIER0_FLOATING_DEPTHS ? vectors : BUSTER_TIER0_FLOATING_DEPTHS - 1) : floating;
         slot = tier0_class_vector(result) && placement.result_depth == depth ? depth : -1;
+    }
+    else if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, function->values[i])))
+    {
+        // The first free floating register, not xmm16: selection reserves it against floating homes and the deep
+        // path windows/spills a full floating stack before emission, just as it does for a row's VECTOR registers.
+        floating = entries->floating_depths[i];
     }
     *integer_top = integer > *integer_top ? integer : *integer_top;
     *floating_top = floating > *floating_top ? floating : *floating_top;
@@ -8874,6 +8916,18 @@ static void tier0_reject(Tier0Validator* validator, uint32_t node, const char* r
     }
 }
 
+// A scratch arena refusal is a memory error, not a rule failure: the caller's lanes can run the part again where
+// there is room.
+static void tier0_reject_memory(Tier0Validator* validator, uint32_t node)
+{
+    if (validator->check.error == TIER0_OK)
+    {
+        validator->check.error = TIER0_ERROR_MEMORY;
+        validator->check.node = node;
+        validator->check.rule = "no scratch memory";
+    }
+}
+
 static uint32_t tier0_pop(Tier0Validator* validator, uint32_t node)
 {
     uint32_t class = BUSTER_TYPED_CLASS_VOID;
@@ -8917,7 +8971,7 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
         uint8_t* copy = BUSTER_ARENA_PUSH_ARRAY(validator->saved, uint8_t, (uint64_t)validator->depth + 1);
         if (copy == 0)
         {
-            tier0_reject(validator, node, "no scratch memory");
+            tier0_reject_memory(validator, node);
         }
         else
         {
@@ -9013,7 +9067,8 @@ static bool tier0_operation_form_valid(uint32_t form)
         {
             legacy = form == tier0_operation_legacy_forms[k];
         }
-        valid = legacy || (explicit && (vex || evex) && named && description->relative_bytes == 0);
+        const bool sse = description->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_vector_operand(description);
+        valid = legacy || (explicit && (vex || evex || sse) && named && description->relative_bytes == 0);
     }
     return valid;
 }
@@ -9226,6 +9281,10 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
 // objects' bytes, the parameters' locations and the calls' arguments. Each refusal is at node 0.
 static void tier0_validate_tables(const Tier0Function* function, Tier0Validator* validator)
 {
+    if (function->vector_bytes != 0 && function->vector_bytes != 16 && function->vector_bytes != 32)
+    {
+        tier0_reject(validator, 0, "vector transport other than EVEX, SSE2 or AVX");
+    }
     if (function->local_sizes != 0 && function->local_alignments == 0)
     {
         tier0_reject(validator, 0, "the objects' sizes without their alignments");
@@ -9275,6 +9334,19 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
         if (!tier0_operation_valid(&function->operations[k]))
         {
             tier0_reject(validator, 0, "an operation's row Tier 0 doesn't place: its counts, classes, forms, roles or memory operands");
+        }
+        else if (function->vector_bytes != 0)
+        {
+            const Tier0Operation* operation = &function->operations[k];
+            bool fits = !tier0_class_vector(operation->result_class) || operation->result_bytes <= function->vector_bytes;
+            for (uint32_t j = 0; j < operation->operand_count; j += 1)
+            {
+                fits = fits && (!tier0_class_vector(operation->operand_classes[j]) || operation->operand_bytes[j] <= function->vector_bytes);
+            }
+            if (!fits)
+            {
+                tier0_reject(validator, 0, "an operation's vector wider than the target's registers");
+            }
         }
     }
     if (function->x87_constant_count != 0 && function->x87_constants == 0)
@@ -9365,7 +9437,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
     validator.saved = scratch.arena;
     if (validator.stack == 0 || hashes == 0 || seen == 0 || labels == 0 || validator.saved_depths == 0 || validator.saved_offsets == 0)
     {
-        tier0_reject(&validator, 0, "no scratch memory");
+        tier0_reject_memory(&validator, 0);
     }
     else if (count > BUSTER_TIER0_MAX_ENTRIES || function->local_count > BUSTER_TIER0_MAX_LOCALS || function->parameter_count > function->local_count)
     {

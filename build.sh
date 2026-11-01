@@ -312,6 +312,11 @@ select_linker()
     echo "build.sh: stage 1 linker: ${linker:-system default}" >&2
 }
 defines=()
+# BUSTER_BUILD_DEFINES adds preprocessor definitions to every translation unit for measurement-variant builds, split on
+# whitespace (e.g. to A/B a compile-time policy constant under perf).
+if [ -n "${BUSTER_BUILD_DEFINES:-}" ]; then
+    defines+=(${BUSTER_BUILD_DEFINES})
+fi
 if [ "$1" = print-compile-flags ]; then
     printf '%s\0' "${debug[@]}" "${flags[@]}" "$optimization" "${defines[@]}"
 elif [ "$1" = print-sanitizer-flags ]; then

@@ -222,6 +222,7 @@ fi
 ./build/compiler test-ir-simd
 ./build/compiler test-ir-lowering
 ./build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c
+./build/compiler test-ir-source --dataflow-self-test
 ./build/compiler test-ir-parse
 ./build/compiler test-ir-reduce
 ./build/compiler test-ir-metamorphic --seed 731 --count 6
@@ -299,6 +300,15 @@ clang -std=c17 -O2 -Wall -Wextra -Werror tests/peak-rss.c -o build/test-peak-rss
 ./build/compiler test-checker-driver --executable ./build/compiler
 == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
 ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
+== Test Make dependency-rule serialization
+# #805's serializer, standalone until the driver calls it: the x86-64 build's scalar classifier and the
+# native build's AVX-512BW path where the host supplies it, each over generated names against an
+# independent quoting implementation, guarded tails, malformed records and capacities, and --oracle's
+# -MT/-MQ target rules against the installed gcc and clang's -MM output.
+clang -std=c17 -O2 -march=x86-64 -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-scalar
+./build/test-dependency-rule-scalar --oracle
+clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-native
+./build/test-dependency-rule-native --oracle
 == Test DWARF source lines and late address finalization
 # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
 ./build/compiler test-debug --cross-check
@@ -358,9 +368,9 @@ unset CPATH C_INCLUDE_PATH
 export SOURCE_DATE_EPOCH=1792454400
 corpus=$BUSTER_CORPUS
 musl="$corpus/libc/musl"
-./build/compiler test-ir-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
-./build/compiler test-ir-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
-./build/compiler test-ir-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+./build/compiler test-ir-source --dominators $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-ir-source --dominators --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+./build/compiler test-ir-source --dominators --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
@@ -504,6 +514,7 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
 == Test dominators, frontiers and natural loops
 ./build/compiler test-dominators
+./build/compiler test-ir-source --dominators tests/ir-source/dominators.c
 == Test scoped name-resolution kernels
 ./build/compiler test-bindings
 == Test verified Tier 1 optimization passes

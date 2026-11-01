@@ -4771,6 +4771,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // of section.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
+#include "c_check_tier1_driver_test.c"
 
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
@@ -5746,6 +5747,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_array_alignment(&test, clang, executable, directory);
+            check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
             check_test_driver_float_classify(&test, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);

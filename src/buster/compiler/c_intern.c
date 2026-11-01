@@ -463,7 +463,14 @@ struct InternTable
     Arena record_arena;
     // Ids in use, counting id 0.
     uint32_t count;
+    // Immutable admission ceiling shared by every consumer of these ids; zero is the original hard ceiling.
+    uint32_t id_limit;
 };
+
+static uint32_t intern_id_limit(const InternTable* table)
+{
+    return table->id_limit != 0 ? table->id_limit : BUSTER_INTERN_MAX_IDS;
+}
 
 // The hash's constants: wyhash's (wyhash is in the public domain).
 #define BUSTER_INTERN_SECRET0 0xa0761d6478bd642full
@@ -768,7 +775,7 @@ static bool intern_grow(InternTable* table)
 // if the table is full.
 BUSTER_INLINE uint8_t* intern_reserve_record(InternTable* table, uint32_t length)
 {
-    bool fits = table->count < BUSTER_INTERN_MAX_IDS;
+    bool fits = table->count < intern_id_limit(table);
     if (fits && table->count >= table->capacity)
     {
         fits = intern_grow(table);
@@ -934,7 +941,7 @@ static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* byte
 BUSTER_INLINE IdentId intern_add_in_bucket(InternTable* table, __m512i spelling, uint32_t length, uint8_t* bucket, uint32_t empties)
 {
     IdentId result = 0;
-    uint8_t* record = table->count < table->capacity ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
+    uint8_t* record = table->count < intern_id_limit(table) && table->count < table->capacity ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
     if (record != 0)
     {
         result = table->count;
@@ -995,7 +1002,9 @@ static __attribute__((unused)) bool intern_initialize_in(InternTable* table, uin
 {
     const Arena arena = table->record_arena;
     *table = (InternTable){ .record_arena = arena };
-    bool result = intern_lay_out(table, &table->record_arena, buckets);
+    const uint64_t limit = arena_reservation_limit() / sizeof(InternSpan);
+    table->id_limit = (uint32_t)(limit < BUSTER_INTERN_MAX_IDS ? limit : BUSTER_INTERN_MAX_IDS) & ~63u;
+    bool result = table->id_limit >= C_NAME_COUNT && intern_lay_out(table, &table->record_arena, buckets);
     table->records = result ? table->record_arena.base + table->record_arena.length : 0;
     // Id 0's spelling: an empty one, so that no other spelling is at offset 0.
     uint8_t* none = result ? arena_push(&table->record_arena, 1, 1) : 0;
@@ -1126,7 +1135,7 @@ static void intern_place_shared(InternTable* table, __m128i slot, uint64_t hash)
 static __attribute__((unused)) bool intern_bulk_begin(InternTable* table, uint32_t count, uint64_t bytes, InternBulk* bulk)
 {
     *bulk = (InternBulk){ .first = table->count, .count = count, .bytes = bytes };
-    bool result = (uint64_t)table->count + count <= BUSTER_INTERN_MAX_IDS;
+    bool result = (uint64_t)table->count + count <= intern_id_limit(table);
     uint64_t buckets = table->bucket_mask + 1;
     uint32_t capacity = table->capacity;
     while (result && (uint64_t)table->count + count > capacity)

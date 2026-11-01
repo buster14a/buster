@@ -230,9 +230,16 @@ static bool check_binding_benchmark_run(CheckBindingBenchmark* benchmark, CheckI
     return valid && !input->resource;
 }
 
-static void check_binding_benchmark_poison(Arena* arena, uint64_t from, uint64_t probe)
+// The poisoned range lies past the arena's length, in storage a reservation leaves inaccessible until it is committed
+// (#802), so it is committed first. Whether it could be.
+static bool check_binding_benchmark_poison(Arena* arena, uint64_t from, uint64_t probe)
 {
-    memset(arena->base + from, BUSTER_CHECK_BINDING_BENCHMARK_POISON, probe - from);
+    const bool committed = arena_commit(arena, probe);
+    if (committed)
+    {
+        memset(arena->base + from, BUSTER_CHECK_BINDING_BENCHMARK_POISON, probe - from);
+    }
+    return committed;
 }
 
 // How far past `from`, below `probe`, the bytes were written since check_binding_benchmark_poison.
@@ -262,7 +269,7 @@ static bool check_binding_benchmark_peaks(CheckBindingBenchmark* benchmark, Chec
         valid = probe <= benchmark->output.capacity && probe <= benchmark->scratch.capacity;
         for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            check_binding_benchmark_poison(arenas[i], 0, probe);
+            valid = check_binding_benchmark_poison(arenas[i], 0, probe);
         }
         CheckInput input;
         uint64_t nanoseconds = 0;
@@ -564,14 +571,15 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
                 benchmark.output.length,
                 benchmark.scratch.length,
             };
+            bool poisoned = true;
             if (pass == 0)
             {
                 // The warm-up sample finds the piece's footprint: what it writes past each arena's length.
-                check_binding_benchmark_poison(&benchmark.output, from[0], from[0] + bound);
-                check_binding_benchmark_poison(&benchmark.scratch, from[1], from[1] + bound);
+                poisoned = check_binding_benchmark_poison(&benchmark.output, from[0], from[0] + bound) &&
+                           check_binding_benchmark_poison(&benchmark.scratch, from[1], from[1] + bound);
             }
             const uint64_t begin = check_source_time();
-            valid = replayed &&
+            valid = poisoned && replayed &&
                     (piece == ISOLATED_READER_STACKS ? c_bindings_scalar(events, results, &benchmark.scratch) :
                      piece == ISOLATED_READER_BATCH ? c_bindings_batch(events, results, &benchmark.scratch, &ignored) :
                      piece == ISOLATED_PARSER_REPLAY ? parse_bindings_build(&parsed, &view, &benchmark.output) :

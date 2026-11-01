@@ -131,6 +131,7 @@ static void check_test_data_source_capacities(CheckTest* test, const CheckInput*
             };
             for (uint32_t i = 0; i < 3; i += 1)
             {
+                assert(arena_commit(&arenas[i], arenas[i].capacity));
                 memset(arenas[i].base, 0xa5, (size_t)arenas[i].capacity);
                 arenas[i].length = 17;
             }

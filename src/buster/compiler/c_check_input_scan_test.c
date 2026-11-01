@@ -153,6 +153,7 @@ static void check_test_output_none(CheckTest* test)
     static const uint32_t counts[] = { 0, 1, 257 };
     for (uint32_t at = 0; owned.base != NULL && at < BUSTER_ARRAY_LENGTH(counts); at += 1)
     {
+        assert(arena_commit(&owned, owned.capacity));
         memset(owned.base, 0x63, owned.capacity);
         owned.length = 37;
         Arena borrowed = owned;
