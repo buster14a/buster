@@ -587,15 +587,15 @@ static uint16_t check_action_half_round(CheckHalf format, bool negative, unsigne
     return (uint16_t)bits;
 }
 
-// A floating value's bits in a format: its sign with the format's quiet NaN for a NaN (as check_data_float_bytes gives a
-// float's: CheckValue keeps no payload), its infinity, or its value rounded.
 // NaNs (#148). The checker's long double holds a NaN of float, double, long double and the half-precision formats as the
 // x87's own loads place one, and as __builtin_nan, __builtin_nans and the arithmetic leave it: the sign, the all-ones
 // exponent, the integer bit and the format's fraction at the significand's top (a float's 23 bits from bit 62, a
 // double's 52, a _Float16's 10, a long double's 63), so that bit 62 is every format's quiet bit and a signaling NaN keeps
 // its bits until a conversion to another format quiets it (check_action_convert_nan). A NaN's bits in a format of
 // `fraction` fraction bits and `exponent` exponent bits are its fraction's top bits; a fraction that narrowing would
-// empty is quiet, as APFloat's conversion leaves a NaN.
+// empty is quiet, as APFloat's conversion leaves a NaN. For the formats of 64 bits or fewer (float, double, _Float16 and
+// __bf16: fraction + exponent below 64); a long double's NaN is its significand as it is, and a __float128's
+// check_action_quad_bits'.
 static uint64_t check_action_nan_bits(long double value, uint32_t fraction, uint32_t exponent)
 {
     uint64_t significand = 0;
@@ -648,6 +648,8 @@ static long double check_action_convert_nan(TypeId from, TypeId to, long double 
     return result;
 }
 
+// A floating value's bits in a half-precision format: its sign with its NaN's bits (check_action_nan_bits, its payload
+// kept) for a NaN, its infinity, or its value rounded.
 static uint16_t check_action_half_bits(CheckHalf format, long double value)
 {
     const bool negative = signbit(value) != 0;

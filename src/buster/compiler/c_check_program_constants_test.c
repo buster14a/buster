@@ -42,7 +42,8 @@ static __attribute__((noinline)) void check_test_float_constant_sources(CheckTes
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
     char directory[] = "/tmp/buster-checker-float-constants-XXXXXX";
-    bool ready = mkdtemp(directory) != 0;
+    const bool made = mkdtemp(directory) != 0;
+    bool ready = made;
     char paths[FILE_COUNT][160];
     char* pointers[FILE_COUNT];
     ParseTestClang outcomes[FILE_COUNT];
@@ -62,12 +63,12 @@ static __attribute__((noinline)) void check_test_float_constant_sources(CheckTes
         check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, description);
         check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
     }
-    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; made && i < FILE_COUNT; i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
         unlink(paths[i]);
     }
-    if (directory[0] != 0)
+    if (made)
     {
         rmdir(directory);
     }
