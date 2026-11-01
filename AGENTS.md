@@ -109,6 +109,40 @@ the shared host lock. These are operational resources, not canonical repository 
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
 
+## Attribution for agent-authored GitHub activity
+
+Every agent session that writes substantive text to GitHub must identify **its
+own session** and **the model used** in the GitHub item it posts. This includes
+opening an issue or pull request; posting issue or PR comments, reviews,
+inline review comments, or replies; and editing an existing issue or PR body.
+Each new comment or review needs its **own** attribution, even when the issue
+or PR already has one. Do not rely on a branch, commit message, prior comment,
+or local record to identify the posting session.
+
+Append this footer to every agent-authored GitHub body, with real values:
+
+```text
+---
+Agent session: [private session](https://provider.example/private/session)
+Model: Provider / exact model identifier
+```
+
+The session URL must be a **stable, authentication-gated permalink** to the
+actual agent session, not a public transcript or an `anyone with the link`
+share link. The URL text itself will be visible to readers of the public
+GitHub issue or PR; privacy must come from the provider's access controls.
+Do not include credentials, signed access URLs, API tokens, private logs,
+or conversation contents. Record the exact provider and model name/version
+the session reports; do not invent model details or a URL. If the agent
+environment does not expose a suitable private session link, obtain one
+before posting rather than silently omitting attribution or publishing an
+unsafe link.
+
+For posts involving several agent sessions, attribute each session and
+its model when it contributed to that post. After a handoff, new comments,
+reviews and edits must identify the session actually making them. This
+provenance is separate from human authorship and DCO sign-off.
+
 ## Issue ownership
 
 Raw measurement evidence lives in
