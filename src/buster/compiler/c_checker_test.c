@@ -29,8 +29,9 @@ struct CheckTest
 // command as N commands. A section deals one unit, and check_test_programs (79 s of the command's 171 s here) one per
 // run of up to 12 consecutive programs: dealing each of its 296 on its own added 2.2 s to the checker unit's compile, the
 // build's longest, and 27 runs add none. The sections that share the run's type table or graph arenas, whose state
-// each leaves to the next, aren't dealt: part 1 runs them all, in their order. Without --part, the one part takes every
-// unit.
+// each leaves to the next, aren't dealt: part 1 runs them all, in their order. A part's random numbers
+// (CheckTest.random) start from the run's seed, so a section that draws them after others draws other numbers in a
+// part than in the whole run. Without --part, the one part takes every unit.
 typedef struct CheckTestPart CheckTestPart;
 struct CheckTestPart
 {
@@ -2142,12 +2143,6 @@ struct CheckSourceFixture
     const TypeCapacity* capacity;
     // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
     double* check_seconds;
-    // The text clang checks in place of `source`, with `source`'s outcome, for a fixture whose own text costs clang
-    // minutes and gigabytes where this checker's cost doesn't grow (null for `source` itself). Clang's constant
-    // evaluator materializes a designated array's elements up to the designator: 134 million values for the sparse
-    // array fixture, 67 s and 48 s of it the kernel's page faults, alone on a 4-CPU VM, where `[65536]` takes 42 ms.
-    // Only the tables whose writers read it set it (check_test_const_sources).
-    const char* oracle;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)

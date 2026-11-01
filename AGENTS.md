@@ -2007,8 +2007,11 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
   (`--part K/N`): test-checker-driver as 4 (the list's longest, 197 s on a hosted
   runner and 48 s on the 9700X, whose start late in the list ended the step) and
   test-checker as 4 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
-  busy). c-testsuite's self-test, about 7 s of waiting out its timeouts, is a
-  command of its own on one CPU, apart from the subset's four.
+  busy). The parts together run each check once, but each part's random
+  numbers start from the run's seed, so a check that draws them after others
+  draws other samples than in the whole command. c-testsuite's self-test,
+  about 7 s of waiting out its timeouts, is a command of its own on one CPU,
+  apart from the subset's four.
 
 A heading declares the CPUs its command keeps busy for much of its run, which
 its CPU time over its time shows (the report gives both). Brief phases on more

@@ -23,7 +23,8 @@ struct CheckDriverFixture
 // runner, 48 s on the 9700X). A check deals one unit, or, where it is a long sweep (check_test_driver_recovery,
 // check_test_driver_error_limits), one per case. Every part goes through the same units in the same order, whatever
 // the others' outcomes, since each unit is dealt before anything it runs decides the next: so the parts together run
-// each unit once. Without --part, the one part takes every unit.
+// each unit once. A part's random numbers (CheckTest.random) start from the run's seed, so a check that draws them
+// after others draws other numbers in a part than in the whole run. Without --part, the one part takes every unit.
 typedef struct CheckDriverPart CheckDriverPart;
 struct CheckDriverPart
 {
@@ -5220,8 +5221,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below and
-    // the sections that take `lazy`. Every other check runs the same commands either way, so the eager command's run of
-    // them is the lazy one's too; repeating them took 90% of the lazy command's time.
+    // the six sections that take `lazy` (check_test_driver_named_ucns, _loop_hints, _gnu_scopes, _section_pragmas,
+    // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
+    // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
+    // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
     if (!lazy && check_test_driver_takes())
     {
         check_test_driver_warning_order(&test);
