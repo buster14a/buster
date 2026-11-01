@@ -381,8 +381,9 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
     // differ between the program and its oracle.
     check_test_program_source(test,
         "static int at(const char*p,const char*a){return p?(int)(p-a):-1;}"
+        "static int sign(int v){return (v>0)-(v<0);}"
         "int tested(int n){char a[32],b[32];int k=n&7;__builtin_strcpy(a,\"hello world\");a[k]=(char)('A'+k);__builtin_strcpy(b,a);b[(k+3)&7]='z';"
-        "int r=__builtin_strcmp(a,b)*3+__builtin_strncmp(a,b,(unsigned)k)*5;r+=at(__builtin_strchr(a,'o'),a)+at(__builtin_strrchr(a,'o'),a)*7;"
+        "int r=sign(__builtin_strcmp(a,b))*3+sign(__builtin_strncmp(a,b,(unsigned)k))*5;r+=at(__builtin_strchr(a,'o'),a)+at(__builtin_strrchr(a,'o'),a)*7;"
         "r+=at(__builtin_strstr(a,\"wor\"),a)+(int)__builtin_strspn(a,\"hel\")+(int)__builtin_strcspn(a,\" \")*11;r+=at(__builtin_strpbrk(a,\"wd\"),a)*13;"
         "char c[64];__builtin_strcpy(c,a);__builtin_strcat(c,\"!\");__builtin_strncat(c,b,3);r+=(int)__builtin_strlen(c)*17;"
         "r+=__builtin_bcmp(a,b,12)!=0;r+=at(__builtin_memchr(a,'w',12),a);char d[32];r+=at(__builtin_mempcpy(d,a,5),d);__builtin_bzero(d,4);"
@@ -391,13 +392,15 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "char*ndup=__builtin_strndup(a,3);r+=(int)__builtin_strlen(ndup)*19;__builtin_free(ndup);r+=__builtin_strcasecmp(\"HeLLo\",a)<0;"
         "r+=__builtin_strncasecmp(\"HELLO\",a,3)==0;r+=at(__builtin_index(a,'l'),a)*23+at(__builtin_rindex(a,'l'),a)*29;return r;}",
         "library-strings", clang);
-    // The wide characters stay positive: glibc's x86 wcscmp variants disagree on whether a negative wchar_t is less
-    // than a positive one, and which variant runs depends on the strings' addresses, so a negative one's comparison
-    // changed sign from run to run (the 9700X job's n=-3 with ASLR).
+    // The wide characters stay positive, and the comparisons' signs alone are used: glibc's x86 wcscmp variants
+    // disagree on whether a negative wchar_t is less than a positive one, and which variant runs depends on the
+    // strings' addresses, so a negative one's comparison changed sign from run to run (the 9700X job's n=-3 with
+    // ASLR). Their magnitudes differ too, by one or more (the hosted runner's n=-3), so only the sign is a value.
     check_test_program_source(test,
         "typedef int wchar;static int at(const wchar*p,const wchar*a){return p?(int)(p-a):-1;}"
+        "static int sign(int v){return (v>0)-(v<0);}"
         "int tested(int n){wchar a[16]={'w','i','d','e',0},b[16]={'w','i','d','f',0};a[n&3]=(wchar)((n+4)*0x10001);"
-        "int r=(int)__builtin_wcslen(a)+__builtin_wcscmp(a,b)*3+__builtin_wcsncmp(a,b,(unsigned)(n&3))*5+__builtin_wmemcmp(a,b,4)*7;"
+        "int r=(int)__builtin_wcslen(a)+sign(__builtin_wcscmp(a,b))*3+sign(__builtin_wcsncmp(a,b,(unsigned)(n&3)))*5+sign(__builtin_wmemcmp(a,b,4))*7;"
         "r+=at(__builtin_wcschr(a,'d'),a)*11+at(__builtin_wmemchr(a,'e',4),a)*13;wchar d[16];"
         "r+=at(__builtin_wmemcpy(d,a,5),d);r+=d[3];__builtin_wmemmove(d+1,d,4);return r+d[1]*17+d[4];}",
         "library-wide", clang);

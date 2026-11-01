@@ -402,8 +402,8 @@ static void check_test_action_histories(CheckTest* test, TypeTable* table)
                 CheckStream stream;
                 const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
                 char message[192];
-                snprintf(message, sizeof(message), "source cutoffs path %u checked %u reports %u early %u late %u size %u", path, checked, stream.report_count, checked ? stream.diagnostics[early] : 0, checked ? stream.diagnostics[late] : 0, checked ? (uint32_t)stream.values[late].integer : 0);
-                check_test_expect(test, checked && stream.report_count == 1 && stream.diagnostics[early] == CHECK_DIAG_INCOMPLETE && stream.diagnostics[late] == CHECK_DIAG_NONE && stream.values[late].integer == 12, message);
+                snprintf(message, sizeof(message), "source cutoffs path %u checked %u reports %u early %u late %u size %u", path, checked, stream.report_count, checked ? stream.diagnostics[early] : 0, checked ? stream.diagnostics[late] : 0, checked ? (uint32_t)check_stream_value(&stream, late).integer : 0);
+                check_test_expect(test, checked && stream.report_count == 1 && stream.diagnostics[early] == CHECK_DIAG_INCOMPLETE && stream.diagnostics[late] == CHECK_DIAG_NONE && check_stream_value(&stream, late).integer == 12, message);
                 arena_pop_to(&output, 0);
             }
         }
@@ -460,7 +460,7 @@ static void check_test_gnu_constant_contexts(CheckTest* test, TypeTable* table)
                     CheckStream stream;
                     const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
                     const bool accept = mode != 0 && form < 5;
-                    check_test_expect(test, checked && (stream.report_count == 0) == accept && (!accept || (stream.values[root].flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_SIDE_EFFECT)) == 0), "GNU folded acceptance neither inflates strict ICE nor suppresses evaluated effects/type errors/faults");
+                    check_test_expect(test, checked && (stream.report_count == 0) == accept && (!accept || (check_stream_flags(&stream, root) & (BUSTER_CHECK_ICE | BUSTER_CHECK_SIDE_EFFECT)) == 0), "GNU folded acceptance neither inflates strict ICE nor suppresses evaluated effects/type errors/faults");
                     arena_pop_to(&output, 0);
                 }
             }

@@ -5771,6 +5771,8 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_x87_test.c"
 #include "buster/compiler/tier0_int128_test.c"
 #include "buster/compiler/tier0_vector_test.c"
+// The masks' check (#179), which main.c includes after the typed interpreter it runs (tier0_mask_test.c).
+static void tier0_test_masks(Tier0TestTally* tally, uint64_t seed, uint32_t count, uint64_t* entries);
 #include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
@@ -6191,6 +6193,15 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_vectors(&tally, &tables, seed, count, &too_deep, &entries);
                 tier0_test_report("vectors", tally);
                 printf("    %" PRIu64 " entries, %u programs past the depths\n", entries, too_deep);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                uint64_t entries = 0;
+                tier0_test_masks(&tally, seed, count, &entries);
+                tier0_test_report("masks", tally);
+                printf("    %" PRIu64 " entries\n", entries);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

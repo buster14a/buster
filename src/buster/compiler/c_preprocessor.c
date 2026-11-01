@@ -359,6 +359,11 @@ struct PPOptions
     bool defer_history;
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
+    // Give every chunk's spellings by the vector printer's general loop, token by token, as before pp_print_spellings
+    // (#649's control, benchmark-preprocessor --spelling-cost: the printed bytes are the same, and with line markers its
+    // time the printer's before it; with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon,
+    // docs/c-preprocessor.md).
+    bool print_per_token;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
     uint32_t location_limit;
     // The bytes of the windows a large file is lexed and refined in (pp_prepare_windows): 0 for BUSTER_PP_WINDOW_BYTES.
@@ -19498,13 +19503,126 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
     return ordinary ? total : 0;
 }
 
+// The most ranges pp_print_spellings places a chunk's tokens in. On an AVX-512 Xeon, chunks of 64 tokens in 8 ranges took
+// 180 ns (the general loop's lookups 220 to 250), in 16 ranges 330 to 360 ns (245 to 265), and in 64 1,200 to 1,320 ns
+// (270 to 290); no chunk of main.c's or sqlite3.c's has more than 7.
+#define BUSTER_PP_PRINT_RANGES 8
+
+// pp_print_vector's step 1 for a chunk of `valid` tokens (of the columns at `values` and `locations`, from the
+// chunk's first) of which none is a pragma line's identifier spelled as written, an integer, an #embed's data or
+// another internal kind, without a branch on each token's kind (#649): the identifiers' spellings from the intern
+// table, a loop over their bits; and every other token's bytes at its location, which is its spelling unless a line
+// splice or a trigraph is in it (pp_print_unspliced, or the batch's copies, check that), its length its value less its
+// location. Their ranges are found a range at a time: the printer's directory gives the range of the first token not
+// placed yet, and compares of the chunk's locations with that range's bounds place every token inside it; a chunk
+// holds 1.5 to 2 ranges on average (sqlite3.c, main.c), and at most 7 on those corpora. Each range costs compares of
+// all 64 locations, so a chunk past BUSTER_PP_PRINT_RANGES of them goes to the general loop, whose lookup per token
+// costs less from about 10 ranges up. Then each token's first and last bytes. Returns false, for the general loop to
+// give the chunk's spellings, when a token's location is in no range, the other tokens (identifiers take no range) are
+// in more ranges than that or a spelling is empty.
+static bool pp_print_spellings(const Preprocessor* pp, const uint32_t* directory, const uint32_t* values, const uint32_t* locations, uint64_t identifiers,
+                               uint64_t valid, const uint8_t* records, const InternSpan* spans, const uint8_t** spellings, uint32_t* lengths, uint8_t* firsts,
+                               uint8_t* lasts)
+{
+    const uint64_t others = valid & ~identifiers;
+    // Each token's bytes less its location (its range's bytes less the range's base), 8 tokens a vector.
+    __m512i deltas[8];
+    for (uint32_t q = 0; q < 8; q += 1)
+    {
+        deltas[q] = _mm512_setzero_si512();
+    }
+    uint64_t pending = others;
+    bool result = true;
+    uint32_t looked = 0;
+    while (result && pending != 0)
+    {
+        const uint32_t range = looked < BUSTER_PP_PRINT_RANGES ? pp_directory_range(pp, directory, locations[__builtin_ctzll(pending)]) : BUSTER_PP_NONE;
+        looked += 1;
+        result = range != BUSTER_PP_NONE;
+        if (result)
+        {
+            const PPRange* record = &pp->ranges[range];
+            const __m512i base = _mm512_set1_epi32((int)record->base);
+            const __m512i extent = _mm512_set1_epi32((int)record->length);
+            uint64_t inside = 0;
+            for (uint32_t q = 0; q < 4; q += 1)
+            {
+                const __mmask16 lanes = (__mmask16)(pending >> (16 * q));
+                const __m512i location = _mm512_maskz_loadu_epi32(lanes, locations + 16 * q);
+                inside |= (uint64_t)_mm512_mask_cmplt_epu32_mask(lanes, _mm512_sub_epi32(location, base), extent) << (16 * q);
+            }
+            const __m512i delta = _mm512_set1_epi64((long long)((uintptr_t)record->bytes - record->base));
+            for (uint32_t q = 0; q < 8; q += 1)
+            {
+                deltas[q] = _mm512_mask_mov_epi64(deltas[q], (__mmask8)(inside >> (8 * q)), delta);
+            }
+            pending &= ~inside;
+        }
+    }
+    uint64_t empty = 0;
+    for (uint32_t q = 0; result && q < 4; q += 1)
+    {
+        const __mmask16 lanes = (__mmask16)(others >> (16 * q));
+        const __m512i length = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(lanes, values + 16 * q), _mm512_maskz_loadu_epi32(lanes, locations + 16 * q));
+        _mm512_mask_storeu_epi32(lengths + 16 * q, lanes, length);
+        empty |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(lanes, length, _mm512_setzero_si512()) << (16 * q);
+    }
+    for (uint32_t q = 0; result && q < 8; q += 1)
+    {
+        const __mmask8 lanes = (__mmask8)(others >> (8 * q));
+        const __m512i location = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, locations + 8 * q));
+        _mm512_mask_storeu_epi64((void*)(spellings + 8 * q), lanes, _mm512_add_epi64(deltas[q], location));
+    }
+    for (uint64_t bits = result ? identifiers & valid : 0; bits != 0; bits &= bits - 1)
+    {
+        const uint32_t k = (uint32_t)__builtin_ctzll(bits);
+        const InternSpan span = spans[values[k]];
+        spellings[k] = records + span.offset;
+        lengths[k] = span.length;
+        empty |= (uint64_t)(span.length == 0) << k;
+    }
+    result = result && empty == 0;
+    // The valid lanes are the chunk's first ones.
+    const uint32_t count = (uint32_t)__builtin_popcountll(valid);
+    for (uint32_t k = 0; result && k < count; k += 1)
+    {
+        firsts[k] = spellings[k][0];
+        lasts[k] = spellings[k][lengths[k] - 1];
+    }
+    return result;
+}
+
+// Whether no spelling of `others` among pp_print_spellings' may hold a line splice or, with `trigraphs`, a trigraph,
+// so that each is its bytes as written (pp_without_splices): the check of a chunk whose copies are step 3's. A splice
+// is a backslash, whitespace (every byte up to ' ' counts here) and a line break, so a backslash may start one only
+// when a blank follows it, or nothing in its 64 bytes (the masked load's zeros past the spelling count as blanks, and
+// so does a backslash in the last lane); a backslash before anything else, as in an escape sequence, may not.
+static bool pp_print_unspliced(const uint8_t* const* spellings, const uint32_t* lengths, uint64_t others, bool trigraphs)
+{
+    const __mmask64 questions = trigraphs ? ~0ull : 0;
+    uint64_t possible = 0;
+    for (uint64_t bits = others; bits != 0; bits &= bits - 1)
+    {
+        const uint32_t k = (uint32_t)__builtin_ctzll(bits);
+        for (uint32_t b = 0; b < lengths[k]; b += 64)
+        {
+            const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, lengths[k] - b < 64 ? lengths[k] - b : 64), spellings[k] + b);
+            const uint64_t blanks = _mm512_cmple_epu8_mask(bytes, _mm512_set1_epi8(' '));
+            possible |= (_mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\')) & ((blanks >> 1) | (1ull << 63))) |
+                        _mm512_mask_cmpeq_epi8_mask(questions, bytes, _mm512_set1_epi8('?'));
+        }
+    }
+    return possible == 0;
+}
+
 // Prints the output as pp_print_scalar does, byte for byte, 64 tokens at a time into one buffer that is written as it
-// fills. For each chunk: each token's spelling (an identifier's from the intern table, else its bytes in the location
-// space through the printer's directory, with masked 64-byte loads checking for the rare backslash), then the spaces
-// for all 64 at once: a token at the start of a line gets none, any other one if whitespace was before it or if its
-// first character would lex together with the last character of the token before (pp_separation_table, indexed by the
-// two characters' classes from vpermi2b lookups), and then the copies, one masked 64-byte store per token (more for a
-// longer spelling), with the line breaks and line markers between.
+// fills. For each chunk: each token's spelling (pp_print_spellings: an identifier's from the intern table, else its
+// bytes in the location space, found a range at a time; or the general loop's, token by token, for a chunk with a
+// pragma line, an integer, an #embed or a possible line splice), then the spaces for all 64 at once: a token at the
+// start of a line gets none, any other one if whitespace was before it or if its first character would lex together
+// with the last character of the token before (pp_separation_table, indexed by the two characters' classes from
+// vpermi2b lookups), and then the copies, one masked 64-byte store per token (more for a longer spelling), with the
+// line breaks and line markers between.
 static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
 {
 #if !BUSTER_HOST_VECTOR
@@ -19520,6 +19638,9 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     const uint8_t* records = pp->table->records;
     const InternSpan* spans = pp->table->spans;
     const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+    // With trigraphs, any '?' in a fast spelling sends its chunk to the general loop, as a possible line splice does.
+    const __mmask64 questions = trigraphs ? ~0ull : 0;
+    const bool per_token = pp->options.print_per_token;
     const __m512i hash_location = _mm512_set1_epi32((int)pp->hash_location);
     Scratch scratch = scratch_begin(0);
     const uint32_t* directory = pp_build_directory(pp, scratch.arena);
@@ -19583,123 +19704,162 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         const uint64_t written = pragma_lines & ~pragma_starts & ~((pragma_starts << 1) | pragma_name) & identifiers & valid;
         pragma_inside = (pragma_lines >> (available - 1)) & 1;
         pragma_name = pragma_starts >> 63;
-        // 1. Spellings: an identifier's from the intern table, any other token's bytes at its location. (A branch-free
-        // version, which looked up both and picked one, was 1-2% slower on the 9700X: the location lookups it adds for
-        // identifiers cost more than the branch's mispredictions.)
+        // 1. Spellings: an identifier's from the intern table, any other token's bytes at its location. Without a pragma
+        // line's identifiers, an integer or an #embed, pp_print_spellings gives them, with no branch on the kind (#649:
+        // the general loop's branch and directory lookup per token were 57-59% of -P's printing of sqlite3.c and main.c
+        // on an AVX-512 Xeon, docs/c-preprocessor.md). Its spellings are checked for line splices by the batch's copies,
+        // which load their bytes anyway, or else before step 3's copies (pp_print_unspliced); a chunk that may hold one
+        // goes through the general loop, token by token, which takes every case, and its spaces and copies are made
+        // again.
         const uint64_t spare_mark = scratch.arena->length;
-        for (uint32_t k = 0; result && k < available; k += 1)
-        {
-            const uint32_t i = c + k;
-            const uint8_t kind = out_kinds[i];
-            const uint32_t value = out_values[i];
-            const uint32_t location = out_locations[i];
-            const uint8_t* spelling = 0;
-            uint32_t length = 0;
-            if (BUSTER_UNLIKELY((written >> k) & 1))
-            {
-                length = pp_written_spelling(pp, value, location, scratch.arena, &spelling);
-                result = spelling != 0;
-                spelling = result ? spelling : (const uint8_t*)"";
-                length = result ? length : 0;
-            }
-            else if (kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT))
-            {
-                spelling = records + spans[value].offset;
-                length = spans[value].length;
-            }
-            else if (kind != BUSTER_PP_KIND_PRAGMA_END && kind != BUSTER_PP_KIND_INTEGER && kind != BUSTER_PP_KIND_EMBED)
-            {
-                const uint32_t range = pp_directory_range(pp, directory, location);
-                spelling = range != BUSTER_PP_NONE ? pp->ranges[range].bytes + (location - pp->ranges[range].base) : (const uint8_t*)"";
-                length = range != BUSTER_PP_NONE ? value - location : 0;
-                const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, length < 64 ? length : 64), spelling);
-                bool special = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\')) != 0 || (trigraphs && _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('?')) != 0);
-                for (uint32_t b = 64; !special && b < length; b += 1)
-                {
-                    special = spelling[b] == '\\' || (trigraphs && spelling[b] == '?');
-                }
-                if (special)
-                {
-                    uint8_t* spare = arena_push(scratch.arena, (uint64_t)length + 1, 1);
-                    result = spare != 0;
-                    const uint32_t raw = length;
-                    length = result ? pp_without_splices(pp, kind, spelling, length, spare, &spelling) : 0;
-                    length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
-                }
-            }
-            else if (kind == BUSTER_PP_KIND_INTEGER)
-            {
-                uint8_t* spare = arena_push(scratch.arena, 24, 1);
-                result = spare != 0;
-                length = result ? pp_spelling(pp, kind, value, location, spare, &spelling) : 0;
-            }
-            spellings[k] = spelling;
-            lengths[k] = length;
-            firsts[k] = length != 0 ? spelling[0] : 0;
-            lasts[k] = length != 0 ? spelling[length - 1] : 0;
-            if (BUSTER_UNLIKELY(kind == BUSTER_PP_KIND_EMBED))
-            {
-                // Its text goes out in pieces (pp_print_embed); its ends' characters give the spaces around it.
-                spellings[k] = (const uint8_t*)"";
-                lengths[k] = 1;
-                pp_embed_ends(pp, value, &firsts[k], &lasts[k]);
-            }
-        }
-        // 2. Spaces, for the 64 tokens at once: line starts (a token that starts a line, or follows a pragma's end, or
-        // is the output's first), whitespace, and the separation table on the class of the last character before and
-        // of the first character after.
-        const __m512i flags = _mm512_maskz_loadu_epi8(valid, out_flags + c);
-        const __m512i first_bytes = _mm512_maskz_loadu_epi8(valid, firsts);
-        const __m512i last_bytes = _mm512_maskz_loadu_epi8(valid, lasts);
-        const uint64_t starts = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_START_OF_LINE));
-        const uint64_t spaces = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_SPACE));
-        const __m512i after = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(after_low, first_bytes, after_high), _mm512_movepi8_mask(first_bytes),
-                                                   _mm512_set1_epi8(BUSTER_PP_AFTER_WORD));
-        __m512i before = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(before_low, last_bytes, before_high), _mm512_movepi8_mask(last_bytes),
-                                              _mm512_set1_epi8(BUSTER_PP_BEFORE_WORD));
-        // An #embed's text ends in a number.
-        const uint64_t numbers =
-            _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
-        before = _mm512_mask_mov_epi8(before, numbers, _mm512_set1_epi8(BUSTER_PP_BEFORE_NUMBER));
-        // Each token's before-class is its previous token's: the classes move up a lane, the chunk's first taking the
-        // class of the token before the chunk.
-        const uint8_t carried = previous_kind == C_TOKEN_NUMERIC_CONSTANT || previous_kind == BUSTER_PP_KIND_EMBED ? BUSTER_PP_BEFORE_NUMBER
-                                : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
-                                : dollar_punctuation && previous_last == '$' ? 0 : pp_before_classes[previous_last];
-        before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
-        const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
-        const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
-        const uint64_t line_starts = starts | (pragma_ends << 1) | (uint64_t)force_line | (uint64_t)(c == 0 && line_start);
-        const uint64_t spaced = (spaces | joins) & ~line_starts & valid;
+        const uint64_t internal = _mm512_mask_cmpge_epu8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
+        bool general = per_token || (written | internal) != 0 ||
+                       !pp_print_spellings(pp, directory, out_values + c, out_locations + c, identifiers, valid, records, spans, spellings, lengths, firsts, lasts);
+        bool settled = false;
+        uint64_t line_starts = 0;
+        uint64_t spaced = 0;
+        uint64_t batch_breaks = 0;
+        uint32_t batch_bytes = 0;
+        uint16_t offsets[64];
+        const uint64_t embeds = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
         // With markers, the unknown tokens, whose line breaks the printer's line counts (pp_print_token_lines).
         const uint64_t unknowns = markers ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) : 0;
-        // -P's common batch has no marker, pragma end or streamed embed. Its gaps are each at most one byte, and
-        // nonempty short spellings fit one bounded load/store. Prefix offsets let all copy addresses be independent.
-        const uint64_t batch_breaks = (line_starts & valid) & ~(uint64_t)line_start;
-        const uint64_t embeds = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
-        uint16_t offsets[64];
-        const uint32_t batch_bytes = result && !markers && pragma_ends == 0 && embeds == 0 ? pp_print_offsets(lengths, available, batch_breaks | spaced, offsets) : 0;
-        if (batch_bytes != 0)
+        // At most twice: with pp_print_spellings' spellings, then with the general loop's if those may hold a splice.
+        while (result && !settled)
         {
-            if (used + batch_bytes > capacity)
+            for (uint32_t k = 0; general && result && k < available; k += 1)
             {
-                result = fwrite(buffer, 1, used, stream) == used;
-                used = 0;
+                const uint32_t i = c + k;
+                const uint8_t kind = out_kinds[i];
+                const uint32_t value = out_values[i];
+                const uint32_t location = out_locations[i];
+                const uint8_t* spelling = 0;
+                uint32_t length = 0;
+                if (BUSTER_UNLIKELY((written >> k) & 1))
+                {
+                    length = pp_written_spelling(pp, value, location, scratch.arena, &spelling);
+                    result = spelling != 0;
+                    spelling = result ? spelling : (const uint8_t*)"";
+                    length = result ? length : 0;
+                }
+                else if (kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT))
+                {
+                    spelling = records + spans[value].offset;
+                    length = spans[value].length;
+                }
+                else if (kind != BUSTER_PP_KIND_PRAGMA_END && kind != BUSTER_PP_KIND_INTEGER && kind != BUSTER_PP_KIND_EMBED)
+                {
+                    const uint32_t range = pp_directory_range(pp, directory, location);
+                    spelling = range != BUSTER_PP_NONE ? pp->ranges[range].bytes + (location - pp->ranges[range].base) : (const uint8_t*)"";
+                    length = range != BUSTER_PP_NONE ? value - location : 0;
+                    const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, length < 64 ? length : 64), spelling);
+                    bool special = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\')) != 0 || (trigraphs && _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('?')) != 0);
+                    for (uint32_t b = 64; !special && b < length; b += 1)
+                    {
+                        special = spelling[b] == '\\' || (trigraphs && spelling[b] == '?');
+                    }
+                    if (special)
+                    {
+                        uint8_t* spare = arena_push(scratch.arena, (uint64_t)length + 1, 1);
+                        result = spare != 0;
+                        const uint32_t raw = length;
+                        length = result ? pp_without_splices(pp, kind, spelling, length, spare, &spelling) : 0;
+                        length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
+                    }
+                }
+                else if (kind == BUSTER_PP_KIND_INTEGER)
+                {
+                    uint8_t* spare = arena_push(scratch.arena, 24, 1);
+                    result = spare != 0;
+                    length = result ? pp_spelling(pp, kind, value, location, spare, &spelling) : 0;
+                }
+                spellings[k] = spelling;
+                lengths[k] = length;
+                firsts[k] = length != 0 ? spelling[0] : 0;
+                lasts[k] = length != 0 ? spelling[length - 1] : 0;
+                if (BUSTER_UNLIKELY(kind == BUSTER_PP_KIND_EMBED))
+                {
+                    // Its text goes out in pieces (pp_print_embed); its ends' characters give the spaces around it.
+                    spellings[k] = (const uint8_t*)"";
+                    lengths[k] = 1;
+                    pp_embed_ends(pp, value, &firsts[k], &lasts[k]);
+                }
             }
-            for (uint32_t k = 0; result && k < available; k += 1)
+            // 2. Spaces, for the 64 tokens at once: line starts (a token that starts a line, or follows a pragma's end, or
+            // is the output's first), whitespace, and the separation table on the class of the last character before and
+            // of the first character after.
+            const __m512i flags = _mm512_maskz_loadu_epi8(valid, out_flags + c);
+            const __m512i first_bytes = _mm512_maskz_loadu_epi8(valid, firsts);
+            const __m512i last_bytes = _mm512_maskz_loadu_epi8(valid, lasts);
+            const uint64_t starts = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_START_OF_LINE));
+            const uint64_t spaces = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_SPACE));
+            const __m512i after = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(after_low, first_bytes, after_high), _mm512_movepi8_mask(first_bytes),
+                                                       _mm512_set1_epi8(BUSTER_PP_AFTER_WORD));
+            __m512i before = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(before_low, last_bytes, before_high), _mm512_movepi8_mask(last_bytes),
+                                                  _mm512_set1_epi8(BUSTER_PP_BEFORE_WORD));
+            // An #embed's text ends in a number.
+            const uint64_t numbers =
+                _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
+            before = _mm512_mask_mov_epi8(before, numbers, _mm512_set1_epi8(BUSTER_PP_BEFORE_NUMBER));
+            // Each token's before-class is its previous token's: the classes move up a lane, the chunk's first taking the
+            // class of the token before the chunk.
+            const uint8_t carried = previous_kind == C_TOKEN_NUMERIC_CONSTANT || previous_kind == BUSTER_PP_KIND_EMBED ? BUSTER_PP_BEFORE_NUMBER
+                                    : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
+                                    : dollar_punctuation && previous_last == '$' ? 0 : pp_before_classes[previous_last];
+            before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
+            const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
+            const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
+            line_starts = starts | (pragma_ends << 1) | (uint64_t)force_line | (uint64_t)(c == 0 && line_start);
+            spaced = (spaces | joins) & ~line_starts & valid;
+            // -P's common batch has no marker, pragma end or streamed embed. Its gaps are each at most one byte, and
+            // nonempty short spellings fit one bounded load/store. Prefix offsets let all copy addresses be independent.
+            batch_breaks = (line_starts & valid) & ~(uint64_t)line_start;
+            batch_bytes = result && !markers && pragma_ends == 0 && embeds == 0 ? pp_print_offsets(lengths, available, batch_breaks | spaced, offsets) : 0;
+            settled = true;
+            if (batch_bytes != 0)
             {
-                const uint32_t newline = (uint32_t)((batch_breaks >> k) & 1);
-                const uint32_t gap = (uint32_t)(((batch_breaks | spaced) >> k) & 1);
-                uint8_t* destination = buffer + used + offsets[k];
-                destination[0] = (uint8_t)(' ' + newline * ('\n' - ' '));
-                const __mmask64 bytes = _bzhi_u64(~0ull, lengths[k]);
-                _mm512_mask_storeu_epi8(destination + gap, bytes, _mm512_maskz_loadu_epi8(bytes, spellings[k]));
+                if (used + batch_bytes > capacity)
+                {
+                    result = fwrite(buffer, 1, used, stream) == used;
+                    used = 0;
+                }
+                // pp_print_unspliced's check, on the bytes each copy loads: a backslash followed by a blank (the zero
+                // past a spelling of less than 64 bytes counts as one) or in the last lane may start a line splice, and
+                // with trigraphs so may any '?'. An identifier's interned spelling has none, and a lane checked in vain
+                // would only cost the general loop.
+                uint64_t possible = 0;
+                for (uint32_t k = 0; result && k < available; k += 1)
+                {
+                    const uint32_t newline = (uint32_t)((batch_breaks >> k) & 1);
+                    const uint32_t gap = (uint32_t)(((batch_breaks | spaced) >> k) & 1);
+                    uint8_t* destination = buffer + used + offsets[k];
+                    destination[0] = (uint8_t)(' ' + newline * ('\n' - ' '));
+                    const __mmask64 bytes = _bzhi_u64(~0ull, lengths[k]);
+                    const __m512i spelling = _mm512_maskz_loadu_epi8(bytes, spellings[k]);
+                    _mm512_mask_storeu_epi8(destination + gap, bytes, spelling);
+                    possible |= (_mm512_cmpeq_epi8_mask(spelling, _mm512_set1_epi8('\\')) & ((_mm512_cmple_epu8_mask(spelling, _mm512_set1_epi8(' ')) >> 1) | (1ull << 63))) |
+                                _mm512_mask_cmpeq_epi8_mask(questions, spelling, _mm512_set1_epi8('?'));
+                }
+                settled = general || possible == 0;
+                if (settled)
+                {
+                    used += batch_bytes;
+                    line_start = false;
+                    force_line = false;
+                    previous_last = lasts[available - 1];
+                    previous_kind = out_kinds[c + available - 1];
+                }
+                else
+                {
+                    batch_bytes = 0;
+                }
             }
-            used += batch_bytes;
-            line_start = false;
-            force_line = false;
-            previous_last = lasts[available - 1];
-            previous_kind = out_kinds[c + available - 1];
+            else if (!general)
+            {
+                // With markers, or a spelling past 64 bytes: step 3 copies them.
+                settled = pp_print_unspliced(spellings, lengths, valid & ~identifiers, trigraphs);
+            }
+            general = !settled;
         }
         // 3. Copies, with the line breaks and markers between: without a branch per token but for line markers (which
         // -P doesn't print), the rare line of more than one break, and spellings past 64 bytes.

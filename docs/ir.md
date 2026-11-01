@@ -43,9 +43,10 @@ transactional refusal by the still-scalar SSA promoter, not successful
 promotion; ordinary corpus mode continues to require promotion. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
-vector/mask calls remain unsupported. Native selection and opmask allocation
-are separate consumers: [#141](https://github.com/buster14a/buster/issues/141)
-and [#179](https://github.com/buster14a/buster/issues/179), respectively; see the
+vector/mask calls remain unsupported. Native selection of vectors is
+[#141](https://github.com/buster14a/buster/issues/141)'s; Tier 1 selects masks'
+operations and allocates them in the opmask class
+([#179](https://github.com/buster14a/buster/issues/179)); see the
 [backend handoff](tier1.md#vector-and-opmask-handoff).
 
 ## Lifetime and stage contract
@@ -546,6 +547,11 @@ the function's records, anchors outside a variadic definition, of other sizes,
 typed, not address-taken, two of one, both at once and aligned below 16.
 `tests/ir/labels.ir` and `tests/ir/aggregates.ir` are their canonical text, which
 `test-ir-parse` reads, prints back byte for byte and requires of every opcode.
+`tests/ir/optimize/` holds [#139](https://github.com/buster14a/buster/issues/139)'s
+before/after pairs in the same text form, which `test-ir-optimize` parses with
+both parser paths, runs through both optimizer twins, reprints byte for byte
+and executes on both sides: [#175](https://github.com/buster14a/buster/issues/175)'s
+last acceptance item ([the tools guide](ir-tools.md#pass-fixtures-in-the-text-form)).
 
 `test-ir-lowering` lowers generated typed programs through both paths, verifies
 every function, compares their columns, and executes the resulting IR in a

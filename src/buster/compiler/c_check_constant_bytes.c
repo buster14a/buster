@@ -14,10 +14,12 @@ static void check_data_integer_bytes(uint8_t* bytes, unsigned __int128 value, ui
     }
 }
 
-// The checker uses Linux/x86-64 binary16, bfloat16, binary32, binary64 and x87 extended values. The half-precision ones
-// are check_action_half_bits', and the other two IEEE encodings are copied into integer values, then serialized
-// explicitly little-endian. x87 is built from numeric fields, never host padding. CheckValue does not retain NaN payload
-// provenance; all NaNs get a deterministic quiet payload and their sign.
+// The checker uses Linux/x86-64 binary16, bfloat16, binary32, binary64 and x87 extended values, and binary128 ones from
+// the constant builtins (#148). The half-precision ones are check_action_half_bits', and the other two IEEE encodings are
+// copied into integer values, then serialized explicitly little-endian. x87 is built from numeric fields, never host
+// padding. A NaN keeps its sign, payload and quiet bit as the long double holds them (check_action_nan_bits, and
+// check_action_quad_bits for binary128), so that a signaling NaN of __builtin_nans and a payload of __builtin_nan's are
+// clang's bytes.
 static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double value)
 {
     _Static_assert(CHAR_BIT == 8 && sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, "checker target requires binary32");
@@ -37,7 +39,7 @@ static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double v
         memcpy(&bits, &rounded, sizeof(bits));
         if (isnan(value))
         {
-            bits = UINT32_C(0x7fc00000) | ((uint32_t)negative << 31);
+            bits = (uint32_t)check_action_nan_bits(value, 23, 8);
         }
         check_data_integer_bytes(bytes, bits, 4);
     }
@@ -48,9 +50,16 @@ static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double v
         memcpy(&bits, &rounded, sizeof(bits));
         if (isnan(value))
         {
-            bits = UINT64_C(0x7ff8000000000000) | ((uint64_t)negative << 63);
+            bits = check_action_nan_bits(value, 52, 11);
         }
         check_data_integer_bytes(bytes, bits, 8);
+    }
+    else if (type == BUSTER_TYPE_FLOAT128)
+    {
+        uint64_t halves[2] = { 0 };
+        check_action_quad_bits(value, halves);
+        check_data_integer_bytes(bytes, halves[0], 8);
+        check_data_integer_bytes(bytes + 8, halves[1], 8);
     }
     else
     {
@@ -58,8 +67,10 @@ static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double v
         uint32_t exponent = 0;
         if (isnan(value) || isinf(value))
         {
+            // A NaN's significand as it is, its payload and its quiet bit among it.
             exponent = 0x7fff;
-            significand = isnan(value) ? UINT64_C(0xc000000000000000) : UINT64_C(0x8000000000000000);
+            significand = UINT64_C(0x8000000000000000);
+            memcpy(&significand, &value, isnan(value) ? sizeof(significand) : 0);
         }
         else if (value != 0)
         {

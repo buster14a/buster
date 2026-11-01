@@ -921,10 +921,11 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
     {
         // Operands are earlier nodes, so the walk ends.
         const uint32_t inner = graph->operand0[at];
-        walking = inner < at && check_asm_noop_cast(program->types, stream->values[inner].type, stream->values[at].type);
+        walking = inner < at && check_asm_noop_cast(program->types, check_stream_type(stream, inner), check_stream_type(stream, at));
         at = walking ? inner : at;
     }
-    const CheckValue* value = at < stream->count && graph->ops[at] == CHECK_OP_VALUE ? stream->values + at : 0;
+    const CheckValue leaf = at < stream->count && graph->ops[at] == CHECK_OP_VALUE ? check_stream_value(stream, at) : (CheckValue){ 0 };
+    const CheckValue* value = at < stream->count && graph->ops[at] == CHECK_OP_VALUE ? &leaf : 0;
     const uint32_t declaration = value != 0 && (value->flags & BUSTER_CHECK_REGISTER) != 0 && value->object != 0 && value->object <= input->token_count ?
                                  value->object - 1 : BUSTER_CHECK_NONE;
     const CheckInputAttributes* attributes = declaration < input->token_count && input->registers[declaration] ? input->attributes[declaration] : 0;
@@ -1037,7 +1038,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = constraint->refused;
         }
-        else if ((value->flags & BUSTER_CHECK_BIT_FIELD) != 0 || (program->stream->values[checked->node].flags & BUSTER_CHECK_BIT_FIELD) != 0)
+        else if ((value->flags & BUSTER_CHECK_BIT_FIELD) != 0 || (check_stream_flags(program->stream, checked->node) & BUSTER_CHECK_BIT_FIELD) != 0)
         {
             reason = "bit-fields as inline assembly operands";
         }

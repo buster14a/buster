@@ -47,7 +47,7 @@ static void check_test_sizeof_source(CheckTest* test, const char* source, uint32
         {
             if (input[path].graph.ops[node] == CHECK_OP_SIZEOF)
             {
-                const CheckValue value = streams[path].values[node];
+                const CheckValue value = check_stream_value(&streams[path], node);
                 const uint32_t expected = form == 3 || form == 4 || found == 0 ? 4 : 8;
                 values &= value.type == BUSTER_TYPE_ULONG && value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == expected;
                 found += 1;

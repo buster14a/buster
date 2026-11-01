@@ -498,8 +498,22 @@ struct CheckStream
     // Output-owned dependency closure of explicit ICE/assert/static contexts, only with const_values.
     // The borrowed graph and its designator leaves are never rewritten to publish this proof.
     uint8_t* constant_evaluated;
-    // Node-indexed typed postorder output. The graph supplies operator, operand and source identity.
-    CheckValue* values;
+    // Node-indexed typed postorder output. The graph supplies operator, operand and source identity. Each node's value is
+    // in columns (#628): its type, flags, category, constant kind and object, which most readers read alone, and for a
+    // node whose value has more (a constant's payload, an address constant's offset, a bit-field's place, an overload set,
+    // a fault: on sqlite3.c, 12% of the nodes, against 36% with an object) its whole value as a row of `payloads`, the
+    // row's index plus one in `payload_rows` (0 for none). check_graph_run's stream has them; a hand-built one may hold
+    // each node's whole value in `dense_values` instead. Readers take them through check_stream_value and its fields'
+    // accessors, whichever the stream holds.
+    CheckValue* dense_values;
+    TypeId* value_types;
+    uint32_t* value_flags;
+    uint32_t* value_objects;
+    uint8_t* value_categories;
+    uint8_t* value_constants;
+    uint32_t* payload_rows;
+    CheckValue* payloads;
+    uint32_t payload_count;
     CheckNodeConversions* conversions;
     CheckConversion* argument_conversions;
     CheckDiagnostic* diagnostics;
@@ -560,6 +574,125 @@ struct CheckOptions
     // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
     bool level_order;
 };
+
+// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628).
+static CheckValue check_stream_value(const CheckStream* stream, uint32_t node)
+{
+    CheckValue result;
+    if (stream->dense_values != NULL)
+    {
+        result = stream->dense_values[node];
+    }
+    else
+    {
+        const uint32_t row = stream->payload_rows[node];
+        if (row != 0 && row <= stream->payload_count)
+        {
+            result = stream->payloads[row - 1];
+        }
+        else
+        {
+            result = (CheckValue){
+                .type = stream->value_types[node],
+                .category = (CheckCategory)stream->value_categories[node],
+                .flags = stream->value_flags[node],
+                .constant_kind = (CheckConstantKind)stream->value_constants[node],
+                .object = stream->value_objects[node],
+            };
+        }
+    }
+    return result;
+}
+
+// Whether the stream holds its nodes' values, in columns or whole.
+static bool check_stream_has_values(const CheckStream* stream)
+{
+    return stream->value_types != NULL || stream->dense_values != NULL;
+}
+
+static TypeId check_stream_type(const CheckStream* stream, uint32_t node)
+{
+    return stream->dense_values != NULL ? stream->dense_values[node].type : stream->value_types[node];
+}
+
+static uint32_t check_stream_flags(const CheckStream* stream, uint32_t node)
+{
+    return stream->dense_values != NULL ? stream->dense_values[node].flags : stream->value_flags[node];
+}
+
+static CheckCategory check_stream_category(const CheckStream* stream, uint32_t node)
+{
+    return stream->dense_values != NULL ? stream->dense_values[node].category : (CheckCategory)stream->value_categories[node];
+}
+
+static CheckConstantKind check_stream_constant_kind(const CheckStream* stream, uint32_t node)
+{
+    return stream->dense_values != NULL ? stream->dense_values[node].constant_kind : (CheckConstantKind)stream->value_constants[node];
+}
+
+static uint32_t check_stream_object(const CheckStream* stream, uint32_t node)
+{
+    return stream->dense_values != NULL ? stream->dense_values[node].object : stream->value_objects[node];
+}
+
+// A node's overload set (CheckValue.overload_head), which only a node with a payload row has.
+static uint32_t check_stream_overload_head(const CheckStream* stream, uint32_t node)
+{
+    uint32_t result = 0;
+    if (stream->dense_values != NULL)
+    {
+        result = stream->dense_values[node].overload_head;
+    }
+    else
+    {
+        const uint32_t row = stream->payload_rows[node];
+        result = row != 0 && row <= stream->payload_count ? stream->payloads[row - 1].overload_head : 0;
+    }
+    return result;
+}
+
+// Whether `value` has more than the stream's columns hold: a field past its type, flags, category, constant kind and
+// object, or a category or a constant kind past a byte. A long double component counts by its ten bytes, never by the six
+// of padding that a store of the type leaves as they were (c_check_literals.c), which no reader reads.
+static bool check_stream_value_rest(const CheckValue* value)
+{
+    const uint64_t rest = (uint64_t)value->integer | (uint64_t)(value->integer >> 64) | value->floating_storage[0] | (value->floating_storage[1] & 0xffff) |
+                          value->imaginary_storage[0] | (value->imaginary_storage[1] & 0xffff) | value->overload_head | (uint64_t)value->offset |
+                          value->bit_width | value->fault | value->fault_node | value->object_bit_offset |
+                          (((uint32_t)value->category | (uint32_t)value->constant_kind) >> 8);
+    return rest != 0;
+}
+
+// Writes `value` as node `node`'s: its columns, and its whole value as the node's payload row, where the node has one or
+// the value has more than the columns (check_stream_value_rest), which takes the next row. A node keeps the row a write
+// gave it (check_graph_run clears `payload_rows` first), so that it has at most one, and `payloads` needs no more rows
+// than the stream has nodes, whatever its writes.
+static void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
+{
+    if (stream->dense_values != NULL)
+    {
+        stream->dense_values[node] = *value;
+    }
+    else
+    {
+        stream->value_types[node] = value->type;
+        stream->value_flags[node] = value->flags;
+        stream->value_objects[node] = value->object;
+        stream->value_categories[node] = (uint8_t)value->category;
+        stream->value_constants[node] = (uint8_t)value->constant_kind;
+        uint32_t row = stream->payload_rows[node];
+        row = row != 0 && row <= stream->payload_count ? row : 0;
+        if (row == 0 && check_stream_value_rest(value))
+        {
+            row = ++stream->payload_count;
+        }
+        if (row != 0)
+        {
+            stream->payloads[row - 1] = *value;
+        }
+        stream->payload_rows[node] = row;
+    }
+}
 
 // A VALUE node's leaf (CheckGraph.leaves).
 static CheckValue* check_graph_leaf_of(const CheckGraph* graph, uint32_t node)
@@ -709,7 +842,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
-    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) ||
+    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) || cbuiltin_float_constant_extra(id) ||
              check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE || cbuiltin_float_class(id) || cbuiltin_float_signbit(id) ||
              cbuiltin_float_canonicalize(id))
     {
@@ -1337,7 +1470,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
     {
         if (operands[i] != BUSTER_CHECK_NONE)
         {
-            action->operands[i] = stream->values[operands[i]];
+            action->operands[i] = check_stream_value(stream, operands[i]);
         }
     }
     if (action->op == CHECK_OP_VALUE)
@@ -1350,7 +1483,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         action->argument_count = graph->argument_counts[node];
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
-            arguments[i] = stream->values[graph->argument_nodes[offset + i]];
+            arguments[i] = check_stream_value(stream, graph->argument_nodes[offset + i]);
         }
         action->arguments = arguments;
         action->argument_conversions = action->argument_count != 0 ? stream->argument_conversions + offset : 0;
@@ -1361,7 +1494,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
 // In particular a bare case/member/initializer lvalue needs a load even though its node has no consuming action.
 static CheckValue check_graph_context_value(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
 {
-    CheckValue value = node < stream->count && stream->values != NULL ? stream->values[node] : (CheckValue){ 0 };
+    CheckValue value = node < stream->count && check_stream_has_values(stream) ? check_stream_value(stream, node) : (CheckValue){ 0 };
     const TypeId plain = graph->const_values != NULL ? check_const_plain(types, value.type) : 0;
     if (node < graph->count && value.category == CHECK_LVALUE && graph->const_values != NULL &&
         stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0 && plain != 0 &&
@@ -1401,11 +1534,12 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
 
 static void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
-    stream->values[node] = result->value;
+    CheckValue value = result->value;
     if (stream->graph->ops[node] != CHECK_OP_VALUE && stream->graph->ops[node] != CHECK_OP_SELECT)
     {
-        stream->values[node].flags &= ~BUSTER_CHECK_LITERAL_ZERO;
+        value.flags &= ~BUSTER_CHECK_LITERAL_ZERO;
     }
+    check_stream_set_value(stream, node, &value);
     memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
     stream->conversions[node].store = result->store_conversion;
     stream->diagnostics[node] = result->diagnostic;
@@ -1435,7 +1569,7 @@ static void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, Ch
 {
     const CheckValue* leaf = check_graph_leaf_of(graph, node);
     const bool valid = type_is_valid(types, leaf->type);
-    stream->values[node] = valid ? *leaf : (CheckValue){ 0 };
+    check_stream_set_value(stream, node, valid ? leaf : &(const CheckValue){ 0 });
     stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
     stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
     stream->warnings[node] = 0;
@@ -1592,7 +1726,7 @@ static uint32_t check_graph_atomic_address_alignment(const TypeTable* types, con
     while (!done && node < stream->count && count < BUSTER_CHECK_ALIGNMENT_STEPS)
     {
         const CheckOp op = (CheckOp)graph->ops[node];
-        const TypeId type = stream->values[node].type;
+        const TypeId type = check_stream_type(stream, node);
         const uint8_t kind = check_action_kind(types, type);
         const uint32_t operand = graph->operand0[node];
         const uint32_t second = graph->operand1[node];
@@ -1615,7 +1749,7 @@ static uint32_t check_graph_atomic_address_alignment(const TypeTable* types, con
         }
         else if (!lvalue && op == CHECK_OP_CAST && operand < node)
         {
-            const TypeId inner = stream->values[operand].type;
+            const TypeId inner = check_stream_type(stream, operand);
             const uint8_t inner_kind = check_action_kind(types, inner);
             const bool object = inner_kind == BUSTER_TYPE_KIND_POINTER &&
                                 check_action_kind(types, type_element(types, type_strip_aligned(types, inner))) != BUSTER_TYPE_KIND_VOID;
@@ -1634,10 +1768,11 @@ static uint32_t check_graph_atomic_address_alignment(const TypeTable* types, con
         else if (((lvalue && op == CHECK_OP_SUBSCRIPT) || (!lvalue && (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT))) && operand < node && second < node)
         {
             // The pointer is a subtraction's left operand, and either of an addition's or a subscript's.
-            const uint8_t left = check_action_kind(types, stream->values[operand].type);
+            const uint8_t left = check_action_kind(types, check_stream_type(stream, operand));
             const bool reverse = op != CHECK_OP_SUBTRACT && left != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(left);
             const uint32_t base = reverse ? second : operand;
-            const CheckValue* index = stream->values + (reverse ? operand : second);
+            const CheckValue index_value = check_stream_value(stream, reverse ? operand : second);
+            const CheckValue* index = &index_value;
             const TypeId element = op == CHECK_OP_SUBSCRIPT ? type : type_element(types, type_strip_aligned(types, type));
             const uint8_t element_kind = check_action_kind(types, element);
             const uint64_t size = element_kind == BUSTER_TYPE_KIND_VOID || element_kind == BUSTER_TYPE_KIND_FUNCTION ? 1 : type_size(types, element);
@@ -1649,7 +1784,7 @@ static uint32_t check_graph_atomic_address_alignment(const TypeTable* types, con
             }
             steps[count++] = (CheckAlignmentStep){ .offset = offset };
             node = base;
-            lvalue = type_kind_is_array(check_action_kind(types, stream->values[base].type));
+            lvalue = type_kind_is_array(check_action_kind(types, check_stream_type(stream, base)));
         }
         else if (!lvalue)
         {
@@ -1668,9 +1803,9 @@ static uint32_t check_graph_atomic_address_alignment(const TypeTable* types, con
             node = operand;
             lvalue = false;
         }
-        else if ((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && operand < node && (stream->values[node].flags & BUSTER_CHECK_BIT_FIELD) == 0)
+        else if ((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && operand < node && (check_stream_flags(stream, node) & BUSTER_CHECK_BIT_FIELD) == 0)
         {
-            TypeId record = type_strip_aligned(types, stream->values[operand].type);
+            TypeId record = type_strip_aligned(types, check_stream_type(stream, operand));
             record = op == CHECK_OP_ARROW && check_action_kind(types, record) == BUSTER_TYPE_KIND_POINTER ?
                      type_strip_aligned(types, type_element(types, record)) : record;
             uint64_t offset = 0;
@@ -2454,7 +2589,7 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
     for (uint32_t i = 0; i < 3; i += 1)
     {
         const uint32_t operand = operands[i];
-        result |= operand != BUSTER_CHECK_NONE && stream->diagnostics[operand] != CHECK_DIAG_NONE && stream->values[operand].type == 0;
+        result |= operand != BUSTER_CHECK_NONE && stream->diagnostics[operand] != CHECK_DIAG_NONE && check_stream_type(stream, operand) == 0;
     }
     if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != 0)
     {
@@ -2463,7 +2598,7 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t operand = graph->argument_nodes[offset + i];
-            result |= stream->diagnostics[operand] != CHECK_DIAG_NONE && stream->values[operand].type == 0;
+            result |= stream->diagnostics[operand] != CHECK_DIAG_NONE && check_stream_type(stream, operand) == 0;
         }
     }
     return result;
@@ -2490,7 +2625,7 @@ static bool check_graph_gnu_constant(uint32_t context, const CheckValue* value)
 static bool check_graph_warning_needed(TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
 {
     const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
-    const CheckValue value = context != 0 ? check_graph_context_value(types, graph, stream, node) : stream->values[node];
+    const CheckValue value = context != 0 ? check_graph_context_value(types, graph, stream, node) : check_stream_value(stream, node);
     return stream->warnings[node] != 0 || check_graph_gnu_constant(context, &value);
 }
 
@@ -2557,7 +2692,7 @@ static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* gra
         const uint32_t required = CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE;
         stream->warnings[node] &= ~((states[node] & 2) == 0 ? unevaluated : (states[node] & 4) != 0 ? required : 0);
         stream->warnings[node] &= ~(graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0);
-        const CheckValue converted = context != 0 ? check_graph_context_value(types, graph, stream, node) : stream->values[node];
+        const CheckValue converted = context != 0 ? check_graph_context_value(types, graph, stream, node) : check_stream_value(stream, node);
         const CheckValue* value = &converted;
         if (check_graph_gnu_constant(context, value) && (value->flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
         {
@@ -2635,7 +2770,7 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
 {
     const uint8_t context = graph->contexts != 0 ? graph->contexts[node] & (uint8_t)~BUSTER_CHECK_CONTEXT_VALUE : 0;
     const CheckValue converted = context != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE ?
-                                 check_graph_context_value(types, graph, stream, node) : stream->values[node];
+                                 check_graph_context_value(types, graph, stream, node) : check_stream_value(stream, node);
     const CheckValue* value = &converted;
     if (stream->diagnostics[node] != CHECK_DIAG_NONE)
     {
@@ -2841,7 +2976,18 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     }
     if (result && count != 0)
     {
-        stream->values = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
+        // Room for a payload row per node, of which the run writes the first few: only those take memory.
+        stream->value_types = BUSTER_ARENA_PUSH_ARRAY(output, TypeId, count);
+        stream->value_flags = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+        stream->value_objects = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+        stream->value_categories = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count);
+        stream->value_constants = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count);
+        stream->payload_rows = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+        stream->payloads = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
+        if (stream->payload_rows != NULL)
+        {
+            memset(stream->payload_rows, 0, (uint64_t)count * sizeof(uint32_t));
+        }
         stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
         stream->diagnostic_operands = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
@@ -2863,7 +3009,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->overloads = graph->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadEffect, graph->overload_count) : 0;
         const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity, &stream->statistics.scratch_bytes);
         stream->overload_addresses = stream->overload_address_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadAddressEffect, stream->overload_address_capacity) : 0;
-        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
+        result = stream->value_types != 0 && stream->value_flags != 0 && stream->value_objects != 0 && stream->value_categories != 0 &&
+                 stream->value_constants != 0 && stream->payload_rows != 0 && stream->payloads != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
                  stream->warnings != 0 &&
                  stream->warning_ignored != 0 && stream->reports != 0 &&
                  (!constant_contexts || stream->constant_evaluated != NULL) &&

@@ -540,6 +540,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ssa_ir_test.c"
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
+#include "buster/compiler/tier0_mask_test.c"
 #include "buster/compiler/interpreter_native_test.c"
 #include "buster/compiler/interpreter_link_test.c"
 #include "buster/compiler/ir_interpreter_test.c"
@@ -569,6 +570,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_licm_test.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
+// #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
+#include "buster/compiler/ir_optimize_text_test.c"
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #include "buster/compiler/ir_source_benchmark.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
@@ -582,6 +585,11 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit.c"
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+// #179: hand-written IR of AVX-512's masks through Tier 1, natively against the shared IR's interpreter.
+#include "buster/compiler/tier1_masks_test.c"
+// #179: what a mask's spill costs, to memory against to a general register, and the programs' checks.
+#include "buster/compiler/mask_spill_measure.c"
+#include "buster/compiler/mask_spill_measure_test.c"
 #include "buster/compiler/tier1_pipeline_benchmark.c"
 #include "buster/compiler/tier1_select_source_benchmark.c"
 // The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
@@ -784,7 +792,7 @@ static int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
     *found = true;
-    if (!BUSTER_HOST_VECTOR && argc >= 2 && (strncmp(argv[1], "benchmark-", 10) == 0 || strcmp(argv[1], "measure-x86-zen5") == 0))
+    if (!BUSTER_HOST_VECTOR && argc >= 2 && (strncmp(argv[1], "benchmark-", 10) == 0 || strcmp(argv[1], "measure-x86-zen5") == 0 || strcmp(argv[1], "measure-mask-spills") == 0))
     {
         fprintf(stderr, "benchmarks require an AVX-512 host build; run tests with this scalar build\n");
         result = 1;
@@ -913,6 +921,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
     {
         result = run_x86_zen5_measure(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-mask-spills") == 0)
+    {
+        result = run_mask_spill_tests();
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-mask-spills") == 0)
+    {
+        result = run_mask_spill_measure(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
@@ -1517,6 +1533,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-pipeline") == 0)
     {
         result = run_tier1_pipeline_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-masks") == 0)
+    {
+        result = run_tier1_mask_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-pipeline") == 0)
     {
