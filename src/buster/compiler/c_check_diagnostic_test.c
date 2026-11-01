@@ -126,7 +126,7 @@ static void check_test_diagnostic_sources(CheckTest* test)
 {
     CheckInput input = { 0 };
     uint32_t first = 0;
-    check_test_expect(test, !check_diagnostic_first_error(&input, NULL, &first) && first == BUSTER_CHECK_NONE,
+    check_test_expect(test, !check_diagnostic_first_error(&input, NULL, NULL, &first) && first == BUSTER_CHECK_NONE,
                       "empty diagnostic input has no promoted error");
     check_test_expect(test, check_diagnostic_severity_default(&input, 0, CHECK_WARNING_GNU_CONSTANT, true) == CHECK_WARNING_IGNORE &&
                            check_diagnostic_severity(&input, 0, CHECK_WARNING_INTEGER_OVERFLOW) == CHECK_WARNING_WARNING,
@@ -151,11 +151,11 @@ static void check_test_diagnostic_sources(CheckTest* test)
         .warnings = graph_warnings,
         .warning_ignored = graph_ignored,
     };
-    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, &first) && first == BUSTER_CHECK_NONE,
+    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, NULL, &first) && first == BUSTER_CHECK_NONE,
                       "warnings in source and graph remain warnings without explicit promotion");
     CheckInputDiagnosticPragmas history = { 0 };
     input.diagnostic_pragmas = &history;
-    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, &first) && first == BUSTER_CHECK_NONE &&
+    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, NULL, &first) && first == BUSTER_CHECK_NONE &&
                            check_diagnostic_severity_default(&input, 3, CHECK_WARNING_GNU_CONSTANT, true) == CHECK_WARNING_IGNORE,
                       "an empty decoded history has the same defaults as an absent history");
     CheckInputDiagnosticPragma records[] =
@@ -186,30 +186,30 @@ static void check_test_diagnostic_sources(CheckTest* test)
     history.records = records;
     history.count = 1;
     history.final_state = 0;
-    check_test_expect(test, check_diagnostic_first_error(&input, NULL, &first) && first == 4,
+    check_test_expect(test, check_diagnostic_first_error(&input, NULL, NULL, &first) && first == 4,
                       "explicit promotion overrides a source warning's default-ignored mask");
-    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2,
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, NULL, &first) && first == 2,
                       "graph promotion selects source order independently of graph node order");
     graph_warnings[1] = 0;
-    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 4,
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, NULL, &first) && first == 4,
                       "an earlier source warning wins over a later graph warning");
     graph_warnings[1] = CHECK_WARNING_INTEGER_OVERFLOW;
     input.constant_warning_ignored = NULL;
     stream.warning_ignored = NULL;
-    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2,
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, NULL, &first) && first == 2,
                       "optional default-ignored columns do not change explicit warning promotion");
     history.count = 2;
     history.final_state = 1;
-    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2,
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, NULL, &first) && first == 2,
                       "later group suppression cannot erase an earlier promoted graph warning");
     graph_warnings[1] = 0;
-    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, &first) && first == BUSTER_CHECK_NONE,
+    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, NULL, &first) && first == BUSTER_CHECK_NONE,
                       "later group suppression applies to both source and graph warning producers");
     history.count = 1;
     history.final_state = 0;
     records[0].operation = CHECK_DIAGNOSTIC_FATAL;
     graph_warnings[1] = CHECK_WARNING_INTEGER_OVERFLOW;
-    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2 &&
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, NULL, &first) && first == 2 &&
                            check_diagnostic_severity(&input, 2, CHECK_WARNING_INTEGER_OVERFLOW) == CHECK_WARNING_FATAL,
                       "fatal promotion participates in the same earliest-error selection");
 }
@@ -242,16 +242,16 @@ static void check_test_warning_policy_prefix(CheckTest* test)
     {
         const char* options[] = { cases[i].first, cases[i].second };
         const PPOptions command = { .semantic_warning_options = options, .semantic_warning_option_count = cases[i].second != NULL ? 2 : 1 };
-        check_test_expect(test, check_warning_command_line(&command, cases[i].id, false).severity == cases[i].expected,
+        check_test_expect(test, check_warning_command_line(&command, cases[i].id, false, false).severity == cases[i].expected,
                           "shared warning policy preserves the independently observed Clang group and promotion rules");
     }
     const char* hidden[] = { "-Wno-system-headers" };
     PPOptions programmatic = { .system_header_warnings = true };
-    check_test_expect(test, check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false).system_headers,
+    check_test_expect(test, check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false, false).system_headers,
                       "a programmatic system-header warning policy is retained without a CLI option slice");
     programmatic.semantic_warning_options = hidden;
     programmatic.semantic_warning_option_count = BUSTER_ARRAY_LENGTH(hidden);
-    check_test_expect(test, !check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false).system_headers,
+    check_test_expect(test, !check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false, false).system_headers,
                       "an ordered visibility option overrides the programmatic baseline");
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     char* ordered[] = { "-Wno-everything", "-include", "-Werror=deprecated-non-prototype", "-Wdeprecated-non-prototype", "source.c", "-o", "-Werror", "-pedantic-errors" };
@@ -264,7 +264,7 @@ static void check_test_warning_policy_prefix(CheckTest* test)
                            strcmp(parsed.semantic_warning_options[0], "-Wno-everything") == 0 &&
                            strcmp(parsed.semantic_warning_options[1], "-Wdeprecated-non-prototype") == 0 &&
                            strcmp(parsed.semantic_warning_options[2], "-pedantic-errors") == 0 &&
-                           check_warning_command_line(&parsed, CHECK_WARNING_ID_KR_DEFINITION, false).severity == CHECK_WARNING_WARNING,
+                           check_warning_command_line(&parsed, CHECK_WARNING_ID_KR_DEFINITION, false, false).severity == CHECK_WARNING_WARNING,
                       "shared CLI capture preserves option order and excludes include/output filenames");
     arena_release(&arena);
 }

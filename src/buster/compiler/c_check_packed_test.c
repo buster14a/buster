@@ -12,12 +12,27 @@ struct CheckPackedTestDiagnostic
     char message[512];
 };
 
-static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar, bool quiet)
+static int check_test_packed_run_options(const char* executable, const char* source, const char* output, const char* errors, bool scalar,
+                                         const char* const* options, uint32_t option_count)
 {
+    char* arguments[16];
+    uint32_t count = 0;
+    if (executable != NULL)
+    {
+        arguments[count++] = (char*)executable;
+    }
+    arguments[count++] = (char*)(scalar ? "--scalar" : "-fsyntax-only");
+    for (uint32_t i = 0; i < option_count && count + 4 < BUSTER_ARRAY_LENGTH(arguments); i += 1)
+    {
+        arguments[count++] = (char*)options[i];
+    }
+    arguments[count++] = "-fsyntax-only";
+    arguments[count++] = "-std=gnu17";
+    arguments[count++] = (char*)source;
+    arguments[count] = NULL;
     int result = -1;
     if (executable != NULL)
     {
-        char* arguments[] = { (char*)executable, scalar ? "--scalar" : "-fsyntax-only", quiet ? "-w" : "-fsyntax-only", "-fsyntax-only", "-std=gnu17", (char*)source, NULL };
         result = object_test_run(arguments, output, errors);
     }
     else
@@ -34,8 +49,7 @@ static int check_test_packed_run(const char* executable, const char* source, con
             }
             close(out);
             close(err);
-            char* arguments[] = { scalar ? "--scalar" : "-fsyntax-only", quiet ? "-w" : "-fsyntax-only", "-fsyntax-only", "-std=gnu17", (char*)source };
-            const int code = run_check_command(BUSTER_ARRAY_LENGTH(arguments), arguments, true);
+            const int code = run_check_command((int)count, arguments, true);
             fflush(NULL);
             _exit(code);
         }
@@ -52,6 +66,12 @@ static int check_test_packed_run(const char* executable, const char* source, con
         }
     }
     return result;
+}
+
+static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar, bool quiet)
+{
+    const char* options[] = { "-w" };
+    return check_test_packed_run_options(executable, source, output, errors, scalar, options, quiet ? 1 : 0);
 }
 
 static uint32_t check_test_packed_diagnostics(const char* path, CheckPackedTestDiagnostic* diagnostics, uint32_t capacity)

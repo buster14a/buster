@@ -285,7 +285,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                         first = initializer.token < first ? initializer.token : first;
                     }
                     uint32_t promoted = BUSTER_CHECK_NONE;
-                    if (checked && check_diagnostic_first_error(&input, &stream, &promoted))
+                    if (checked && check_diagnostic_first_error(&input, &stream, NULL, &promoted))
                     {
                         first = promoted < first ? promoted : first;
                     }

@@ -435,7 +435,8 @@ static uint32_t check_corpus_repair_warning(const CheckCorpusPath* path, const C
     return first;
 }
 
-static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser* parser, uint32_t before_token, const CheckRepair* repair)
+static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser* parser, uint32_t before_token, const CheckRepair* repair,
+                                             const PPOptions* options)
 {
     uint32_t first = BUSTER_CHECK_NONE;
     uint32_t pragma = 0;
@@ -445,7 +446,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
     {
         if (repair == NULL)
         {
-            check_diagnostic_first_error(&path->input, path->checked ? &path->stream : NULL, &first);
+            check_diagnostic_first_error(&path->input, path->checked ? &path->stream : NULL, options, &first);
         }
         else
         {
@@ -649,7 +650,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     check_corpus_late_diagnostics(result, &repair->parser, repair->record_begin);
                 }
             }
-            check_corpus_warning_diagnostics(result, &repair->parser, repair->record_begin, repair);
+            check_corpus_warning_diagnostics(result, &repair->parser, repair->record_begin, repair, &repair->preprocessor->options);
             check_corpus_location(result, &repair->parser, repair->preprocessor);
         }
         result->resource |= !ready;
@@ -731,7 +732,8 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
         for (uint32_t i = 0; i < views[v].count; i += 1)
         {
             const CheckWarningEvent* event = views[v].events + i;
-            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0);
+            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
+                                                                                (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
             if (command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0)
             {
                 continue;
@@ -973,7 +975,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     {
         check_corpus_late_diagnostics(path, view, path->position);
     }
-    check_corpus_warning_diagnostics(path, view, BUSTER_CHECK_NONE, NULL);
+    check_corpus_warning_diagnostics(path, view, BUSTER_CHECK_NONE, NULL, &pp->options);
     if (!path->parsed && path->token == BUSTER_CHECK_NONE)
     {
         // A clean semantic prefix never accepts the failed original parse or turns its cutoff into TU end.

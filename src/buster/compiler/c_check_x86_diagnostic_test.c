@@ -216,6 +216,7 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         bool rejected;
         bool quiet;
         uint32_t hard_columns[2]; // Clang and Buster locations for an expected hard-constraint error.
+        const char* options[2]; // The command line's -Wargument-outside-range mappings, in order.
     } fixtures[] =
     {
         { "issue 487", "unsigned long long f(W a){return __builtin_ia32_ucmpb512_mask(a,a,8,~0ull);}", 1, true },
@@ -301,6 +302,24 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         { "warning policy", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", 1, false },
         { "ignored policy", "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", 0, false },
         { "push pop policy", "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\n#pragma GCC diagnostic pop\nunsigned g(V a){return BAD;}", 1, true },
+        // The command line's mappings of clang's DefaultError range diagnostic, and their order: -Wno-error=NAME demotes
+        // it and keeps it a warning through a later -Werror, -Werror=NAME after that restores the error, -Wno-NAME
+        // disables it, and a source pragma is authoritative where it applies.
+        { "option disabled", "unsigned f(V a){return BAD;}", 0, false, false, { 0 }, { "-Wno-argument-outside-range" } },
+        { "option error", "unsigned f(V a){return BAD;}", 1, true, false, { 0 }, { "-Werror=argument-outside-range" } },
+        { "option everything", "unsigned f(V a){return BAD;}", 1, true, false, { 0 }, { "-Weverything" } },
+        { "option no-everything", "unsigned f(V a){return BAD;}", 0, false, false, { 0 }, { "-Wno-everything" } },
+        { "option demoted", "unsigned f(V a){return BAD;}", 1, false, false, { 0 }, { "-Wno-error=argument-outside-range" } },
+        { "option demoted then error", "unsigned f(V a){return BAD;}", 1, true, false, { 0 }, { "-Wno-error", "-Werror=argument-outside-range" } },
+        { "option demoted then global error", "unsigned f(V a){return BAD;}", 1, false, false, { 0 }, { "-Wno-error=argument-outside-range", "-Werror" } },
+        { "option error then demoted", "unsigned f(V a){return BAD;}", 1, false, false, { 0 }, { "-Werror=argument-outside-range", "-Wno-error=argument-outside-range" } },
+        { "option error then global no-error", "unsigned f(V a){return BAD;}", 1, true, false, { 0 }, { "-Werror=argument-outside-range", "-Wno-error" } },
+        { "option disabled then enabled", "unsigned f(V a){return BAD;}", 1, false, false, { 0 }, { "-Wno-argument-outside-range", "-Wargument-outside-range" } },
+        { "option disabled then global error", "unsigned f(V a){return BAD;}", 0, false, false, { 0 }, { "-Wno-argument-outside-range", "-Werror" } },
+        { "option disabled demoted", "unsigned f(V a){return BAD;}", 0, false, false, { 0 }, { "-Wno-argument-outside-range", "-Wno-error=argument-outside-range" } },
+        { "option demoted deferred", "unsigned f(V a,int n){if(n)return BAD;return 0;}", 1, false, false, { 0 }, { "-Wno-error=argument-outside-range" } },
+        { "option disabled, warning pragma", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", 1, false, false, { 0 }, { "-Wno-argument-outside-range" } },
+        { "option demoted, error pragma", "#pragma clang diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", 1, true, false, { 0 }, { "-Wno-error=argument-outside-range" } },
         { "ICE stays hard in dead code", "unsigned f(V a,int n){if(0)return __builtin_ia32_cmpb128_mask(a,a,n,65535);return 0;}", 0, true, false, { 35, 74 } },
         { "ICE stays hard in sizeof", "unsigned f(V a,int n){return sizeof(__builtin_ia32_cmpb128_mask(a,a,n,65535));}", 0, true, false, { 37, 76 } },
         { "-w suppresses range", "unsigned f(V a){return BAD;}", 0, false, true },
@@ -324,7 +343,24 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         char source[2048];
         const int length = snprintf(source, sizeof(source), "%s%s\n", prefix, fixtures[i].source);
         const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
-        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", fixtures[i].quiet ? "-w" : "-fsyntax-only", path, NULL };
+        const uint32_t option_count = (fixtures[i].options[0] != NULL ? 1u : 0u) + (fixtures[i].options[1] != NULL ? 1u : 0u);
+        char* arguments[16];
+        uint32_t argument_count = 0;
+        arguments[argument_count++] = (char*)clang;
+        arguments[argument_count++] = "-std=gnu17";
+        arguments[argument_count++] = "-fsyntax-only";
+        arguments[argument_count++] = "-fno-color-diagnostics";
+        if (fixtures[i].quiet)
+        {
+            arguments[argument_count++] = "-w";
+        }
+        for (uint32_t option = 0; option < option_count; option += 1)
+        {
+            arguments[argument_count++] = (char*)fixtures[i].options[option];
+        }
+        arguments[argument_count++] = "-fsyntax-only";
+        arguments[argument_count++] = path;
+        arguments[argument_count] = NULL;
         const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
         const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors, true);
         char description[512];
@@ -337,7 +373,9 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         }
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
-            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet) : -1;
+            const int status = written ? (option_count != 0 ?
+                check_test_packed_run_options(NULL, path, output, errors, scalar != 0, fixtures[i].options, option_count) :
+                check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet)) : -1;
             const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors, true);
             const bool same = status == oracle_status && actual.count == oracle.count &&
                               (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&

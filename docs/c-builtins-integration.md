@@ -1234,8 +1234,12 @@ are stored outside the leaf's graph operands. Nested compound literals use
 the same bounded worklist, while dead or unevaluated literals supply no roots.
 The driver reports each surviving event at the builtin's source
 location, with the converted immediate and its valid bounds, through
-`-Wargument-outside-range`'s default-error policy. Diagnostic pragmas can
-downgrade or suppress it; `-w` suppresses it too. A failed or incomplete program
+`-Wargument-outside-range`'s default-error policy. The command line maps it as
+clang does: `-Wno-error=argument-outside-range` demotes it to a warning and
+keeps it one through a later `-Werror`, `-Wno-argument-outside-range`
+suppresses it, and `-Werror=argument-outside-range` after either restores the
+error. Source diagnostic pragmas can downgrade or suppress it at their
+locations; `-w` suppresses it too. A failed or incomplete program
 leaves unknown events for conservative reporting rather than dropping them.
 
 Only an actual range event allocates the temporary reachability worklist.

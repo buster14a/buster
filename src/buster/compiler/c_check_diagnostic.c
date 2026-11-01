@@ -9,7 +9,6 @@
 #define CHECK_WARNING_UNKNOWN_PRAGMA 0x200u
 #define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
 #define CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER 0x10000u
-#define CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE 0x20000u
 #define CHECK_WARNING_RETURN_TYPE 0x40000u
 #define CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION 0x80000u
 #define CHECK_WARNING_VISIBILITY_PRAGMA 0x100000u
@@ -148,8 +147,7 @@ static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* inp
 
 static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
 {
-    const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
-                                          warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
     return check_diagnostic_severity_from(input, token, source, warning, severity);
 }
 
@@ -174,6 +172,24 @@ static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, u
     return severity;
 }
 
+// The x86 range diagnostics' severity: the command line's mapping of clang's DefaultError warning (or its intrinsic
+// default when the caller knows no options), then a source pragma at the event's token.
+static CheckWarningSeverity check_diagnostic_range_severity(const CheckInput* input, const PPOptions* options, uint32_t token, bool default_error)
+{
+    CheckWarningSeverity baseline = default_error ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    if (options != NULL)
+    {
+        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, default_error);
+        // clang's -w suppresses this diagnostic whatever a pragma says, even an error one.
+        if (command.quiet)
+        {
+            return CHECK_WARNING_IGNORE;
+        }
+        baseline = command.severity;
+    }
+    return check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, baseline);
+}
+
 // Snapshot command-line policy independently of option storage and source-ordered pragma overrides.
 static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options)
 {
@@ -181,7 +197,7 @@ static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* op
                    "the K&R policy snapshot covers its four stable IDs");
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(input->kr_warning_severities); i += 1)
     {
-        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false);
+        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false, false);
         input->kr_warning_severities[i] = (uint8_t)command.severity;
         input->kr_warning_quiet = command.quiet;
         input->kr_warning_system = command.system_headers;
@@ -240,7 +256,7 @@ static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t nod
     return result;
 }
 
-static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, uint32_t* token)
+static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, const PPOptions* options, uint32_t* token)
 {
     uint32_t first = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
@@ -258,7 +274,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
         for (uint32_t e = 0; e < effect->range_event_count; e += 1)
         {
             if (effect->range_events[e].disposition == CHECK_BUILTIN_X86_READY && at < first &&
-                check_diagnostic_severity(input, at, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) >= CHECK_WARNING_ERROR)
+                check_diagnostic_range_severity(input, options, at, effect->range_events[e].default_error) >= CHECK_WARNING_ERROR)
             {
                 first = at;
             }

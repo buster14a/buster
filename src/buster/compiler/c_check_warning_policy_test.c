@@ -12,6 +12,7 @@ static void check_test_warning_policy(CheckTest* test)
         const char* first;
         const char* second;
         CheckWarningSeverity expected;
+        bool default_error;
     } cases[] = {
         { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-ignored-pragmas", NULL, CHECK_WARNING_IGNORE },
         { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-pragmas", NULL, CHECK_WARNING_IGNORE },
@@ -51,6 +52,27 @@ static void check_test_warning_policy(CheckTest* test)
         { CHECK_WARNING_ID_STATIC_LOCAL_INLINE, "-Wno-static-in-inline", NULL, CHECK_WARNING_WARNING },
         { CHECK_WARNING_ID_LITERAL_RANGE, "-w", "-Werror=literal-range", CHECK_WARNING_IGNORE },
         { CHECK_WARNING_ID_PLAIN_COMPLEX, "-Wno-everything", "-Werror=pedantic", CHECK_WARNING_IGNORE },
+        // The x86 range diagnostics are clang DefaultError warnings: -Wno-error=NAME demotes one to a warning and keeps
+        // it a warning through a later -Werror, while -Werror=NAME after it restores the error, and -WNAME alone keeps
+        // the default error (only one re-enabled after -Wno-NAME becomes a warning).
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wargument-outside-range", NULL, CHECK_WARNING_ERROR, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-argument-outside-range", NULL, CHECK_WARNING_IGNORE, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error=argument-outside-range", NULL, CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error=argument-outside-range", "-Werror", CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Werror", "-Wno-error=argument-outside-range", CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error=argument-outside-range", "-Werror=argument-outside-range", CHECK_WARNING_ERROR, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Werror=argument-outside-range", "-Wno-error=argument-outside-range", CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error", "-Werror=argument-outside-range", CHECK_WARNING_ERROR, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Werror=argument-outside-range", "-Wno-error", CHECK_WARNING_ERROR, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-argument-outside-range", "-Wargument-outside-range", CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error=argument-outside-range", "-Wargument-outside-range", CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-argument-outside-range", "-Werror", CHECK_WARNING_IGNORE, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-argument-outside-range", "-Weverything", CHECK_WARNING_IGNORE, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error=argument-outside-range", "-Weverything", CHECK_WARNING_WARNING, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Weverything", "-Wno-argument-outside-range", CHECK_WARNING_IGNORE, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-error=all", NULL, CHECK_WARNING_ERROR, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-everything", NULL, CHECK_WARNING_IGNORE, true },
+        { CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, "-Wno-everything", "-Weverything", CHECK_WARNING_IGNORE, true },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
@@ -59,23 +81,26 @@ static void check_test_warning_policy(CheckTest* test)
             .semantic_warning_options = arguments,
             .semantic_warning_option_count = cases[i].second != NULL ? 2 : 1,
         };
-        const CheckWarningCommandLine actual = check_warning_command_line(&options, cases[i].id, false);
+        const CheckWarningCommandLine actual = check_warning_command_line(&options, cases[i].id, false, cases[i].default_error);
         check_test_expect(test, actual.severity == cases[i].expected, "sparse warning options follow independently observed Clang group and global policy");
     }
     const PPOptions empty = { 0 };
+    check_test_expect(test, check_warning_command_line(&empty, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, true).severity == CHECK_WARNING_ERROR &&
+                           check_warning_command_line(&empty, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, false).severity == CHECK_WARNING_WARNING,
+                       "a default-error diagnostic's unmapped command line is an error, unlike an ordinary warning's");
     for (uint32_t id = CHECK_WARNING_ID_NON_LITERAL_NULL; id < CHECK_WARNING_ID_COUNT; id += 1)
     {
-        const CheckWarningCommandLine enabled = check_warning_command_line(&empty, id, false);
-        const CheckWarningCommandLine ignored = check_warning_command_line(&empty, id, true);
+        const CheckWarningCommandLine enabled = check_warning_command_line(&empty, id, false, false);
+        const CheckWarningCommandLine ignored = check_warning_command_line(&empty, id, true, false);
         check_test_expect(test, enabled.severity == CHECK_WARNING_WARNING && ignored.severity == CHECK_WARNING_IGNORE,
                           "event defaults remain independent of every high policy ID");
     }
     const char* arguments[] = { "-Wsystem-headers", "-Wno-system-headers" };
     PPOptions options = { .semantic_warning_options = arguments, .semantic_warning_option_count = 1 };
-    check_test_expect(test, check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false).system_headers,
+    check_test_expect(test, check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false, false).system_headers,
                       "source warning visibility can explicitly include system headers");
     options.semantic_warning_option_count = 2;
-    check_test_expect(test, !check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false).system_headers,
+    check_test_expect(test, !check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false, false).system_headers,
                       "the last system-header visibility option controls the sparse warnings");
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     char* ordered[] = { "-Wno-everything", "-include", "-Werror=literal-range", "-Wliteral-range", "source.c", "-o", "-Werror", "-pedantic-errors" };
@@ -88,7 +113,7 @@ static void check_test_warning_policy(CheckTest* test)
                            strcmp(parsed.semantic_warning_options[0], "-Wno-everything") == 0 &&
                            strcmp(parsed.semantic_warning_options[1], "-Wliteral-range") == 0 &&
                            strcmp(parsed.semantic_warning_options[2], "-pedantic-errors") == 0 &&
-                           check_warning_command_line(&parsed, CHECK_WARNING_ID_LITERAL_RANGE, false).severity == CHECK_WARNING_WARNING,
+                           check_warning_command_line(&parsed, CHECK_WARNING_ID_LITERAL_RANGE, false, false).severity == CHECK_WARNING_WARNING,
                       "actual CLI capture keeps option order and never mistakes an include or output filename for warning policy");
     arena_release(&arena);
 }

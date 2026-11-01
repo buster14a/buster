@@ -521,8 +521,8 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
         for (uint32_t e = 0; !pp->fatal && e < effect->range_event_count; e += 1)
         {
             const uint32_t token = check_diagnostic_x86_token(input, effect->node);
-            const CheckWarningSeverity severity = check_diagnostic_severity(input, token, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE);
             const CheckBuiltinX86RangeEvent* event = effect->range_events + e;
+            const CheckWarningSeverity severity = check_diagnostic_range_severity(input, &pp->options, token, event->default_error);
             // A failed/incomplete program cannot prove deadness. Report any still-deferred event conservatively.
             if (event->disposition != CHECK_BUILTIN_X86_SUPPRESSED && severity != CHECK_WARNING_IGNORE && token < parser->tokens.count)
             {
@@ -2606,7 +2606,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
                     uint32_t promoted_token = BUSTER_CHECK_NONE;
-                    bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
+                    bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &pp->options, &promoted_token);
                     promoted |= check_driver_warning_promoted(pp, &input, &input.warning_events, repairing ? &repair : NULL);
                     promoted |= check_driver_warning_promoted(pp, &input, &initializer_warning_view, repairing ? &repair : NULL);
                     promoted |= check_driver_warning_promoted(pp, &input, &stream.warning_events, repairing ? &repair : NULL);
