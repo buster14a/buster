@@ -3564,6 +3564,104 @@ in the [record](https://github.com/buster14a/buster-performance/tree/703e034725e
 This is the sparse-walk snapshot, before the later combined storage/traversal
 integration, not a new measurement of that combination.
 
+### The coded walk (#1038)
+
+The expressions' walk still took each token it visited through its action's
+chain of about 25 tests of the token's role, kind and columns before it acted,
+every step loading at the token the postorder had reached. Its vector path is
+now the coded walk (`c_check_expression_input.c`); `--scalar` keeps the walk,
+the oracle.
+
+- **Classes.** The classes' pass gives each token the walk acts at a class too
+  (`CheckInputExpressionCode`, in the visits byte's bits 2 to 6): which branch
+  of the walk's tests its role, its kind and the columns the walk doesn't write
+  lead to. Each block of 64 tokens looks its roles up in a table of their
+  classes (`check_input_role_codes`, with `vpermi2b`). An operand's class is its
+  kind's (identifier, literal or the walk's own). A role no test takes is a
+  DROP, but for the kinds the walk refuses. An ignored token is a LIST of a list
+  role and a DROP otherwise. A sparse entry or a type query finishing at the
+  token (`specifier_finishes`, 8 pointers at a time) makes it the walk's.
+  `check_input_expression_code` is the scalar twin, by the walk's tests in their
+  order.
+- **Compaction.** The postorder is read 1,024 positions at a time
+  (`check_input_expression_compact`), 16 tokens' bytes gathered from `visits`
+  and compressed with their tokens into two arrays on the stack. The column has
+  `BUSTER_CHECK_VISITS_PADDING` bytes past the last token's for the gathers'
+  four-byte reads. A DROP's action is nothing but its children's chains joined,
+  and no parent reads them: its first value is `NONE`, as the reader's setup
+  wrote it, so its tokens are left out. The scalar twin writes every token and
+  counts the ones it keeps.
+- **Actions.** Each class has its own action, which writes what the walk's does
+  (the node's columns, its leaf, the token's node and values):
+  - an identifier's leaf, as twelve words (no x87 store of its zero floating
+    parts);
+  - a literal's leaf;
+  - prefix, binary, cast, member, subscript, postfix and conditional operators;
+  - lists and groups;
+  - terminators' discards and conditions;
+  - plain calls, with their arguments' slice and the library builtins' marks.
+
+  The node is `check_input_add`'s without its record of the nodes before it,
+  which the next `check_input_add` or `check_graph_record_finish` makes, in node
+  order, from their final columns. An action tests what its class can't say: the
+  values the children have, the columns the walk writes as it goes, a builtin or
+  an intrinsic at the token. Where they don't hold, the token goes to the walk's
+  own visit (`check_input_expression_visit`, the action factored out as
+  `check_input_expression_act`). An action that leaves a token has written only
+  its first value and its children's chains, which the visit writes again as
+  they were. A unit with expressions past its limit or deferred, or with
+  overloadable functions, is the walk's throughout; so are a K&R unit's
+  identifiers and calls and a constexpr object's uses.
+- **The twins.** The scan test checks the classes by both paths against its own
+  reading of the walk's tests. It checks the compaction by both paths, with and
+  without the DROPs, against a random postorder, every column ending at a
+  `PROT_NONE` page. `test-checker` requires the coded walk to act by class
+  (`CheckInput.expression_classed`) at tokens of every fixture whose features it
+  takes, and the walk at none. Every comparison of the two paths compares the
+  graphs, leaves, argument slices and `token_nodes` (`test-checker`,
+  `test-checker-corpus`, c-testsuite's objects).
+- **What the walk is made of.** The counts per class that #1038 asked for, from
+  the walk's branch taken at each token:
+
+  | class | `sqlite3.c` | `main.c` | musl's 8 directories |
+  | --- | --- | --- | --- |
+  | tokens | 710,061 | 6,703,719 | 1,526,259 (441 units) |
+  | not acted at | 27.9% | 21.3% | 28.2% |
+  | ignored lists | 10.5% | 6.8% | 24.7% |
+  | ignored, no values | 4.2% | 2.9% | 8.9% |
+  | identifiers | 13.7% | 14.0% | 6.0% |
+  | literals | 6.4% | 10.5% | 4.2% |
+  | binary operators | 6.2% | 8.3% | 5.8% |
+  | ternary openings, separators, associations | 3.7% | 11.0% | 1.5% |
+  | members | 4.6% | 2.8% | 0.2% |
+  | groups | 3.1% | 3.1% | 4.5% |
+  | terminators | 7.8% | 4.4% | 6.3% |
+  | calls | 1.9% | 1.8% | 1.5% |
+  | conditions | 1.6% | 0.5% | 0.1% |
+  | the sparse columns | 0.03% | 0.07% | 0.86% (almost all `asm`) |
+
+  The sparse tail that has to stay ordered is small in all three. On the frozen
+  `sqlite3.c`, the coded walk visits 512,058 tokens and acts by class at 450,240.
+- **Measured.** In a 4-CPU Sapphire Rapids VM without performance counters, `-c`
+  of the frozen `sqlite3.c` (`--lanes 1`, CPU 2) was timed 31 times with
+  rotating builds, by `--time-stages`' new `time-check expressions` row (the
+  TSC across `check_input_expressions`). The walk's minimum went from 41.4 to
+  33.1 ms, its median from 54.9 to 39.6 ms, and the `check-input` stage's
+  median from 172.9 to 153.9 ms. Sampling at 50 µs (8 compiles each) gave the
+  walk about 12,500 samples before and 7,100 after, about 43% less. The VM's page faults land
+  inside the walk's interval (about 8 ms of system time in both builds), and
+  its run-to-run spread is wide, so these figures are the VM's alone. The
+  9700X's counters are the measurement of record.
+- **Tried, and slower.** Identifier leaves built 16 at a time from gathered
+  declaration columns, written before anything could read a leaf. That is
+  before every token left to the walk's visit, whose node records the nodes
+  before it. Those flushes averaged about 3 leaves on `sqlite3.c`, and the
+  walk's minimum rose from 32.1 to 34.2 ms, so the leaves are written by their
+  action. Building the graph data-parallel needs node ids before any node is
+  written, which is #1038's remaining work. That means every value's consumer
+  found (its nearest ancestor that isn't a list, by pointer jumping), the
+  consumers' operand counts as a histogram, and a prefix sum.
+
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
 output fills. Since #572 the graph stores `CheckValue` only for VALUE leaves;

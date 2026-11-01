@@ -2819,8 +2819,8 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
 }
 
 // Reads --time-stages' report in `text` (check_clock_read): whether it has every row once, the stages adding up to the
-// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), and the process's lines.
-// Each stage's milliseconds go to `stages` (by CheckStage).
+// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), the reader's expressions' walk
+// once within the reader's stage (#1038), and the process's lines. Each stage's milliseconds go to `stages` (by CheckStage).
 static bool check_test_driver_time_report(const char* text, double* stages)
 {
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
@@ -2847,6 +2847,11 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     {
         valid = strstr(text, process[p]) != NULL;
     }
+    static const char walk[] = "\ntime-check\texpressions\t";
+    const char* walked = valid ? strstr(text, walk) : NULL;
+    double expressions = -1;
+    valid = walked != NULL && strstr(walked + 1, walk) == NULL && sscanf(walked + sizeof(walk) - 1, "%lf", &expressions) == 1 && expressions >= 0 &&
+            expressions <= stages[CHECK_STAGE_CHECK_INPUT] + 0.001;
     const double stage_error = sum > total ? sum - total : total - sum;
     const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
     return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);

@@ -1211,7 +1211,10 @@ designs and the compilers already built this way.
   `CheckOptions.level_order`, in stable dependency levels), with scalar
   barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
-  `c_check_binding.c` publishes each use's retained answer from those events
+  its expression graph's walk has a vector path, the coded walk
+  (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
+  each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
+  "The coded walk"); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`

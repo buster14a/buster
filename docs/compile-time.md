@@ -775,6 +775,11 @@ report, on standard error after the command, a row per stage.
   N`, and one for a source without code to emit), and `lanes`, those its flow
   ran on, one after a failed start.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
+- **The expressions' walk** inside `check-input` is a line of its own after the
+  total, `time-check expressions MILLISECONDS PERCENT`: the TSC's ticks across
+  `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
+  #1038; two TSC reads a unit, with the option or without) and the driver adds
+  up. It overlaps the stage, so it is no row of the stages' sum.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked
   by `test-checker-driver --executable`.

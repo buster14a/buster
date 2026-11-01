@@ -393,7 +393,7 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
     uint32_t parser_events = 0;
     CBindingStatistics statistics[CHECK_INPUT_BINDING_MODES] = { 0 };
     // The tokens each mode's walks visited (#529): the walk in source order's and the expressions' walk's.
-    uint32_t visits[CHECK_INPUT_BINDING_MODES][2] = { { 0 } };
+    uint32_t visits[CHECK_INPUT_BINDING_MODES][3] = { { 0 } };
     for (uint32_t mode = CHECK_INPUT_BINDINGS_DIRECT; valid && mode < CHECK_INPUT_BINDING_MODES; mode += 1)
     {
         CheckInput input;
@@ -405,6 +405,7 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
         statistics[mode] = parser_mode ? input.parser_binding_statistics : input.binding_statistics;
         visits[mode][0] = input.resolve_visits;
         visits[mode][1] = input.expression_visits;
+        visits[mode][2] = input.expression_classed;
         if (!valid)
         {
             fprintf(stderr, "benchmark-checker-bindings: %s: mode %s differs from the default handoff\n", file, check_input_binding_mode_names[mode]);
@@ -620,9 +621,9 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
             {
                 printf(" over_direct_ns=%" PRId64, (int64_t)median - (int64_t)direct);
             }
-            printf(" walked_uses=%" PRIu64 " fallback_uses=%" PRIu64 " resolve_visits=%u expression_visits=%u retained_bytes=%" PRIu64
+            printf(" walked_uses=%" PRIu64 " fallback_uses=%" PRIu64 " resolve_visits=%u expression_visits=%u expression_classed=%u retained_bytes=%" PRIu64
                    " written_bytes_available=%u output_written_bytes=%" PRIu64 " scratch_written_bytes=%" PRIu64 "\n",
-                   statistics[mode].walked_uses, statistics[mode].fallback_uses, visits[mode][0], visits[mode][1], retained[mode], !pipeline,
+                   statistics[mode].walked_uses, statistics[mode].fallback_uses, visits[mode][0], visits[mode][1], visits[mode][2], retained[mode], !pipeline,
                    output_peaks[mode], scratch_peaks[mode]);
         }
         for (uint32_t piece = 0; results != 0 && piece < ISOLATED_COUNT; piece += 1)

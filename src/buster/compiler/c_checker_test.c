@@ -2239,6 +2239,12 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                          fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
                 const bool visits = input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits;
                 check_test_expect(test, visits, resource_message);
+                // The coded walk acts by class (#1038) at tokens of every unit whose features it takes, and the scalar walk at none.
+                snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
+                         fixture->name, input[1].expression_classed, input[1].expression_visits, input[0].expression_classed);
+                const bool coded = input[1].overload_heads != NULL || input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
+                                   (input[1].expression_classed != 0 && input[1].expression_classed <= input[1].expression_visits);
+                check_test_expect(test, coded && input[0].expression_classed == 0, resource_message);
             }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;

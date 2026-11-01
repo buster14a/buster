@@ -78,7 +78,60 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
         taken |= role == lists[r];
     }
     const bool acts = reader->first_child[i] != BUSTER_CHECK_NONE || sparse || taken;
-    return (uint8_t)((acts ? BUSTER_CHECK_EXPRESSION_ACTS : 0) | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0));
+    // The class (CheckInputExpressionCode): the walk's visit for a sparse entry or a type query's finish; an ignored
+    // token's list or none; then by the roles each class takes, an operand's by its kind, and a role no test takes a DROP
+    // but for the kinds above, which the walk refuses.
+    static const uint8_t classed_roles[] = { PARSE_ROLE_PREFIX, PARSE_ROLE_MULTIPLICATIVE, PARSE_ROLE_ADDITIVE, PARSE_ROLE_SHIFT, PARSE_ROLE_RELATIONAL,
+                                             PARSE_ROLE_EQUALITY, PARSE_ROLE_BITWISE_AND, PARSE_ROLE_BITWISE_XOR, PARSE_ROLE_BITWISE_OR, PARSE_ROLE_LOGICAL_AND,
+                                             PARSE_ROLE_LOGICAL_OR, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR, PARSE_ROLE_CLOSE_GROUP,
+                                             PARSE_ROLE_CLOSE_CAST, PARSE_ROLE_OPEN_TERNARY, PARSE_ROLE_ASSOCIATION, PARSE_ROLE_CLOSE_INITIALIZER,
+                                             PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_POSTFIX,
+                                             PARSE_ROLE_CLOSE_CONDITION, PARSE_ROLE_TERMINATOR, PARSE_ROLE_CLOSE_FOR, PARSE_ROLE_CLOSE_CALL,
+                                             PARSE_ROLE_CLOSE_FUNCTION };
+    static const uint8_t classed_codes[] = { CHECK_INPUT_CODE_PREFIX, CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY,
+                                             CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY,
+                                             CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_BINARY,
+                                             CHECK_INPUT_CODE_BINARY, CHECK_INPUT_CODE_SEPARATOR, CHECK_INPUT_CODE_GROUP, CHECK_INPUT_CODE_CAST,
+                                             CHECK_INPUT_CODE_LIST, CHECK_INPUT_CODE_LIST, CHECK_INPUT_CODE_LIST, CHECK_INPUT_CODE_TERNARY,
+                                             CHECK_INPUT_CODE_SUBSCRIPT, CHECK_INPUT_CODE_MEMBER, CHECK_INPUT_CODE_POSTFIX, CHECK_INPUT_CODE_CONDITION,
+                                             CHECK_INPUT_CODE_TERMINATOR, CHECK_INPUT_CODE_TERMINATOR, CHECK_INPUT_CODE_CALL, CHECK_INPUT_CODE_CALL };
+    // The walk's visit: the roles its other tests take, but none of the classes.
+    static const uint8_t visited_roles[] = { PARSE_ROLE_RETURN, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_CLOSE_KEYWORD, PARSE_ROLE_CLOSE_COMPOUND_BODY,
+                                             PARSE_ROLE_RANGE, PARSE_ROLE_CLOSE_CASE, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_CLOSE_ENUM, PARSE_ROLE_CLOSE_SPECIFIER,
+                                             PARSE_ROLE_CLOSE_ASM, PARSE_ROLE_LABEL, PARSE_ROLE_TAG, PARSE_ROLE_BITFIELD };
+    bool listed = false;
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(lists); r += 1)
+    {
+        listed |= role == lists[r];
+    }
+    bool refused = false;
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+    {
+        refused |= kind == kinds[k];
+    }
+    uint8_t code = refused ? CHECK_INPUT_CODE_SCALAR : CHECK_INPUT_CODE_DROP;
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(classed_roles); r += 1)
+    {
+        code = role == classed_roles[r] ? classed_codes[r] : code;
+    }
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(visited_roles); r += 1)
+    {
+        code = role == visited_roles[r] ? CHECK_INPUT_CODE_SCALAR : code;
+    }
+    if (role == PARSE_ROLE_OPERAND)
+    {
+        code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
+               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL : CHECK_INPUT_CODE_SCALAR;
+    }
+    if (reader->ignored[i] != 0)
+    {
+        code = listed ? CHECK_INPUT_CODE_LIST : CHECK_INPUT_CODE_DROP;
+    }
+    if (sparse || reader->specifier_finishes[i] != NULL)
+    {
+        code = CHECK_INPUT_CODE_SCALAR;
+    }
+    return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
 static CheckInput check_test_output_none_columns(uint32_t* const* columns, uint32_t count)
@@ -213,6 +266,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         BOUNDS,
         STATEMENTS,
         FIRST_VALUE,
+        FINISHES,
+        POSTORDER,
+        PADDED_VISITS,
+        COMPACT_TOKENS,
+        COMPACT_CLASSES,
         COLUMNS,
     };
     uint8_t* mappings[COLUMNS];
@@ -230,7 +288,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     const uint8_t kind_values[] = { PARSE_KIND_L_SQUARE, PARSE_KIND_ASM, PARSE_KIND_SIZEOF, PARSE_KIND_PERIOD, PARSE_KIND_IDENTIFIER, PARSE_KIND_ATTRIBUTE,
                                     PARSE_KIND_CASE, PARSE_KIND_STATIC_ASSERT, PARSE_KIND_COMMA, PARSE_KIND_ALIGNAS, PARSE_KIND_CALLING_CONVENTION, PARSE_KIND_STRING,
                                     PARSE_KIND_L_SQUARE, PARSE_KIND_STRUCT, PARSE_KIND_ENUM, PARSE_KIND_TYPEOF, PARSE_KIND_EXTENSION, PARSE_KIND_IDENTIFIER,
-                                    PARSE_KIND_GOTO, PARSE_KIND_SWITCH };
+                                    PARSE_KIND_GOTO, PARSE_KIND_SWITCH, PARSE_KIND_NUMBER, PARSE_KIND_CHARACTER, PARSE_KIND_PLUS, PARSE_KIND_ARROW };
     // The names whose tokens the syntax bits mark, each as its bit.
     const uint32_t syntax_names[] = { C_NAME_BUILTIN_VA_ARG, C_NAME_BUILTIN_CONVERTVECTOR, C_NAME_BUILTIN_BIT_CAST, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR,
                                       C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_NORETURN, C_NAME_NONNULL, C_NAME_NULLABLE,
@@ -242,7 +300,9 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     const uint8_t role_values[] = { PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_SEPARATOR,
                                     PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_SPECIFIER, PARSE_ROLE_MEMBER, PARSE_ROLE_TAG,
                                     PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_RETURN, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE,
-                                    PARSE_ROLE_TERMINATOR, PARSE_ROLE_OPEN_ASM };
+                                    PARSE_ROLE_TERMINATOR, PARSE_ROLE_OPEN_ASM, PARSE_ROLE_PREFIX, PARSE_ROLE_ADDITIVE, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA,
+                                    PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CAST, PARSE_ROLE_OPEN_TERNARY, PARSE_ROLE_CLOSE_INITIALIZER,
+                                    PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_POSTFIX, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_BITFIELD };
     uint32_t mismatches = 0;
     uint32_t mark_differences = 0;
     uint32_t class_differences = 0;
@@ -404,6 +464,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         reader.designator_tokens = check_test_scan_column(mappings[DESIGNATORS] + page, count, 4);
         reader.vla_ends = check_test_scan_column(mappings[BOUNDS] + page, count, 4);
         reader.first_value = check_test_scan_column(mappings[FIRST_VALUE] + page, count, 4);
+        reader.specifier_finishes = check_test_scan_column(mappings[FINISHES] + page, count, sizeof(CheckInputSpecifierJob*));
         uint32_t* sparse_columns[] = { input.expression_regions, input.asm_ids, reader.constant_present, reader.vararg_calls, reader.designator_tokens, reader.vla_ends };
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -417,6 +478,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             {
                 sparse_columns[c][i] = ((draw >> (8 + 4 * c)) & 15) == 0 ? 1 + (draw >> 28) : 0;
             }
+            // A type query that finishes at one token in eight.
+            reader.specifier_finishes[i] = (check_test_random(test) & 7) == 0 ? (CheckInputSpecifierJob*)&reader : NULL;
         }
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
@@ -464,6 +527,59 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         }
         input.asm_ids = dense_asms;
         parser.options.scalar = false;
+        // The coded walk's compaction of these classes (check_input_expression_compact), by both paths: the tokens the walk
+        // acts at among each range of a postorder (a random permutation of the tokens), in its order, with their bytes;
+        // from bytes that end three past the last token's, the most the gathers reach, and into arrays of exactly the
+        // range's room, each ending at a PROT_NONE page.
+        check_input_expression_classes(&reader);
+        uint32_t* postorder = check_test_scan_column(mappings[POSTORDER] + page, count, 4);
+        uint8_t* padded = check_test_scan_column(mappings[PADDED_VISITS] + page, count + 3, 1);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            postorder[i] = i;
+        }
+        for (uint32_t i = count; i > 1; i -= 1)
+        {
+            const uint32_t j = check_test_random(test) % i;
+            const uint32_t swapped = postorder[i - 1];
+            postorder[i - 1] = postorder[j];
+            postorder[j] = swapped;
+        }
+        memcpy(padded, visits, count);
+        for (uint32_t i = count; i < count + 3; i += 1)
+        {
+            padded[i] = (uint8_t)check_test_random(test);
+        }
+        reader.visits = padded;
+        reader.postorder = postorder;
+        const uint32_t ranges[][2] = { { 0, count }, { count / 3, count }, { count / 2, count / 2 + (count + 3) / 4 }, { count > 0 ? 1 : 0, count > 1 ? count - 1 : count } };
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(ranges); r += 1)
+        {
+            const uint32_t first = ranges[r][0];
+            const uint32_t end = ranges[r][1];
+            uint32_t* compact_tokens = check_test_scan_column(mappings[COMPACT_TOKENS] + page, end - first, 4);
+            uint32_t* compact_classes = check_test_scan_column(mappings[COMPACT_CLASSES] + page, end - first, 4);
+            // Every token the walk acts at, and all but its DROPs, as the coded walk keeps them.
+            const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+            for (uint32_t run = 0; run < 4; run += 1)
+            {
+                const uint32_t skipped = run < 2 ? UINT32_MAX : dropped;
+                const uint32_t acting = check_input_expression_compact(&reader, first, end, compact_tokens, compact_classes, skipped, (run & 1) != 0);
+                uint32_t expected = 0;
+                for (uint32_t position = first; position < end; position += 1)
+                {
+                    const uint32_t token = postorder[position];
+                    if ((padded[token] & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && padded[token] != skipped)
+                    {
+                        class_differences += expected >= acting || compact_tokens[expected] != token || compact_classes[expected] != padded[token];
+                        expected += 1;
+                    }
+                }
+                class_differences += acting != expected;
+            }
+        }
+        reader.visits = visits;
+        reader.postorder = NULL;
     }
     mismatches += mark_differences + class_differences;
     char description[200];
