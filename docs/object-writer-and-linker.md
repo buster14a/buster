@@ -5088,6 +5088,21 @@ the futex:
   bounds each wait. Its C1 hint wakes as fast as C0's (`0xf0`) and draws a
   little less.
 
+**A group that shares its CPUs sleeps at once.** A group with more lanes than the
+CPUs the process may run on (`lane_group_shares_cpus`: one `sched_getaffinity`
+as it starts, 0.40 µs, and a group of one lane or one pinned to a CPU per lane
+makes none) skips the wait in `mwaitx`, and the spin that takes its place in a
+build without it (every Intel host, and a baseline `-march=x86-64` build on AMD
+too), for `lane_sleep` at once: either holds a CPU a lane that hasn't arrived
+needs, for up to 1 ms, so that every sync costs a timeslice. On a two-core,
+four-CPU set of the development host (a Ryzen 9 7940HS, so these are not 9700X
+figures), `test-lanes`' eight lanes and 10,000 rounds took 97.8 s before the
+change in a baseline build, whose wait is the spin, and 0.72 s after it, with
+the same values and 195,726 futex sleeps in the waiting lanes in place of the
+spin's 133,355; the native build's `mwaitx` took 33.2 s there and 0.83 s. The
+watchdog didn't fire in either run. A group with no more lanes than CPUs waits
+as before, in `mwaitx` or in the spin.
+
 `benchmark-lanes` ends with the same measurement for its largest group: lane 0
 works alone for the wait, then every lane works for 1 ms. Medians of three
 runs, against full speed, with the wake as in the table above:

@@ -51,6 +51,10 @@
 // lane_wait. A waiting lane spins for BUSTER_LANE_SPINS pauses, waits in mwaitx for the word's line to be written for up
 // to BUSTER_LANE_WAIT_NANOSECONDS (lane_wait_ticks), and then sleeps on the word with a futex, setting its bit 0 first
 // so that the lane that advances it knows to wake the sleepers: a sync at which no lane slept makes no system call.
+// A group with more lanes than the CPUs the process may run on shares them (lane_group_shares_cpus), and there a lane
+// that would wait in mwaitx sleeps at once instead: a wait in mwaitx, or the spin that takes its place in a build without
+// it, keeps the lane's CPU for up to BUSTER_LANE_WAIT_NANOSECONDS, and the lanes that haven't arrived need those CPUs
+// before they can arrive, so that every sync would cost a timeslice.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -856,6 +860,9 @@ struct LaneGroup
     // lane_take's counter, which every lane adds to: on a pair of lines of its own, so that taking never disturbs the
     // barrier.
     _Alignas(BUSTER_LANE_LINE_PAIR_BYTES) uint64_t taken;
+    // Whether the group's lanes share CPUs (lane_group_shares_cpus), which a lane that waits for its group reads
+    // (lane_wait): with the barrier's lines written every sync, this one is written as the group starts.
+    bool shares_cpus;
 };
 
 // A session's lane start (lane_session_run): its session and index, and with a CPU list whether its thread pinned
@@ -1044,7 +1051,10 @@ static uint32_t lane_sleep(uint32_t* word, uint32_t value)
 }
 
 // Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
-// mwaitx; then sleeps (lane_sleep).
+// mwaitx; then sleeps (lane_sleep). A lane of a group that shares CPUs (LaneGroup.shares_cpus) leaves the waiting to
+// lane_sleep: a wait in mwaitx, or the spin that takes its place in a build without it, keeps the lane's CPU for up to
+// BUSTER_LANE_WAIT_NANOSECONDS, and the lanes that haven't arrived need those CPUs before they can arrive, so that every
+// sync would cost a timeslice.
 static uint32_t lane_wait(uint32_t* word, uint32_t value)
 {
     uint32_t current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
@@ -1053,8 +1063,9 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
         _mm_pause();
         current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
     }
+    const LaneGroup* group = thread_context.lane.group;
     // A wait that ended while spinning, as at most syncs, doesn't read the clock (rdtsc is 27 µops on Zen 5).
-    if ((current & ~1u) == value)
+    if ((group == 0 || !group->shares_cpus) && (current & ~1u) == value)
     {
         const uint64_t begin = __rdtsc();
         const uint64_t budget = lane_wait_ticks(begin);
@@ -1415,6 +1426,12 @@ static bool lane_narrow(uint32_t lanes)
     thread_context.narrow_depth = depth + 1;
     if (inside)
     {
+        // A narrowed group of several lanes shares the CPUs its session's lanes do, which the session worked out as it
+        // started (LaneGroup.shares_cpus).
+        if (count > 1)
+        {
+            thread_context.session->narrowed[depth].shares_cpus = thread_context.session->group.shares_cpus;
+        }
         thread_context.lane = (Lane){
             .index = outer.index,
             .count = count,
@@ -1473,6 +1490,30 @@ static void lane_widen(void)
 #define BUSTER_LANE_TEAM_READY 2u
 // sched_setaffinity's masks: 1,024 CPUs, as glibc's cpu_set_t.
 #define BUSTER_LANE_CPU_MASK_WORDS 16
+
+// The CPUs the process may run on, counted from its affinity mask (lane_core_count counts those CPUs' cores instead).
+// One read is a system call, and a group that pins no CPU of its own makes it once, as it starts.
+static uint32_t lane_cpu_count(void)
+{
+    uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const long written = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask);
+    const uint32_t words = written > 0 ? (uint32_t)((uint64_t)written / 8) : 0;
+    uint32_t result = 0;
+    for (uint32_t word = 0; word < words && word < BUSTER_LANE_CPU_MASK_WORDS; word += 1)
+    {
+        result += (uint32_t)__builtin_popcountll(mask[word]);
+    }
+    return result != 0 ? result : 1;
+}
+
+// Whether a group of `lanes` lanes shares the CPUs the process may run on: more lanes than CPUs, none of them pinned to a
+// CPU of its own (`pinned`). A lane of such a group that waits sleeps at once (lane_wait), rather than hold the CPU a lane
+// that hasn't arrived needs for up to BUSTER_LANE_WAIT_NANOSECONDS; with one lane per CPU its wait costs the group
+// nothing.
+static bool lane_group_shares_cpus(uint32_t lanes, bool pinned)
+{
+    return !pinned && lanes > 1 && lanes > lane_cpu_count();
+}
 
 // Runs one whole operation on `count` lanes, with the calling thread as lane 0. Its phases call one another directly
 // inside entry; this is the runtime's only work callback. With a command team, count selects a prefix of its fixed
@@ -1816,6 +1857,7 @@ static bool lane_team_run(LaneTeam* team, uint32_t count, void (*entry)(void* ar
         team->group = (LaneGroup){
             .entry = entry,
             .argument = argument,
+            .shares_cpus = lane_group_shares_cpus(count, team->has_cpus),
         };
         team->count = count;
         const Lane previous = thread_context.lane;
@@ -1854,13 +1896,15 @@ static void* lane_thread_main(void* parameter)
 {
     LaneStart* start = parameter;
     start->pinned = start->cpu < 0 || lane_pin((uint32_t)start->cpu);
+    // The lane is the group's before the gate, which a group that shares CPUs then waits at with lane_sleep (lane_wait):
+    // the lanes created so far would otherwise hold their CPUs while the others are created.
+    thread_context.lane = (Lane){
+        .index = start->index,
+        .count = start->count,
+        .group = start->group,
+    };
     if (lane_wait(&start->group->gate, 0) == BUSTER_LANE_GATE_RUN)
     {
-        thread_context.lane = (Lane){
-            .index = start->index,
-            .count = start->count,
-            .group = start->group,
-        };
         thread_context.running = true;
         start->group->entry(start->group->argument);
     }
@@ -1873,6 +1917,7 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
     LaneGroup group = {
         .entry = entry,
         .argument = argument,
+        .shares_cpus = lane_group_shares_cpus(count, cpus != 0),
     };
     LaneStart starts[BUSTER_LANE_MAX_COUNT];
     pthread_t threads[BUSTER_LANE_MAX_COUNT];
@@ -2222,6 +2267,7 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
             }
             session->count = started ? lanes : 1;
             session->created = created;
+            session->group.shares_cpus = lane_group_shares_cpus(session->count, session->has_cpus);
             lane_publish(&session->gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
             for (uint32_t i = 1; !started && i < created; i += 1)
             {
@@ -2273,6 +2319,10 @@ static uint32_t lane_session_settle(void)
         {
             pthread_join(session->threads[i], 0);
         }
+        // Whether the lanes that run share the CPUs they run on, whichever group lane 0 is in as it settles: the
+        // session's, or a flow's, which lane 0 began before it settled (lane_flow_begin makes it a group of one, as the C
+        // driver's and link-foreign's flows do), and whose rounds then narrow from the session's answer.
+        session->group.shares_cpus = lane_group_shares_cpus(run ? session->count : 1, session->has_cpus);
         // The lanes that run: with one per core, fewer than the capacity lane 0 started on.
         if (thread_context.lane.group == &session->group)
         {

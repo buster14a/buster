@@ -1290,6 +1290,22 @@ the existing families or of new ones:
   `mfence`, `sfence`), `clflush`, `ldmxcsr` and `stmxcsr` (through the leaf's
   red zone) and `xsetbv`, which only the kernel may run and whose fixture only
   compiles and links.
+- the header builtins, leaves too: the names `<xmmintrin.h>`, `<emmintrin.h>`
+  and `<prfchwintrin.h>` declare (`_mm_lfence`, `_mm_mfence`, `_mm_sfence`,
+  `_mm_pause`, `_mm_clflush`, `_mm_getcsr`, `_mm_setcsr`, `_m_prefetch` and
+  `_m_prefetchw`), whose calls were calls of undefined functions. An x86 builtin
+  of the intrinsic catalogue's rows and leaves (`cbuiltin_source_intrinsic`)
+  stays the builtin under a declaration of it with external linkage, at file
+  scope or at block scope, as clang keeps it (`check_input_intrinsic_prepare`,
+  each catalogue row's verdict remembered in `CheckInputReader.intrinsic_source`);
+  a definition with internal linkage is the program's function, and a local
+  object of the name hides it. Pending: clang refuses a definition of one with
+  external linkage (`definition of builtin function`), which this compiler
+  takes as the builtin; and the builtins of the dedicated paths
+  (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
+  declaration too, become calls of their names here.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
+  modes, and stays out of the scope.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

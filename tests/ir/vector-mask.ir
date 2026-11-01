@@ -12,5 +12,8 @@ b0:
   %9 = and.m32 %7, %7
   %10 = not.m64 %8
   %11 = vselect.v16i32 %6, %2, %2
-  %12 = ret.void %11
+  %12 = bitcast.i64 %10
+  %13 = bitcast.m64 %12
+  %14 = bitcast.i32 %9
+  %15 = ret.void %11
 }
