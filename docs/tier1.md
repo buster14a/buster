@@ -137,7 +137,8 @@ measures at 2,602, so the counts aren't comparable across records. On the
 7940HS the object's text grows from 1,283,627 to 1,439,515 bytes (+12.1%) and
 five compiles' median wall time from 525 to 698 ms in one pair of runs and 751
 to 910 ms in another (+33.0% and +21.2%; that host is shared, so its time is a
-range). On the 9700X, at the same head as the review (`fe3f3c79`), the text
+range). On the 9700X, at `fe3f3c79` — this head with `main` merged again, whose
+wider selection takes 2,171 of the 2,604 functions rather than 2,155 — the text
 grows from 1,440,195 to 1,613,155 bytes (+12.0%) and the median of four clean
 compiles from 363 ms to 487 ms (+34.2%), the first run's figure discarded
 because it includes the wait for the CI job that held the lock. The two hosts'
@@ -153,7 +154,7 @@ instructions +40%, 2.5 times the spill traffic), and the pipeline's cleanup
 after it does not recover the regression (205,229 against 205,269
 instructions, 0.02%), so the cost is the merge rather than dead values. Tier 1
 therefore doesn't route C source through GVN until a variant accounts for
-allocation cost. [The measurement record](https://github.com/buster14a/buster-performance/tree/5fb6ffb10c291770d168b92272a0dcecc6e16d21/docs/measurements/gvn-866-tier1-2026-11-01)
+allocation cost. [The measurement record](https://github.com/buster14a/buster-performance/tree/d24f417aef4eb860bccc2370c2e963e57fb5695a/docs/measurements/gvn-866-tier1-2026-11-01)
 has the commands, the host and the raw logs; [the value-numbering
 guide](ir-value-numbering.md) has the rest of the figures.
 

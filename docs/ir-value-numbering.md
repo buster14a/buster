@@ -191,6 +191,6 @@ does not recover the regression (205,229 against 205,269 instructions), so it
 is the merge, not dead values, that costs. Routing C source through GVN by
 default therefore waits for a variant that accounts for allocation cost; the
 option stays as the reproducible measurement, and [the measurement
-record](https://github.com/buster14a/buster-performance/tree/5fb6ffb10c291770d168b92272a0dcecc6e16d21/docs/measurements/gvn-866-tier1-2026-11-01)
+record](https://github.com/buster14a/buster-performance/tree/d24f417aef4eb860bccc2370c2e963e57fb5695a/docs/measurements/gvn-866-tier1-2026-11-01)
 has the commands, the host and the raw logs.
 
