@@ -1115,10 +1115,10 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 491 audited SemaX86 constraint facts for 463
+`c_check_builtin_x86.c` adds 549 audited SemaX86 constraint facts for 521
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
-rounding sets, 91 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
 error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
@@ -1266,6 +1266,15 @@ the existing families or of new ones:
   direction. `x86_semantics.c` gained the effects of the forms these reach that
   it lacked: VSUBSS, VSUBSD, VDIVSS and VDIVSD's EVEX forms, the 231 FMAs' and
   FMSUBs' 64-byte forms and the EVEX integer-to-float conversions.
+- the rest of the gathers and scatters: AVX-512's of floats and doubles at 64
+  bytes (`gathersiv16sf` to `gatherdiv8df`, `scatterdiv16sf` to
+  `scattersiv8di`) and of every element at 16 and 32 bytes (`gather3div2df` to
+  `gather3siv8si`, `scatterdiv2df` to `scattersiv8si`), the existing families'
+  with their forms; and AVX2's under a vector's signs (`gatherd_d` to
+  `gatherq_q256`), a family of their own (`CHECK_X86_LOWER_GATHER_VECTOR`:
+  VEX's VPGATHER with the mask in vvvv, which the instruction zeroes). Each
+  takes clang's scale check (1, 2, 4 or 8). `x86_semantics.c` gained the effects
+  of the float gathers and scatters, VPGATHERQD's and VPSCATTERDQ's.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

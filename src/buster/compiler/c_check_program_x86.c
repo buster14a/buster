@@ -84,6 +84,9 @@ typedef enum CheckX86LowerFamily
     // (void* p, mask m, vector index, vector a, int scale): VPSCATTER's of a's elements to p + index * scale under m; a
     // of `other` bytes.
     CHECK_X86_LOWER_SCATTER,
+    // (vector w, const T* p, vector index, vector m, int scale): AVX2's VPGATHER's elements at p + index * scale where m's
+    // have their top bits, merged into w, m zeroed; the index of `other` bytes.
+    CHECK_X86_LOWER_GATHER_VECTOR,
     // (vector a, vector b, vector m): VPBLENDVB's b's bytes where m's have their top bits, a's elsewhere.
     CHECK_X86_LOWER_BLENDV,
     // (vector a, vector b, mask m): VPSHUFBITQMB's mask under m; or (vector a, int immediate, mask m): VFPCLASS's of a.
@@ -1097,6 +1100,22 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
                 row->result_class = BUSTER_TYPED_CLASS_VOID;
                 row->result_bytes = 0;
             }
+        }
+        else if (rule->family == CHECK_X86_LOWER_GATHER_VECTOR)
+        {
+            const uint32_t scale = immediate == 1 ? 0 : immediate == 2 ? 1 : immediate == 4 ? 2 : immediate == 8 ? 3 : 4;
+            reason = scale == 4 ? "x86 builtins' gathers and scatters of a scale other than 1, 2, 4 or 8" : reason;
+            row->records[0] = (X86Instruction){ .form = rule->form, .reg = v0, .vvvv = v3, .rm = BUSTER_TIER0_ROLE_INTEGER(1), .index = v2,
+                                                .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale & 3) };
+            row->record_count = 1;
+            row->operand_count = 4;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+            row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[2] = rule->other;
+            row->operand_classes[3] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[3] = rule->bytes;
         }
         else if (rule->family == CHECK_X86_LOWER_BLENDV)
         {

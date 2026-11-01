@@ -421,6 +421,48 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             0,
             false,
         },
+        {
+            // The rest of the gathers and scatters (#148): AVX-512's of floats and doubles at 64 bytes and of every element at
+            // 16 and 32 bytes, under masks of some lanes and all, at the elements' scales and by byte and word offsets at
+            // scales 1 and 2; the scatters into tables whose bytes are hashed after them; and AVX2's gathers under vectors'
+            // signs.
+            "x86-rest-gathers",
+            "#define G(N,T,...) {T r=__builtin_ia32_##N(__VA_ARGS__);FOLD(r);}\n"
+            "#define S(N,...) __builtin_ia32_##N(__VA_ARGS__);\n"
+            "int tested(int n){unsigned h=2166136261u;float tf[64];double td[64];int ti[64];long long tq[64];float sf[64]={0};double sd[64]={0};"
+            "int si[64]={0};long long sq[64]={0};\n"
+            "for(int i=0;i<64;i++){tf[i]=(float)i*1.5f+(float)n;td[i]=(double)i*2.25+(double)n;ti[i]=i*7+n;tq[i]=(long long)i*0x100000001ll+n;}\n"
+            "v4sf a4,f4;v8sf f8;v16sf a16;v2df p2;v4df p4;v8df p8;v4si i4,x4;v8si i8,x8;v16si x16;v2di q2,y2;v4di q4,y4;v8di y8;fill(&a4,16,n);"
+            "fill(&f4,16,n+1);fill(&f8,32,n+2);fill(&a16,64,n+3);fill(&p2,16,n+4);fill(&p4,32,n+5);fill(&p8,64,n+6);fill(&i4,16,n+7);fill(&i8,32,n+8);"
+            "fill(&q2,16,n+9);fill(&q4,32,n+10);\n"
+            "for(int i=0;i<16;i++){x16[i]=(i*3+n)&63;if(i<8){x8[i]=(i*5+n*3)&63;y8[i]=(i*7+n)&63;}if(i<4){x4[i]=(i*11+n)&63;y4[i]=(i*13+n*5)&63;}"
+            "if(i<2)y2[i]=(i*17+n*7)&63;}\n"
+            "unsigned long long m=mask(n);unsigned char k8=(unsigned char)m;unsigned short k16=(unsigned short)(m>>8);\n"
+            "G(gathersiv16sf,v16sf,a16,tf,x16,k16,4)G(gathersiv16sf,v16sf,a16,tf,x16,0xffff,4)G(gathersiv8df,v8df,p8,td,x8,k8,8)"
+            "G(gatherdiv16sf,v8sf,f8,tf,y8,k8,4)G(gatherdiv16si,v8si,i8,ti,y8,k8,4)G(gatherdiv8df,v8df,p8,td,y8,0xff,8)\n"
+            "G(gather3div2df,v2df,p2,td,y2,k8,8)G(gather3div2di,v2di,q2,tq,y2,k8,8)G(gather3div4df,v4df,p4,td,y4,k8,8)"
+            "G(gather3div4di,v4di,q4,tq,y4,0xff,8)G(gather3div4sf,v4sf,a4,tf,y2,k8,4)G(gather3div4si,v4si,i4,ti,y2,0xff,4)"
+            "G(gather3div8sf,v4sf,f4,tf,y4,k8,4)G(gather3div8si,v4si,i4,ti,y4,k8,4)G(gather3siv2df,v2df,p2,td,x4,k8,8)"
+            "G(gather3siv2di,v2di,q2,tq,x4,0xff,8)G(gather3siv4df,v4df,p4,td,x4,k8,8)G(gather3siv4di,v4di,q4,tq,x4,k8,8)"
+            "G(gather3siv4sf,v4sf,a4,tf,x4,k8,4)G(gather3siv4si,v4si,i4,ti,x4,k8,4)G(gather3siv8sf,v8sf,f8,tf,x8,k8,4)"
+            "G(gather3siv8si,v8si,i8,ti,x8,0xff,4)G(gather3siv4si,v4si,i4,ti,x4*4,0xff,1)G(gather3siv4si,v4si,i4,ti,x4*2,k8,2)\n"
+            "S(scatterdiv16sf,sf,k8,y8,f8,4)S(scatterdiv8df,sd,k8,y8,p8,8)S(scattersiv16sf,sf,k16,x16,a16,4)S(scattersiv8df,sd,0xff,x8,p8,8)"
+            "S(scattersiv8di,sq,k8,x8,(v8di)p8,8)S(scatterdiv2df,sd,k8,y2,p2,8)S(scatterdiv2di,sq,0xff,y2,q2,8)S(scatterdiv4df,sd,k8,y4,p4,8)"
+            "S(scatterdiv4di,sq,k8,y4,q4,8)S(scatterdiv4sf,sf,k8,y2,a4,4)S(scatterdiv4si,si,k8,y2,i4,4)S(scatterdiv8sf,sf,0xff,y4,f4,4)"
+            "S(scatterdiv8si,si,k8,y4,i4,4)S(scattersiv2df,sd,k8,x4,p2,8)S(scattersiv2di,sq,k8,x4,q2,8)S(scattersiv4df,sd,0xff,x4,p4,8)"
+            "S(scattersiv4di,sq,k8,x4,q4,8)S(scattersiv4sf,sf,k8,x4,a4,4)S(scattersiv4si,si,k8,x4,i4,4)S(scattersiv8sf,sf,k8,x8,f8,4)"
+            "S(scattersiv8si,si,k8,x8,i8,4)S(scattersiv4si,si,0xff,x4*2,i4,2)FOLD(sf);FOLD(sd);FOLD(si);FOLD(sq);\n"
+            "v4si m4={-1,0,-(n&1),-1};v8si m8={-1,0,-1,-(n&1),0,-1,-1,-(n&2)};v2di m2={-1,-(long long)(n&1)};v4di m4q={0,-1,-1,-(long long)(n&1)};\n"
+            "G(gatherd_d,v4si,i4,ti,x4,m4,4)G(gatherd_d256,v8si,i8,ti,x8,m8,4)G(gatherd_pd,v2df,p2,td,x4,(v2df)m2,8)"
+            "G(gatherd_pd256,v4df,p4,td,x4,(v4df)m4q,8)G(gatherd_ps,v4sf,a4,tf,x4,(v4sf)m4,4)G(gatherd_ps256,v8sf,f8,tf,x8,(v8sf)m8,4)"
+            "G(gatherd_q,v2di,q2,tq,x4,m2,8)G(gatherd_q256,v4di,q4,tq,x4,m4q,8)G(gatherq_d,v4si,i4,ti,y2,m4,4)G(gatherq_d256,v4si,i4,ti,y4,m4,4)"
+            "G(gatherq_pd,v2df,p2,td,y2,(v2df)m2,8)G(gatherq_pd256,v4df,p4,td,y4,(v4df)m4q,8)G(gatherq_ps,v4sf,a4,tf,y2,(v4sf)m4,4)"
+            "G(gatherq_ps256,v4sf,f4,tf,y4,(v4sf)m4,4)G(gatherq_q,v2di,q2,tq,y2,m2,8)G(gatherq_q256,v4di,q4,tq,y4,m4q,8)"
+            "G(gatherd_d,v4si,i4,ti,x4*4,m4,1)\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 491 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 549 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -525,6 +525,64 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_cvtusi2sd64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 187 },
     { "__builtin_ia32_cvtusi2ss32", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 188 },
     { "__builtin_ia32_cvtusi2ss64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 189 },
+    { "__builtin_ia32_gather3div2df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 369 },
+    { "__builtin_ia32_gather3div2di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 370 },
+    { "__builtin_ia32_gather3div4df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 371 },
+    { "__builtin_ia32_gather3div4di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 372 },
+    { "__builtin_ia32_gather3div4sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 373 },
+    { "__builtin_ia32_gather3div4si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 374 },
+    { "__builtin_ia32_gather3div8sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 375 },
+    { "__builtin_ia32_gather3div8si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 376 },
+    { "__builtin_ia32_gather3siv2df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 377 },
+    { "__builtin_ia32_gather3siv2di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 378 },
+    { "__builtin_ia32_gather3siv4df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 379 },
+    { "__builtin_ia32_gather3siv4di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 380 },
+    { "__builtin_ia32_gather3siv4sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 381 },
+    { "__builtin_ia32_gather3siv4si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 382 },
+    { "__builtin_ia32_gather3siv8sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 383 },
+    { "__builtin_ia32_gather3siv8si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 384 },
+    { "__builtin_ia32_gatherd_d", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 365 },
+    { "__builtin_ia32_gatherd_d256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 366 },
+    { "__builtin_ia32_gatherd_pd", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 353 },
+    { "__builtin_ia32_gatherd_pd256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 354 },
+    { "__builtin_ia32_gatherd_ps", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 357 },
+    { "__builtin_ia32_gatherd_ps256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 358 },
+    { "__builtin_ia32_gatherd_q", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 361 },
+    { "__builtin_ia32_gatherd_q256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 362 },
+    { "__builtin_ia32_gatherdiv16sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 388 },
+    { "__builtin_ia32_gatherdiv16si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 392 },
+    { "__builtin_ia32_gatherdiv8df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 387 },
+    { "__builtin_ia32_gatherq_d", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 367 },
+    { "__builtin_ia32_gatherq_d256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 368 },
+    { "__builtin_ia32_gatherq_pd", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 355 },
+    { "__builtin_ia32_gatherq_pd256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 356 },
+    { "__builtin_ia32_gatherq_ps", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 359 },
+    { "__builtin_ia32_gatherq_ps256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 360 },
+    { "__builtin_ia32_gatherq_q", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 363 },
+    { "__builtin_ia32_gatherq_q256", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 364 },
+    { "__builtin_ia32_gathersiv16sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 386 },
+    { "__builtin_ia32_gathersiv8df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 385 },
+    { "__builtin_ia32_scatterdiv16sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 412 },
+    { "__builtin_ia32_scatterdiv2df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 393 },
+    { "__builtin_ia32_scatterdiv2di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 394 },
+    { "__builtin_ia32_scatterdiv4df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 395 },
+    { "__builtin_ia32_scatterdiv4di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 396 },
+    { "__builtin_ia32_scatterdiv4sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 397 },
+    { "__builtin_ia32_scatterdiv4si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 398 },
+    { "__builtin_ia32_scatterdiv8df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 411 },
+    { "__builtin_ia32_scatterdiv8sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 399 },
+    { "__builtin_ia32_scatterdiv8si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 400 },
+    { "__builtin_ia32_scattersiv16sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 410 },
+    { "__builtin_ia32_scattersiv2df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 401 },
+    { "__builtin_ia32_scattersiv2di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 402 },
+    { "__builtin_ia32_scattersiv4df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 403 },
+    { "__builtin_ia32_scattersiv4di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 404 },
+    { "__builtin_ia32_scattersiv4sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 405 },
+    { "__builtin_ia32_scattersiv4si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 406 },
+    { "__builtin_ia32_scattersiv8df", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 409 },
+    { "__builtin_ia32_scattersiv8di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 413 },
+    { "__builtin_ia32_scattersiv8sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 407 },
+    { "__builtin_ia32_scattersiv8si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 408 },
 };
 
 static bool check_builtin_x86_test_expect(CheckBuiltinX86Test* test, bool condition, const char* description, uint32_t item)
@@ -589,7 +647,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 491, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 549, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];
