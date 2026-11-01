@@ -169,3 +169,216 @@ static void check_test_driver_symbols(CheckTest* test, const char* clang, const 
     unlink(strong_path);
     unlink(strong_object);
 }
+
+// A template's symbols in -c's object (#812): its `.L` and numeric labels are the assembler's temporary symbols, which
+// the object leaves out; an undefined `.globl` declaration and a `.set`/`.equ` absolute are the template's alone, which
+// the object leaves out too (clang writes them, as GLOBAL UND and LOCAL ABS); and a `.hidden` label keeps its visibility.
+// The source's labels are read from both objects' own symbol tables.
+static bool check_test_elf_symbol_named(const CheckTestElf* elf, const char* spelling)
+{
+    bool found = false;
+    for (uint64_t i = 1; !found && i < elf->symbol_count; i += 1)
+    {
+        const char* name = check_test_elf_string(elf->symbol_names, elf->symbol_names_size, elf->symbols[i].st_name);
+        found = name != 0 && strcmp(name, spelling) == 0;
+    }
+    return found;
+}
+
+static bool check_test_elf_symbol_prefix(const CheckTestElf* elf, const char* prefix)
+{
+    bool found = false;
+    const size_t length = strlen(prefix);
+    for (uint64_t i = 1; !found && i < elf->symbol_count; i += 1)
+    {
+        const char* name = check_test_elf_string(elf->symbol_names, elf->symbol_names_size, elf->symbols[i].st_name);
+        found = name != 0 && strncmp(name, prefix, length) == 0;
+    }
+    return found;
+}
+
+static bool check_test_elf_symbol_size(const CheckTestElf* elf, const char* spelling, uint64_t* size)
+{
+    bool found = false;
+    for (uint64_t i = 1; !found && i < elf->symbol_count; i += 1)
+    {
+        const char* name = check_test_elf_string(elf->symbol_names, elf->symbol_names_size, elf->symbols[i].st_name);
+        found = name != 0 && strcmp(name, spelling) == 0;
+        if (found)
+        {
+            *size = elf->symbols[i].st_size;
+        }
+    }
+    return found;
+}
+
+static void check_test_driver_asm_object_symbols(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "void target(void) { volatile int value = 1; value = value + 2; (void)value; }\n"
+        "static void static_target(void) {}\n"
+        "int global = 5;\n"
+        "static int static_global = 5;\n"
+        "int tested(int n)\n"
+        "{\n"
+        "    __asm__ volatile(\".pushsection .data\\n.Ldirective_local:\\n.byte 1\\n.popsection\");\n"
+        "    __asm__ volatile(\".pushsection .data\\n.hidden directive_hidden\\ndirective_hidden: .byte 2\\n.popsection\");\n"
+        "    __asm__ volatile(\".globl directive_declared\");\n"
+        "    __asm__ volatile(\".globl directive_cross\");\n"
+        "    __asm__ volatile(\"directive_cross: nop\");\n"
+        "    __asm__ volatile(\".set directive_set, 7\");\n"
+        "    __asm__ volatile(\".hidden directive_external\");\n"
+        "    __asm__ volatile(\"call directive_external\");\n"
+        "    __asm__ volatile(\".weak directive_weak_decl\");\n"
+        "    __asm__ volatile(\".hidden directive_hidden_decl\");\n"
+        "    __asm__ volatile(\".weak target\");\n"
+        "    __asm__ volatile(\".weak static_global\");\n"
+        "    __asm__ volatile(\".hidden target\");\n"
+        "    __asm__ volatile(\".globl static_target\");\n"
+        "    __asm__ volatile(\".size target, 7\");\n"
+        "    __asm__ volatile(\".size global, 4\");\n"
+        "    __asm__ volatile(\"jmp 1f\\n1: nop\");\n"
+        "    return n;\n"
+        "}\n"
+        "int main(void) { static_target(); static_global++; return tested(0) + static_global - 6; }\n";
+    char source[512];
+    char ours_path[512];
+    char theirs_path[512];
+    snprintf(source, sizeof(source), "%s/asm-directive-symbols.c", directory);
+    snprintf(ours_path, sizeof(ours_path), "%s/asm-directive-symbols.o", directory);
+    snprintf(theirs_path, sizeof(theirs_path), "%s/asm-directive-symbols-clang.o", directory);
+    const bool written = object_write_file(source, (const uint8_t*)source_text, sizeof(source_text) - 1) == OBJECT_ERROR_NONE;
+    const char* arguments[] = { "-std=gnu17" };
+    const CheckCorpusSymbols oracle_object = { .clang = clang, .arguments = arguments, .argument_count = BUSTER_ARRAY_LENGTH(arguments), .directory = directory };
+    CheckCorpusOracle oracle = { 0 };
+    const bool accepted = written && check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+    const bool compiled_theirs = accepted && !oracle.rejected && check_corpus_clang_object(&oracle_object, source, theirs_path);
+    char* const our_arguments[] = { (char*)executable, "-std=gnu17", "-c", "-o", ours_path, source, NULL };
+    char* text = NULL;
+    const bool compiled_ours = accepted && !oracle.rejected && check_test_driver_spawn(our_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, compiled_ours && compiled_theirs, "a template's directive symbols make clang's object and ours");
+    Arena ours_arena = arena_reserve(UINT64_C(1) << 22);
+    Arena theirs_arena = arena_reserve(UINT64_C(1) << 22);
+    CheckTestElf ours = { 0 };
+    CheckTestElf theirs = { 0 };
+    const bool loaded = compiled_ours && compiled_theirs && ours_arena.base != 0 && theirs_arena.base != 0 &&
+                        check_test_elf_open(&ours, object_test_read_file(&ours_arena, ours_path)) &&
+                        check_test_elf_open(&theirs, object_test_read_file(&theirs_arena, theirs_path));
+    check_test_expect(test, loaded, "the template symbols' objects are readable");
+    check_test_expect(test, loaded && !check_test_elf_symbol_named(&ours, ".Ldirective_local") && !check_test_elf_symbol_prefix(&ours, ".LC"),
+                      "a template's local and numeric labels are -c's temporary symbols");
+    check_test_expect(test, loaded && !check_test_elf_symbol_named(&ours, "directive_declared") && check_test_elf_symbol_named(&theirs, "directive_declared"),
+                      "an undefined '.globl' declaration is left out (clang keeps it)");
+    check_test_expect(test, loaded && !check_test_elf_symbol_named(&ours, "directive_set") && check_test_elf_symbol_named(&theirs, "directive_set"),
+                      "a template's '.set' is its own (clang writes an absolute symbol)");
+    uint16_t ours_visibility = 0;
+    uint16_t theirs_visibility = 0;
+    const bool our_hidden = loaded && check_test_visibility_symbol(ours_path, "directive_hidden", &ours_visibility);
+    const bool their_hidden = loaded && check_test_visibility_symbol(theirs_path, "directive_hidden", &theirs_visibility);
+    check_test_expect(test, our_hidden && their_hidden && (ours_visibility & 3) == STV_HIDDEN && ours_visibility == theirs_visibility,
+                      "a template label's '.hidden' is in -c's object as clang's is");
+    uint16_t our_external = 0;
+    uint16_t their_external = 0;
+    const bool our_reference = loaded && check_test_visibility_symbol(ours_path, "directive_external", &our_external);
+    const bool their_reference = loaded && check_test_visibility_symbol(theirs_path, "directive_external", &their_external);
+    check_test_expect(test, our_reference && their_reference && (our_external & 3) == STV_HIDDEN && our_external == their_external,
+                      "a template's '.hidden' declaration is in -c's undefined symbol as clang's is");
+    uint16_t our_target = 0;
+    uint16_t their_target = 0;
+    uint64_t our_size = 0;
+    uint64_t their_size = 0;
+    const bool our_target_symbol = loaded && check_test_visibility_symbol(ours_path, "target", &our_target);
+    const bool their_target_symbol = loaded && check_test_visibility_symbol(theirs_path, "target", &their_target);
+    const bool our_target_size = loaded && check_test_elf_symbol_size(&ours, "target", &our_size);
+    const bool their_target_size = loaded && check_test_elf_symbol_size(&theirs, "target", &their_size);
+    check_test_expect(test, our_target_symbol && their_target_symbol && (our_target & 0xff00) == (2 << 8) && (our_target & 3) == STV_HIDDEN &&
+                                our_target == their_target && our_target_size && their_target_size && our_size == 7 && their_size == 7,
+                      "a template's '.weak', '.hidden' and '.size' change the unit's C function as clang's object has it");
+    uint64_t our_global_size = 0;
+    uint64_t their_global_size = 0;
+    const bool our_global = loaded && check_test_elf_symbol_size(&ours, "global", &our_global_size);
+    const bool their_global = loaded && check_test_elf_symbol_size(&theirs, "global", &their_global_size);
+    check_test_expect(test, our_global && their_global && our_global_size == 4 && their_global_size == 4,
+                      "a template's '.size' sets a C variable's size after its data atom exists");
+    uint16_t our_static_global = 0;
+    uint16_t their_static_global = 0;
+    const bool our_static_global_symbol = loaded && check_test_visibility_symbol(ours_path, "static_global", &our_static_global);
+    const bool their_static_global_symbol = loaded && check_test_visibility_symbol(theirs_path, "static_global", &their_static_global);
+    check_test_expect(test, our_static_global_symbol && their_static_global_symbol && (our_static_global & 0xff00) == (2 << 8) &&
+                                our_static_global == their_static_global,
+                      "a template's '.weak' applies to a static C variable as clang's object has it");
+    uint16_t our_static = 0;
+    uint16_t their_static = 0;
+    const bool our_static_symbol = loaded && check_test_visibility_symbol(ours_path, "static_target", &our_static);
+    const bool their_static_symbol = loaded && check_test_visibility_symbol(theirs_path, "static_target", &their_static);
+    check_test_expect(test, our_static_symbol && their_static_symbol && (our_static & 0xff00) == 0x100 && our_static == their_static,
+                      "a template's '.globl' makes a static C function global as clang's object has it");
+    uint16_t our_cross = 0;
+    uint16_t their_cross = 0;
+    const bool our_cross_symbol = loaded && check_test_visibility_symbol(ours_path, "directive_cross", &our_cross);
+    const bool their_cross_symbol = loaded && check_test_visibility_symbol(theirs_path, "directive_cross", &their_cross);
+    check_test_expect(test, our_cross_symbol && their_cross_symbol && (our_cross & 0xff00) == 0x100 && our_cross == their_cross,
+                      "a template's '.globl' upgrades a label another template defines, as clang's object has it");
+    check_test_expect(test, loaded && !check_test_elf_symbol_named(&ours, "directive_weak_decl") && check_test_elf_symbol_named(&theirs, "directive_weak_decl") &&
+                                !check_test_elf_symbol_named(&ours, "directive_hidden_decl") && check_test_elf_symbol_named(&theirs, "directive_hidden_decl"),
+                      "-c leaves out an unreferenced undefined weak or hidden declaration (documented)");
+    static const char oversized[] = "int tested(int n){__asm__ volatile(\".size tested, 1000\");return n;}\n";
+    char oversized_source[512];
+    char oversized_object[512];
+    snprintf(oversized_source, sizeof(oversized_source), "%s/asm-size-past-atom.c", directory);
+    snprintf(oversized_object, sizeof(oversized_object), "%s/asm-size-past-atom.o", directory);
+    const bool oversized_written = object_write_file(oversized_source, (const uint8_t*)oversized, sizeof(oversized) - 1) == OBJECT_ERROR_NONE;
+    char* const oversized_arguments[] = { (char*)executable, "-std=gnu17", "-c", "-o", oversized_object, oversized_source, NULL };
+    char* oversized_text = NULL;
+    const int oversized_status = oversized_written ? check_test_driver_spawn(oversized_arguments, &oversized_text) : -1;
+    check_test_expect(test, oversized_status == 1 && oversized_text != NULL &&
+                                strstr(oversized_text, "inline assembly .size on the unit's symbol exceeds its definition") != NULL,
+                      "a template's '.size' past a C symbol's definition is refused by name");
+    free(oversized_text);
+    unlink(oversized_source);
+    unlink(oversized_object);
+    static const char weak_variable[] = "int global = 5;\nvoid f(void) { __asm__ volatile(\".weak global\"); }\nint main(void) { return global == 5 ? 0 : 1; }\n";
+    char weak_variable_source[512];
+    char weak_variable_object[512];
+    snprintf(weak_variable_source, sizeof(weak_variable_source), "%s/asm-weak-variable.c", directory);
+    snprintf(weak_variable_object, sizeof(weak_variable_object), "%s/asm-weak-variable.o", directory);
+    const bool weak_variable_written = object_write_file(weak_variable_source, (const uint8_t*)weak_variable, sizeof(weak_variable) - 1) == OBJECT_ERROR_NONE;
+    char* const weak_variable_arguments[] = { (char*)executable, "-std=gnu17", "-c", "-o", weak_variable_object, weak_variable_source, NULL };
+    char* weak_variable_text = NULL;
+    const int weak_variable_status = weak_variable_written ? check_test_driver_spawn(weak_variable_arguments, &weak_variable_text) : -1;
+    check_test_expect(test, weak_variable_status == 1 && weak_variable_text != NULL && strstr(weak_variable_text, "inline assembly .weak on a defined variable") != NULL,
+                      "a template's '.weak' on a defined C variable is refused, as clang refuses it");
+    free(weak_variable_text);
+    unlink(weak_variable_source);
+    unlink(weak_variable_object);
+    // A template's `.weak` makes the unit's own C definition weak, so the direct path takes another object's strong
+    // definition, as clang's link does.
+    static const char weak_source[] = "void target(void) { }\nvoid f(void) { __asm__ volatile(\".weak target\"); }\nint main(void) { f(); return 0; }\n";
+    static const char strong_source[] = "void target(void) { __asm__ volatile(\"nop\"); }\n";
+    char weak_path[512];
+    char strong_path[512];
+    char weak_program[512];
+    snprintf(weak_path, sizeof(weak_path), "%s/asm-weak.c", directory);
+    snprintf(strong_path, sizeof(strong_path), "%s/asm-strong.c", directory);
+    snprintf(weak_program, sizeof(weak_program), "%s/asm-weak-program", directory);
+    const bool weak_written = object_write_file(weak_path, (const uint8_t*)weak_source, sizeof(weak_source) - 1) == OBJECT_ERROR_NONE &&
+                              object_write_file(strong_path, (const uint8_t*)strong_source, sizeof(strong_source) - 1) == OBJECT_ERROR_NONE;
+    char* const weak_arguments[] = { (char*)executable, "-o", weak_program, weak_path, strong_path, NULL };
+    char* weak_text = NULL;
+    const int weak_linked = weak_written ? check_test_driver_spawn(weak_arguments, &weak_text) : -1;
+    free(weak_text);
+    char* const weak_run_arguments[] = { weak_program, NULL };
+    char* weak_output = NULL;
+    const int weak_status = weak_linked == 0 ? check_test_driver_spawn(weak_run_arguments, &weak_output) : -1;
+    free(weak_output);
+    check_test_expect(test, weak_linked == 0 && weak_status == 0, "a template's '.weak' lets another object's strong definition link");
+    unlink(weak_path);
+    unlink(strong_path);
+    unlink(weak_program);
+    arena_release(&ours_arena);
+    arena_release(&theirs_arena);
+    unlink(source);
+    unlink(ours_path);
+    unlink(theirs_path);
+}

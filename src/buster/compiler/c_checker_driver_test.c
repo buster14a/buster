@@ -5860,6 +5860,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_asm_object_symbols(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_aliases(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

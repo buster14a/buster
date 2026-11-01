@@ -473,10 +473,22 @@ designs and the compilers already built this way.
   references and labels. The statement's code calls the result, a per-unit
   helper; a template of no instructions, a barrier's, is no code at all, but
   one with x87 operands, whose helper passes them through the x87's stack as
-  clang's code does. A
+  clang's code does. A template that takes a directive besides the syntax
+  switches is instead one source assembled whole by `asm_assemble` (the
+  helper's frame and operand loads around it, or a naked function's templates),
+  whose atoms, symbols and fixups the emission merges; a template of alignment
+  or NOP fill alone publishes its atoms and calls nothing. `.set` absolute
+  symbols are the template's; `.globl` or a visibility directive upgrades a label
+  another template defines, `.type`/`.size` apply to its own template's label,
+  a binding or visibility directive applies to the unit's C symbol of that name
+  (`.weak` a function's, an extern's or a static variable's; an external
+  definition's is refused), a `.size` once its definition's atom exists, and a
+  reference from another
+  template is refused by name. A
   naked function's templates are its whole code. Templates' labels are local
-  symbols, and the other names they refer to are the unit's symbols of those
-  link names or undefined globals (`check_program_emit_asm_symbols`). A
+  unless a binding or visibility directive names them, and the other names they
+  refer to are the unit's symbols of those link names or undefined globals
+  (`check_program_emit_asm_symbols`). A
   file-scope `asm`'s templates are assembled by the emission into atoms of
   their sections before the functions' (`check_program_emit_file_asm`, #619),
   each in its section in `-c`'s object.
@@ -490,7 +502,8 @@ designs and the compilers already built this way.
   `test-checker --program-asm` runs the inline-assembly source fixtures alone;
   the full `test-checker` command continues to include them.
   `test-checker-driver` links and runs naked functions' labels and a template's
-  call of `puts` by the direct path. `test-assembler` checks
+  call of `puts` by the direct path, and compares a template's `-c` symbols
+  with clang's. `test-assembler` checks
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
   admits for templates with GNU as. [The inline assembly
   guide](docs/c-inline-assembly.md) has the placement, the substitution, the
