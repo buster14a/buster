@@ -1403,8 +1403,15 @@ the same bounded worklist, while dead or unevaluated literals supply no roots.
 The driver reports each surviving event at the builtin's source
 location, with the converted immediate and its valid bounds, through
 `-Wargument-outside-range`'s default-error policy. Diagnostic pragmas can
-downgrade or suppress it; `-w` suppresses it too. A failed or incomplete program
-leaves unknown events for conservative reporting rather than dropping them.
+downgrade or suppress it; `-w` suppresses it too. Its message ends in
+` [-Wargument-outside-range]` wherever the driver reports it, as clang's does
+under every mapping: clang's printer adds `-Werror,` only to a warning that
+isn't an error by default, so the option is alone whether the diagnostic is a
+warning, an error or a fatal error, by pragma or with `-Werror` (#1079). The
+command-line mappings that change its severity (`-Wno-error=`, `-Wno-`) and
+the driver's general `-Wfatal-errors` are #1080 and #1081. A failed or
+incomplete program leaves unknown events for conservative reporting rather
+than dropping them.
 
 Only an actual range event allocates the temporary reachability worklist.
 It uses one visited byte and one 64-bit stack slot per graph node/control,
@@ -1413,8 +1420,13 @@ scalar walk handles the dependent edges of this exceptional diagnostic path;
 ordinary valid inputs retain the existing scalar/vector checking kernels.
 `test-checker` compares independent source fixtures with Clang, one translation
 unit per fixture, through both production driver schedules. It checks
-acceptance, severity, complete range messages and source locations, including
-negative immediates, dead control flow, unevaluated operands and pragma state.
+acceptance, severity, complete range messages (their option's suffix too) and
+source locations, including negative immediates, dead control flow,
+unevaluated operands and pragma state. `check_test_x86_range_mappings` holds
+clang 23's text, each diagnostic and note line for line, for the default,
+`-Werror`, `-Werror=argument-outside-range`, clang's and GCC's warning, error
+and fatal pragmas, a push and a pop, and deferred reports, which clang and both
+paths must give.
 
 For #562, `check_input_x86_contexts` supplies source diagnostic context before
 `check_x86_action` consumes the sparse `CheckX86Call` records. An unselected

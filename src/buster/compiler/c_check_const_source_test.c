@@ -5,6 +5,15 @@
 #ifndef BUSTER_C_CHECK_CONST_SOURCE_TEST_INCLUDED
 #define BUSTER_C_CHECK_CONST_SOURCE_TEST_INCLUDED
 
+// The sparse array fixture's text, and the text clang checks in its place, of its outcome: the same extent, a designated
+// element and a read through the zero fill. Clang's constant evaluator materializes a designated array's elements up
+// to the designator, 134 million values for the fixture's: 67 s, 48 s of it the kernel's page faults, alone on a 4-CPU
+// VM, where [65536] takes 42 ms. check_test_const_sources writes the oracle's text for clang (the fixture is known by
+// its source's address), and this checker checks the fixture's own, which check_test_source reads from the fixture.
+// They are kept here rather than in CheckSourceFixture, whose other tables' writers write each fixture's source.
+static const char check_const_sparse_source[] = "const int a[268435456]={[134217728]=7};enum{E=a[134217728],Z=a[268435455]};_Static_assert(E==7 && Z==0,\"sparse\");\n";
+static const char check_const_sparse_oracle[] = "const int a[268435456]={[65536]=7};enum{E=a[65536],Z=a[268435455]};_Static_assert(E==7 && Z==0,\"sparse\");\n";
+
 static const CheckSourceFixture check_const_source_fixtures[] =
 {
     {
@@ -75,7 +84,7 @@ static const CheckSourceFixture check_const_source_fixtures[] =
     },
     {
         .name = "sparse const arrays do not materialize their declared extent",
-        .source = "const int a[268435456]={[134217728]=7};enum{E=a[134217728],Z=a[268435455]};_Static_assert(E==7 && Z==0,\"sparse\");\n",
+        .source = check_const_sparse_source,
     },
     {
         .name = "automatic const array retains a source-only address path",
@@ -361,7 +370,8 @@ static void check_test_const_sources(CheckTest* test, const char* clang)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
         pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], check_const_source_fixtures[i].source, strlen(check_const_source_fixtures[i].source));
+        const char* text = check_const_source_fixtures[i].source == check_const_sparse_source ? check_const_sparse_oracle : check_const_source_fixtures[i].source;
+        ready = parse_test_write(paths[i], text, strlen(text));
     }
     const char* arguments[] = { "-std=gnu17" };
     ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
