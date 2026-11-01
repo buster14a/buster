@@ -899,6 +899,14 @@ What changed:
   - A 2 MB margin on either side keeps them in the table's own storage. The
     storage isn't aligned to a huge page, because wild 0.10, which links CI's
     builds, refuses alignments past 64 KB.
+  - Only `main.c`'s units' copy, the one a compile builds, has the margins,
+    4 MB of `.bss` in all. The benchmarks' units, which no compile runs, keep
+    their copies as they were, rather than 67 MB of margins over 16 copies.
+  - `x86_encoder_initialized` is in `.data`, as `lane.c`'s `LaneProcess` is.
+    In `.bss` it followed the margin into a 2 MB region where a compile writes
+    nothing else, and an `always` kernel cleared that region's huge page for
+    the one byte. On the 9700X that cost 2 MB of peak RSS, and `hello.c`'s
+    other stages took 0.05 to 0.06 ms more.
   - The other modes' tables (32-bit addresses, APX, 32- and 16-bit modes),
     which no compile builds, keep their size. They get only the commit.
 - **Tier 0 commits its nine tables' pages in one call per array**
@@ -909,44 +917,60 @@ What changed:
   cost less than a huge page's clearing would.
 
 Objects are the same bytes: the 220 programs of c-testsuite's subset,
-`hello.c`, and the compiler's own `main.c` (39 MB), all compiled with `-c` by
-both builds. The encoder's loops are unchanged. Measured on the same VM against
-`91cfe9e0`, both builds linked by wild 0.10.0 as CI links them, with tcc 0.9.27
-(Ubuntu's) as the reference:
+`hello.c` and `sqlite3.c` on the 9700X (the record's `objects.txt`), and the
+compiler's own `main.c` (39 MB) on the VM, all compiled with `-c` by both
+builds. The encoder's loops are unchanged.
+[The frozen record](https://github.com/buster14a/buster-performance/tree/5af90b2008b8440ff284b6e41ff1250479a29eb5/docs/measurements/backend-setup-590-2026-11-01)
+has the raw outputs, commands and harness. In the tables, "disabled" is a
+process's `PR_SET_THP_DISABLE`, which its children inherit; it stands in for a
+kernel with `never`.
+
+On the 9700X (THP `always`, under its lock, CPU 2), this change at `32e0c754`
+against `main` at `b823d1c2`, both built by `build.sh` there, with tcc 0.9.28rc
+as the reference:
+
+| input | THP | `main` | this change | tcc |
+| --- | --- | ---: | ---: | ---: |
+| `hello.c`'s `backend-setup`, medians of 3 × 41 | `always` | 0.583 ms | 0.518 ms | |
+| `hello.c`'s stages | `always` | 2.080 ms | 2.035 ms | |
+| `hello.c`'s `backend-setup` | disabled | 0.831 ms | 0.627 ms | |
+| `hello.c`'s stages | disabled | 2.153 ms | 1.944 ms | |
+| c-testsuite's 220, best of 3 each, mean | `always` | 1.913 ms | 1.809 ms | 0.553 ms |
+| c-testsuite's 220, best of 3 each, mean | disabled | 2.078 ms | 1.852 ms | 0.515 ms |
+| `sqlite3.c`, `measure-compile --runs 11` | `always` | 135.25 ms | 135.39 ms | |
+
+- **Peak RSS on the 9700X.** `backend-setup`'s peak added is `main`'s (6,564
+  KiB), and its 2 MB windows of `.bss` are `main`'s six.
+- **Small files there.** Its kernel already gave the tables huge pages, so the
+  gain is the derived templates and the commits: a tenth of `backend-setup`,
+  and about 2% of a small file's stages.
+
+On a 2.1 GHz Xeon VM (THP `madvise`), `91cfe9e0` against `8da9e479`, both
+linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 | input | THP | `91cfe9e0` | this change | tcc |
 | --- | --- | ---: | ---: | ---: |
-| `hello.c`, `measure-compile --runs 31`, two rounds | `madvise` | 11.7, 14.0 ms | 10.1, 11.0 ms | 3.1 to 3.8 ms |
-| `hello.c`'s `backend-setup` | `madvise` | 3.4, 4.3 ms (1,132 faults) | 2.4, 2.1 ms (426) | |
-| `hello.c`, `measure-compile --runs 31`, two rounds | disabled | 12.1, 13.0 ms | 11.7, 10.4 ms | |
-| `hello.c`'s `backend-setup` | disabled | 4.1, 3.5 ms | 2.6, 2.7 ms | |
-| c-testsuite's 220, best of 3 each, mean | `madvise` | 9.80 ms | 8.36 ms | 2.23 ms |
-| c-testsuite's 220, best of 3 each, mean | disabled | 9.58 ms | 8.77 ms | |
-| `main.c -c`, median of 5 | `madvise` | 7.87 s | 7.74 s | |
+| `hello.c`, `measure-compile --runs 31`, two rounds | `madvise` | 13.8, 12.8 ms | 10.9, 10.1 ms | 3.2 to 3.5 ms |
+| `hello.c`'s `backend-setup` | `madvise` | 3.87, 3.86 ms (1,129 faults) | 2.09, 2.17 ms (420) | |
+| `hello.c`, two rounds | disabled | 13.6, 11.7 ms | 10.7, 10.7 ms | |
+| `hello.c`'s `backend-setup` | disabled | 4.21, 3.21 ms | 2.36, 2.53 ms | |
+| c-testsuite's 220, best of 3 each, mean | `madvise` | 8.84 ms | 8.03 ms | 2.04 ms |
+| c-testsuite's 220, best of 3 each, mean | disabled | 9.07 ms | 7.70 ms | 2.11 ms |
 
-- **The THP column.** "Disabled" is a process's `PR_SET_THP_DISABLE`, which
-  its children inherit; it stands in for a kernel with `never`. That kernel
-  counts `MADV_POPULATE_WRITE`'s pages as minor faults: 1,136 of them there,
-  with none taken one at a time.
-- **Peak RSS.** With huge pages, peak RSS grows by 1.2 MB (28.0 to 29.3 MB):
-  the kernel clears the table's huge pages whole.
-- **Address space.** `size build/compiler` gives `.bss` as 191,385,484 bytes
-  before and 258,553,052 after: 16 copies of `x86_encode`'s table, one per
-  unit that includes the encoder (`main.c`'s units share one), each with its
-  4 MB of margins. That is address space, not memory or file size: the `.bss`
-  segment has no file bytes.
-- **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 is several
-  times the median.
-- **Where it stands against tcc.** c-testsuite's programs still take 3.7
-  times tcc's time, against 4.4 times before. What remains of
-  `backend-setup` (2.1 to 2.7 ms here) is mostly the encoder's build and its
+- **Minor faults.** A kernel counts `MADV_POPULATE_WRITE`'s pages as minor
+  faults: about 1,130 of them in the "disabled" rows, with none taken one at a
+  time.
+- **Peak RSS on the VM.** With huge pages it grows by 1.2 MB (31.0 to
+  32.3 MB), as the kernel clears the table's huge pages whole.
+- **Address space.** On the 9700X, `size build/compiler` gives `.bss` as
+  191,387,924 bytes before and 195,641,236 after: the margins. That is address
+  space, not memory or file size: the `.bss` segment has no file bytes.
+- **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 can be
+  several times the median.
+- **Against tcc.** c-testsuite's programs take 3.3 to 4 times tcc's time,
+  against 3.5 to 4.3 times before. What remains of `backend-setup` (2.1 to
+  2.5 ms on the VM, 0.52 ms on the 9700X) is mostly the encoder's build and its
   pages' clearing, Tier 0's build, and semantics and unwind.
-- **The 9700X, not measured.** There `backend-setup` was 0.779 ms (the
-  table above), and its kernel's `always` already gave the tables huge pages.
-  So most of this change's gain there should be the FS and GS templates no
-  longer built: about half of the encoder's 0.667 ms build
-  (#590's figure, from `benchmark-x86-encoder`), perhaps 0.3 ms. This session had no access to
-  the 9700X.
 - **Not done.** Building the tables ahead of time, into a snapshot or
   read-only data, would take their build and clearing out of a compile. That
   needs an identity and staleness scheme like the runtime snapshot's. It

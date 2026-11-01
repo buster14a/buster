@@ -309,7 +309,12 @@ or three 2 MB pages, depending on where the link places the table.
   pages.
 - **Where.** A huge page's margin on either side keeps those pages in the
   table's own storage. The storage isn't aligned to a huge page, because wild
-  0.10, which links CI's builds, refuses alignments past 64 KB.
+  0.10, which links CI's builds, refuses alignments past 64 KB. Only the copy
+  in `main.c`'s units (`BUSTER_UNIT`), the one a compile builds, has the
+  margins; the benchmarks' units keep theirs without them.
+  `x86_encoder_initialized` is in `.data`, as `lane.c`'s `LaneProcess` is: in
+  `.bss` it followed the margin into a 2 MB region of its own, which an
+  `always` kernel cleared whole for that one byte.
 - **The other tables.** Tests, the disassembler and the other modes' entry
   points build the other modes' tables. Those keep their size, without margins
   or huge pages, because the benchmarks' units have copies of them all.
@@ -323,7 +328,9 @@ or three 2 MB pages, depending on where the link places the table.
   `always`, which already gave `.bss` huge pages, so it hid the cost.
 - **Measured.** On a 2.1 GHz Xeon VM with `madvise`, a process's first
   `x86_encoder_initialize` fell from a median of 1.8–2.6 ms with 788 faults to
-  0.9–1.0 ms. Its work without faults fell from 0.94 to 0.53 ms.
+  0.9–1.0 ms. Its work without faults fell from 0.94 to 0.53 ms. The whole
+  change's figures, the 9700X's among them, are in `docs/compile-time.md`'s
+  "The backend's tables when a function is emitted (#590)".
 
 ### VEX and EVEX
 
