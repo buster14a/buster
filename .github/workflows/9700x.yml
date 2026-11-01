@@ -743,9 +743,9 @@ jobs:
                   # Both modules, including the scaling fixture's include, use the same harness and generator.
                   cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
                       "$ab_dir/$side/src/buster/compiler/"
-                  # The shared harness includes the host-ISA adapter. Keep each revision's headers when present;
-                  # a base predating the adapter uses the current compatibility headers on this vector-only host.
-                  for header in host_isa.h host_scalar.h host_scalar_vectors.h; do
+                  # The shared harness includes the host-ISA adapter and the encoder's baked-table header. Keep each
+                  # revision's headers when present; a base predating one uses the current header on this host.
+                  for header in host_isa.h host_scalar.h host_scalar_vectors.h baked.h; do
                       dest="$ab_dir/$side/src/buster/compiler/$header"
                       if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
                           git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
