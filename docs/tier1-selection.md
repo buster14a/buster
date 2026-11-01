@@ -150,7 +150,15 @@ without weakening that API's checks.
 `tier1_select_plan(function, dominance, output, scratch, vector, result,
 error_node)` returns `Tier1SelectError`. Both the vector and scalar paths invoke
 their corresponding IR verifier. A cross-block value use requires the supplied
-dominator intervals; structural verification alone is insufficient. This slice
+dominator intervals; structural verification alone is insufficient.
+`tier1_select_plan_verified`, with the same arguments, gives the same plan
+without the verification: it takes a function its caller has verified with
+those dominator intervals, as the C driver's `--tier1` takes `ir_optimize`'s
+result, which `ir_optimize` verifies before it returns (`c_check_tier1.c`). On
+the frozen `sqlite3.c`, the verification was a quarter of selection's cycles
+(#141). The selector's tests plan their functions both ways, and the pipeline
+test plans each optimized function as the driver does and checks it against the
+verifying plan, field by field. This slice
 requires value definitions to precede uses in physical instruction order, but
 for a phi's operands, which may follow it (a loop's back edge). An integer phi
 selects `TIER1_RULE_PHI` (#140): no records and no effective uses, since its
@@ -574,7 +582,7 @@ The latter is not a whole-pipeline peak-memory measurement.
 [preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
 selection on real C: every function `-c` compiles of the files, lowered, promoted
 and optimized as the C driver's `--tier1` takes it, with its dominance, outside
-the time; then `tier1_select_plan` of each, the IR verification it runs included,
+the time; then `tier1_select_plan_verified` of each, as the driver plans it,
 by both paths, in 21 passes that alternate which path runs first, as nanoseconds,
 core cycles, instructions and the throttle (PMCx1A0's umask 0x08, #199) per IR
 instruction and cycles per typed entry. A function a step before selection
@@ -620,9 +628,10 @@ heads and at its merge with main, `cc3387f`:
   scripts against 10,763 M and 4,281 M. Each program's hottest function
   (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
-  the frozen `sqlite3.c`: 338 by the vector path and 340 by the scalar twin. A
-  quarter of each is the plan's `ir_verify` of its input, which the pipeline
-  has verified already.
+  the frozen `sqlite3.c`: 243 by the vector path and 253 by the scalar twin,
+  since the plan no longer verifies the optimizer's verified result
+  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01));
+  with that verification they were 338 and 340.
 - **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
   `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
   others fail in clang's own steps (links past the small code model, which

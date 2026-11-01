@@ -2182,8 +2182,9 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
 }
 
 // Function/plan/scratch storage is disjoint. `dominance` is required for any cross-block value use: the structural IR
-// verifier alone does not establish that such a definition reaches its use. No input-dependent recursion is used.
-static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+// verifier alone does not establish that such a definition reaches its use. No input-dependent recursion is used. With
+// `verify` false, the caller has verified the IR with `dominance` (tier1_select_plan_verified).
+static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, Tier1SelectPlan* result, uint32_t* error_node)
 {
     (void)vector;
 
@@ -2204,7 +2205,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     else
     {
-        const IrCheck check = BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, dominance) : ir_verify_scalar(function, scratch, dominance);
+        const IrCheck check = !verify ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, dominance) : ir_verify_scalar(function, scratch, dominance);
         if (check.error != IR_OK)
         {
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
@@ -2505,6 +2506,21 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         *error_node = failed_node;
     }
     return error;
+}
+
+// The plan of a function that hasn't been verified: ir_verify (or ir_verify_scalar on the scalar path) with `dominance`
+// first, which refuses what the plan can't read.
+static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+{
+    return tier1_select_plan_checked(function, dominance, output, scratch, vector, true, result, error_node);
+}
+
+// The plan of a function its caller has verified with `dominance`, as ir_optimize verifies its result: the same plan as
+// tier1_select_plan's, without verifying it again. On the frozen sqlite3.c, the verification was a quarter of selection's
+// cycles (#141). Unverified IR here may be read outside its columns.
+static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+{
+    return tier1_select_plan_checked(function, dominance, output, scratch, vector, false, result, error_node);
 }
 
 static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* pattern, const uint8_t* registers, uint32_t first)
