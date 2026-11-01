@@ -602,6 +602,24 @@ which agree within 40 KB; the reader's end is the high-water mark when
   above it. Here the twin's reads of the four columns are 2,600 faults on the
   zero page, which the vector path doesn't make.
 
+**On the 9700X.** The `changes` job now selects the compile-time attribution
+when the checker's reader, graph, parser, program or arena sources change, so
+this PR's job ran the step's own `measure-compile --runs 11` on the frozen
+`sqlite3.c` with `-march=znver5`. Main's latest successful scheduled run of the
+same step (`ebee03e`) against this PR's merge (`5473ef3a`):
+
+| build | wall | user | system | peak RSS | check-input | check-expressions | check-program | lower |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| main `ebee03e` | 134.574 ms | 111.333 ms | 22.938 ms | 401,724 KiB | 58.902 ms | 14.033 ms | 13.824 ms | 14.125 ms |
+| this PR `5473ef3a` | 121.988 ms | 104.308 ms | 16.827 ms | 332,080 KiB | 53.086 ms | 14.152 ms | 10.168 ms | 13.460 ms |
+
+The kernel's cycles (`perf stat`'s `cycles:k`) were 110,131,476 on main and
+95,451,739 on this PR. Its minor faults rose from 2,139 to 5,083, the rare
+columns' base pages and the discard's first touches, for the 69,644 KiB lower
+peak. The PR's merge includes main's later checker changes, so this table is
+the final branch against main's latest successful scheduled run; the VM table
+above is the isolated PR change.
+
 What the reader's end still holds for little, besides the scratch and the
 front end, which their first users fill (the parse's temporaries, then the
 reader's columns, to 77 MB of `sqlite3.c`'s scratch):
