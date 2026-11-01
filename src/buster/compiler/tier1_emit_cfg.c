@@ -248,13 +248,15 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     const uint32_t count = function->instruction_count;
     const bool vector = BUSTER_VECTOR_PATH(options->vector);
     const Tier1LivenessError checked = tier1_liveness_validate_plan(plan, scratch, vector, true);
+    tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, checked);
     Tier1EmitError error = checked == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : checked == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : checked == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : checked == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     error = error == TIER1_EMIT_OK && count == 0 ? TIER1_EMIT_INVALID : error;
     IrCfg cfg = { 0 };
     if (error == TIER1_EMIT_OK)
     {
         const IrError built = ir_build_cfg(function, output, scratch, &cfg);
-        error = built == IR_OK ? TIER1_EMIT_OK : built == IR_ERROR_MEMORY ? TIER1_EMIT_MEMORY : TIER1_EMIT_INVALID;
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_IR, built);
+        error = built == IR_OK ? TIER1_EMIT_OK : built == IR_ERROR_MEMORY ? TIER1_EMIT_MEMORY : built == IR_ERROR_LIMIT ? TIER1_EMIT_LIMIT : TIER1_EMIT_INVALID;
     }
     const uint32_t added = error == TIER1_EMIT_OK && cfg.predecessor_offsets[1] != 0 ? 1 : 0;
     const uint32_t base = 2 * added;
@@ -405,7 +407,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .flags = tier1_emit_cfg_frame_flags(plan->function, options),
         };
         Tier1FrameRequirements requirements = { 0 };
-        error = tier1_frame_requirements(&request, &requirements) == TIER1_FRAME_OK ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
+        const Tier1FrameError framed = tier1_frame_requirements(&request, &requirements);
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
+        error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
         prepared->reserved_registers = requirements.reserved_registers | (1u << BUSTER_TIER1_SELECT_SCRATCH);
     }
     const uint32_t registers = options->register_mask & ~prepared->reserved_registers;
@@ -911,7 +915,8 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
             .flags = tier1_emit_cfg_frame_flags(plan->function, options),
         };
         const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
-        error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_FRAME;
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
+        error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
     }
     // A frame object's address's recipe, its displacement from the frame's base now that the layout has the object: its
     // offset, and the constant added to it (tier1_emit_cfg_recipes), as a 64-bit value tier1_rematerialize checks fits.
@@ -1840,6 +1845,13 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         input->registers[0] = caller | callee;
         Tier1CfgAllocation second;
         const Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(input, output, scratch, &second) : tier1_cfg_allocate_scalar(input, output, scratch, &second);
+        // A speculative register preference may be unsatisfiable, but corrupt input or exhausted capacity is not a
+        // reason to conceal the allocator's failure behind its earlier allocation.
+        if (allocated != TIER1_CFG_OK && allocated != TIER1_CFG_CONSTRAINT)
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
+            error = allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_INVALID;
+        }
         const bool taken = allocated == TIER1_CFG_OK && second.split_count == 0 && (second.temp_slots & ~(1u | 1u << BUSTER_TIER1_ALLOCATE_MASK)) == 0;
         if (taken)
         {
@@ -1879,6 +1891,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
             emitted->cfg_input.definition_registers = 0;
             allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
         }
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
         error = allocated == TIER1_CFG_OK ? TIER1_EMIT_OK : allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : allocated == TIER1_CFG_CONSTRAINT ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_INVALID;
         // Without fixed ranges there are no splits; the general and opmask classes alone have values.
         error = error != TIER1_EMIT_OK || (emitted->cfg.split_count == 0 && (emitted->cfg.temp_slots & ~(1u | 1u << BUSTER_TIER1_ALLOCATE_MASK)) == 0) ? error : TIER1_EMIT_ALLOCATION;
