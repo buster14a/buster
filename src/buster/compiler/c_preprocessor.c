@@ -19518,8 +19518,8 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
 // holds 1.5 to 2 ranges on average (sqlite3.c, main.c), and at most 7 on those corpora. Each range costs compares of
 // all 64 locations, so a chunk past BUSTER_PP_PRINT_RANGES of them goes to the general loop, whose lookup per token
 // costs less from about 10 ranges up. Then each token's first and last bytes. Returns false, for the general loop to
-// give the chunk's spellings, when a token's location is in no range, the tokens are in more ranges than that or a
-// spelling is empty.
+// give the chunk's spellings, when a token's location is in no range, the other tokens (identifiers take no range) are
+// in more ranges than that or a spelling is empty.
 static bool pp_print_spellings(const Preprocessor* pp, const uint32_t* directory, const uint32_t* values, const uint32_t* locations, uint64_t identifiers,
                                uint64_t valid, const uint8_t* records, const InternSpan* spans, const uint8_t** spellings, uint32_t* lengths, uint8_t* firsts,
                                uint8_t* lasts)

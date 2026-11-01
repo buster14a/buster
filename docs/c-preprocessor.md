@@ -2265,9 +2265,10 @@ buffer, written with `fwrite` as it fills, in three steps:
    range's bytes less its base plus its location, eight to a vector, and its
    length is its value less its location. A chunk with a pragma line's
    identifiers (spelled as written), a generated integer or an `#embed`, a
-   token outside every range, an empty spelling, or tokens in more than 8
-   ranges (`BUSTER_PP_PRINT_RANGES`) goes through the general loop instead,
-   token by token. Each range costs compares of all 64 locations: on the Xeon
+   token outside every range, an empty spelling, or other tokens (not
+   identifiers, whose spellings are interned) in more than 8 ranges
+   (`BUSTER_PP_PRINT_RANGES`) goes through the general loop instead, token by
+   token. Each range costs compares of all 64 locations: on the Xeon
    below, a chunk in 8 ranges took 180 ns against 220–250 ns for the general
    loop's lookups, one in 16 330–360 ns against 245–265, and one in 64
    1,200–1,320 ns against 270–290.
