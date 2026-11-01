@@ -657,6 +657,16 @@ designs and the compilers already built this way.
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
   process.
+  Each executable it links then writes itself with the backend's tables built
+  (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
+  `x86_semantics_initialize`, `tier0_initialize` and `unwind_initialize` write
+  is in a section of its own (`buster_baked`: `BUSTER_BAKED` for state main.c's
+  units share, `BUSTER_BAKED_UNIT` for a module's statics, baked in the
+  checker's unit, the C driver's), so a compile starts with them built. A new
+  table those initializers write goes there too: the bake fails the build when
+  they write anything outside it. PIEs (the sanitizers' builds) and
+  `BUSTER_BAKE=0` build them when they run; `test-baked-tables` checks either
+  kind (the compile-time guide's "Baked tables").
   `./build.sh shifts DIRECTORY SOURCE SHIFT...` also links the same objects
   into `DIRECTORY/compiler-SHIFT` for each SHIFT, with that many bytes of
   padding in `.text` before SOURCE's code, for `time-runs` to compare builds
