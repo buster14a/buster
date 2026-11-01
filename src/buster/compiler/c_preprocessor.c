@@ -19902,8 +19902,9 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                 // pp_print_unspliced's check, on the bytes each copy loads: a backslash followed by a blank (the zero
                 // past a spelling of less than 64 bytes counts as one) or in the last lane may start a line splice, and
                 // with trigraphs so may any '?'. An identifier's interned spelling has none, and a lane checked in vain
-                // would only cost the general loop. A gap is written as one break or space, or with markers as 8,
-                // which the spelling and the next token's output write over.
+                // would only cost the general loop. Most spellings have neither byte, so the rest of the check waits
+                // for one (#649: on an AVX-512 Xeon, 4-8% of -P's printing). A gap is written as one break or space, or
+                // with markers as 8, which the spelling and the next token's output write over.
                 uint64_t possible = 0;
                 for (uint32_t k = from; result && k < to; k += 1)
                 {
@@ -19921,8 +19922,12 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                     const __mmask64 bytes = _bzhi_u64(~0ull, lengths[k]);
                     const __m512i spelling = _mm512_maskz_loadu_epi8(bytes, spellings[k]);
                     _mm512_mask_storeu_epi8(destination + ((ones >> k) & 1) + (markers ? line_breaks[k] : 0), bytes, spelling);
-                    possible |= (_mm512_cmpeq_epi8_mask(spelling, _mm512_set1_epi8('\\')) & ((_mm512_cmple_epu8_mask(spelling, _mm512_set1_epi8(' ')) >> 1) | (1ull << 63))) |
-                                _mm512_mask_cmpeq_epi8_mask(questions, spelling, _mm512_set1_epi8('?'));
+                    const uint64_t backslashes = _mm512_cmpeq_epi8_mask(spelling, _mm512_set1_epi8('\\'));
+                    const uint64_t marks = _mm512_mask_cmpeq_epi8_mask(questions, spelling, _mm512_set1_epi8('?'));
+                    if (BUSTER_UNLIKELY((backslashes | marks) != 0))
+                    {
+                        possible |= (backslashes & ((_mm512_cmple_epu8_mask(spelling, _mm512_set1_epi8(' ')) >> 1) | (1ull << 63))) | marks;
+                    }
                 }
                 printed = result && (general || possible == 0);
                 if (printed)

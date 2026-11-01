@@ -2154,7 +2154,7 @@ differ by up to 1% from code placement alone.
 | Pastes (#122) | Two identifiers, or an identifier and a number, interned without lexing | Lexing every paste | `main.c` (66,520 pastes) 16.5 to 15.2 ms |
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
-| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices, with line markers' breaks as gaps up to each line start that needs a marker | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices; token by token, a line start that needs a marker and chunks with a pragma end, an embed or a spelling past 64 bytes | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms, before #649's spellings; with them, `-E -P`'s printing of `main.c` 5.54–5.59 to 2.71 ns an output token, and `-E`'s with line markers 59.2 to 43.4 ms on `main.c` and 7.30 to 5.63 ms on `sqlite3.c` against the general loop (below); the line markers' batches' are pending (on the Xeon, 97.5 to 61.4 ms and 11.4 to 7.09 ms) |
+| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices, with line markers' breaks as gaps up to each line start that needs a marker | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices; token by token, a line start that needs a marker and chunks with a pragma end, an embed or a spelling past 64 bytes | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms, before #649's spellings; with them, `-E -P`'s printing of `main.c` 5.54–5.59 to 2.71 ns an output token, and `-E`'s with line markers 59.2 to 43.4 ms on `main.c` and 7.30 to 5.63 ms on `sqlite3.c` against the general loop (below); the line markers' batches' are pending (on the Xeon, about 93 to 56 ms and 11.5 to 6.9 ms) |
 
 **The directive tables alone** (`benchmark-preprocessor --tables`, the 9700X,
 CPU 2, three runs of 21 passes on the C library corpus: 8,983 files, 13,152,141
@@ -2378,11 +2378,12 @@ overlapping 512-bit stores a cost to avoid (`docs/coding-style.md`), and the
 
 The line markers' batches, on that host (an in-process harness timing 41 prints
 of one run of each, the old printer compiled beside the new one, `-E`'s
-expansion starts and deferred history, to `/dev/null`): printing with markers
-took 61.4 against 97.5 ms on `main.c` and 7.09 against 11.4 ms on `sqlite3.c`
-(the fastest prints 56.3–57.3 against 89.6–92.6 ms, and 6.9 against
-10.7–11.0); `-P`'s printing is the same on `main.c` (the fastest 36.5–37.7
-against 36.4–37.0 ms) and 2–4% slower on `sqlite3.c`. Of what is left of the
+expansion starts and deferred history, to `/dev/null`, two runs): printing with
+markers took 55.3–56.5 against 91.9–95.3 ms on `main.c` and 6.7–7.1 against
+11.1–11.8 ms on `sqlite3.c`, and with `-P` 35.8–36.3 against 37.9–39.5 ms and
+3.10–3.16 against 3.30–3.49 ms. Without the batch's check for a splice waiting
+for a backslash or a `?` before the rest of it, `-P` printed 4–8% slower, as
+fast as before on `main.c` and 2–4% slower on `sqlite3.c`. Of what is left of the
 markers' cost over `-P`, placing the line starts takes about 21 ns each (12 ms of
 `main.c`'s 584,482, 2 ms of `sqlite3.c`'s 93,740), half of it counting their
 lines, which read the whole source once (38 MB and 9.8 MB) a line at a time,
