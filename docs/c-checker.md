@@ -857,8 +857,19 @@ readers.
 and operand edges stay in `CheckGraph`; the stream adds node-indexed semantic
 columns without renumbering or expanding the graph:
 
-- `values` stores each node's `TypeId`, value category, constant representation,
-  flags, optional object/addend, bit width and deferred evaluation fault.
+- Each node's value (`CheckValue`: its `TypeId`, value category, constant
+  representation, flags, optional object/addend, bit width and deferred
+  evaluation fault) is in columns (#628). `value_types`, `value_flags`,
+  `value_objects`, `value_categories` and `value_constants` hold the fields
+  that most readers read alone. A node whose value has more (a constant's
+  payload, an address constant's offset, a bit-field's place, an overload set,
+  a fault) also has its whole value as a row of `payloads`, its row's index
+  plus one in `payload_rows`, 0 for none. On `sqlite3.c` 12% of the nodes have
+  a row, where 36% have an object. `check_stream_value` gives a node's whole
+  value, and `check_stream_type`, `check_stream_flags`,
+  `check_stream_category`, `check_stream_constant_kind` and
+  `check_stream_object` its fields. A hand-built stream may hold a whole value
+  per node in `dense_values` instead, which the accessors read the same way.
 - `conversions` contains three operand records and a separate store record per
   node. Each records the
   destination type and the applicable lvalue, array/function decay, promotion,
@@ -1961,8 +1972,16 @@ What the lowering covers past scalars (#145's programs):
   low bits' direction for 8 to 11, as clang's code does.
 
   A function with an X86
-  entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
-  opmask's are integers. A builtin the table doesn't name is refused by name
+  entry has vectors (`Tier0Function.vectors`) whatever its values' classes. Its
+  masks are C's integers (`__mmask16` is an `unsigned short`), and where the
+  unit's target has AVX-512 BW and DQ, a row's masks are Tier 0's mask class
+  (#179, `check_x86_lower_masks`): a mask operand its records would move into
+  an opmask register from its integer is taken there by role, a mask result
+  they would move out is left there, their other opmask registers are scratch
+  roles, and the moves are Tier 0's conversions from and to the C type around
+  the row, so that the function has masks (`Tier0Function.masks`). A row whose
+  registers don't map onto roles (VP2INTERSECT's pair, a mask's integer read
+  otherwise) keeps the moves, its opmask registers by number. A builtin the table doesn't name is refused by name
   ("this x86 builtin"), and so are one whose instructions the target hasn't and
   a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
   instructions name fixed registers, or would write the vector registers
@@ -2539,6 +2558,14 @@ What the lowering covers past scalars (#145's programs):
   of 39 fixtures with clang's, its place and its message, on both paths
   (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
   the deferred reader's fixtures and the selection's take a cleanup too.
+- **A block's objects' lifetimes**, for Tier 1's frame (#177, the C driver's
+  `--tier1`, `CheckProgramOptions.lifetimes`): `CHECK_CONTROL_LIFETIME` entries
+  where a block's statements begin and end (after its cleanups) and before each
+  `break`, `continue` or `goto` that leaves it (after the jump's cleanups),
+  which the lowering turns into its locals' events
+  (`Tier0Function.lifetime_entries`). A block a jump can enter past its opening
+  brace has none: [the frame guide](tier1-frame.md)'s "Slot sharing between
+  objects".
 - **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
   emission's attribute pass). A weak declaration's symbol is weak, defined
   or undefined; on a declaration without external linkage it is clang's error
@@ -3416,19 +3443,68 @@ they do per token where little of it was per declaration or expression:
   byte copies, the initializers' expression re-evaluation
   (`check_input_evaluate_cached`), the liveness walk
   (`check_initializer_live_writes`) and the constant-fold warnings. On #872's
-  M7-style units, #754 is the whole measured `bc11fddb`..`d11a91d2`
-  difference (local Ryzen 9 7940HS instruction counts, `perf stat -e
-  instructions:u` over `benchmark-checker-deferred --passes 6 --lanes 1`
-  runs with the frozen corpus's pinned predefines and headers, three repeats,
-  all within 0.02%: `00213.c` +6.3%, `00182.c` +0.7%, `00204.c` +3.7%,
-  `00200.c` +1.6%, `sqlite3.c` +4.1%; the K&R stack #735+#752+#756 with the
-  six non-reader merges is +0.0 to +0.2%, and #831 is unchanged, so the
-  endpoint sums match). The `fresh` skip itself removes 0.06% of `sqlite3.c`'s
-  run (`00204.c` 0.20%, `00200.c` 0.07%, `00213.c` 0.13%, `00182.c` 0.00%).
-  `perf` on `sqlite3.c` puts `check_const_append` at 1.2 to 1.4% of the
-  reading's cycles. A locked-9700X five-round M7-style campaign with
-  `ns/token` medians is still needed for qualification numbers; these local
-  counts are attribution only.
+  M7-style units, the locked-9700X campaign
+  ([the record](https://github.com/buster14a/buster-performance/tree/275811e54bff6b12698311e9480325a0b7399e5f/docs/measurements/checker-872-qualification-2026-11-01))
+  reads `bc11fddb`..`d11a91d2` as #754's own work and nothing else: #754 is
+  +1.6% by the median of the ten units' one-lane readings (+2.1% in source
+  order), `sqlite3.c` +4.9% (source order +3.0%), `00204.c` +15.0%,
+  `00200.c` +7.3% and `00213.c` +12.9%, while each of the other ten
+  first-parent merges' median change is within ±1.2% one lane and ±1.6% in
+  source order, and their cumulative `m754..d11a91d2` change is +0.4% by the
+  token-weighted total. In the
+  feature's own units that is 2.1 ns per input token on `sqlite3.c` in source
+  order and 4.0 in the deferred reader's one lane, 9.7 on `00204.c`, 2.9 on
+  `00200.c` and 23.5 on `00213.c`; `perf stat` counts +4.06% instructions and
+  +3.74% cycles on `sqlite3.c` and +3.82% and +11.19% on `00204.c`. The
+  `fresh` skip itself removes 0.5% by the ten units' median one-lane change,
+  0.4% of `sqlite3.c`'s one-lane reading and 0.06% of its instructions
+  (0.20% of `00204.c`'s); on the rule's multi-lane reading the fixed head's
+  token-weighted total is `bc11fddb`'s (54.13 against 54.11 ms). The
+  campaign's main, `97824e90`, is 148 first-parent merges past `d11a91d2`;
+  its further +2.8% token-weighted one-lane reading over `d11a91d2`'s
+  (+3.9% of `sqlite3.c`'s instructions) accumulates over that range's later
+  checker features (#927, #966, #968 and #1002 among them), outside this
+  change.
+- **Store-to-load round trips in the receipts and the liveness walks (#873).**
+  Samples of `ls_bad_status2.stli_other` on the 9700X and the 7940HS placed
+  loads that can't take an older store's data in both. `check_const_append`
+  wrote each trie node's new child into a stack copy of the node with a 4-byte
+  store and reread the copy with an 8-byte load, at each of the 32 depths, and
+  copied its object and its buffer out with wide loads right after narrower
+  stores into them. `check_initializer_live_writes`'s radix sort zeroed its
+  1 KiB of counts with vector stores and read them back with 4-byte loads, in
+  each of its eight passes, and so did `check_initializer_live`'s sort of the
+  address candidates. Now each new node is its old node's two children as one
+  64-bit word, so that the trie loop's depths reread no node from the stack
+  (its last depth reads two spilled values, stored long before). The object is
+  copied before its places are written into the array. The capacities that the
+  storage calls grow are locals, so that nothing takes the buffer's address and
+  its copy into `*buffer` is a store per field. Both sorts run a pass only over
+  a digit in which some offset differs from the first one's, and none when the
+  offsets are in order already, as a single write's two ends and a table's
+  pointers in source order are. All of it is exact: the frozen `sqlite3.c`'s
+  `-c` objects (both paths, `-g`, `--lower-all`) and diagnostics, 1,337 musl
+  sources' objects and c-testsuite's 220 programs' are main's, byte for byte.
+  On that `sqlite3.c`'s `-c`, the 4,231 liveness walks (4,023 of them a single
+  write) run 158 of the 33,848 passes that main ran, and the 104 sorts of
+  address candidates none of their 832. Callgrind on a baseline
+  (`BUSTER_HOST_ARCH=x86-64`) build counts 39.7M fewer instructions of 5,964M
+  (−0.66%): the walk's 43.9M became 5.3M, the address sorts' 3.7M became 2.4M,
+  and the appends' 4.01M became 4.29M, a few more instructions per depth for no
+  stack round trip. On the 7940HS, `perf stat -r 5` of the native build before the address
+  sorts' change counted 2.25% fewer instructions and 9.62% fewer `stli_other`
+  ([buster14a/buster#1037's review](https://github.com/buster14a/buster/pull/1037#pullrequestreview-5727977655)).
+  On the 9700X, against main at its fork point, with the same objects
+  ([the record](https://github.com/buster14a/buster-performance/tree/d2f5d31761d6f67cdcfe862306e29b0451bb2ae6/docs/measurements/checker-store-forwarding-873-2026-11-01)):
+  `-c` of that `sqlite3.c` took 2.15% fewer user cycles, 2.34% fewer
+  instructions and 18.1% fewer `stli_other` (`-fsyntax-only` 2.35%, 2.90% and
+  18.6%), the medians of 10 interleaved processes each; over six placements of
+  the checker's unit and two copies, in two rounds, −1.82% and −2.11% of
+  `-c`'s user cycles and −2.29% and −2.56% of `-fsyntax-only`'s, where main
+  against itself read within ±0.27%. `--time-stages` puts it in
+  `check-declarations`, 3.67 ms down to 1.90; `check_initializer_live_writes`
+  and `check_const_append`, which took 15.1% of main's `stli_other` samples,
+  are no longer among those over 0.41%.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a

@@ -353,6 +353,8 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                     }
                 } break;
                 case IR_STACK_ADDR: value = (uint64_t)a * 64 + 1; break;
+                // A slot's lifetime marker reads and writes nothing (#177).
+                case IR_LIFETIME: break;
                 case IR_SYMBOL_ADDR: value = (uint64_t)a << 32; break;
                 case IR_ADDRESS: value = values[a] + (b == BUSTER_IR_NONE ? 0 : values[b] * f->addresses[f->c[i]].scale) + f->addresses[f->c[i]].offset; break;
                 case IR_LOAD:
@@ -1171,10 +1173,15 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+// #175's text-form pass fixtures, defined after the per-pass implementations in ir_optimize_text_test.c.
+static void ir_optimize_text_tests(IrOptimizeTest* test);
+static int ir_optimize_text_print_fixtures(void);
+
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
     bool arguments_valid = true;
+    bool print_text = false;
     for (int i = 1; i < argc; i += 1)
     {
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
@@ -1184,23 +1191,32 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
             test.random = strtoull(argv[++i], &end, 0);
             arguments_valid = errno == 0 && *end == 0 && test.random != 0;
         }
+        else if (strcmp(argv[i], "--print-text") == 0)
+        {
+            print_text = true;
+        }
         else
         {
             arguments_valid = false;
         }
     }
     int result = 2;
-    if (arguments_valid)
+    if (arguments_valid && print_text)
+    {
+        result = ir_optimize_text_print_fixtures();
+    }
+    else if (arguments_valid)
     {
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
+        ir_optimize_text_tests(&test);
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }
     else
     {
-        fprintf(stderr, "usage: test-ir-optimize [--seed N]\n");
+        fprintf(stderr, "usage: test-ir-optimize [--seed N] [--print-text]\n");
     }
     return result;
 }

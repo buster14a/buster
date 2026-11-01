@@ -319,7 +319,7 @@ static uint32_t check_target_feature_callee(const CheckProgram* program, uint32_
     const CheckStream* stream = program->stream;
     const uint32_t callee = graph->operand0[node];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
-    const CheckValue value = callee < graph->count ? stream->values[callee] : (CheckValue){ 0 };
+    const CheckValue value = callee < graph->count ? check_stream_value(stream, callee) : (CheckValue){ 0 };
     uint32_t object = overload != BUSTER_CHECK_NONE ? stream->overloads[overload].selected.object : 0;
     if (overload == BUSTER_CHECK_NONE && callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE && value.category == CHECK_FUNCTION)
     {
@@ -433,15 +433,14 @@ static const BuiltinIntrinsicInfo* check_target_feature_emitted(const CheckProgr
     const uint32_t effect = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
     const uint32_t call = check_program_builtin_index(graph->x86_calls, graph->x86_count, sizeof(CheckX86Call), node);
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
-    const uint8_t kind = info != NULL ? check_action_kind(program->types, stream->values[node].type) : BUSTER_TYPE_KIND_NONE;
+    const uint8_t kind = info != NULL ? check_action_kind(program->types, check_stream_type(stream, node)) : BUSTER_TYPE_KIND_NONE;
     bool folded = info != NULL && info->constant_evaluable_attribute && (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING);
     for (uint32_t i = 0; folded && i < graph->argument_counts[node]; i += 1)
     {
         const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-        const CheckValue* value = argument < graph->count ? stream->values + argument : NULL;
-        const CheckConstantKind constant = value != NULL ? value->constant_kind : CHECK_CONSTANT_NONE;
+        const CheckConstantKind constant = argument < graph->count ? check_stream_constant_kind(stream, argument) : CHECK_CONSTANT_NONE;
         folded = (constant == CHECK_CONSTANT_INTEGER || constant == CHECK_CONSTANT_FLOATING) &&
-                 (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+                 (check_stream_flags(stream, argument) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     }
     const bool constant = call != BUSTER_CHECK_NONE && graph->x86_calls[call].constant_evaluated_context;
     return info != NULL && !folded && !constant ? info : NULL;
@@ -473,7 +472,7 @@ static const BuiltinIntrinsicInfo* check_target_feature_predicate(const CheckPro
         compare |= info->name_length == strlen(compares[i]) && memcmp(info->name, compares[i], info->name_length) == 0;
     }
     const uint32_t predicate = compare && graph->argument_counts[node] == 3 ? graph->argument_nodes[graph->argument_offsets[node] + 2] : BUSTER_CHECK_NONE;
-    const bool past = predicate < graph->count && stream->values[predicate].constant_kind == CHECK_CONSTANT_INTEGER && stream->values[predicate].integer > 7;
+    const bool past = predicate < graph->count && check_stream_constant_kind(stream, predicate) == CHECK_CONSTANT_INTEGER && check_stream_value(stream, predicate).integer > 7;
     const int32_t avx = past ? predefines_feature_index("avx", 3) : -1;
     return avx >= 0 && !predefines_has(map, (uint32_t)avx) ? info : NULL;
 }
@@ -549,15 +548,16 @@ struct CheckTargetFeatureEmission
 static bool check_target_feature_select(const CheckProgram* program, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
-    const CheckValue* values = program->stream->values;
+    const CheckStream* stream = program->stream;
     const uint32_t flags = BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_GNU_CONSTANT;
     const uint32_t arms[] = { graph->operand1[node], graph->operand2[node] };
     bool constant = true;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arms); i += 1)
     {
-        constant = constant && arms[i] < graph->count && (values[arms[i]].flags & flags) != 0 && (values[arms[i]].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        constant = constant && arms[i] < graph->count && (check_stream_flags(stream, arms[i]) & flags) != 0 &&
+                   (check_stream_flags(stream, arms[i]) & BUSTER_CHECK_SIDE_EFFECT) == 0;
     }
-    const uint32_t kind = type_kind(program->types, type_strip_aligned(program->types, values[node].type));
+    const uint32_t kind = type_kind(program->types, type_strip_aligned(program->types, check_stream_type(stream, node)));
     return constant && kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION && kind != BUSTER_TYPE_KIND_COMPLEX;
 }
 

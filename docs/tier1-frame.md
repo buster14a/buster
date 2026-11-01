@@ -3,10 +3,11 @@
 `src/buster/compiler/tier1_frame.c` implements the planning part of
 [#177](https://github.com/buster14a/buster/issues/177): interval stack-slot
 sharing, fixed areas, stack alignment, register preservation and explicit
-prologue/epilogue steps. It emits no machine instructions or unwind tables.
-The scalar and vector paths produce valid frames with identical class counts,
-storage sizes and prologue plans; the physical color assigned to an individual
-object can differ.
+prologue/epilogue steps. It emits no machine instructions or unwind tables
+itself, but its steps are Tier 0's frame protocol, which the C driver's unwind
+tables describe ("Unwind tables" below). The scalar and vector paths produce
+valid frames with identical class counts, storage sizes and prologue plans; the
+physical color assigned to an individual object can differ.
 
 ## Producer and consumer contract
 
@@ -17,7 +18,8 @@ value that might spill, outgoing calls and frame options. Exclude the returned
 allowed masks. RSP is always unavailable to allocation independently of this
 query. The frame query reserves RBP for dynamic stacks, requested frame
 pointers or alignment beyond 16 bytes; dynamic stacks with such realignment
-also reserve R13 as a stable base. It does not silently repair an allocation.
+also reserve R15 as a stable base (Tier 0's realigned base too, which the unwind
+tables' reader checks). It does not silently repair an allocation.
 
 After allocation, `tier1_frame_plan` and `tier1_frame_plan_scalar` take the
 actual memory objects. They reject conflicting allocated registers and check
@@ -55,8 +57,9 @@ through maximum end, including any intervening holes. The interval producer
 should retain these bounds while constructing intervals. An address-taken
 local supplies its conservative scope lifetime, including every possible
 escaped use; a local or aggregate producer can use the same column contract.
-The current C checker and source-to-SSA path do not yet produce this complete
-frame request. The frame module introduces no parallel IR.
+The C driver's `--tier1` gives each block's objects its block's lifetime and
+the CFG consumer passes them so ("Slot sharing between objects" below). The
+frame module introduces no parallel IR.
 
 `AbiCall[]`, produced by `abi_assign` or its scalar twin in
 `calling_convention.c`, supplies each call's outgoing byte count and required
@@ -72,10 +75,12 @@ value's lookup is therefore `offset[allocation.spill_ids[value]]` with the
 compact view above. `slot_count`, `class_count`, `object_bytes`,
 `payload_bytes`, `outgoing_bytes`, `stack_adjust_bytes` and
 `maximum_stack_bytes` describe the storage and stack movement. The last
-includes the worst realignment gap and pointer push, or the red-zone extent
-when no stack adjustment is needed. `saved_registers` and `save_offset[16]`
-describe saved general registers; RBP's mandatory pointer push is represented
-by its own prologue/epilogue steps.
+includes the pushes, the worst realignment gap and the pointer push, or the
+pushes and the red-zone extent when no stack adjustment is needed.
+`saved_registers` and `save_offset[16]` describe the pushed callee-saved
+registers, each slot's displacement from RBP in a frame with a frame pointer and
+from the post-prologue RSP otherwise; RBP's mandatory pointer push is
+represented by its own prologue/epilogue steps.
 
 Output columns belong to the caller's output `Arena`. Temporary columns belong
 to a distinct scratch `Arena`. Newly allocated output/scratch storage must not
@@ -125,48 +130,127 @@ expensive wide gathers. Their costs remain in the measurements; a measured
 
 ## Frame and prologue rules
 
-The fixed frame holds outgoing arguments at its bottom, then colored objects,
-the aligned 176-byte SysV variadic register-save area when requested, and
-eight-byte callee-save slots. Calls can require alignment beyond the usual
-16 bytes. Dynamic frames keep the maximum outgoing requirements but set
-`dynamic_outgoing`: the consumer must allocate and align outgoing arguments
-at each call's current RSP, separately from fixed local storage.
+The prologue is Tier 0's frame protocol, the one `unwind_tier0_frame_tails`
+reads and `unwind.c` describes: with a frame pointer `push rbp; mov rbp, rsp`
+first; then each callee-saved register the allocation uses pushed, in RBX, RBP,
+R12, R13, R14, R15 order (ascending encoder numbers); then one subtraction; then
+a realignment's `and rsp, -alignment` and, for a dynamic realigned frame, its
+base's `mov r15, rsp`; then the variadic saves. The epilogue releases the
+subtraction (`add rsp`) or, with a frame pointer, resets rsp from rbp past
+whatever the body allocated or realigned (`lea rsp, [rbp - 8n]` below the `n`
+pushes, `mov rsp, rbp` without any), then pops the registers in reverse, and
+rbp last. Pushes take a byte or two each where stores into the frame took four
+or five, as clang's prologues do.
+
+The subtraction's region holds outgoing arguments at its bottom, then colored
+objects, then the aligned 176-byte SysV variadic register-save area when
+requested. Entry RSP is 8 modulo 16 and every push takes 8, so rsp after the
+pushes is 0 or 8 modulo 16; the subtraction includes that residue so that rsp
+after it is 16-aligned, and an odd number of pushes can align a frame without
+one (a caller's frame of three pushes and no locals subtracts nothing). Calls
+can require alignment beyond the usual 16 bytes, which realigns the frame like
+an over-aligned object. Dynamic frames keep the maximum outgoing requirements
+but set `dynamic_outgoing`: the consumer must allocate and align outgoing
+arguments at each call's current RSP, separately from fixed local storage.
 
 The leaf red zone is allowed only without calls, dynamic stack allocation,
 realignment or a required frame pointer, and when the complete payload fits
-128 bytes. Entry RSP is 8 modulo 16; the planner includes that residue when
-placing sixteen-byte objects. A 128-byte object aligned to eight fits; the
-same size aligned to sixteen needs 136 bytes of downward extent and does not.
-`NO_RED_ZONE` disables it explicitly.
+128 bytes below rsp after the pushes, whose residue the planner includes when
+placing sixteen-byte objects. With no pushes, a 128-byte object aligned to
+eight fits; the same size aligned to sixteen needs 136 bytes of downward extent
+and does not. `NO_RED_ZONE` disables it explicitly.
 
 Fixed frames address objects through their post-prologue RSP. Ordinary dynamic
-frames use RBP with negative displacements. A dynamic realigned frame first
-pushes and establishes RBP to preserve entry restoration, aligns/subtracts
-RSP, stores the original callee-save values through RSP, then establishes
-R13 as its stable aligned base. The epilogue restores R13 last before
-resetting RSP from RBP and popping the old RBP. A fixed realigned frame only
-needs RBP for restoration and uses RSP to address objects.
+frames use RBP with negative displacements below the pushes. A realigned frame
+subtracts and then aligns, so that its objects lie in the subtraction's bytes
+above the aligned rsp; a dynamic one then copies rsp into R15, one of its
+pushes, as its stable aligned base, which its pop restores after the reset.
+A fixed realigned frame only needs RBP for restoration and uses RSP to address
+objects.
 
 The variadic prologue plans all six general argument-register saves and eight
 sixteen-byte vector saves; the latter are conditional on entry AL being
 nonzero. The emitter must preserve that entry AL value until these
-conditional saves are decided. Prologue stores explicitly name RSP as their
-base, including the original R13 save before R13 becomes a base pointer.
+conditional saves are decided. Variadic stores explicitly name RSP as their
+base. Tier 1's CFG consumer asks for this area for a variadic definition with a
+register save area (#789). The IR's save-area slot is the area itself, at
+`variadic_offset`. Its overflow area is addressed from the incoming frame:
+16 bytes past RBP with a frame pointer, and otherwise past the reservation,
+the pushed callee-saved registers and the return address from RSP.
 
 With `PROBE_STACK`, allocations of at least 4096 bytes use a
-`PROBE_ALLOCATE` step. A realigning prologue uses `PROBE_ALIGN` under that
-option, including for a small final subtraction: otherwise the alignment gap
-and subtraction together could cross an unprobed page. These abstract steps
-require the emitter to touch each descending page-sized interval **and the
-final destination**. The recorded amount is the subtraction size or target
-alignment; the probe stride is `BUSTER_TIER1_FRAME_PAGE_BYTES`. Dynamic-body
-allocations require their own protected lowering and are not prologue steps.
+`PROBE_ALLOCATE` step. A realigning prologue probes its subtraction whatever its
+size and uses `PROBE_ALIGN` after it, so that the alignment gap's probes start
+from a touched address: otherwise the subtraction and the gap together could
+cross an unprobed page. These abstract steps require the emitter to touch each
+descending page-sized interval **and the final destination**. The recorded
+amount is the subtraction size or target alignment; the probe stride is
+`BUSTER_TIER1_FRAME_PAGE_BYTES`. Dynamic-body allocations require their own
+protected lowering and are not prologue steps. A probe's loop moves rsp a page at
+a time, which the unwind tables' protocol doesn't describe: the C driver, which
+asks for no probes, refuses such a frame rather than describe it wrongly.
 
-The plan has bounded step arrays and no instruction positions. Omitting a
-frame pointer in actual emitted code still requires the PC-anchored unwind
-description from [#88](https://github.com/buster14a/buster/issues/88). The
-planner itself emits no instructions; the separate companion below realizes
-its frame steps. Spill loads/stores belong to the instruction consumer.
+The plan has bounded step arrays and no instruction positions. Spill
+loads/stores belong to the instruction consumer.
+
+## Slot sharing between objects
+
+Tier 1's frame lets objects that are never live at once share a slot (#177's
+design: an address-taken local's lifetime is its scope, conservatively, since
+its address can escape within it). The lifetimes are C's own: an automatic
+object lives from its block's entry to the block's exit, however either
+happens, wherever its declaration is in the block (C17 6.2.4p5).
+
+- The checked program, asked by `--tier1` (`CheckProgramOptions.lifetimes`,
+  `c_check_program_lifetime.c`), lists each block's local declarations by its
+  closing brace (`CheckProgram.lifetime_first`). Its control stream gets a
+  `CHECK_CONTROL_LIFETIME` start where the block's statements begin, and an end
+  after them (after the block's cleanups) and before each break, continue or
+  goto that leaves it (after the jump's cleanups). A goto back inside the block,
+  before a declaration, leaves nothing: the object still lives, and a pointer to
+  it may be read there. Clang's markers end such an object, which C doesn't. A
+  return, a computed goto and the body's end need no end, since nothing in the
+  block follows them, and an end missing on a path only makes a lifetime
+  longer.
+- A block that a jump can enter other than through its opening brace has no
+  lifetimes; its objects live throughout the function, as clang leaves out the
+  markers of an object a goto bypasses (`VarBypassDetector`). Such blocks are:
+  - those between a goto's label (or an asm goto's) and the innermost block
+    that holds the jump too. No emitted body reaches the asm goto part yet:
+    the lowering refuses asm goto by name (`CheckProgramAsm.reason`), and the
+    part stands ready for when it takes one;
+  - those between a case or default label and its switch, the switch's own
+    block among them, whose opening brace never runs;
+  - every block around a label whose address is taken;
+  - a statement expression's own block.
+- The lowering turns each control into an event per local of the block
+  (`Tier0Function.lifetime_entries` and `lifetime_locals`), which Tier 0
+  doesn't read. `ir_lower` turns the events into `lifetime` markers before their
+  entries ([the IR guide](ir.md)'s "Slot lifetimes"), and SSA promotion drops a
+  promoted slot's markers.
+- The CFG consumer (`tier1_emit_cfg_lifetimes`) finds where each object with
+  markers is live. That forward problem (some path from a start reaches here
+  without an end) is backward liveness on the reversed CFG, which `dataflow.c`'s
+  AVX-512 solver, or its scalar twin with `--scalar`, solves. A block's last
+  marker of an object is its use where it starts the object and its definition
+  where it ends it. The object's interval for the coloring above is the hull of
+  the positions where it is live, among the spill slots'. An object without
+  markers keeps its whole function.
+
+The positions are the blocks' layout, so a hull can cover positions where its
+object is dead (a branch's other arm laid out inside), which only keeps slots
+apart. An access through an object's address comes between a start and an end
+on some path, so its positions are inside the hull. The analyses' passes are
+walks up the parse tree from the declarations, jumps, cases and labels, each
+bounded by its depth, and they run only for `--tier1`. Like the control stream
+they feed, they are scalar.
+
+`--tier1-no-lifetimes` compiles without lifetimes, every object a slot of its
+own. On `test-checker-driver`'s lifetime fixture (`check_test_driver_tier1_lifetimes`),
+which has the cases above, Tier 1's frames take 1,480 bytes with lifetimes
+against 2,064 without, by both paths. Every build prints clang's output. That
+was measured in a cloud container: frame sizes against `clang -O2` on the
+corpora and the run time on the 9700X are still to be measured.
 
 ## Native frame companion
 
@@ -195,8 +279,10 @@ RSP, and flags; they preserve the six incoming general argument registers,
 XMM arguments, and the original entry AL. Consecutive vector-save steps
 share one test of AL and one conditional branch around their `movaps` stores.
 All emitted forms belong to baseline x86-64. Epilogues preserve return-value
-registers. A dynamic realigned frame stores original R13 before establishing
-the aligned base, and restores it after all other accesses through that base.
+registers. Without probes, the records are the protocol in Tier 0's own forms,
+which the unwind tables' reader matches: `push` and `pop`, the frame pointer's
+and the base's `mov` in their `RM64_R64` form, `sub`, `add` and `and` with a
+sign-extended imm8 where the amount fits, and the reset's `lea` from rbp.
 
 Protected allocation descends by 4096 bytes with a byte read/write at each
 step, then touches any final partial step. Protected realignment also touches
@@ -207,10 +293,68 @@ arithmetic instruction. The helper does not lower dynamic body allocations or
 dynamic outgoing call areas; the instruction consumer must reserve, align,
 and, when required, probe those at the call or allocation site.
 
-The companion publishes records and branch targets, not PC-anchored unwind
-rows. Native execution coverage below therefore does not complete #88 or
-establish debugger/unwinder acceptance. Full ABI cross-linking and corpus
-requirements remain open as listed below.
+The companion publishes records and branch targets; the C driver's emission
+finds the transitions' PCs in them after branch sizing ("Unwind tables" below).
+Full ABI cross-linking and corpus requirements remain open as listed below.
+
+## Unwind tables
+
+Tier 1's code in the C driver publishes its frame to the emission as Tier 0's
+code does (`check_tier1_frame` in `c_check_tier1.c`, into `Tier0Code`'s
+`frame_saved`, `frame_size`, `frame_pointer`, `frame_alignment_log2` and
+`frame_base`), so that `check_program_emit_code` writes its unwind tables with
+`unwind_tier0_frame_tails` and `unwind_write`, the vector writer and its exact
+twin, as it writes Tier 0's, and `--verify`'s analyzer (`unwind_tier0`) checks
+the frames it takes. `--tier1` therefore compiles with unwind tables by default,
+under the driver's usual options ([the unwind guide](unwind.md)'s "The C
+driver's unwind tables"), and no longer needs `-fno-asynchronous-unwind-tables`.
+
+Tier 1 puts an epilogue before every return's `ret` rather than jumping to one.
+Both consumers record each return's `ret` (`Tier1EmitResult.exits`). Every
+return but the code's last record is published as one of the code's tails
+(`Tier0Code.tail_records`), the way a tail call's teardown is (#147): its CFI
+remembers the body's rules before the teardown, follows the release and pops,
+and restores them after the `ret`. Where the code's last record isn't its last
+return's `ret` (a loop whose latch's jump comes last, a call that doesn't
+return, a trap), the frame is open (`Tier0Code.frame_open`,
+`UnwindFunction.open`): its FDE has the prologue's transitions alone, the body's
+rules hold to its end, and each of its returns is a tail. A frameless function
+publishes no tails, since its rules are the CIE's throughout; it is published
+open where its code doesn't end in a `ret` (the reader otherwise wants a closed
+frameless function to end in a `ret` or a `ud2`), and its FDE is the closed one
+either way. A frame with probes isn't the protocol, and the C driver refuses it
+(`TIER1_EMIT_FRAME`), never asking for one. So does a frame whose exits aren't
+all `ret`s, or whose last record is a `ret` though the frame is published open:
+`check_tier1_frame` checks both, so that a disagreement with the emission's
+reader would send the function to Tier 0 rather than fail the compile.
+`--tier1-report` counts the shapes: `open_frames` (open frames with
+transitions), `return_tails` (returns published as tails) and `red_zones`
+(frames whose objects are in the red zone).
+
+`test-check-debug --cross-check` (`c_check_unwind_test.c`) checks it on a
+fixture compiled by `--tier1 --verify`, every function but `main` by Tier 1:
+a frame of spill slots alone, one with pushes, two returns each after its own
+epilogue, an open frame whose loop's latch comes last, a realigned frame (with
+its frame pointer), the same open and with two returns, and a leaf whose spills
+are in the red zone, whose shapes `--tier1-report`'s counts must show. Each
+function's FDE, as `readelf -wF` interprets it, must have its shape: from the
+entry's row, a row with the CFA rsp+8 at each return's `ret`, a last row with
+another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in
+some row exactly for the frame pointers, and the leaf's one row.
+By each path and through GNU ld and lld, `backtrace()` walks through every frame
+to `main` (and without unwind tables stops at the first), `--lanes 1` and 8 make
+the vector path's bytes, and gdb's backtrace at every instruction of each
+function, both returns and the loops' iterations among them, gives the function
+and `main`. Tier 1 doesn't make the other
+shapes the planner can: its allocator gives a leaf no callee-saved register (they
+go only to values live across a call), so a red zone has no pushes above it, and
+its selection refuses the dynamic stack's operations, so no frame of Tier 1's is
+addressed from rbp (`test-tier1-frame` and `test-tier1-frame-execution` check
+those). `test-unwind` checks the writer's
+open descriptions against its independent CFI interpreter and
+`unwind_tier0_frame_tails` on early returns and open frames of every save mask,
+with and without a frame pointer, with its refusals. `test-c-testsuite --tier1`
+compiles c-testsuite's subset with the tables and `--verify`.
 
 ## Checking and measurement
 
@@ -225,10 +369,14 @@ check unpadded input tails, inaccessible empty inputs and exact-capacity output.
 Invalid indices, duplicates, arithmetic limits, arena exhaustion and conflicting
 reserved registers check refusal and rollback.
 
-Local diagnostics passed 2,273,931 checks with seed 177 and eight rounds, and
-an ASan/UBSan run passed 8,793,497 checks with seed 177177 and 32 rounds. All
-checks passed. These are local correctness diagnostics, not 9700X or
-emitted-code acceptance evidence. A local benchmark smoke exercised all four
+The abstract stack also checks that the steps follow the unwind tables'
+protocol (the order of the pushes, subtraction, realignment and base, and the
+epilogue's release or reset and its pops in reverse) and that each push writes
+the slot `save_offset` publishes. With push-based saves, local diagnostics in a
+cloud container passed 2,277,543 checks with seed 177 and eight rounds and
+8,802,059 with seed 177177 and 32 rounds (the earlier store-based planner's
+were 2,273,931 and an ASan/UBSan 8,793,497). These are local correctness
+diagnostics, not 9700X or emitted-code acceptance evidence. A local benchmark smoke exercised all four
 phases and both paths at 65 objects; assembly inspection confirmed bounded
 masked vector loads/stores and the pressure-scan vector additions.
 
@@ -246,8 +394,9 @@ unprotected control: only the probing function faults on an intermediate
 allocation page, a 65536-byte alignment gap, or the final partial allocation
 step. Additional cases check malformed steps, exact output capacities,
 unchanged destination bytes on refusal, and the maximum 384-record/64-branch
-append. Local optimized and ASan/UBSan runs each passed 14,619 checks. These
-are native helper correctness diagnostics; they do not substitute for the
+append. Local optimized and ASan/UBSan runs each passed 14,619 checks, and the
+push-based emitter's optimized run passed the same 14,619. These are native
+helper correctness diagnostics; they do not substitute for the
 source-to-program ABI/corpus qualification or controlled 9700X measurements.
 
 `benchmark-tier1-frame [--only scalar|vector] [--phase prepare|color|layout|total]
@@ -278,13 +427,17 @@ output stores; isolated rows cannot establish a total improvement. Synthetic
 generation precedes timing. Source-level interval construction, allocation,
 native emission and generated-program execution are outside this benchmark.
 
-No 9700X timing or speedup is claimed here. Issue #177 remains open for
+No 9700X timing or speedup is claimed here, nor for the push-based saves:
+they shorten every prologue and epilogue that saves registers, but their run
+time on `speedtest1` hasn't been measured. Issue #177 remains open for
 [#142](https://github.com/buster14a/buster/issues/142) generated-code checking,
 [#137](https://github.com/buster14a/buster/issues/137) Tier 1 cross-linking
-including variadic and over-aligned functions, frame-size comparisons against
-`clang -O2` on the corpora, and controlled `speedtest1`/corpus runtime evidence
-for slot sharing and frame-pointer omission. Prologue-plan simulation and
-bounded native-helper execution do not satisfy those full-program requirements.
+including variadic definitions and over-aligned functions, frame-size
+comparisons against `clang -O2` on the corpora (with and without the objects'
+lifetimes, "Slot sharing between objects"), and controlled
+`speedtest1`/corpus runtime evidence for slot sharing and frame-pointer
+omission. Prologue-plan simulation and bounded native-helper execution do not
+satisfy those full-program requirements.
 
 ## Boundary audit #298
 
@@ -299,8 +452,9 @@ allocator register reservations → actual spills/callee-save usage → frame
 plan → native prologue/epilogue records**. `tier1_frame_requirements` therefore
 precedes allocation, although final `tier1_frame_plan` follows it. A late
 change needing more reserved registers requires an explicit allocation retry.
-The native companion emits records and branch columns; final-PC unwind/debug
-production for [#88](https://github.com/buster14a/buster/issues/88) is still missing.
+The native companion emits records and branch columns; the C driver's emission
+derives the final-PC unwind tables from them ("Unwind tables" above), while `-g`'s
+source rows for Tier 1's code are still missing.
 
 The planner borrows u32 start/end/size/alignment columns and an optional compact
 index list with separate selected count and column count. Retaining value-wide

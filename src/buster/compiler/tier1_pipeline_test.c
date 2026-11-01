@@ -1217,12 +1217,16 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     uint32_t node = BUSTER_IR_NONE;
                     if (ok)
                     {
-                        const Tier1SelectError error = tier1_select_plan(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
+                        // As the driver's --tier1 plans the optimizer's verified result, without verifying it again: the
+                        // plan tier1_select_plan's verification gives (#141).
+                        const Tier1SelectError error = tier1_select_plan_verified(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
                         ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "select the actual optimized SSA function");
                         if (!ok)
                         {
                             fprintf(stderr, "  selection error=%u node=%u function=%u\n", error, node, f);
                         }
+                        ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_again(&function, &dominance, &plan, true, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
+                                                         "the verified function's plan is the verifying plan's");
                     }
                     Tier1EmitResult* emitted = &bodies[f];
                     if (ok)

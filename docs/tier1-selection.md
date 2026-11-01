@@ -117,6 +117,32 @@ patterns are:
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
+- Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
+  and the jump tables C's switches lower to. A label's address is its symbol's
+  (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
+  register (`TIER1_RULE_JUMP_INDIRECT`). Its target is never a load in its own
+  block that the jump could fold. Computed gotos go through their function's
+  dispatch block, which the lowering puts last and the optimizer keeps. A jump
+  table's entry is an offset added to the table's address. The CFG consumer takes
+  every function with labels. It places the jump's edges' moves at its labels'
+  blocks, which that edge alone enters, or in stubs after the jump. Each label's
+  first record, where the driver defines its symbol, is its block's, or its
+  stub's where that edge has one (`tier1_emit_cfg_labels`), since the jump
+  enters it through the label's address. A `br_indirect` that can go to one label
+  alone jumps there.
+- Variadic definitions (#789): the anchors that `va_start`'s lowering reaches,
+  the register save area and the overflow area. The save area is a frame object
+  (`TIER1_RULE_STACK_ADDRESS`, folded into its users' memory operands like any
+  other). The CFG consumer asks for it with `BUSTER_TIER1_FRAME_VARIADIC`: the
+  frame planner reserves its 176 bytes, and the prologue stores the six argument
+  registers there and, after testing `al`, the eight vector registers
+  (`tier1_frame_emit.c`). The overflow area is in the caller's frame, so its
+  address is a `lea` of its own and never a memory operand's base. The lea is
+  16 bytes past RBP where the frame has a frame pointer, and otherwise past
+  RSP's reservation, the callee-saved registers the prologue pushed and the
+  return address, plus the named arguments' stack bytes
+  (`tier1_emit_cfg_incoming`). Every variadic definition goes to the CFG
+  consumer. A function with its own ABI records is still refused whole.
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and
 four-byte spill slots. Their logical memory widths remain one/two bytes.
@@ -137,9 +163,10 @@ six integer/pointer parameters in the System V registers RDI, RSI, RDX, RCX,
 R8 and R9. Their intervals start at function entry, because parameter nodes
 emit no late copies. This emitter has no frame or callee-saved-register changes.
 
-Calls, phis, switches, floating values, byte/word arithmetic, dynamic shifts,
-division/remainder, stack/symbol addresses, spill fragments and rematerialized
-fragments are explicit unsupported/allocation results in `tier1_select_emit`:
+Calls, phis, switches, labels and indirect jumps, variadic definitions,
+floating values, byte/word arithmetic, dynamic shifts, division/remainder,
+stack/symbol addresses, spill fragments and rematerialized fragments are
+explicit unsupported/allocation results in `tier1_select_emit`:
 it has neither call preservation nor the edge moves a phi needs.
 No semantic error silently falls back to another tier. The separate
 `tier1_emit.c` consumer described below handles allocated spill fragments
@@ -148,11 +175,22 @@ without weakening that API's checks.
 ## Producer, plan and allocation handoff
 
 `tier1_select_plan(function, dominance, output, scratch, vector, result,
-error_node)` returns `Tier1SelectError`. Both the vector and scalar paths invoke
-their corresponding IR verifier. A cross-block value use requires the supplied
-dominator intervals; structural verification alone is insufficient. This slice
-requires value definitions to precede uses in physical instruction order, but
-for a phi's operands, which may follow it (a loop's back edge). An integer phi
+error_node)` returns `Tier1SelectError`. It verifies its input first, by its
+path's IR verifier: `ir_verify` on the vector path, `ir_verify_scalar` on the
+scalar one. A cross-block value use requires the supplied dominator intervals;
+structural verification alone is insufficient.
+`tier1_select_plan_verified`, with the same arguments, gives the same plan
+without the verification: it takes a function its caller has verified with
+those dominator intervals, as the C driver's `--tier1` takes `ir_optimize`'s
+result, which `ir_optimize` verifies before it returns (`c_check_tier1.c`). On
+the frozen `sqlite3.c`, the verification was a quarter of selection's cycles
+(#141). The selector's tests plan their functions both ways, and the pipeline
+test plans each optimized function as the driver does and checks it against the
+verifying plan, field by field. A value defined in a node's own block must
+precede the node in physical instruction order. With dominance supplied, a value
+of another block may follow it: a computed goto's dispatch block, which the
+lowering puts last, defines phis that the labels' blocks read (#789). A phi's
+operands may follow it too (a loop's back edge). An integer phi
 selects `TIER1_RULE_PHI` (#140): no records and no effective uses, since its
 operands are uses on its block's incoming edges, which the CFG consumer's edge
 moves read (`tier1_emit_cfg.c`, in the [pipeline guide](tier1-pipeline.md)).
@@ -404,6 +442,110 @@ stores and copies are scalar emission work; the existing liveness, allocation,
 frame and rematerialization producers retain their vector/scalar paths. No
 compile-time speedup is claimed for adding this consumer.
 
+## AVX-512's masks (#179)
+
+The IR's masks, `m8` to `m64` (#732), are the opmask class's, which the CFG
+consumer allocates (the [allocation guide](tier1-allocation.md)'s "The opmask
+class"). The selector takes a function with masks and refuses one with vectors
+(`tier1_select_has_vectors`: a vector type, constant or operation in its
+instructions, parameters, calls or slots), which are #141's: a mask's operations
+need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
+
+| IR | Rule | Records |
+| --- | --- | --- |
+| `const` (and `undef`, any mask: zero) | `TIER1_RULE_MASK_CONSTANT` | `kxor k, k, k` for zero, `kxnor k, k, k` for every bit, else `mov r11d, imm32` (or `movabs r11`) and `kmov k, r11` |
+| `copy` | `TIER1_RULE_MASK_COPY` | `kmov k, k`, none where allocation gave both one register |
+| `and`, `or`, `xor` | `TIER1_RULE_MASK_LOGIC` | `kand`, `kor`, `kxor` `k, k, k` |
+| `not` | `TIER1_RULE_MASK_NOT` | `knot k, k` |
+| `bitcast` of an `iN` to `mN` | `TIER1_RULE_MASK_FROM_INTEGER` | `kmov k, r32` (`kmovq k, r64` for `m64`), the integer's register's low bits |
+| `bitcast` of an `mN` to `iN` | `TIER1_RULE_MASK_TO_INTEGER` | `kmov r32, k` (`kmovq r64, k`), the bits past the mask's zero, as `iN`'s canonical 32-bit storage has them |
+| `bitcast` of an `mN` to `mN` | `TIER1_RULE_MASK_COPY` | as `copy`'s |
+| `load`, `store` | `TIER1_RULE_MASK_LOAD`, `_STORE`, and their `_ADDRESS` folds | `kmov k, m` and `kmov m, k`, the address folded as an integer access's, a frame object's among them |
+| `phi` | `TIER1_RULE_PHI` | none: its operands are its edges' moves |
+
+The opmask instructions of a width leave the bits past it zero, as the IR's masks
+have them, so no record extends a mask. The `bitcast`s are the boundary the typed
+stream's conversions between masks and integers lower through (the [IR SIMD
+guide](ir-simd.md)'s "Masks from the typed stream"): a `kmovb` or `kmovw` from a
+general register reads its low byte or word, so an `i8` or `i16` in canonical
+32-bit storage converts with no extension, and a `kmov` into one zeroes the
+register past the mask's bits. A node's register is its allocation's
+location, class 2's `64 + k`, whose low three bits the expansion takes as k. A
+mask's `select`, `vcmp` and `vselect` have no rule and are refused at their node:
+`cmov` has no opmask form, and the comparisons and selection need vectors.
+
+Only the CFG consumer takes the rules (`tier1_emit_cfg.c`): the straight-line
+consumer sends any function with a mask there, and the uniform-register
+`tier1_select_emit` refuses them. There a mask's value is class 2's, allowed k1
+to k7, with k0 the class's scratch. Its spills, reloads, edge and split moves are
+`kmov` of the mask's width (`tier1_select_mask_forms`): to and from its slot,
+whose size is the mask's bytes, and between opmask registers; a cycle goes through
+k0, and a slot-to-slot move through k0 too, in two moves, as `tier1_cfg.c` stages
+them. No opmask register survives a call, so a call saves every mask live past it
+in a frame row of its register's (`Tier1EmitPrepared.mask_save_mask`, the
+registers some mask holds across some call) and reloads it after, by `kmov` of
+the mask's width; a mask never takes a callee-saved general register. The rows
+come after the general registers' call-save rows, then the general class's
+temporary slot and the opmask class's, then the frame objects. The records' forms
+are the target's to allow, as every record's: `kmovw` and the word forms need
+AVX512F, the byte forms AVX512DQ, the doubleword and quadword ones AVX512BW, and
+a target without them is refused at emission (`TIER1_EMIT_TARGET`). A width no
+mask has gets no form at all (`X86_FORM_NONE`, which no target allows), so it is
+refused the same way rather than taking another width's forms.
+
+A mask load's or store's `kmov` is its node's only record, so its last, which the
+CFG consumer's frame-object patch rewrites with the frame's base and the
+object's offset (`stack_object`, #996). No mask is recomputed (#178): the
+masks' rules are none of the recipes' (`tier1_emit_cfg_recipes`), which skip a
+mask and any chain through one, and no mask value is marked for the allocator,
+whose dead definitions read the marks. A mask recipe would need its own `kxor`,
+`kxnor` or `kmov` forms. A division's fixed registers (#141's `rax` and `rdx`)
+don't touch a mask, which keeps its opmask register across the sequence; their
+saves take the general call-save rows, before the masks' own.
+
+`test-tier1-masks [--seed N] [--print]` (`tier1_masks_test.c`) takes
+hand-written IR of masks through this path: each fixture is a function of a
+pointer to a 256-byte buffer, and of a count where it loops, that loads masks of
+every width from the buffer's first half and stores masks into its second half
+(the IR has no mask argument or result, and no conversion between a mask and an
+integer). Each is parsed by both of `ir_parse.c`'s paths into the same function,
+planned and emitted by both of Tier 1's paths for x86-64-v4, its allocation
+accepted by `tier1_cfg_verify`, its records by the target's allow-list and
+`x86_semantics.c`'s coverage, and encoded by both encoders into the same bytes.
+On a host with AVX512F, BW and DQ, each runs in a child on 16 random buffers (a
+quarter all zeros, a quarter all ones), whose bytes after the run, the ones no
+store writes among them, must be the shared IR interpreter's. The fixtures:
+
+- `and`, `or`, `xor`, `not` and copies at the four widths;
+- constants: zero and every bit at each width, and others through r11;
+- a loop whose two mask phis swap every iteration, a cycle through k0, beside a
+  mask accumulated from the buffer by a loaded index;
+- ten masks live at once, more than k1 to k7 hold, spilled and reloaded at their
+  widths;
+- masks live across two calls, and a mask phi across a call in a loop, of a helper
+  that sets every opmask register (`kxnorq` into k0 to k7) before it returns its
+  argument plus one: generated code beside the function, where the interpreter
+  calls a C function that returns the same;
+- masks of every width stored into a frame object and loaded back, each access's
+  object folded into its `kmov`'s memory operand, the frame's base at the object's
+  offset, as an integer access's is (`stack_object`): the test checks each such
+  node's `kmov` there;
+- masks live across a division by a register, one by a constant's reciprocal and
+  a call, beside eight 64-bit constants live across all three, too wide for an
+  immediate.
+
+Each fixture runs with rematerialization (as the C driver's `--tier1` compiles)
+and without, and in each no mask may have a recipe or be marked to be recomputed;
+with it, some of the general values beside the masks must be recomputed, which
+the division fixture's constants are.
+
+And the refusals, on both paths: a vector at selection, a mask's `select` at
+selection, and at emission the baseline target (no opmask form) and AVX512F alone
+for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
+masks alone is taken; and each width's `kmov` forms, none for a width no mask
+has. `--print` prints each fixture's records by the vector path, as GNU as reads
+them.
+
 ## Tests and benchmark
 
 `test-tier1-select` checks both original-IR covers, real records and native
@@ -478,7 +620,7 @@ The latter is not a whole-pipeline peak-memory measurement.
 [preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
 selection on real C: every function `-c` compiles of the files, lowered, promoted
 and optimized as the C driver's `--tier1` takes it, with its dominance, outside
-the time; then `tier1_select_plan` of each, the IR verification it runs included,
+the time; then `tier1_select_plan_verified` of each, as the driver plans it,
 by both paths, in 21 passes that alternate which path runs first, as nanoseconds,
 core cycles, instructions and the throttle (PMCx1A0's umask 0x08, #199) per IR
 instruction and cycles per typed entry. A function a step before selection
@@ -524,9 +666,10 @@ heads and at its merge with main, `cc3387f`:
   scripts against 10,763 M and 4,281 M. Each program's hottest function
   (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
-  the frozen `sqlite3.c`: 338 by the vector path and 340 by the scalar twin. A
-  quarter of each is the plan's `ir_verify` of its input, which the pipeline
-  has verified already.
+  the frozen `sqlite3.c`: 243 by the vector path and 253 by the scalar twin,
+  since the plan no longer verifies the optimizer's verified result
+  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01));
+  with that verification they were 338 and 340.
 - **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
   `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
   others fail in clang's own steps (links past the small code model, which
@@ -534,6 +677,5 @@ heads and at its merge with main, `cc3387f`:
   Buster's.
 
 Full pattern-state generation, the remaining scalar/ABI/spill consumers, and
-whole-C integration (the functions selection refuses whole: labels as values,
-switches, aggregates by value and variadic definitions among them) are
-outstanding.
+whole-C integration (the functions selection refuses whole: switches and
+aggregates by value among them) are outstanding.

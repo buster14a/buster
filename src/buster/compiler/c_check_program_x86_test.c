@@ -1805,6 +1805,64 @@ static void check_test_program_x86_float_predicates(CheckTest* test)
 // rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
 // (check_lower_x86_operand_class); a rule with a rounding control at each value clang takes for it, and one past them; and
 // a MASK_UNARY's or MASK_MERGE's both with its mask an operand and with a constant mask of every lane's bit, unmasked.
+// The rows' masks in Tier 0's mask class (#179, check_x86_lower_masks): at a target of every feature, each rule's row
+// (at an immediate of 1) of the families that take or give a mask moved into the class, a row Tier 0 takes, its masks
+// operands and its result of the mask's bytes; VP2INTERSECT's pair kept by number; and at an AVX-512F target without BW
+// and DQ, which Tier 0's mask moves take, every row kept as it was.
+static void check_test_program_x86_masks(CheckTest* test)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    X86Target narrow = every;
+    narrow.features &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ));
+    static const uint8_t families[] = {
+        CHECK_X86_LOWER_COMPARE, CHECK_X86_LOWER_SELECT, CHECK_X86_LOWER_KMOV, CHECK_X86_LOWER_LOAD, CHECK_X86_LOWER_STORE, CHECK_X86_LOWER_KBINARY,
+        CHECK_X86_LOWER_KSHIFT, CHECK_X86_LOWER_KTEST, CHECK_X86_LOWER_KUNARY, CHECK_X86_LOWER_VECTOR_MASK, CHECK_X86_LOWER_MASK_VECTOR,
+        CHECK_X86_LOWER_COMPRESS, CHECK_X86_LOWER_GATHER, CHECK_X86_LOWER_SCATTER, CHECK_X86_LOWER_MASK_UNARY, CHECK_X86_LOWER_MASK_MERGE,
+    };
+    uint32_t moved[BUSTER_ARRAY_LENGTH(families)] = { 0 };
+    uint32_t total = 0;
+    uint32_t transformed = 0;
+    uint32_t intersections = 0;
+    uint32_t narrowed = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        Tier0Operation row;
+        if (check_x86_lower_row_of(&every, rule, 1, 4, 0, false, &row) == NULL)
+        {
+            total += 1;
+            Tier0Operation masked = row;
+            const bool done = check_x86_lower_masks(&masked, &every);
+            transformed += done ? 1 : 0;
+            intersections += done && rule->family == CHECK_X86_LOWER_INTERSECT ? 1 : 0;
+            bool shaped = !done || tier0_operation_valid(&masked);
+            for (uint32_t j = 0; done && j < masked.operand_count; j += 1)
+            {
+                shaped &= masked.operand_classes[j] != BUSTER_TYPED_CLASS_MASK || masked.operand_bytes[j] == tier0_class_bytes(row.operand_classes[j]);
+            }
+            shaped &= !done || masked.result_class != BUSTER_TYPED_CLASS_MASK || masked.result_bytes == tier0_class_bytes(row.result_class);
+            char description[160];
+            snprintf(description, sizeof(description), "%s: its row's masks in the mask class aren't a row Tier 0 takes, or of their integers' bytes", rule->name);
+            check_test_expect(test, shaped, description);
+            for (uint32_t f = 0; done && f < BUSTER_ARRAY_LENGTH(families); f += 1)
+            {
+                moved[f] += rule->family == families[f] ? 1 : 0;
+            }
+            Tier0Operation kept = row;
+            narrowed += check_x86_lower_masks(&kept, &narrow) || memcmp(&kept, &row, sizeof(row)) != 0 ? 1 : 0;
+        }
+    }
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(families); f += 1)
+    {
+        char description[128];
+        snprintf(description, sizeof(description), "the mask class takes no row of family %u", families[f]);
+        check_test_expect(test, moved[f] != 0, description);
+    }
+    check_test_expect(test, intersections == 0, "VP2INTERSECT's pair of masks taken by role");
+    check_test_expect(test, narrowed == 0, "a row's masks moved into the mask class at a target without AVX-512BW and DQ");
+    printf("  x86 masks: %u of %u rules' rows take and give their masks in Tier 0's mask class\n", transformed, total);
+}
+
 static void check_test_program_x86_rows(CheckTest* test)
 {
     check_test_program_intrinsic_features(test);
@@ -1857,6 +1915,7 @@ static void check_test_program_x86_rows(CheckTest* test)
     char description[128];
     snprintf(description, sizeof(description), "every x86 rule's row is one Tier 0 takes (%u rows, %u not)", rows, invalid);
     check_test_expect(test, rows != 0 && invalid == 0, description);
+    check_test_program_x86_masks(test);
     static const struct { const char* name; uint64_t feature; } immediate_features[] = {
         { "__builtin_ia32_shufpd", BUSTER_X86_FEATURE(AVX) },
         { "__builtin_ia32_pblendw128", BUSTER_X86_FEATURE(AVX) },

@@ -109,6 +109,50 @@ the shared host lock. These are operational resources, not canonical repository 
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
 
+## Attribution for agent-authored GitHub activity
+
+Every agent session that writes substantive text to GitHub must identify **its
+own session** and **the model used** in the GitHub item it posts. This includes
+opening an issue or pull request; posting issue or PR comments, reviews,
+inline review comments, or replies; and editing an existing issue or PR body.
+Each new comment or review needs its **own** attribution, even when the issue
+or PR already has one. Do not rely on a branch, commit message, prior comment,
+or local record to identify the posting session.
+
+Append this footer to every agent-authored GitHub body, with real values:
+
+```text
+---
+Agent session: [private session](https://provider.example/private/session)
+Model: Provider / exact model identifier
+```
+
+Where the provider exposes no shareable session URL, give its session
+identifier and say that no URL is exposed instead:
+
+```text
+---
+Agent session: ses_0123456789abcdef (Provider session ID; no share URL is exposed)
+Model: Provider / exact model identifier
+```
+
+A session URL, where one exists, must be a **stable, authentication-gated
+permalink** to the actual agent session, not a public transcript or an
+`anyone with the link` share link. The URL text itself will be visible to
+readers of the public GitHub issue or PR; privacy must come from the
+provider's access controls. Do not include credentials, signed access URLs,
+API tokens, private logs, or conversation contents. Record the exact
+provider and model name/version the session reports; do not invent model
+details. If the agent environment exposes a session identifier but no
+suitable private session link, post the identifier with a note that no
+share URL is exposed rather than silently omitting attribution or
+publishing an unsafe link.
+
+For posts involving several agent sessions, attribute each session and
+its model when it contributed to that post. After a handoff, new comments,
+reviews and edits must identify the session actually making them. This
+provenance is separate from human authorship and DCO sign-off.
+
 ## Issue ownership
 
 Raw measurement evidence lives in
@@ -181,9 +225,15 @@ designs and the compilers already built this way.
   self-loops. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. Run
-  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit` and
-  `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
+  masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
+  stores, constants and bitcasts to and from integers of every width) and
+  allocated in the opmask class by the CFG consumer, which moves and spills them
+  at their widths and saves them around calls; vectors are refused (#141). Run
+  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
+  `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
+  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
+  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -192,7 +242,10 @@ designs and the compilers already built this way.
   paths (#141). A division by a constant that isn't a power of two is a
   multiplication by its reciprocal (Granlund and Montgomery), in either consumer,
   which saves the values `mul`'s `rax` and `rdx` would clobber (the [selection
-  guide](docs/tier1-selection.md)). `test-tier1-model` checks the emitted-case measurement reader;
+  guide](docs/tier1-selection.md)). `measure-mask-spills` times a mask's spill and
+  reload, to memory against to a general register (`mask_spill_measure.c`, #179's
+  measured choice; the 9700X job runs it, `test-mask-spills` checks its programs).
+  `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
@@ -201,13 +254,18 @@ designs and the compilers already built this way.
   and conservative loop-invariant motion, private-field replacement and bounded
   translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
   `test-ir-sroa` and `test-ir-inline` verify transformations against independent
-  semantic fixtures and the upstream SSA promoter. `benchmark-ir-optimize`
+  semantic fixtures and the upstream SSA promoter; `test-ir-optimize` also runs
+  #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
+  through both parser paths, both twins, the canonical printer and the
+  independent executor (`--print-text` prints them for review).
+  `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](docs/ir-optimization.md) records supported inputs
   and the source-corpus and target measurements still required for #139.
 
 - `ir_parse.c` reads the shared printer format through bounded scalar/vector
-  paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics.
+  paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics;
+  `test-ir-optimize` runs the pass fixtures in that form.
   `test-ir-reduce` checks deterministic structural reduction, exact failure classes,
   allocation rollback and canonical replay; `reduce-ir` writes a new reproducer
   bundle without requiring the C frontend. See [IR reduction](docs/ir-reduce.md).
@@ -277,15 +335,35 @@ designs and the compilers already built this way.
   liveness with phi operands on their edges, hinted (`hint_values`) to keep one
   register, then each edge's parallel move, placed at a block's end or start or
   on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
-  is its independent checker, which simulates each block and edge.
-  `test-tier1-cfg` runs fixtures and random SSA over random CFGs with mutants;
-  `test-tier1-cfg-source` adapts every function `-c` compiles of real C, lowered
-  and promoted, through a machine model (`tier1_cfg_ir.c`) and checks both paths'
-  allocations. The allocation guide's "Allocation over a CFG (#140)" has the
-  contract and what is pending.
+  is its independent checker, which simulates each block and edge, and checks
+  each piece of a range cut at a split where its split's moves leave it. Its
+  classes, and `tier1_allocate.c`'s, are general, vector and AVX-512's opmask
+  registers (#179: k1 to k7 for values, a class with k0 refused, k0 the class's
+  scratch, every mask clobbered by a call). `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
+  three classes with mutants; `test-tier1-cfg-source` adapts every function `-c`
+  compiles of real C, lowered and promoted, through a machine model
+  (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
+  allocates #732's SIMD functions as lowered, their masks in the opmask class.
+  The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
+  (#179)" have the contract and what is pending.
 
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
-  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  #177, whose steps are Tier 0's frame protocol (callee-saved registers pushed,
+  one subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
+  realignment and its R15 base after the subtraction), which the C driver's
+  unwind tables describe from Tier 1's published frame (`check_tier1_frame`,
+  early returns as tails, an open frame where the code doesn't end in its last
+  epilogue: the frame guide's "Unwind tables"; `test-check-debug --cross-check`
+  unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every instruction).
+  Its frame objects share slots by their blocks' lifetimes, which `--tier1` asks
+  the checked program for (`c_check_program_lifetime.c`: a block a jump enters
+  past its opening keeps its objects' whole-function lifetimes) and the IR
+  carries as `lifetime` markers, colored by the CFG consumer over `dataflow.c`'s
+  fixpoint on the reversed CFG (`tier1_emit_cfg_lifetimes`; the frame guide's
+  "Slot sharing between objects"); `test-tier1-emit` checks shared and separate
+  rows natively, and `test-checker-driver`'s lifetime fixture smaller frames
+  than `--tier1-no-lifetimes`' against clang.
+  `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
   `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
   variadic saves and guarded page probes. [The frame guide](docs/tier1-frame.md)
@@ -320,7 +398,15 @@ designs and the compilers already built this way.
   them natively against clang -O0's build. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
-  bit builtins' and `expect`'s; `test-checker --program-align` runs them.
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them, and
+  `classify_type`, `eh_return_data_regno`, `dwarf_cfa`, `launder` and the
+  generic leaves (`debugtrap`, `memcpy_inline` and the others: the guide's
+  "Generic builtins of clang's own checks and of an instruction or two"). The
+  signaling NaNs and the `_Float16` and `__float128` constants (`nans`,
+  `nanf16`, `inff128` and the others) are floating builtins, their NaNs' bits
+  exact in static data and code (`check_action_nan_bits`); `test-checker
+  --program-float-constants` runs them against clang (the guide's "Signaling
+  NaNs and the `_Float16` and `__float128` constants").
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
@@ -330,8 +416,9 @@ designs and the compilers already built this way.
   #126); `test-checker` runs them against clang's code and checks that a
   misaligned one is refused exactly where clang calls libatomic. The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
-  `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
-  `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
+  `xsetbv`, `monitorx`, `mwaitx`, `tzcnt`, `lzcnt_u16`, the fences, `clflush`,
+  `ldmxcsr`, `stmxcsr`, Key Locker's, `umwait`, `tpause` and `xbegin`) are
+  per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
   of vectors and pointers both, and its encryptions' with a branch that branch
   sizing sizes. The library builtins (`c_builtin_library.c`) are calls of their
   C library functions by name, with their rows' prototypes, folded where clang
@@ -437,10 +524,11 @@ designs and the compilers already built this way.
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
-  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, with
-  `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` and
+  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
+  unwind tables alike, #177's `check_tier1_frame`; without `-g`; `--tier1-report` and
   `--tier1-refusals` say which step refused the others, and
-  `--tier1-no-rematerialize` compiles them without rematerialization: [the Tier 1
+  `--tier1-no-rematerialize` compiles them without rematerialization and
+  `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
   guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
@@ -832,7 +920,13 @@ designs and the compilers already built this way.
   and gdb's backtrace at every instruction of each function, whose steps must
   reach every instruction of gdb's disassembly of it; and a `SIGILL` handler's
   `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
-  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret).
+  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret);
+  and a `--tier1 --verify` fixture's Tier 1 frames (#177: spill slots alone,
+  pushes, two returns, an open frame, a realigned one, open and with two
+  returns too, a red-zone leaf, the shapes `--tier1-report`'s counts show and
+  each function's FDE rows, by `readelf -wF`), walked by `backtrace()` by each
+  path, by `--lanes 1` and 8 into one lane's bytes and linked by GNU ld and lld,
+  and by gdb at every instruction.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -854,11 +948,13 @@ designs and the compilers already built this way.
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
   refuses, and realigned frames', whose `and rsp` and base's `mov` it checks;
   `unwind_tier0_frame_tails` with a function's tail calls' teardowns, #147,
-  each remembered and restored around its jump);
+  each remembered and restored around its jump, and Tier 1's early returns'
+  as such teardowns before their rets, #177);
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
-  batch. `check_program_emit` writes the C driver's unwind tables so, one
-  EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  batch, and for Tier 1's open frames (`UnwindFunction.open`, #177) no epilogue
+  at the end, each return a tail. `check_program_emit` writes the C driver's
+  unwind tables so, one EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
   frame against the analyzer and actual Tier 0 code, a frame pointer's and
   realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges
@@ -990,8 +1086,12 @@ designs and the compilers already built this way.
   files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
   `__libc_start_main`), which applies their `IRELATIVE` relocations, or
   `--startup-applies-irelative` says the program's own does. It keeps the
-  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
-  pooling and CIE pooling are off by default.
+  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. It takes
+  GCC's `collect2` LTO plugin options (`-plugin` for `liblto_plugin.so` or
+  `LLVMgold.so`, and `-plugin-opt=...`) when no input needs the plugin, and
+  refuses a direct object or loaded archive member with a `.gnu.lto_*` or
+  `.llvm.lto` section, or raw LLVM bitcode, by input, member and section
+  (#816). GC, literal pooling and CIE pooling are off by default.
   It runs on the lanes its objects pay for (#594, `foreign_driver_lanes`): one,
   and one more per 3 MB of its objects, at most 8 and one per core of the CPUs
   it may run on, which lane 0 decides by opening the command line's first inputs
@@ -1212,7 +1312,21 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`); long double's, the 128-bit integers' and the
-  vectors' values keep their own slots there, by their true depths (#780). The
+  vectors' values keep their own slots there, by their true depths (#780).
+  AVX-512's masks (MASK, #179) are a third stack beside the integer and the
+  floating ones, of 1 to 8 bytes each: depths 0 to 6 in k1 to k7, deeper ones in
+  frame slots (`Tier0Frame.mask_area`), saved around calls (every opmask
+  register is caller-saved) and around rows that name opmask registers by
+  number; rows take them by role (`MASK(j)`, `MASK_RESULT`, `MASK_SCRATCH(k)`,
+  borrowing k1 on past k7), and the stack's depths are a column of their own
+  in a function with masks (`Tier0Function.masks`, `tier0_vector_mask_depths`
+  and its twin). `interpreter.c` runs them; `ir_lower.c` lowers them to the
+  IR's `m8` to `m64`, its rows of the front end's `_k*` builtins through
+  `ir_simd_typed.c`'s decoder, so `--tier1` compiles them by Tier 1
+  (docs/ir-simd.md's "Masks from the typed stream"); the
+  front end's AVX-512 builtins are their first user (`check_x86_lower_masks`);
+  `test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over
+  them natively against the interpreter and a model of its own. The
   output is
   the records with #144's branch columns, `LinkReference`s, the frame
   (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
@@ -1236,8 +1350,9 @@ designs and the compilers already built this way.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
   (#131), with labels (`br_indirect`), by-value aggregates' ABI records (the
-  producer's locations, which the IR's types can't give) and a variadic
-  definition's frame and anchors. `ir_lower.c` lowers the `Tier0Function` stream
+  producer's locations, which the IR's types can't give), a variadic
+  definition's frame and anchors, and frame slots' lifetime markers (`lifetime`,
+  #177, from `Tier0Function.lifetime_entries`). `ir_lower.c` lowers the `Tier0Function` stream
   into the all-in-memory form for SSA promotion: frame objects as address-taken
   slots of their size and alignment, `COPY` as integer load/store pieces, the
   dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
@@ -2813,6 +2928,15 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   20,000 times, pausing together now and then, while lane 0 waits on it with
   `lane_wait` for every advance, sleeping on its futex with more than one lane:
   each value it sees even and larger than the last, and no advance lost;
+- groups that share CPUs (#824): `lane_group_shares_cpus` against this thread's
+  affinity mask — a group of exactly the process's CPUs doesn't share them, one
+  of more does unless every lane is pinned, and one lane never does — and a
+  group of two lanes on one CPU, which the test cuts this thread's mask to: both
+  lanes must read their group as sharing it, and the lane that waited for lane
+  0's stall must have slept, its group's wait leaving `mwaitx` and the spin that
+  takes its place without it at once, since either holds the CPU the late lane
+  needs; two lanes on the process's own CPUs, where it has more than one, read
+  theirs as not sharing them;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
@@ -4928,8 +5052,8 @@ The exact commands, pinned inputs and raw reports for the #117 acceptance
 refresh are in [the measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md).
 Its invocation scripts take a separate normal shared-host lock for each command.
 
-`./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+`./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
+vectorized|scalar] [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
@@ -4983,6 +5107,21 @@ library corpus.
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
 without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
 output's tokens must be the same (#120).
+
+`--markers` runs and prints as `-E` without `-P` does: with the expansion starts
+the line markers read and the history deferred (`PPOptions.expansion_starts` and
+`defer_history`, as the `-E` driver sets them), the printing timed with its line
+markers and reported as `-E with printing`; of the controls it takes
+`--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
+vectorized kernels with the printer's spellings by `pp_print_spellings`
+(`spellings`) and by its general loop for every chunk (`per-token`,
+`PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
+warm-up print, with markers or without, must give the same bytes, whatever the
+implementation and the read limit. Both take the printer's own copies, its
+line markers' batches among them, so the two rows differ in the spellings
+alone, and each row's history in the job is its before. The 9700X job runs
+both, with and without `--markers`, on `main.c` and the frozen `sqlite3.c`
+where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under
@@ -5442,9 +5581,14 @@ lazy session.
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
-every run one lane's code. Run it under the 9700X's lock without `taskset`,
-with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
-and the benchmark on the frozen SQLite source where the emission changes.
+every run one lane's code, for the target its options give (#1045:
+`test-checker` measures a unit of 512-bit vectors with `-march=znver5` and
+refuses the same unit for the baseline profile, and measures a baseline
+unit's function whose target attribute takes AVX2's vectors,
+`c_check_lanes_benchmark_test.c`). Run it under the 9700X's lock without
+`taskset`, with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job
+runs the test, and the benchmark on the frozen SQLite source where the
+emission changes, on the lane counts of the guide's table (#1069).
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
 measurements.
 
@@ -5515,7 +5659,12 @@ it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
 each alone, and with `--generate DIR` it writes a program of synth's shape
 (512 units of 200 functions by default) for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
-measurements.
+measurements. The end-to-end single- and multi-unit contract, with the
+mixed-tier and actual command-team receipts, is
+[the multicore acceptance guide](docs/multicore-acceptance.md);
+`tests/driver/multicore.c` runs it in the shared correctness suite. What
+#149's remaining whole-process performance acceptance still needs is there
+too.
 
 ## Selective lowering
 
@@ -6052,7 +6201,23 @@ arguments', the parameters' and the result's tables at its edges, on a plain
 function and one with a result object; and in every program above, the
 vector path must take each function, and one change of each in every fourth
 program (a kind, a class or a value, two entries swapped, one removed or
-repeated) only where the scalar validator takes it.
+repeated) only where the scalar validator takes it. Then the `masks` check
+(`tier0_mask_test.c`, #179): `--count` random programs over the mask class,
+each compiled by both paths into the same records and both encoders into the
+same bytes, linked with a callee whose masks fill k1 to k7, and run natively
+where the host has AVX-512 F, VL, BW and DQ, every output byte against the
+check's stack machine and, for the programs without rows or frame objects,
+`interpreter.c`'s: masks of every width loaded, converted from every integer
+class (constants, loads and calls' results) and back, in frame objects, under
+DUP, STORE's kept value and `?:`, chains of 6 to 12 live masks (past k7, where
+the logic meets masks in their slots), calls with masks live and past k7, and
+rows by role (with scratch registers, from and to integers, past k7) and by
+number (under live masks). Its coverage must reach every mask kind of each
+width, conversions from each, every row, both arms, the mask stack past 9,
+both kinds of call and a row past k7. A zero-masked vector move whose
+decoration is a role runs under no live mask and under seven, against C; and
+each of the class's rules is refused (`tier0_validate`'s and
+`tier0_operation_valid`'s), with its valid neighbours taken.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
@@ -6100,7 +6265,9 @@ pinned to one allowed CPU; like the others, its measurements are informational.
 vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
-it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+it, and the definitions `-c` lowers are lowered and emitted for the target its
+options give (`-march`, the `-m` features: #1041), each function with a target
+attribute for the attribute's, outside the time;
 their typed streams, with the symbols' access the emission gave them
 (`check_program_access`), make one corpus with the other files' functions, which
 both paths must agree on before the same medians are reported. A file the

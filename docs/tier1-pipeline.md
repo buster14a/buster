@@ -8,7 +8,8 @@ tier0_emit / tier0_program_functions (including abi_assign)
   → ssa_ir_promote / ssa_ir_promote_scalar
   → ir_optimize (SCCP, DCE and CFG cleanup)
   → rebuilt CFG and dominance; both IR verifiers
-  → tier1_select_plan
+  → tier1_select_plan_verified (as the C driver plans ir_optimize's verified
+    result), checked against tier1_select_plan's plan
   → tier1_emit_function
       → a straight-line chain: effective-use liveness, required input/definition
         locations and fragment allocation

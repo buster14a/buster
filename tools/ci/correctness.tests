@@ -73,8 +73,9 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Test c-testsuite's programs with Tier 1's code [4 CPUs]
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
-# others by Tier 0), by both paths, whose allocators assign registers differently, both programs run; the scalar
-# path's executable the same bytes with the ids in source order and in another (#153). The declared subset must pass.
+# others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
+# both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
+# The declared subset must pass.
 ./build/compiler test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
@@ -221,7 +222,7 @@ fi
 ./build/compiler test-ir
 ./build/compiler test-ir-simd
 ./build/compiler test-ir-lowering
-./build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c
+./build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c
 ./build/compiler test-ir-source --dataflow-self-test
 ./build/compiler test-ir-parse
 ./build/compiler test-ir-reduce
@@ -288,8 +289,10 @@ fi
 # (#153's --id-order).
 unset CPATH C_INCLUDE_PATH
 ./build/compiler test-checker-corpus --clang clang --deferred 8 --id-order 153 build/c-testsuite/tests/single-exec
-== Compile c-testsuite's programs as the units of one command [2 CPUs]
+== Compile c-testsuite's programs as the units of one command [8 CPUs]
 # #152: every program at once with -c by 8 lanes, each one's object and diagnostics its own alone, in order.
+# The heading is the parallel runner's scheduling budget, not an affinity mask: the command's children each take up
+# to eight lanes, so declaring two CPUs let the runner co-schedule other two-CPU commands on the same cores.
 ./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
 == Test the x86-64 encoder
 ./build/compiler test-x86-encoder
@@ -316,7 +319,7 @@ clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -W
 ./build/compiler test-inflate
 == Test the C driver's source rows and DWARF
 # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb; and the unwind tables,
-# through backtrace() and gdb at every instruction.
+# through backtrace() and gdb at every instruction, Tier 1's frames' among them (#177).
 ./build/compiler test-check-debug --cross-check
 == Test the x86-64 disassembler against GNU tools
 corpus="$(mktemp -d)"
@@ -325,7 +328,7 @@ clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o "$corpus/corpus.o"
 objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
 ./build/compiler test-x86-disassembler --objdump --file "$corpus/corpus.text"
 == Test binding
-# --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
+# --cross-check also links each bound program's objects with ld.lld and ld.bfd and runs them, and compares what binding
 # found with lld's link of the programs' own objects.
 ./build/compiler test-bind --cross-check
 == Test token refinement
@@ -351,6 +354,11 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 ./build/compiler test-tier1-liveness
 ./build/compiler test-tier1-emit
 ./build/compiler test-tier1-pipeline --cross-check
+# #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
+# interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
+./build/compiler test-tier1-masks
+# #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
+./build/compiler test-mask-spills
 ./build/compiler test-tier1-model
 ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
 == Test shared IR local promotion and typed-stream semantics
@@ -376,6 +384,9 @@ export SOURCE_DATE_EPOCH=1792454400
 corpus=$BUSTER_CORPUS
 musl="$corpus/libc/musl"
 ./build/compiler test-tier1-cfg-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+# #179: #732's SIMD functions, which the SSA promoter refuses, allocated as lowered, their vcmp masks in the opmask class,
+# and the _k* builtins' functions of masks alone, which it promotes, allocated as any other.
+./build/compiler test-tier1-cfg-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c
 ./build/compiler test-tier1-cfg-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 ./build/compiler test-tier1-cfg-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
@@ -447,11 +458,12 @@ awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR
 ./build/compiler test-x86-target
 == Test generated-code ISA selection and native records
 ./build/compiler test-x86-target-selection
-== Test the driver's commands of several source files [2 CPUs]
+== Test the driver's commands of several source files [8 CPUs]
 # #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
 # and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
 # lanes that don't start.
+# Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
 ./build/compiler test-check-units
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 ./build/compiler test-unwind --cross-check
@@ -524,3 +536,11 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 ./build/compiler test-dataflow
 == Test the partial Zen 5 model and instruction harness
 ./build/compiler test-x86-zen5
+== Test mixed-tier single- and multi-file determinism [8 CPUs]
+# #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
+# Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
+# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
+./build/test-driver-multicore ./build/compiler

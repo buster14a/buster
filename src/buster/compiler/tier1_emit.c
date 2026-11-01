@@ -18,8 +18,9 @@
 // block must branch to the immediately following block. The sink has no values to reconcile and retains its branch.
 // Every other function, general control flow and phis, goes to tier1_emit_cfg.c, which allocates over the CFG and
 // moves values along its edges; numeric fragment order is not a substitute.
-// Indirect/variadic/wide-ABI calls, dynamic/variadic frames and direct register-to-register
-// fragment transitions are explicit unsupported cases. R11 remains reserved for selection and frame probes.
+// Indirect/variadic/wide-ABI calls, dynamic frames and direct register-to-register fragment transitions are explicit
+// unsupported cases here. A variadic definition goes to tier1_emit_cfg.c too, which fills its register save area (#789).
+// R11 remains reserved for selection and frame probes.
 //
 // Borrowed inputs are immutable and may precede allocations in the output arena, but must not overlap either arena's
 // unused capacity. The arenas are disjoint. Failure restores both lengths and preserves the result. All retained
@@ -30,7 +31,15 @@
 #include <string.h>
 
 #define BUSTER_TIER1_EMIT_GENERAL_REGISTERS 16
-#define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6)
+// The emitter's view of who is where is by tier1_cfg.c's register locations, class * 32 + register: a general
+// register's location is its number, an opmask register's (#179) 64 + k.
+#define BUSTER_TIER1_EMIT_LOCATIONS BUSTER_TIER1_CFG_SPILL
+#define BUSTER_TIER1_EMIT_MASK_LOCATION (32u * BUSTER_TIER1_ALLOCATE_MASK)
+// The opmask registers the CFG consumer's masks take, k1 to k7, k0 its scratch: and every one a call clobbers.
+#define BUSTER_TIER1_EMIT_MASK_REGISTERS 0xfeu
+// A call's records past its node's share, a kmov store and load of each of k1 to k7 that a mask holds across it among
+// them (#179).
+#define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6 + 2 * 7)
 // The records a node of a fixed-register rule writes past its share, BUSTER_TIER1_SELECT_RECORDS_PER_NODE: its sequence's,
 // and the saves and restores of the two fixed registers a division takes (tier1_emit_fixed).
 #define BUSTER_TIER1_EMIT_FIXED_RECORDS (BUSTER_TIER1_SELECT_FIXED_RECORDS + 4 - BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
@@ -85,6 +94,12 @@ struct Tier1EmitPrepared
     // than a node's share.
     uint32_t fixed_count;
     uint32_t call_save_mask;
+    // The CFG consumer's: each node's class (null for the straight-line consumer, whose values are all general), the
+    // opmask registers whose masks a call saves in rows of their own after the general registers' (#179), and the
+    // slots' columns for them, one per opmask register where the function has masks.
+    const uint8_t* classes;
+    uint32_t mask_save_mask;
+    uint32_t mask_columns;
     uint32_t slot_columns;
     AbiCall call_abi;
 };
@@ -133,6 +148,15 @@ struct Tier1EmitResult
     // Recomputed values' definitions that nothing read, which the CFG consumer leaves out (tier1_emit_cfg_dead_definition).
     uint32_t dropped_definitions;
     uint32_t jumps;
+    // In the CFG consumer, each of the function's labels' first record (IrFunction.labels, #789), where the driver defines
+    // its symbol: its block's first record, or where the indirect jump that may go to it has a stub for that edge, the
+    // stub's (tier1_emit_cfg_labels); label_count of them, the function's, and none in a function without labels.
+    uint32_t* label_records;
+    uint32_t label_count;
+    // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
+    // `exit_count` of them. The C driver's unwind tables take the early returns' teardowns from them (#177).
+    uint32_t* exits;
+    uint32_t exit_count;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -141,8 +165,9 @@ struct Tier1EmitTransitions
     uint32_t* offsets;
     uint32_t* fragments;
     uint32_t* values;
+    // Each value's register location, or UINT8_MAX; and each location's value, BUSTER_IR_NONE for none.
     uint8_t* registers;
-    uint32_t owners[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
+    uint32_t owners[BUSTER_TIER1_EMIT_LOCATIONS];
 };
 
 static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier1Liveness* liveness, const Tier1EmitOptions* options, Arena* output, Tier1EmitPrepared* result)
@@ -324,9 +349,9 @@ static Tier1EmitError tier1_emit_transitions(const Tier1EmitPrepared* prepared, 
     }
     if (error == TIER1_EMIT_OK)
     {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        for (uint32_t location = 0; location < BUSTER_TIER1_EMIT_LOCATIONS; location += 1)
         {
-            transitions.owners[reg] = BUSTER_IR_NONE;
+            transitions.owners[location] = BUSTER_IR_NONE;
         }
         if (input->value_count != 0)
         {
@@ -440,15 +465,26 @@ static Tier1EmitError tier1_emit_copy(Tier1EmitResult* result, const Tier1Remate
     return error;
 }
 
+// A value's class: the CFG consumer's columns', or general.
+static uint32_t tier1_emit_class(const Tier1EmitPrepared* prepared, uint32_t value)
+{
+    return prepared->classes != 0 ? prepared->classes[value] : BUSTER_TIER1_ALLOCATE_GPR;
+}
+
+// A value's spill or reload at its slot: a general register's mov of its width, or a mask's kmov of its own (#179),
+// which writes or reads the mask's bytes alone.
 static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1Frame* frame, uint32_t value, uint8_t reg, bool load)
 {
     const uint32_t width = prepared->sizes[value];
+    const bool mask = tier1_emit_class(prepared, value) == BUSTER_TIER1_ALLOCATE_MASK;
+    const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+    const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],
-        .reg = reg,
+        .reg = mask ? (uint8_t)(reg & 7) : reg,
         .rm = (uint8_t)frame->base_register,
         .mode = BUSTER_X86_MEMORY_BASE,
-        .form = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32),
+        .form = mask ? (load ? forms->load : forms->store) : general,
     };
     return record;
 }
@@ -486,16 +522,19 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
         const uint8_t kind = allocation->kinds[f];
         const uint8_t previous = allocation->kinds[f - 1];
         const uint8_t reg = allocation->registers[f];
-        const uint8_t old_register = allocation->registers[f - 1];
-        if (previous == BUSTER_TIER1_ALLOCATE_REGISTER && transitions->owners[old_register] == value)
+        // The fragments' registers are their class's: the emitter's view has them by location.
+        const uint32_t base_location = 32 * tier1_emit_class(prepared, value);
+        const bool mask = base_location == BUSTER_TIER1_EMIT_MASK_LOCATION;
+        if (previous == BUSTER_TIER1_ALLOCATE_REGISTER && transitions->owners[base_location + allocation->registers[f - 1]] == value)
         {
-            transitions->owners[old_register] = BUSTER_IR_NONE;
+            transitions->owners[base_location + allocation->registers[f - 1]] = BUSTER_IR_NONE;
         }
         if (kind == BUSTER_TIER1_ALLOCATE_REGISTER && previous == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
         {
-            // The value's definition again, rather than a reload: it has no slot.
-            error = tier1_emit_copy(result, &prepared->recipes, value, reg, (uint8_t)frame->base_register, buffer);
-            transitions->owners[reg] = value;
+            // The value's definition again, rather than a reload: it has no slot. No mask has a recipe (#179): their
+            // patterns are the opmask class's own, none a constant's, an address's or a copy of one.
+            error = mask ? TIER1_EMIT_ALLOCATION : tier1_emit_copy(result, &prepared->recipes, value, reg, (uint8_t)frame->base_register, buffer);
+            transitions->owners[base_location + reg] = value;
         }
         else if (kind == BUSTER_TIER1_ALLOCATE_REGISTER)
         {
@@ -506,9 +545,9 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
                 error = TIER1_EMIT_MEMORY;
             }
             result->spill_loads += error == TIER1_EMIT_OK;
-            transitions->owners[reg] = value;
+            transitions->owners[base_location + reg] = value;
         }
-        transitions->registers[value] = kind == BUSTER_TIER1_ALLOCATE_REGISTER ? reg : UINT8_MAX;
+        transitions->registers[value] = kind == BUSTER_TIER1_ALLOCATE_REGISTER ? (uint8_t)(base_location + reg) : UINT8_MAX;
         result->transition_count += 1;
     }
     return error;
@@ -738,6 +777,9 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             result->references = ir_allocate(output, result->prepared.call_count, sizeof(LinkReference), &ok);
             result->reference_capacity = result->prepared.call_count;
         }
+        // A straight-line chain returns once at most, at its end.
+        result->exits = ir_allocate(output, 1, 4, &ok);
+        result->exit_count = 0;
         if (!ok)
         {
             error = TIER1_EMIT_MEMORY;
@@ -848,6 +890,15 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             if (error == TIER1_EMIT_OK)
             {
                 tier1_select_requests_add(&requests, &selected, first, buffer.records);
+            }
+            if (error == TIER1_EMIT_OK && returns && result->exit_count == 0)
+            {
+                result->exits[0] = buffer.count - 1;
+                result->exit_count = 1;
+            }
+            else if (error == TIER1_EMIT_OK && returns)
+            {
+                error = TIER1_EMIT_INVALID;
             }
         }
         if (error == TIER1_EMIT_OK && !plan->covered[node] && plan->function->type[node] != IR_VOID)

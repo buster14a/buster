@@ -392,7 +392,9 @@ not have that ambiguity.
 ## Floating checking
 
 `c_check_builtin_float.c` retains the declared real format and constructs
-infinities and quiet NaNs exactly for float, double and target x87 long double.
+infinities and NaNs exactly for float, double, target x87 long double,
+`_Float16` and `__float128` ("Signaling NaNs and the `_Float16` and
+`__float128` constants" below).
 NaN payload metadata is the entire decoded narrow string literal after
 parentheses/casts, excluding only the final terminator. Embedded zero bytes
 remain part of that slice and prevent constant folding. Unknown or invalid
@@ -556,6 +558,52 @@ signbits and canonicalize's results; folds; operands evaluated once; and
 vectors of 4 to 64 bytes of floats and doubles, GNU's and clang's extended
 ones, at x86-64-v4. Clang -O3's code differs from -O0's for eight masks of x87
 values, so -O0's builds are the oracle.
+
+### Signaling NaNs and the `_Float16` and `__float128` constants (#148)
+
+`__builtin_nans`, `__builtin_nansf` and `__builtin_nansl` (catalog codes 0x3e4
+to 0x3e6), and the `_Float16` and `__float128` forms of `nan`, `nans`, `inf`
+and `huge_val` (0x3e7 to 0x3ee: `nanf16`, `nansf16`, `inff16`, `huge_valf16`,
+`nanf128`, `nansf128`, `inff128`, `huge_valf128`), are floating builtins of the
+checker's, as `nan` and `inf` are (`cbuiltin_float_constant_extra`,
+`cbuiltin_float_nan`, `cbuiltin_float_signaling`), and `__has_builtin` answers
+them. Their payloads are read as `nan`'s are, and each value is APFloat
+`makeNaN`'s (`check_builtin_float_special`): the payload masked below the quiet
+bit, the quiet bit set or, for a signaling NaN, clear, and a signaling NaN
+without a payload given the bit below the quiet one (`nans("")` is
+`0x7ff4000000000000`, `nansf16("")` `0x7d00`).
+
+The checker's long double holds every format's NaN as the x87's own loads
+place it: the format's fraction at the significand's top, so that bit 62 is
+every format's quiet bit (`check_action_nan_bits`). A `__float128`'s 112
+fraction bits don't fit, so its NaN keeps its quiet bit at 62, its fraction's
+bit 110 (a signaling NaN without a payload's) at 61 and its payload's low 61
+bits below (`check_action_quad_bits`). A payload past 61 bits is refused:
+in a static initializer as an initializer that is not a constant expression,
+and in a function as an unsupported floating builtin. The value keeps its bits until a conversion to another format quiets it,
+as APFloat's does (`check_action_convert_nan`, which first re-encodes a
+`__float128` NaN as a narrowing reads it), so a conversion to the value's own
+format, the rounding of a NaN, and a unary `+` or `-` (a sign change alone, as
+`changeSign` makes it) leave a signaling NaN signaling.
+
+Static data, aggregates' initializers and function code write a NaN's bits from
+that encoding, its payload and quiet bit among them (`check_data_float_bytes`,
+`check_lower_float_bits`). Main wrote the canonical NaN, so `static double d =
+__builtin_nan("5")` lost its payload (`0x7ff8000000000000` where clang writes
+`0x7ff8000000000005`), and so did `nanf` and `nanl` in static data and `nanl`
+in code. The classifications fold of `_Float16` constants, their least normal
+`0x1p-14`, and of `__float128` infinities, NaNs and zeros, the values these
+builtins make, which are exact in the long double. They still refuse a
+run-time `_Float16` or `__float128` argument by name, as before.
+
+`test-check-builtins-float` checks the constructions and refusals, and
+`test-checker --program-float-constants` (`c_check_program_constants_test.c`)
+checks sources by both paths against clang (folds in constant expressions,
+result types, static and aggregate initializers, refusals) and runs programs
+natively against clang -O0's builds: each builtin's bytes in static data, in
+an aggregate's initializer and in code, with payloads, signs, negations and the
+conversions that quiet a signaling NaN, and `nan`'s, `nanf`'s and `nanl`'s
+payloads in static data.
 
 ## Atomic and terminal helper calls
 
@@ -1026,6 +1074,72 @@ width by alignments of every width, 128-bit and wide `_BitInt` sources,
 addresses in static data and in frames, and `expect`'s and
 `expect_with_probability`'s arguments evaluated once, in order, or not at all.
 
+## Generic builtins of clang's own checks and of an instruction or two
+
+The checker takes `__builtin_classify_type`, `__builtin_eh_return_data_regno`,
+`__builtin_dwarf_cfa` and `__builtin_launder` (catalog codes 0x3f0 to 0x3f3,
+after the NaN constants) as miscellaneous builtins, by clang 23's Sema and
+evaluator (`check_builtin_misc_generic`):
+
+- `classify_type(e)` is its operand's GCC type class, as clang's evaluator gives
+  it in C: `void` 0, an integer or an enumeration 1, `bool` 4, a pointer, an
+  array or a function 5, a floating type 8, a complex one 9, a struct 12, a union
+  13, a `_BitInt` 18, a vector 19, and `nullptr_t` -1. An `_Atomic` type is its
+  value type's class. The operand is any expression, of an incomplete type too,
+  read by its type before any conversion, and never runs (`classify_type(i++)`
+  leaves `i`). The call is an int constant expression;
+- `eh_return_data_regno(n)` is x86-64's DWARF register of the n-th exception
+  data register, rax's 0 and rdx's 1, and -1 for any other n, which must be an
+  integer constant expression. The call is an int constant expression;
+- `dwarf_cfa()` is the function's canonical frame address, which clang -O0's
+  code computes as rbp + 16: Tier 0's `FRAME_ADDRESS` plus 16, which gives the
+  function a frame pointer as `__builtin_frame_address` does;
+- `launder(p)` is p, of its type, which must be a pointer to a complete object
+  type: not `void`'s, not a function's, and not an incomplete struct's. An
+  address constant stays one (`int* p = __builtin_launder(&g);` at file scope),
+  so `__has_constexpr_builtin` answers 1 for it, as clang's does.
+
+Eleven others are leaves, per-unit helpers of clang -O0's instructions
+(`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
+features. Their prototypes are clang's metadata's:
+
+- `__builtin_debugtrap`: `int3`, whose trap returns past it;
+- `__builtin_readcyclecounter`: `rdtsc`, as `__builtin_ia32_rdtsc`;
+- `__builtin_readsteadycounter`: 0, since x86's code reads no counter for it;
+- `__builtin_thread_pointer`: `fs:[0]`;
+- `__builtin_stack_address`: the caller's rsp at the call, past the leaf's
+  return address;
+- `__builtin_dwarf_sp_column`: 7, rsp's DWARF register;
+- `__builtin___clear_cache`, `__builtin_assume_separate_storage` and
+  `__builtin_assume_dereferenceable`: nothing past their arguments, which the
+  call evaluates as clang's does;
+- `__builtin_memcpy_inline` and `__builtin_memset_inline`: their constant
+  size's bytes, by `rep movsb` and `rep stosb`, where clang's code stores them
+  itself.
+
+A call's size of `memcpy_inline` and `memset_inline` must be an integer
+constant expression (the prototype's `I`). A non-constant one is refused at the
+argument, as the x86 builtins' are; clang's message ("argument to ... must be
+a constant integer", at the call) is pending for both. `__builtin_verbose_trap`,
+whose two arguments clang requires to be string literals, is pending too.
+
+Two costs are accepted for now:
+- A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
+  clang's code makes the constant size's stores itself. Lowering them through
+  the misc builtins' straight-line copy and fill recipes
+  (`cbuiltin_misc_lower_copy_small`) is a follow-up.
+- `__has_constexpr_builtin` answers 0 for `__builtin_assume_separate_storage`,
+  which clang answers 1 for. A leaf has no catalogue row for the query to read,
+  and since the builtin returns `void`, no C constant expression can call it.
+
+`test-checker --program-align` checks source fixtures of their classes,
+registers, types and refusals by both paths against clang, and runs programs
+natively against clang -O0's build: the folds, launder's pointers, a callee's
+CFA against its caller's stack address, debugtrap's trap counted by a SIGTRAP
+handler, the counters, the thread and stack pointers, the no-ops' arguments
+evaluated once in order, and the inline copy's and fill's bytes
+(`c_check_program_generic_builtins_test.c`).
+
 ## Intrinsic checking contracts
 
 The later maintainer decision in #156 includes target intrinsics in #148's
@@ -1068,11 +1182,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 450 audited SemaX86 constraint facts for 422
+`c_check_builtin_x86.c` adds 558 audited SemaX86 constraint facts for 530
 affected names in the frozen 1,492-name own-main target-builtin scope and the
-supplementary scope: 87
-rounding sets, 90 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
+supplementary scope: 127
+rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 276 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -1204,6 +1318,60 @@ the existing families or of new ones:
   one's predicate is the immediate's whole byte, as clang's code passes it
   (`vcomiss`'s and `vcomisd`'s its low 5 bits, as `vcomish`'s, all the
   instruction reads), with the exceptions' suppression it asks for.
+- AVX-512's arithmetic by a rounding control: the 64-byte vectors' sums,
+  differences, products, quotients and square roots (`addpd512` to `divps512`,
+  `sqrtpd512`, `sqrtps512`), the scalar ones into w under a mask
+  (`addsd_round_mask` to `divss_round_mask`), the conversions of integers to
+  floats and of floats to doubles under a mask (`cvtdq2ps512_mask`,
+  `cvtudq2ps512_mask`, `cvtqq2pd512_mask`, `cvtuqq2pd512_mask`,
+  `cvtps2pd512_mask`, which takes the exceptions' suppression), the scalar
+  conversions to integers (`vcvtsd2si32` to `vcvtss2si64`) and from them into a
+  vector's low element (`cvtsi2sd64` to `cvtusi2ss64`, a family of their own,
+  `CHECK_X86_LOWER_INT_CONVERT`), and the 64-byte FMAs merged into a, zeroed or
+  merged into c (`vfmaddpd512_mask` to `vfmsubps512_mask3`). The current mode
+  (4) takes the plain form; 8 to 11 take the embedded rounding's form with its
+  direction. `x86_semantics.c` gained the effects of the forms these reach that
+  it lacked: VSUBSS, VSUBSD, VDIVSS and VDIVSD's EVEX forms, the 231 FMAs' and
+  FMSUBs' 64-byte forms and the EVEX integer-to-float conversions.
+- the rest of the gathers and scatters: AVX-512's of floats and doubles at 64
+  bytes (`gathersiv16sf` to `gatherdiv8df`, `scatterdiv16sf` to
+  `scattersiv8di`) and of every element at 16 and 32 bytes (`gather3div2df` to
+  `gather3siv8si`, `scatterdiv2df` to `scattersiv8si`), the existing families'
+  with their forms; and AVX2's under a vector's signs (`gatherd_d` to
+  `gatherq_q256`), a family of their own (`CHECK_X86_LOWER_GATHER_VECTOR`:
+  VEX's VPGATHER with the mask in vvvv, which the instruction zeroes). Each
+  takes clang's scale check (1, 2, 4 or 8). `x86_semantics.c` gained the effects
+  of the float gathers and scatters, VPGATHERQD's and VPSCATTERDQ's.
+- SSE4.1's roundings by an immediate (`roundps`, `roundpd`, their 256-bit
+  forms, and `roundss` and `roundsd` of b's first element into a: 0 to 15), its
+  dot products (`dpps`, `dpps256`, `dppd`), AES's key assist
+  (`aeskeygenassist128`), SHA's four rounds (`sha1rnds4`, 0 to 3, a legacy form
+  without vvvv, as BINARY's SHA forms are) and F16C's conversions to halves
+  (`vcvtps2ph`, `vcvtps2ph256`, 0 to 255), each the immediate's whole byte, by
+  VEX forms that require AVX. `x86_semantics.c` gained their VEX forms'
+  effects, and Tier 0's legacy list SHA1RNDS4.
+- the system builtins whose instructions take fixed registers or memory, as
+  per-unit leaves (`c_builtin_x86_helpers.c`): `rdtsc` (`__rdtsc`'s records),
+  `lzcnt_u16` (BSR's index xored with 15, 16 for 0), the fences (`lfence`,
+  `mfence`, `sfence`), `clflush`, `ldmxcsr` and `stmxcsr` (through the leaf's
+  red zone) and `xsetbv`, which only the kernel may run and whose fixture only
+  compiles and links.
+- the header builtins, leaves too: the names `<xmmintrin.h>`, `<emmintrin.h>`
+  and `<prfchwintrin.h>` declare (`_mm_lfence`, `_mm_mfence`, `_mm_sfence`,
+  `_mm_pause`, `_mm_clflush`, `_mm_getcsr`, `_mm_setcsr`, `_m_prefetch` and
+  `_m_prefetchw`), whose calls were calls of undefined functions. An x86 builtin
+  of the intrinsic catalogue's rows and leaves (`cbuiltin_source_intrinsic`)
+  stays the builtin under a declaration of it with external linkage, at file
+  scope or at block scope, as clang keeps it (`check_input_intrinsic_prepare`,
+  each catalogue row's verdict remembered in `CheckInputReader.intrinsic_source`);
+  a definition with internal linkage is the program's function, and a local
+  object of the name hides it. Pending: clang refuses a definition of one with
+  external linkage (`definition of builtin function`), which this compiler
+  takes as the builtin; and the builtins of the dedicated paths
+  (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
+  declaration too, become calls of their names here.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
+  modes, and stays out of the scope.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's
@@ -1276,6 +1444,41 @@ storage. Allocation failure marks the source input as a resource failure,
 leaves call metadata untouched and restores scratch. Differential fixtures
 exercise both driver schedules, nested selections, dead statements, unevaluated
 contexts and pragma/`-w` policy; storage tests cover every allocation cut.
+
+For #1066, a call whose hard immediate constraint fails is reported as clang
+reports it. A nonconstant immediate, one of the prototype's `I` arguments or
+one a SemaX86 rule constrains, gives `argument to 'NAME' must be a constant
+integer`, where clang's `BuiltinConstantArg` says it. An invalid rounding or
+SAE control gives `invalid rounding argument`, and an invalid gather or
+scatter scale `scale argument must be 1, 2, 4, or 8`. Each is placed at the
+call's begin, the builtin's name, with the notes of the macros it comes from.
+The checker still records them as `CHECK_DIAG_INCOMPATIBLE` on the call's node,
+and its effect keeps the failed constraint. The call's value has no type, so
+that an enclosing call or operator inherits the error rather than reports
+another, as clang checks no call whose arguments hold an error. The driver and the corpus check
+find that effect by node (`check_diagnostic_x86_hard`), a search per error
+reported, since the stream keeps the effects in their nodes' order. The report
+keeps the call's `)` as its token, so its order among the unit's other
+diagnostics, and the cutoffs that read it, are as before: clang reports the call
+after its arguments' own diagnostics. `-fsyntax-only` and `-c` print it alike.
+`test-checker` (`check_test_x86_hard_errors`) compares hand-written fixtures
+with clang, line for line: the k-shifts, a call over two lines, two calls on one
+line, nested calls, macros, constants that are integer constant expressions and
+ones that aren't, rounding, SAE and scale controls, and errors in the arguments
+(an undeclared one, failed calls inside calls and operators, and failed calls in
+a conditional's arms, which each report). Each runs by both paths, with
+`-fsyntax-only` and `-c`. `check_test_x86_hard_corpus` runs the corpus check on
+a call over two lines, in a unit that parses and in one whose later syntax
+error sends it through the repair. Its first error must be clang's line,
+column and message. `check_test_x86_hard_every` generates a unit with one
+call for every in-scope x86 builtin and each of its integer constant arguments,
+that argument a parameter, and compares it with clang the same four ways. It
+also checks that every lowering row's immediate and rounding control is such
+an argument, so the lowering never refuses a nonconstant one that the checker
+let through. It also checks that every x86 builtin's message fits
+`BUSTER_CHECK_DIAGNOSTIC_X86_TEXT`, and that it generated every call it counted.
+Its coverage may not fall below the tree's: 588 calls of 555 builtins, and 555
+lowering rows.
 
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
 shuffle, conversion, nondeterministic and nontemporal spellings, and the 52
@@ -1427,9 +1630,9 @@ which clang tests inline, are the floating builtins' ("Floating checking"),
 not calls. The table's other `F` rows stay refused, and `__has_builtin`
 answers 0 for them. The lowering refuses by name those the checker can type:
 `__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
-Tier 0's allocation doesn't take), and the signaling NaNs' and the `_Float128`
-and `_Float16` NaNs' (constants clang folds that no library function makes).
-The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
+Tier 0's allocation doesn't take). The signaling NaNs and the `_Float128` and
+`_Float16` NaNs, which clang folds, are the floating builtins' constants
+("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
 function takes or returns `__fp16`), the matrix builtins, and the `FILE`
 builtins (`fprintf` and its kin).
 

@@ -8,7 +8,11 @@
 //
 // tier1_frame_requirements runs before allocation: reserve its register mask. tier1_frame_plan and its scalar twin
 // return object-to-slot and object-to-byte-offset columns plus an explicit SysV prologue/epilogue plan. Nothing here
-// emits instructions or unwind tables. The consumer must attach actual instruction PCs before #88 can use the steps.
+// emits instructions or unwind tables. The plan is Tier 0's frame protocol, which unwind_tier0_frame_tails and unwind.c
+// describe (#88, #177): rbp pushed and pointed at its push when the frame keeps a pointer, then the callee-saved
+// registers pushed in RBX, RBP, R12, R13, R14, R15 order, then one subtraction, then a realignment's `and` and its
+// base's copy (R15, one of the pushes). The epilogue releases the subtraction (or resets rsp from rbp, past the pushes)
+// and pops in reverse. The consumer attaches actual instruction PCs to those transitions.
 //
 // The vector path sorts ends before starts within (rounded size, alignment) classes, scans live pressure, finds each
 // start's nearest earlier equal-or-greater pressure by pointer jumping, and inherits the slot of the intervening end.
@@ -39,7 +43,7 @@
 #define BUSTER_TIER1_FRAME_MAX_ALIGNMENT (1u << 30)
 #define BUSTER_TIER1_FRAME_PAGE_BYTES 4096u
 #define BUSTER_TIER1_FRAME_STEP_CAPACITY 32u
-#define BUSTER_TIER1_FRAME_REALIGN_BASE BUSTER_ABI_R13
+#define BUSTER_TIER1_FRAME_REALIGN_BASE BUSTER_ABI_R15
 
 #define BUSTER_TIER1_FRAME_VARIADIC (1u << 0)
 #define BUSTER_TIER1_FRAME_DYNAMIC_STACK (1u << 1)
@@ -91,6 +95,8 @@ struct Tier1FrameRequirements
     bool dynamic_stack;
 };
 
+// A push or pop moves rsp by 8 and writes or reads the word at the new or old rsp (`base` RSP, `offset` -8 or 0).
+// RESET_STACK sets rsp to `base` + `offset` (rbp less the pushes below it).
 typedef enum Tier1FrameStepKind
 {
     TIER1_FRAME_PUSH_POINTER,
@@ -99,12 +105,12 @@ typedef enum Tier1FrameStepKind
     TIER1_FRAME_PROBE_ALIGN,
     TIER1_FRAME_ALLOCATE,
     TIER1_FRAME_PROBE_ALLOCATE,
-    TIER1_FRAME_SAVE_REGISTER,
+    TIER1_FRAME_PUSH_REGISTER,
     TIER1_FRAME_SAVE_VARIADIC_INTEGER,
     // This step runs only if entry AL != 0, before any instruction destroys the entry AL value.
     TIER1_FRAME_SAVE_VARIADIC_VECTOR_IF_AL,
     TIER1_FRAME_SET_REALIGN_BASE,
-    TIER1_FRAME_RESTORE_REGISTER,
+    TIER1_FRAME_POP_REGISTER,
     TIER1_FRAME_RELEASE,
     TIER1_FRAME_RESET_STACK,
     TIER1_FRAME_POP_POINTER,
@@ -144,6 +150,8 @@ struct Tier1Frame
     bool red_zone;
     bool variadic;
     int32_t variadic_offset;
+    // The callee-saved registers the prologue pushes and each one's slot: from rbp with a frame pointer, otherwise from
+    // the post-prologue rsp. RBP's own push with a frame pointer is its prologue/epilogue steps', not one of these.
     uint32_t saved_registers;
     int32_t save_offset[16];
     uint32_t prologue_count;
@@ -671,8 +679,8 @@ static void tier1_frame_color_vector(Tier1FrameWork* work)
 
 static void tier1_frame_step(Tier1FrameStep* steps, uint32_t* count, Tier1FrameStepKind kind, uint32_t reg, uint32_t base, int32_t offset, uint32_t amount)
 {
-    // At most 25 prologue and 9 epilogue steps: one pointer push/set, one align, one allocation, six GPR saves,
-    // fourteen variadic saves, and one stable-base set. These are per-function fixed bounds, not input-sized lists.
+    // At most 25 prologue and 8 epilogue steps: one pointer push/set, six register pushes, one allocation, one align,
+    // one stable-base set and fourteen variadic saves. These are per-function fixed bounds, not input-sized lists.
     assert(*count < BUSTER_TIER1_FRAME_STEP_CAPACITY);
     steps[*count] = (Tier1FrameStep){
         .kind = kind,
@@ -684,35 +692,43 @@ static void tier1_frame_step(Tier1FrameStep* steps, uint32_t* count, Tier1FrameS
     *count += 1;
 }
 
+// Tier 0's frame protocol (the file's comment), which the unwind tables describe from the transitions' PCs.
 static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1FrameRequirements* requirements, Tier1Frame* frame)
 {
+    const bool probe = (request->flags & BUSTER_TIER1_FRAME_PROBE_STACK) != 0;
+    const uint32_t pushes = (uint32_t)__builtin_popcount(frame->saved_registers);
     if (frame->frame_pointer)
     {
         tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_PUSH_POINTER, BUSTER_ABI_RBP, BUSTER_ABI_RSP, -8, 8);
         tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_SET_POINTER, BUSTER_ABI_RBP, BUSTER_ABI_RSP, 0, 0);
     }
-    if (frame->realigned)
-    {
-        const Tier1FrameStepKind kind = request->flags & BUSTER_TIER1_FRAME_PROBE_STACK ? TIER1_FRAME_PROBE_ALIGN : TIER1_FRAME_ALIGN_STACK;
-        tier1_frame_step(frame->prologue, &frame->prologue_count, kind, BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->alignment);
-    }
-    if (frame->stack_adjust_bytes != 0)
-    {
-        const bool probe = (request->flags & BUSTER_TIER1_FRAME_PROBE_STACK) != 0 && frame->stack_adjust_bytes >= BUSTER_TIER1_FRAME_PAGE_BYTES;
-        tier1_frame_step(frame->prologue, &frame->prologue_count, probe ? TIER1_FRAME_PROBE_ALLOCATE : TIER1_FRAME_ALLOCATE,
-            BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->stack_adjust_bytes);
-    }
-    // R13's original value must be stored before it becomes the realigned base. Every prologue store addresses RSP;
-    // a non-realigned frame's RBP-relative displacements differ from RSP-relative ones by the fixed subtraction.
-    const int64_t to_rsp = frame->base_register == BUSTER_ABI_RBP ? frame->stack_adjust_bytes : 0;
+    // Ascending encoder numbers are the unwind order: RBX, RBP, R12, R13, R14, R15.
     for (uint32_t reg = 0; reg < 16; reg += 1)
     {
         if ((frame->saved_registers & (1u << reg)) != 0)
         {
-            tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_SAVE_REGISTER, reg, BUSTER_ABI_RSP,
-                (int32_t)(frame->save_offset[reg] + to_rsp), 8);
+            tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_PUSH_REGISTER, reg, BUSTER_ABI_RSP, -8, 8);
         }
     }
+    // Under PROBE_STACK a realigned frame probes its subtraction whatever its size, so that the alignment gap's probe
+    // starts from a touched address: the two together could otherwise cross an unprobed page.
+    if (frame->stack_adjust_bytes != 0)
+    {
+        const bool probed = probe && (frame->stack_adjust_bytes >= BUSTER_TIER1_FRAME_PAGE_BYTES || frame->realigned);
+        tier1_frame_step(frame->prologue, &frame->prologue_count, probed ? TIER1_FRAME_PROBE_ALLOCATE : TIER1_FRAME_ALLOCATE,
+            BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->stack_adjust_bytes);
+    }
+    if (frame->realigned)
+    {
+        tier1_frame_step(frame->prologue, &frame->prologue_count, probe ? TIER1_FRAME_PROBE_ALIGN : TIER1_FRAME_ALIGN_STACK, BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->alignment);
+    }
+    if (frame->base_register == BUSTER_TIER1_FRAME_REALIGN_BASE && requirements->dynamic_stack && frame->realigned)
+    {
+        tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_SET_REALIGN_BASE, BUSTER_TIER1_FRAME_REALIGN_BASE, BUSTER_ABI_RSP, 0, 0);
+    }
+    // Every variadic store addresses RSP; a dynamic frame's RBP-relative displacements differ from RSP-relative ones by
+    // the pushes and the fixed subtraction below rbp.
+    const int64_t to_rsp = frame->base_register == BUSTER_ABI_RBP ? (int64_t)frame->stack_adjust_bytes + 8 * pushes : 0;
     if (frame->variadic)
     {
         for (uint32_t i = 0; i < BUSTER_ABI_INTEGER_ARGUMENTS; i += 1)
@@ -728,30 +744,26 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
                 BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES);
         }
     }
-    if (frame->base_register == BUSTER_TIER1_FRAME_REALIGN_BASE && requirements->dynamic_stack && frame->realigned)
-    {
-        tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_SET_REALIGN_BASE, BUSTER_TIER1_FRAME_REALIGN_BASE, BUSTER_ABI_RSP, 0, 0);
-    }
-    for (uint32_t reg = 0; reg < 16; reg += 1)
-    {
-        if ((frame->saved_registers & (1u << reg)) != 0 && reg != frame->base_register)
-        {
-            tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RESTORE_REGISTER, reg, frame->base_register, frame->save_offset[reg], 8);
-        }
-    }
-    if ((frame->saved_registers & (1u << frame->base_register)) != 0)
-    {
-        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RESTORE_REGISTER, frame->base_register, frame->base_register,
-            frame->save_offset[frame->base_register], 8);
-    }
     if (frame->frame_pointer)
     {
-        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RESET_STACK, BUSTER_ABI_RSP, BUSTER_ABI_RBP, 0, 0);
-        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_POINTER, BUSTER_ABI_RBP, BUSTER_ABI_RSP, 0, 8);
+        // rsp back to the last push, past whatever the body allocated or realigned: `lea rsp, [rbp - 8n]`, or with no
+        // pushes `mov rsp, rbp`.
+        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RESET_STACK, BUSTER_ABI_RSP, BUSTER_ABI_RBP, -(int32_t)(8 * pushes), 0);
     }
     else if (frame->stack_adjust_bytes != 0)
     {
         tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RELEASE, BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->stack_adjust_bytes);
+    }
+    for (uint32_t reg = 16; reg > 0; reg -= 1)
+    {
+        if ((frame->saved_registers & (1u << (reg - 1))) != 0)
+        {
+            tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_REGISTER, reg - 1, BUSTER_ABI_RSP, 0, 8);
+        }
+    }
+    if (frame->frame_pointer)
+    {
+        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_POINTER, BUSTER_ABI_RBP, BUSTER_ABI_RSP, 0, 8);
     }
 }
 
@@ -815,23 +827,27 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
     {
         position = variadic_begin + BUSTER_ABI_SAVE_AREA_BYTES;
     }
-    const uint64_t saves_begin = candidate.saved_registers != 0 ? tier1_frame_align(position, 8) : position;
-    position = saves_begin + (uint32_t)__builtin_popcount(candidate.saved_registers) * 8;
+    // The pushes, rbp's and the callee-saved registers', come before the subtraction, so rsp after them is entry RSP (8
+    // modulo 16) less 8 per push: 0 or 8 modulo 16.
+    const uint32_t pushes = (uint32_t)__builtin_popcount(candidate.saved_registers);
+    const uint64_t pushed = 8 * (uint64_t)pushes + (candidate.frame_pointer ? 8 : 0);
+    const uint32_t pushed_residue = (uint32_t)((8 + pushed) & 15);
     uint32_t data_alignment = requirements.object_alignment;
     data_alignment = candidate.variadic && data_alignment < 16 ? 16 : data_alignment;
-    data_alignment = candidate.saved_registers != 0 && data_alignment < 8 ? 8 : data_alignment;
-    // Entry RSP is 8 modulo 16. A red-zone base must compensate for that residue, including sixteen-byte objects.
-    const uint32_t residue = data_alignment <= 16 ? 8 % data_alignment : 0;
+    // A red-zone base must compensate for that residue, including sixteen-byte objects. The red zone is below the
+    // pushes' rsp.
+    const uint32_t residue = data_alignment <= 16 ? pushed_residue % data_alignment : 0;
     const uint64_t red_span = tier1_frame_align(position + residue, data_alignment) - residue;
     candidate.red_zone = request->call_count == 0 && !candidate.frame_pointer && !requirements.dynamic_stack &&
         (request->flags & BUSTER_TIER1_FRAME_NO_RED_ZONE) == 0 && red_span <= BUSTER_ABI_RED_ZONE_BYTES;
+    // The subtraction leaves rsp 16-aligned; a realigned frame's `and` after it aligns it further, by at most its
+    // alignment less 16.
     uint64_t adjustment = 0;
     if (!candidate.red_zone && (position != 0 || request->call_count != 0))
     {
-        const uint32_t entry_residue = candidate.frame_pointer ? 0 : 8;
-        adjustment = tier1_frame_align(position + entry_residue, requirements.alignment) - entry_residue;
+        adjustment = tier1_frame_align(position + pushed_residue, 16) - pushed_residue;
     }
-    const uint64_t maximum = candidate.red_zone ? red_span : adjustment + (candidate.frame_pointer ? 8 : 0) + (candidate.realigned ? requirements.alignment - 16 : 0);
+    const uint64_t maximum = pushed + (candidate.red_zone ? red_span : adjustment + (candidate.realigned ? requirements.alignment - 16 : 0));
     Tier1FrameError error = position <= INT32_MAX && adjustment <= INT32_MAX && maximum <= INT32_MAX ? TIER1_FRAME_OK : TIER1_FRAME_OVERFLOW;
     if (error == TIER1_FRAME_OK && work->count != 0)
     {
@@ -851,7 +867,8 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
         candidate.maximum_stack_bytes = (uint32_t)maximum;
         candidate.red_zone_bytes = candidate.red_zone ? (uint32_t)red_span : 0;
         candidate.base_register = requirements.dynamic_stack ? (candidate.realigned ? BUSTER_TIER1_FRAME_REALIGN_BASE : BUSTER_ABI_RBP) : BUSTER_ABI_RSP;
-        const int64_t bias = candidate.red_zone ? -(int64_t)red_span : (candidate.base_register == BUSTER_ABI_RBP ? -(int64_t)adjustment : 0);
+        // RBP is the pushes and the subtraction above the post-prologue rsp.
+        const int64_t bias = candidate.red_zone ? -(int64_t)red_span : (candidate.base_register == BUSTER_ABI_RBP ? -(int64_t)(adjustment + 8 * pushes) : 0);
         for (uint32_t i = 0; i < work->count; i += 1)
         {
             const uint32_t group = work->object_class[i];
@@ -859,12 +876,15 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
             candidate.offset[i] = (int32_t)((int64_t)(work->class_offset[group] + (uint64_t)work->color[i] * work->class_stride[group]) + bias);
         }
         candidate.variadic_offset = candidate.variadic ? (int32_t)((int64_t)variadic_begin + bias) : 0;
+        // The k-th push's word is 8 (k + 1) bytes below rbp, or below entry RSP, which is the subtraction and the pushes
+        // above the post-prologue rsp.
         uint32_t saved_index = 0;
         for (uint32_t reg = 0; reg < 16; reg += 1)
         {
             if ((candidate.saved_registers & (1u << reg)) != 0)
             {
-                candidate.save_offset[reg] = (int32_t)((int64_t)(saves_begin + saved_index * 8) + bias);
+                const int64_t below = 8 * (int64_t)(saved_index + 1);
+                candidate.save_offset[reg] = (int32_t)(candidate.frame_pointer ? -below : (int64_t)adjustment + 8 * (int64_t)pushes - below);
                 saved_index += 1;
             }
         }

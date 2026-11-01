@@ -5788,6 +5788,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_array_alignment(&test, clang, executable, directory);
             check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
             check_test_driver_tier1_divide(&test, clang, executable, directory);
+            check_test_driver_tier1_labels(&test, clang, executable, directory);
+            check_test_driver_tier1_variadic(&test, clang, executable, directory);
+            check_test_driver_tier1_masks(&test, clang, executable, directory);
+            check_test_driver_tier1_lifetimes(&test, clang, executable, directory);
             check_test_driver_float_classify(&test, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);

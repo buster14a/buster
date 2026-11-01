@@ -1166,6 +1166,37 @@ slower (`l16x38f384.c`), 0.1% faster by the median, and from 1.8% faster than
 slower (`d16x19f384s192.c`, on eight rather than six), as much as the units
 whose lanes it leaves as they were differ between the two builds.
 
+### The merged stream's huge pages (#874)
+
+The merge's pass writes the merged stream's eight columns, and the token positions its scans fill, into
+the caller's scratch arena from every lane that read the bodies. In a process's one reading those pages
+are fresh, and lanes that write one 2 MB region at first touch each allocate and clear a huge page for
+it, of which the kernel maps one, as in the walks' race (#764). #764's and #847's campaigns couldn't see
+it: the benchmark reused the caller's arenas from reading to reading, so its merge's pages were already
+mapped.
+
+The calling thread now faults in exactly the written ranges before the merge's `lane_run`
+(`check_deferred_fault_range`): the six 4-byte columns, the operation and kind bytes, and the positions,
+one store at each 2 MB region, each overwritten by the pass. It adds no per-write protocol to the pass,
+and the one-lane path is unchanged. `benchmark-checker-deferred --cold` releases and reserves the
+caller's arenas for every reading, so that a process's one reading is measured.
+
+Campaign E2 read seven units cold on up to eight lanes by the rule, six passes, with every page fault
+recorded with its instruction: the fix's lanes took no store fault at a 2 MB region another thread was
+clearing, and the control's (the same tree with the fault-in's body empty) took them at 7 regions of
+`h16x77.c`, 12 of `h16x154.c` and 11 of `sqlite3.c`, none on the other four. On those racing units the
+fix's processes took 12.8% to 35.5% fewer of the kernel's cycles, with the same user instructions to
+0.02%. The record is
+[deferred-merge-874](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/deferred-merge-874-2026-11-01).
+
+By each tree's rule on A2's 43 units, five rounds (campaign B9), no unit's cold reading is more than 2%
+slower with the fix: the medians run from 19.1% faster to 1.4% slower, and the 31 units the rule gives
+more than one lane read 5.0% faster by the median. Four units had one round above 2% (up to `h16x10.c`'s
+5.3%), while their five-round medians are 2.2% faster to 1.4% slower, the spread of builds of one code
+(`docs/profiling.md`, "Comparing two versions"). At a state's later readings, whose pages are already
+mapped, the fix pays only its nine stores a reading: one warm round (campaign W9) reads 0.57% faster by
+the median, from 5.15% faster to 2.40% slower (`h16x38.c`, whose cold median is 19.1% faster).
+
 ## One-lane pinning removed (#450)
 
 The exact `35f26f68` baseline and `1d2b12c6` candidate were compared on the
@@ -1239,9 +1270,9 @@ unit's lanes claim its huge pages (#847). A pass that reads only the blocks
 the walks wrote (above) would make base pages cheaper at every size. The
 merge's pass writes the merged stream's columns into the caller's scratch from
 its lanes: in a process's one reading those are fresh huge pages, which lanes
-that meet in a region would each clear, as the walks did; the benchmark reuses
-the caller's arenas, whose pages its first pass faulted in, and doesn't
-measure that (#874). With the race gone, a state's later
+that meet in a region would each clear, as the walks did. The calling thread
+now faults in the written ranges before the lanes (#874, above), and `--cold`
+measures a process's one reading. With the race gone, a state's later
 readings can have a rule of their own (#697's item 3), fitted on a grid like
 campaign W5's, once a caller reads several units with one state.
 

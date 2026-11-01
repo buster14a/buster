@@ -79,7 +79,7 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
                              reader->parser->tokens.kinds[direct] == PARSE_KIND_IDENTIFIER && values[0].category == CHECK_LVALUE &&
                              !check_init_aggregate(reader->types, values[0].type);
     CheckInitializer initialized = { .type = type, .failed_token = BUSTER_CHECK_NONE, .warning_token = BUSTER_CHECK_NONE };
-    CheckStream stream = { .values = values, .diagnostics = diagnostics, .count = count };
+    CheckStream stream = { .dense_values = values, .diagnostics = diagnostics, .count = count };
     // Evaluate/query before this point. Until the walk ends, its output arena contains only contiguous part
     // appends; receipt publication and diagnostic growth happen afterward, while side tables use scratch.
     CheckInitWalker walker = {
@@ -136,7 +136,7 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
         if (part->kind == CHECK_INIT_VALUE)
         {
             valid = valid && part->value.constant_kind != CHECK_CONSTANT_NONE && part->value.fault == CHECK_FAULT_NONE &&
-                    (part->value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_INACTIVE_UNION_READ)) == 0 &&
+                    (part->value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                     (part->value.constant_kind != CHECK_CONSTANT_ADDRESS || part->value.object == 0 ||
                      (part->value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0);
         }

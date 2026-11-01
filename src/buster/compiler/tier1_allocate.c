@@ -24,9 +24,18 @@
 #define BUSTER_TIER1_ALLOCATE_MAX_POSITIONS (1u << 24)
 #define BUSTER_TIER1_ALLOCATE_MAX_USES (1u << 24)
 #define BUSTER_TIER1_ALLOCATE_USE_EVENT 0x80000000u
-#define BUSTER_TIER1_ALLOCATE_CLASSES 2
+// The register classes: general registers (bits 0 to 15), vector registers (0 to 31) and AVX-512's opmask registers
+// (#179: k0 to k7, bits 0 to 7). A class's registers are its own; nothing moves a value between classes.
+#define BUSTER_TIER1_ALLOCATE_CLASSES 3
 #define BUSTER_TIER1_ALLOCATE_GPR 0
 #define BUSTER_TIER1_ALLOCATE_VECTOR 1
+#define BUSTER_TIER1_ALLOCATE_MASK 2
+// The opmask class's value registers, k1 to k7. k0 can't be a write mask (an EVEX instruction's mask field of 0 means
+// no mask), so no mask value is ever allocated there: it is the class's scratch register (tier1_cfg.c's), and validation
+// refuses a class, an interval or a hint that would put a value in it. A fixed range may name all eight registers
+// (BUSTER_TIER1_ALLOCATE_MASK_FILE): a call clobbers k0 too.
+#define BUSTER_TIER1_ALLOCATE_MASK_REGISTERS 0xfeu
+#define BUSTER_TIER1_ALLOCATE_MASK_FILE 0xffu
 #define BUSTER_TIER1_ALLOCATE_REGISTER 0
 #define BUSTER_TIER1_ALLOCATE_SPILL 1
 #define BUSTER_TIER1_ALLOCATE_REMATERIALIZE 2
@@ -72,8 +81,10 @@ struct Tier1AllocationInput
     uint32_t count;
     uint32_t value_count;
     uint32_t position_count;
-    // Physical register bits. GPR bits 0..15; vector bits 0..15 or 0..31 as permitted by the output target.
-    // The producer excludes RSP and any frame/scratch registers. A zero class mask permits only spills.
+    // Physical register bits. GPR bits 0..15; vector bits 0..15 or 0..31 as permitted by the output target; mask bits
+    // 0..7 (k0 to k7) where the output target has AVX-512, else none. The producer excludes RSP and any frame/scratch
+    // registers, k0 among them where it is the mask class's scratch; a value used as a write mask, which k0 can't be,
+    // has k1 to k7 alone among its allowed registers. A zero class mask permits only spills.
     uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     Tier1FixedIntervals fixed;
 };
@@ -124,7 +135,8 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
     if (valid)
     {
         valid = input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && input->value_count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && input->position_count <= BUSTER_TIER1_ALLOCATE_MAX_POSITIONS && input->fixed.count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && input->use_count <= BUSTER_TIER1_ALLOCATE_MAX_USES;
-        valid = valid && (input->registers[0] & 0xffff0000u) == 0 && (input->count == 0 || (input->starts != 0 && input->ends != 0 && input->values != 0 && input->allowed_registers != 0 && input->classes != 0));
+        valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0;
+        valid = valid && (input->count == 0 || (input->starts != 0 && input->ends != 0 && input->values != 0 && input->allowed_registers != 0 && input->classes != 0));
         valid = valid && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.registers != 0 && input->fixed.classes != 0));
         valid = valid && ((input->use_offsets == 0 && input->use_positions == 0 && input->use_count == 0) || (input->use_offsets != 0 && (input->use_count == 0 || input->use_positions != 0)));
         valid = valid && (input->use_required == 0 || input->use_offsets != 0);
@@ -159,6 +171,7 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
     {
         valid = input->fixed.starts[i] < input->fixed.ends[i] && input->fixed.ends[i] <= input->position_count && input->fixed.classes[i] < BUSTER_TIER1_ALLOCATE_CLASSES;
         valid = valid && (input->fixed.classes[i] != BUSTER_TIER1_ALLOCATE_GPR || (input->fixed.registers[i] & 0xffff0000u) == 0);
+        valid = valid && (input->fixed.classes[i] != BUSTER_TIER1_ALLOCATE_MASK || (input->fixed.registers[i] & ~BUSTER_TIER1_ALLOCATE_MASK_FILE) == 0);
     }
     return valid;
 }
@@ -696,7 +709,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
     uint8_t* value_last = 0;
     uint32_t* use_intervals = 0;
     Tier1AllocationPieces pieces = { 0 };
-    bool extended[BUSTER_TIER1_ALLOCATE_CLASSES] = { false, false };
+    bool extended[BUSTER_TIER1_ALLOCATE_CLASSES] = { false };
     uint32_t event_count = 0;
     uint32_t fragment_capacity = 0;
     if (arena != 0 && result != 0 && tier1_allocation_input_valid(input))
@@ -848,13 +861,21 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
+        // The classes that have intervals, in one pass: a class without them has nothing to color, and its passes over
+        // the intervals and the events, and the scan the common path would have left it, are skipped, so that a
+        // function's empty classes (the vector and opmask ones, for most) cost nothing past this pass.
+        uint32_t present = 0;
+        for (uint32_t i = 0; i < columns.count; i += 1)
+        {
+            present |= 1u << columns.classes[i];
+        }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
         {
             bool regular = BUSTER_VECTOR_PATH(vector);
             uint32_t class_count = 0;
             uint32_t class_event_count = 0;
             int32_t live = 0;
-            for (uint32_t i = 0; i < columns.count; i += 1)
+            for (uint32_t i = 0; ((present >> class) & 1) != 0 && i < columns.count; i += 1)
             {
                 if (columns.classes[i] == class)
                 {
@@ -862,7 +883,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                     regular &= allowed[i] == columns.registers[class];
                 }
             }
-            for (uint32_t e = 0; e < event_count; e += 1)
+            for (uint32_t e = 0; class_count != 0 && e < event_count; e += 1)
             {
                 const uint32_t interval = events[e] >> 1;
                 if ((events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) == 0 && columns.classes[interval] == class)
@@ -886,7 +907,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 tier1_allocation_color(input, class, class_events, class_event_count, regs, hinted ? value_last : 0);
                 allocation.vector_intervals += class_count;
             }
-            else
+            else if (class_count != 0)
             {
                 allocation.scalar_intervals += class_count;
                 bool assigned = false;

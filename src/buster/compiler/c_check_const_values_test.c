@@ -693,6 +693,217 @@ static void check_const_test_live_records(CheckTest* test, TypeTable* types)
     arena_release(&scratch);
 }
 
+// The liveness walk's sort skips the passes over a digit that every write's ends share (#873). Rounds of writes whose
+// offsets and sizes vary in one or two chosen bytes alone, adjacent or apart, so that six or seven of the eight passes
+// are skipped, or in order, so that all eight are, must select exactly the writes that have a segment between two
+// consecutive ends that no later write covers.
+static void check_const_test_live_digits(CheckTest* test, TypeTable* types)
+{
+    enum { PARTS = 24, ROUNDS = 576 };
+    static const uint8_t shifts[][2] = { { 3, 3 }, { 5, 5 }, { 3, 8 }, { 8, 8 }, { 16, 16 }, { 24, 40 }, { 8, 48 }, { 56, 56 }, { 3, 32 } };
+    // Its draws come from a sequence of its own, so that the sections after it take the inputs they took before it.
+    CheckTest draws = { .random = test->random ^ UINT64_C(873) };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool exact = scratch.base != NULL;
+    for (uint32_t round = 0; exact && round < ROUNDS; round += 1)
+    {
+        // Every other round's writes are in order, each at or after the end of the one before, whose points need no
+        // pass at all.
+        const bool ordered = (round & 1) != 0;
+        const uint8_t* shift = shifts[(round / 2) % BUSTER_ARRAY_LENGTH(shifts)];
+        const uint32_t count = 1 + check_test_random(&draws) % PARTS;
+        CheckInitPart parts[PARTS];
+        uint64_t ends[PARTS * 2];
+        uint64_t object_bits = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t at = shift[ordered ? 0 : check_test_random(&draws) & 1];
+            const uint64_t after = i != 0 ? ends[i * 2 - 1] : 0;
+            const uint64_t offset = ordered ? after + ((uint64_t)(check_test_random(&draws) % 2) << at) : (uint64_t)(check_test_random(&draws) % 16) << at;
+            const uint64_t bits = (uint64_t)(1 + check_test_random(&draws) % 4) << at;
+            parts[i] = (CheckInitPart){ .kind = CHECK_INIT_CLEAR, .type = BUSTER_TYPE_INT, .bit_offset = offset, .byte_count = bits / 8 };
+            ends[i * 2] = offset;
+            ends[i * 2 + 1] = offset + bits;
+            object_bits = offset + bits > object_bits ? offset + bits : object_bits;
+        }
+        uint32_t shared = 0;
+        for (uint32_t digit = 0; digit < 8; digit += 1)
+        {
+            bool same = true;
+            for (uint32_t e = 1; e < count * 2; e += 1)
+            {
+                same = same && (((ends[e] ^ ends[0]) >> (digit * 8)) & 255) == 0;
+            }
+            shared += same;
+        }
+        const CheckInitializer initialized = {
+            .type = BUSTER_TYPE_INT, .status = CHECK_INIT_OK, .object_size = object_bits / 8, .parts = parts, .count = count,
+        };
+        uint8_t* live = NULL;
+        const uint64_t mark = scratch.length;
+        exact = shared >= 6 && check_initializer_live_writes(types, &initialized, &scratch, &live) == CHECK_INIT_OK && live != NULL;
+        for (uint32_t p = 0; exact && p < count; p += 1)
+        {
+            bool uncovered = false;
+            for (uint32_t e = 0; e < count * 2; e += 1)
+            {
+                uint64_t next = UINT64_MAX;
+                for (uint32_t f = 0; f < count * 2; f += 1)
+                {
+                    next = ends[f] > ends[e] && ends[f] < next ? ends[f] : next;
+                }
+                bool covered = false;
+                for (uint32_t q = p + 1; q < count; q += 1)
+                {
+                    covered = covered || (ends[q * 2] <= ends[e] && next <= ends[q * 2 + 1]);
+                }
+                uncovered = uncovered || (ends[p * 2] <= ends[e] && next <= ends[p * 2 + 1] && !covered);
+            }
+            exact = live[p] == uncovered;
+        }
+        arena_pop_to(&scratch, mark);
+    }
+    check_test_expect(test, exact, "writes whose ends share most digits select the writes that no later writes cover whole");
+    arena_release(&scratch);
+}
+
+// check_initializer_live's sort of the address candidates skips the same passes (#873). Rounds of 8-byte address writes
+// whose offsets vary in one or two chosen bytes, or are in order, among clears that may cover them, must keep exactly the
+// addresses whose eight bytes no later write touches, in source order.
+static void check_const_test_reference_digits(CheckTest* test, TypeTable* types)
+{
+    enum { PARTS = 24, ROUNDS = 576 };
+    static const uint8_t shifts[][2] = { { 3, 3 }, { 6, 6 }, { 3, 8 }, { 8, 8 }, { 16, 16 }, { 24, 40 }, { 8, 48 }, { 56, 56 }, { 3, 32 } };
+    // Its draws come from a sequence of its own, so that the sections after it take the inputs they took before it.
+    CheckTest draws = { .random = test->random ^ UINT64_C(0x873873) };
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    Arena output = arena_reserve(UINT64_C(1) << 20);
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool exact = pointer != 0 && output.base != NULL && scratch.base != NULL;
+    for (uint32_t round = 0; exact && round < ROUNDS; round += 1)
+    {
+        // Every other round's addresses are in order, each at or after the one before, which need no pass at all.
+        const bool ordered = (round & 1) != 0;
+        const uint8_t* shift = shifts[(round / 2) % BUSTER_ARRAY_LENGTH(shifts)];
+        const uint32_t count = 1 + check_test_random(&draws) % PARTS;
+        CheckInitPart parts[PARTS];
+        uint64_t low[PARTS];
+        uint64_t high[PARTS];
+        uint32_t expected[PARTS];
+        uint32_t expected_count = 0;
+        uint64_t first = 0;
+        uint64_t previous = 0;
+        uint64_t varying = 0;
+        bool any = false;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t at = shift[ordered ? 0 : check_test_random(&draws) & 1];
+            const bool address = check_test_random(&draws) % 3 != 0;
+            if (address)
+            {
+                const uint64_t offset = ordered ? previous + ((uint64_t)(check_test_random(&draws) % 2) << at) : (uint64_t)(check_test_random(&draws) % 16) << at;
+                const CheckValue value = {
+                    .type = pointer,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = 1 + i,
+                };
+                parts[i] = (CheckInitPart){ .kind = CHECK_INIT_VALUE, .type = pointer, .bit_offset = offset, .value = value };
+                low[i] = offset;
+                high[i] = offset + 64;
+                first = any ? first : offset;
+                varying |= offset ^ first;
+                previous = offset;
+                any = true;
+            }
+            else
+            {
+                const uint64_t offset = (uint64_t)(check_test_random(&draws) % 16) << at;
+                const uint64_t bits = (uint64_t)(1 + check_test_random(&draws) % 4) << at;
+                parts[i] = (CheckInitPart){ .kind = CHECK_INIT_CLEAR, .type = BUSTER_TYPE_INT, .bit_offset = offset, .byte_count = bits / 8 };
+                low[i] = offset;
+                high[i] = offset + bits;
+            }
+        }
+        uint32_t shared = 0;
+        for (uint32_t digit = 0; digit < 8; digit += 1)
+        {
+            shared += ((varying >> (digit * 8)) & 255) == 0;
+        }
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            bool touched = false;
+            for (uint32_t q = p + 1; q < count; q += 1)
+            {
+                touched = touched || (low[q] < high[p] && low[p] < high[q]);
+            }
+            if (parts[p].kind == CHECK_INIT_VALUE && !touched)
+            {
+                expected[expected_count++] = 1 + p;
+            }
+        }
+        const CheckInitializer initialized = { .type = BUSTER_TYPE_INT, .status = CHECK_INIT_OK, .parts = parts, .count = count };
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        uint32_t* objects = NULL;
+        uint32_t found = 0;
+        exact = shared >= 6 && check_initializer_references(types, &initialized, &output, &scratch, &objects, &found) == CHECK_INIT_OK &&
+                found == expected_count && (found == 0 || memcmp(objects, expected, (uint64_t)found * sizeof(uint32_t)) == 0);
+        arena_pop_to(&output, output_mark);
+        arena_pop_to(&scratch, scratch_mark);
+    }
+    check_test_expect(test, exact, "address candidates whose offsets share most digits keep exactly the addresses no later write touches");
+    arena_release(&scratch);
+    arena_release(&output);
+}
+
+// Each append writes a new 32-node path to its object (#873 builds each node in registers), so that every view keeps
+// its own trie. After 640 appends, each view must find exactly the objects appended before it was taken, each with the
+// places the append gave it, and none of the identities that were never appended.
+static void check_const_test_trie(CheckTest* test, TypeTable* types)
+{
+    enum { OBJECTS = 640, VIEWS = 6 };
+    static const uint32_t taken[VIEWS] = { 0, 1, 2, 63, 300, OBJECTS };
+    Arena arena = arena_reserve(UINT64_C(1) << 22);
+    CheckConstBuffer buffer = { .arena = &arena };
+    CheckConstValues views[VIEWS] = { 0 };
+    const TypeId ci = type_qualify(types, BUSTER_TYPE_INT, BUSTER_TYPE_CONST);
+    bool ready = arena.base != NULL;
+    uint32_t view = 0;
+    for (uint32_t i = 0; ready && i <= OBJECTS; i += 1)
+    {
+        while (view < VIEWS && taken[view] == i)
+        {
+            views[view++] = check_const_view(&buffer);
+        }
+        if (i < OBJECTS)
+        {
+            const CheckValue integer = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = i };
+            const CheckConstObject header = { .object = 1 + i * 40503, .declaration = 2 * i + 1, .completed = 2 * i + 2, .type = ci, .byte_size = 4 };
+            const CheckConstPart part = { .kind = CHECK_CONST_VALUE, .type = BUSTER_TYPE_INT, .bit_count = 32, .value = integer };
+            ready = check_const_append(&buffer, header, &part, 1, NULL, 0, (i & 1) != 0);
+        }
+    }
+    bool exact = ready && view == VIEWS;
+    for (uint32_t v = 0; exact && v < VIEWS; v += 1)
+    {
+        for (uint32_t i = 0; exact && i < OBJECTS; i += 1)
+        {
+            const CheckConstValues* owner = NULL;
+            const CheckConstObject* found = check_const_find(&views[v], 1 + i * 40503, UINT32_MAX, &owner);
+            const CheckConstObject* absent = check_const_find(&views[v], 2 + i * 40503, UINT32_MAX, NULL);
+            exact = absent == NULL && (i < taken[v] ? found != NULL && owner == &views[v] && found->object == 1 + i * 40503 &&
+                                                          found->declaration == 2 * i + 1 && found->completed == 2 * i + 2 &&
+                                                          found->type == ci && found->byte_size == 4 && found->part_first == i &&
+                                                          found->part_count == 1 && found->union_first == 0 && found->union_count == 0
+                                                    : found == NULL);
+        }
+    }
+    check_test_expect(test, exact, "every view's trie finds the objects appended before it with their places, and no others");
+    arena_release(&arena);
+}
+
 static void check_test_const_values(CheckTest* test)
 {
     check_test_expect(test, sizeof(CheckValue) == 96, "subbyte object identity occupies existing CheckValue padding");
@@ -713,6 +924,9 @@ static void check_test_const_values(CheckTest* test)
         check_const_test_history(test, &types.table);
         check_const_test_exhaustion(test, &types.table);
         check_const_test_live_records(test, &types.table);
+        check_const_test_live_digits(test, &types.table);
+        check_const_test_reference_digits(test, &types.table);
+        check_const_test_trie(test, &types.table);
     }
     arena_release(&arena);
     check_test_types_close(&types);
