@@ -891,6 +891,210 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
                             "published frame reader refuses missing inputs", 6100);
 }
 
+// Tier 1's exits (#177): the frame's teardown (as its epilogue's, which a frame pointer's code starts with its reset
+// from rbp, no transition) at `fixture`'s end, its transitions' ends into `ends`.
+static void unwind_tier0_test_teardown(UnwindTier0Fixture* fixture, uint8_t saved, uint32_t frame, bool pointer, uint32_t* ends, uint32_t* ended)
+{
+    static const uint8_t registers[] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
+    uint32_t* count = &fixture->code.count;
+    const uint32_t pushes = (uint32_t)__builtin_popcount(saved);
+    if (pointer)
+    {
+        fixture->records[(*count)++] = pushes != 0 ? unwind_tier0_test_record(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, -8 * (int32_t)pushes, 0)
+                                                   : unwind_tier0_test_record(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+    }
+    else if (frame != 0)
+    {
+        fixture->records[(*count)++] = unwind_tier0_test_record(frame <= 127 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame);
+        ends[(*ended)++] = *count;
+    }
+    for (uint32_t reg = BUSTER_ARRAY_LENGTH(registers); reg > 0; reg -= 1)
+    {
+        if ((saved & (1u << (reg - 1))) != 0)
+        {
+            fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_POP_R64, 0, registers[reg - 1], 0, 0, 0);
+            ends[(*ended)++] = *count;
+        }
+    }
+    if (pointer)
+    {
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_POP_R64, 0, X86_REGISTER_RBP, 0, 0, 0);
+        ends[(*ended)++] = *count;
+    }
+}
+
+// Tier 1's code of `saved`'s pushes and a frame of `frame` bytes, or a frame pointer's (#177): its prologue, a body
+// with `returns` early returns, each its epilogue's teardown and its ret, then its epilogue at its end, or with `open`
+// a jump back into its body as its last record, every return a tail (Tier0Code.frame_open). The expected descriptor
+// and tails' ends go into the fixture and `tails`.
+static bool unwind_tier0_test_exits_fixture(UnwindTier0Fixture* fixture, uint8_t saved, uint32_t frame, bool pointer, uint32_t returns, bool open, uint32_t* tail_records,
+                                            uint32_t* tails)
+{
+    static const uint8_t registers[] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
+    memset(fixture, 0, sizeof(*fixture));
+    unwind_tier0_test_bind(fixture);
+    const bool frameless = saved == 0 && frame == 0 && !pointer;
+    fixture->code.frame_saved = saved;
+    fixture->code.frame_size = frame;
+    fixture->code.frame_pointer = pointer;
+    fixture->code.frame_open = open;
+    fixture->expected.saved = saved;
+    fixture->expected.pointer = pointer ? 1 : 0;
+    fixture->expected.frame_size = pointer ? 0 : frame;
+    fixture->expected.open = open && !frameless ? 1 : 0;
+    uint32_t* count = &fixture->code.count;
+    uint32_t events = 0;
+    uint32_t* ended = &events;
+    if (pointer)
+    {
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_PUSH_R64, 0, X86_REGISTER_RBP, 0, 0, 0);
+        fixture->event_ends[(*ended)++] = *count;
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+        fixture->event_ends[(*ended)++] = *count;
+    }
+    for (uint32_t reg = 0; reg < BUSTER_ARRAY_LENGTH(registers); reg += 1)
+    {
+        if ((saved & (1u << reg)) != 0)
+        {
+            fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_PUSH_R64, 0, registers[reg], 0, 0, 0);
+            fixture->event_ends[(*ended)++] = *count;
+        }
+    }
+    if (frame != 0)
+    {
+        fixture->records[(*count)++] = unwind_tier0_test_record(frame <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame);
+        if (!pointer)
+        {
+            fixture->event_ends[(*ended)++] = *count;
+        }
+    }
+    fixture->body = *count;
+    // Each return: a body's record, the teardown and the ret, a tail's events (its transitions' ends and its ret's end).
+    uint32_t tail_ends[4 * 8];
+    uint32_t tail_ended = 0;
+    const uint32_t exits = returns + (open ? 1 : 0);
+    for (uint32_t k = 0; k < exits; k += 1)
+    {
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, (int32_t)k);
+        unwind_tier0_test_teardown(fixture, saved, frame, pointer, tail_ends, &tail_ended);
+        tail_records[k] = *count;
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_RET, 0, 0, 0, 0, 0);
+        tail_ends[tail_ended++] = *count;
+    }
+    fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, 100);
+    fixture->epilogue = *count;
+    if (open)
+    {
+        fixture->branches[0] = *count;
+        fixture->targets[0] = fixture->body;
+        fixture->code.branch_count = 1;
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_JMP_REL8, 0, 0, 0, 0, 0);
+    }
+    else
+    {
+        unwind_tier0_test_teardown(fixture, saved, frame, pointer, fixture->event_ends, ended);
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_RET, 0, 0, 0, 0, 0);
+    }
+    fixture->expected.event_count = (uint8_t)events;
+    fixture->code.tail_records = exits != 0 ? tail_records : 0;
+    fixture->code.tail_count = exits;
+    fixture->expected.tail_count = exits;
+    fixture->expected.tails = exits != 0 ? tails : 0;
+    const bool valid = unwind_tier0_test_measure(fixture);
+    for (uint32_t k = 0; valid && k < tail_ended; k += 1)
+    {
+        tails[k] = tail_ends[k] < *count ? fixture->offsets[tail_ends[k]] : fixture->size;
+    }
+    return valid;
+}
+
+// unwind_tier0_frame_tails on Tier 1's exits (#177): every mask with a frame and without, and each frame pointer's, with
+// one or two early returns and an epilogue at the end, and open with none or one more; the descriptor and the tails'
+// ends as expected, which unwind_check takes. Then each refusal: a tail whose ret is something else, a teardown that
+// isn't the frame's, an open frame published closed (its last record isn't a ret), and a ret past the code.
+static void unwind_tier0_test_exits(UnwindTier0Test* test)
+{
+    static const uint32_t frames[] = { 0, 40, 4096 };
+    for (uint32_t saved = 0; saved < 64; saved += 1)
+    {
+        for (uint32_t shape = 0; shape < 2 * BUSTER_ARRAY_LENGTH(frames); shape += 1)
+        {
+            const bool pointer = shape >= BUSTER_ARRAY_LENGTH(frames);
+            const uint32_t frame = frames[shape % BUSTER_ARRAY_LENGTH(frames)];
+            for (uint32_t form = 0; form < 4 && (!pointer || (saved & 2) == 0); form += 1)
+            {
+                const bool open = form >= 2;
+                const uint32_t returns = form % 2 + (open ? 0 : 1);
+                const uint64_t id = 7000 + ((uint64_t)saved * 2 * BUSTER_ARRAY_LENGTH(frames) + shape) * 4 + form;
+                UnwindTier0Fixture fixture;
+                uint32_t tail_records[4];
+                uint32_t expected_tails[4 * 8];
+                if (!unwind_tier0_test_expect(test, unwind_tier0_test_exits_fixture(&fixture, (uint8_t)saved, frame, pointer, returns, open, tail_records, expected_tails),
+                                              "build each frame's exits", id))
+                {
+                    continue;
+                }
+                const bool frameless = saved == 0 && frame == 0 && !pointer;
+                // A frameless function's tails Tier 1 doesn't publish: its rules are the CIE's throughout.
+                if (frameless)
+                {
+                    fixture.code.tail_count = 0;
+                    fixture.code.tail_records = 0;
+                    fixture.expected.tail_count = 0;
+                    fixture.expected.tails = 0;
+                }
+                UnwindFunction descriptor;
+                uint32_t tails[4 * 8];
+                memset(&descriptor, 0xe7, sizeof(descriptor));
+                memset(tails, 0xe7, sizeof(tails));
+                const UnwindError error = unwind_tier0_frame_tails(&fixture.code, fixture.offsets, fixture.size, &descriptor, tails);
+                const uint32_t per = unwind_tail_events(&fixture.expected);
+                const bool same = error == UNWIND_OK && descriptor.tails == (fixture.expected.tail_count != 0 ? tails : 0) &&
+                                  memcmp(tails, expected_tails, (uint64_t)fixture.expected.tail_count * per * sizeof(uint32_t)) == 0;
+                descriptor.tails = fixture.expected.tails;
+                unwind_tier0_test_expect(test, same && memcmp(&descriptor, &fixture.expected, sizeof(descriptor)) == 0 && unwind_check(&descriptor, 1) == UNWIND_OK,
+                                         "Tier 1's exits read as tails, open or closed", id);
+            }
+        }
+    }
+    // The refusals, from a fixed frame's and a frame pointer's code with one early return, closed and open.
+    for (uint32_t base = 0; base < 4; base += 1)
+    {
+        for (uint32_t mutation = 0; mutation < 4; mutation += 1)
+        {
+            const bool pointer = base % 2 != 0;
+            const bool open = base >= 2;
+            UnwindTier0Fixture fixture;
+            uint32_t tail_records[4];
+            uint32_t expected_tails[4 * 8];
+            const uint64_t id = 7900 + base * 4 + mutation;
+            if (!unwind_tier0_test_expect(test, unwind_tier0_test_exits_fixture(&fixture, 37, pointer ? 0 : 40, pointer, 1, open, tail_records, expected_tails),
+                                          "build the exits' refusal baselines", id))
+            {
+                continue;
+            }
+            const uint32_t ret = tail_records[0];
+            UnwindError wanted = UNWIND_ERROR_UNSUPPORTED;
+            switch (mutation)
+            {
+                case 0: fixture.records[ret].form = X86_FORM_NOP; break;
+                case 1: fixture.records[ret - 1].rm = X86_REGISTER_R14; break;
+                case 2: fixture.code.frame_open = !open; break;
+                case 3: tail_records[0] = fixture.code.count; wanted = UNWIND_ERROR_INVALID; break;
+            }
+            UnwindFunction descriptor;
+            memset(&descriptor, 0xe7, sizeof(descriptor));
+            UnwindFunction sentinel;
+            memcpy(&sentinel, &descriptor, sizeof(sentinel));
+            uint32_t tails[4 * 8];
+            // An open frame published closed has no epilogue at its end, and a closed one published open ends in its
+            // epilogue's ret, which an open frame's last record isn't: both refused.
+            const UnwindError error = unwind_tier0_frame_tails(&fixture.code, fixture.offsets, fixture.size, &descriptor, tails);
+            unwind_tier0_test_expect(test, error == wanted && memcmp(&descriptor, &sentinel, sizeof(descriptor)) == 0, "Tier 1's exits' refusals leave the descriptor alone", id);
+        }
+    }
+}
+
 static void unwind_tier0_test_guards(UnwindTier0Test* test)
 {
     const int64_t page_size = sysconf(_SC_PAGESIZE);
@@ -1013,6 +1217,7 @@ static bool unwind_tier0_test(void)
         unwind_tier0_test_boundaries(&test);
         unwind_tier0_test_guards(&test);
         unwind_tier0_test_frames(&test);
+        unwind_tier0_test_exits(&test);
         unwind_tier0_test_terminal(&test, &arena);
         unwind_tier0_test_generated(&test, &arena);
     }

@@ -26,6 +26,15 @@ external implementation or test corpus is incorporated.
 Every build and test runs on the approved 9700X through the shared per-run lock.
 The new test commands are also in the existing protected workflow.
 
+`interpreter.c` runs Tier 0's masks (#179, [Tier 0's guide](tier0.md)'s "Masks"):
+conversions to and from integers, `LOAD`, `STORE` and `SET` of a mask's bytes,
+`AND`, `OR`, `XOR` and `NOT` of one width, and every class's `DUP`, `DISCARD` and
+`JUMP_VALUE`, each mask's bits in its value's low word (zeros past its width) and
+its bytes in the high word; a width other than an entry's is `INTERPRETER_INVALID`.
+Like the other classes past `F80`, a mask's frame object and machine operations
+(`X86` rows) aren't modelled. `test-tier0`'s masks check runs its random programs
+without rows or objects through it against their native code.
+
 Dynamic-stack text uses `alloca.ptr %size`, `stack_save.i64` and
 `stack_restore.void %position` with no extra metadata. Both interpreter fronts
 execute the [shared dynamic-stack contract](ir.md#dynamic-stack-contract).

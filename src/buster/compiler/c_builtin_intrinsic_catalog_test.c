@@ -164,7 +164,7 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
     const char generic_name[] = "__builtin_bswap32";
     const char bit_cast_name[] = "__builtin_bit_cast";
     const char va_list_name[] = "__builtin_va_list";
-    const char outside[] = "__builtin_ia32_lfence";
+    const char outside[] = "__builtin_ia32_readeflags_u32";
     const char suffix[] = "__builtin_ia32_enqcmdtail";
     const char prefix[] = "x__builtin_ia32_enqcmd";
     const BuiltinIntrinsicInfo* positive_info = builtin_intrinsic_own_main_lookup(positive, sizeof(positive) - 1);

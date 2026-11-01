@@ -122,7 +122,9 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
                  a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_benchmark_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        equal = check_benchmark_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] &&
+        const CheckValue value_a = check_stream_value(a, i);
+        const CheckValue value_b = check_stream_value(b, i);
+        equal = check_benchmark_value_equal(&value_a, &value_b) && a->diagnostics[i] == b->diagnostics[i] &&
                 a->warnings[i] == b->warnings[i] && a->warning_ignored[i] == b->warning_ignored[i] && a->member_offsets[i] == b->member_offsets[i];
         equal = equal && a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t j = 0; equal && j < 3; j += 1)
@@ -283,7 +285,7 @@ int run_checker_benchmark(int argc, char** argv)
                     {
                         CheckStream conditioning;
                         valid = check_graph_run(&types, &graph, &output, &scratch, &scalar, &conditioning);
-                        __asm__ volatile("" : : "r"(conditioning.values) : "memory");
+                        __asm__ volatile("" : : "r"(conditioning.value_types) : "memory");
                         arena_pop_to(&output, expected_end);
                     }
                 }

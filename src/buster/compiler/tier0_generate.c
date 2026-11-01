@@ -299,7 +299,7 @@ static const char* tier0_c_type(uint32_t class)
 {
     static const char* const names[BUSTER_TYPED_CLASSES] = {
         "void", "signed char", "unsigned char", "short", "unsigned short", "int", "unsigned", "long", "unsigned long", "float", "double",
-        "long double", "__int128", "unsigned __int128", "char __attribute__((vector_size(64)))",
+        "long double", "__int128", "unsigned __int128", "char __attribute__((vector_size(64)))", "unsigned long long",
     };
     return names[class < BUSTER_TYPED_CLASSES ? class : 0];
 }

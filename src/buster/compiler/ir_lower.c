@@ -832,6 +832,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_STRUCTURE;
             check.instruction = typed.node;
         }
+        else if (input->masks)
+        {
+            // Tier 0's masks (#179), whose conversions to and from integers the IR's m8 to m64 have no operation for
+            // (ir_simd's contract): the caller's Tier 0 compiles the function.
+            check.error = IR_ERROR_UNSUPPORTED;
+        }
     }
     IrSimdTypedOperation* operations = 0;
     for (uint32_t i = 0; check.error == IR_OK && i < input->count; i += 1)

@@ -43,7 +43,7 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
         effects |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
                                                      builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
         const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
-                                 (op == CHECK_OP_BUILTIN_FLOAT && builtin >= CBUILTIN_NAN && builtin <= CBUILTIN_NANL) ||
+                                 (op == CHECK_OP_BUILTIN_FLOAT && cbuiltin_float_nan(builtin)) ||
                                  (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_NONDETERMINISTIC_VALUE);
         if (!unevaluated)
         {

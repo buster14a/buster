@@ -63,8 +63,9 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Test c-testsuite's programs with Tier 1's code [4 CPUs]
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
-# others by Tier 0), by both paths, whose allocators assign registers differently, both programs run; the scalar
-# path's executable the same bytes with the ids in source order and in another (#153). The declared subset must pass.
+# others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
+# both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
+# The declared subset must pass.
 ./build/compiler test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
@@ -351,7 +352,7 @@ musl="$corpus/libc/musl"
 ./build/compiler test-lexer --no-digraphs
 == Test the C driver's source rows and DWARF
 # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb; and the unwind tables,
-# through backtrace() and gdb at every instruction.
+# through backtrace() and gdb at every instruction, Tier 1's frames' among them (#177).
 ./build/compiler test-check-debug --cross-check
 == Test branch sizing
 # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's

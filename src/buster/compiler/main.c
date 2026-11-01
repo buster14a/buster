@@ -540,6 +540,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ssa_ir_test.c"
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
+#include "buster/compiler/tier0_mask_test.c"
 #include "buster/compiler/interpreter_native_test.c"
 #include "buster/compiler/interpreter_link_test.c"
 #include "buster/compiler/ir_interpreter_test.c"

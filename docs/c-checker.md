@@ -857,8 +857,19 @@ readers.
 and operand edges stay in `CheckGraph`; the stream adds node-indexed semantic
 columns without renumbering or expanding the graph:
 
-- `values` stores each node's `TypeId`, value category, constant representation,
-  flags, optional object/addend, bit width and deferred evaluation fault.
+- Each node's value (`CheckValue`: its `TypeId`, value category, constant
+  representation, flags, optional object/addend, bit width and deferred
+  evaluation fault) is in columns (#628). `value_types`, `value_flags`,
+  `value_objects`, `value_categories` and `value_constants` hold the fields
+  that most readers read alone. A node whose value has more (a constant's
+  payload, an address constant's offset, a bit-field's place, an overload set,
+  a fault) also has its whole value as a row of `payloads`, its row's index
+  plus one in `payload_rows`, 0 for none. On `sqlite3.c` 12% of the nodes have
+  a row, where 36% have an object. `check_stream_value` gives a node's whole
+  value, and `check_stream_type`, `check_stream_flags`,
+  `check_stream_category`, `check_stream_constant_kind` and
+  `check_stream_object` its fields. A hand-built stream may hold a whole value
+  per node in `dense_values` instead, which the accessors read the same way.
 - `conversions` contains three operand records and a separate store record per
   node. Each records the
   destination type and the applicable lvalue, array/function decay, promotion,
@@ -1961,8 +1972,16 @@ What the lowering covers past scalars (#145's programs):
   low bits' direction for 8 to 11, as clang's code does.
 
   A function with an X86
-  entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
-  opmask's are integers. A builtin the table doesn't name is refused by name
+  entry has vectors (`Tier0Function.vectors`) whatever its values' classes. Its
+  masks are C's integers (`__mmask16` is an `unsigned short`), and where the
+  unit's target has AVX-512 BW and DQ, a row's masks are Tier 0's mask class
+  (#179, `check_x86_lower_masks`): a mask operand its records would move into
+  an opmask register from its integer is taken there by role, a mask result
+  they would move out is left there, their other opmask registers are scratch
+  roles, and the moves are Tier 0's conversions from and to the C type around
+  the row, so that the function has masks (`Tier0Function.masks`). A row whose
+  registers don't map onto roles (VP2INTERSECT's pair, a mask's integer read
+  otherwise) keeps the moves, its opmask registers by number. A builtin the table doesn't name is refused by name
   ("this x86 builtin"), and so are one whose instructions the target hasn't and
   a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
   instructions name fixed registers, or would write the vector registers

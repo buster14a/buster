@@ -339,8 +339,8 @@ static void check_const_source_atomic_runtime(CheckTest* test)
                 const bool runtime = stream.constant_evaluated != NULL && stream.constant_evaluated[node] == 0 &&
                                      operand < node && stream.constant_evaluated[operand] == 0;
                 check_test_expect(test, runtime && (stream.conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0 &&
-                                       (stream.values[node].flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
-                                       stream.values[node].constant_kind == CHECK_CONSTANT_NONE,
+                                       (check_stream_flags(&stream, node) & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
+                                       check_stream_constant_kind(&stream, node) == CHECK_CONSTANT_NONE,
                                   "ordinary const atomic scalar/member returns retain observable lvalue loads outside the constant closure");
                 returns += 1;
             }

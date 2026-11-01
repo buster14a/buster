@@ -1531,7 +1531,9 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
                  a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_test_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
+        const CheckValue value_a = check_stream_value(a, i);
+        const CheckValue value_b = check_stream_value(b, i);
+        equal = check_test_value_equal(&value_a, &value_b) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
                 (a->diagnostic_operands != NULL ? a->diagnostic_operands[i] : 0) == (b->diagnostic_operands != NULL ? b->diagnostic_operands[i] : 0) &&
                 (a->member_offsets != NULL ? a->member_offsets[i] : 0) == (b->member_offsets != NULL ? b->member_offsets[i] : 0) &&
                 (a->warning_ignored != NULL ? a->warning_ignored[i] : 0) == (b->warning_ignored != NULL ? b->warning_ignored[i] : 0) &&
@@ -1682,9 +1684,9 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         check_test_expect(test, valid, "context fixture checker run");
         if (valid)
         {
-            check_test_expect(test, stream.values[logical].fault == CHECK_FAULT_NONE && stream.values[logical].integer == 0, "graph short circuit evaluated an unselected operand");
-            check_test_expect(test, stream.values[size].integer == 4 && stream.values[size].fault == CHECK_FAULT_NONE, "graph sizeof evaluated its operand");
-            check_test_expect(test, stream.values[selected].fault == CHECK_FAULT_DIVIDE_BY_ZERO, "graph lost selected evaluation fault");
+            check_test_expect(test, check_stream_value(&stream, logical).fault == CHECK_FAULT_NONE && check_stream_value(&stream, logical).integer == 0, "graph short circuit evaluated an unselected operand");
+            check_test_expect(test, check_stream_value(&stream, size).integer == 4 && check_stream_value(&stream, size).fault == CHECK_FAULT_NONE, "graph sizeof evaluated its operand");
+            check_test_expect(test, check_stream_value(&stream, selected).fault == CHECK_FAULT_DIVIDE_BY_ZERO, "graph lost selected evaluation fault");
             check_test_expect(test, stream.diagnostics[invalid] == CHECK_DIAG_INTEGER_REQUIRED, "graph hid a constraint violation in an unevaluated branch");
             bool assertion_report = false;
             bool evaluation_report = false;
@@ -1708,7 +1710,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         }
         check_test_compare_graph(test, table, &graph, output, scratch, true);
         const bool chain_valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
-        check_test_expect(test, chain_valid && stream.values[previous].integer == 127, "same-bracket-depth dependency chain was evaluated too early");
+        check_test_expect(test, chain_valid && check_stream_value(&stream, previous).integer == 127, "same-bracket-depth dependency chain was evaluated too early");
         arena_pop_to(output, output_mark);
         graph.count = 0;
         graph.leaf_count = 0;
@@ -5534,7 +5536,7 @@ static __attribute__((noinline)) void check_test_type_capacity(CheckTest* test)
             CheckStream stream;
             const bool checked = check_graph_run(&table, &graph, &output, &scratch, &options, &stream);
             check_test_expect(test, !checked && stream.status == CHECK_STATUS_RESOURCE && stream.failed_node == 1 && stream.count == 0 &&
-                                   stream.values == 0 && output.length == output_mark && scratch.length == scratch_mark,
+                                   !check_stream_has_values(&stream) && output.length == output_mark && scratch.length == scratch_mark,
                               "scheduler exposes type-capacity failure and rolls back output");
         }
     }
@@ -5582,6 +5584,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 }
 
 #include "c_check_graph_test.c"
+#include "c_check_stream_columns_test.c"
 #include "c_check_builtin_graph_test.c"
 #include "c_check_varargs_graph_test.c"
 #include "c_check_special_graph_test.c"
@@ -5646,6 +5649,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_selection_test.c"
 #include "c_check_program_library_test.c"
 #include "c_check_program_classify_test.c"
+#include "c_check_program_constants_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -5724,6 +5728,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_asm = false;
     bool program_bits = false;
     bool program_align = false;
+    bool program_float_constants = false;
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
@@ -5775,6 +5780,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_align = true;
         }
+        else if (strcmp(argv[i], "--program-float-constants") == 0)
+        {
+            program_float_constants = true;
+        }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
@@ -5804,10 +5813,10 @@ static int run_checker_tests(int argc, char** argv)
     }
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
-                                                           program_bits || program_align || program_overloads || program_library ||
-                                                           embed_initializers || sizeof_only));
+                                                           program_bits || program_align || program_float_constants || program_overloads ||
+                                                           program_library || embed_initializers || sizeof_only));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5869,6 +5878,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_align)
         {
             check_test_align(&test, clang);
+        }
+        else if (initialized && program_float_constants)
+        {
+            check_test_float_constants(&test, clang);
         }
         else if (initialized)
         {
@@ -6068,6 +6081,14 @@ static int run_checker_tests(int argc, char** argv)
             }
             if (check_test_takes())
             {
+                check_test_stream_columns(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_fresh_output(&test);
+            }
+            if (check_test_takes())
+            {
                 check_test_target_options(&test);
             }
             if (check_test_takes())
@@ -6085,6 +6106,14 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_input_scans(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_selection_positions(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_asm_label_kernels(&test);
             }
             if (check_test_takes())
             {
@@ -6247,6 +6276,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_classify(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_float_constants(&test, clang);
             }
             if (check_test_takes())
             {

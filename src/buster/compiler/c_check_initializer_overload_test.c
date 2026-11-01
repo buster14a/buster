@@ -44,7 +44,7 @@ static void check_init_test_overload_parts(CheckTest* test, const CheckInput* in
                     const bool wide = fixture == 2 || (fixture >= 3 && part->bit_offset % 128 == 64);
                     const uint32_t selected = wide ? 1 : fixture >= 5 ? 2 : 0;
                     const CheckOverloadCandidate* candidate = input->graph.overload_candidates + selected;
-                    const CheckValue original = stream->values[part->node];
+                    const CheckValue original = check_stream_value(stream, part->node);
                     check_test_expect(test, part->value.object == candidate->object && part->value.overload_head == 0 &&
                                            part->value.constant_kind == CHECK_CONSTANT_ADDRESS && part->value.offset == 0 &&
                                            (part->value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0,
