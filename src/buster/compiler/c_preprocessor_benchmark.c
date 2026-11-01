@@ -28,11 +28,12 @@
 // history deferred (PPOptions.defer_history, as -E and `parse` run them: a unit without diagnostics records none), or
 // without skipping the inclusions of guarded files (#120), whose output must be the same. --spelling-cost replaces them
 // with the vectorized kernels whose printer gives every chunk's spellings by its general loop, token by token, as
-// before #649's pp_print_spellings (PPOptions.print_per_token), whose printed bytes must be the same (a digest of each
-// one's warm-up print, into memory). --markers runs and prints as -E without -P does: with the expansion starts its
-// line markers read and the history deferred (PPOptions.expansion_starts and defer_history, as the -E driver sets
-// them), the printing timed with its line markers; it doesn't go with --history-cost, which defers the history of
-// its second implementation alone, nor with --clang, which times `clang -E -P`. --only
+// before #649's pp_print_spellings (PPOptions.print_per_token). Every run's printed bytes must be the same, whatever the
+// implementation and the read limit: a digest of each one's warm-up print, into memory. --markers runs and prints as -E
+// without -P does: with the expansion starts its line markers read and the history deferred (PPOptions.expansion_starts
+// and defer_history, as the -E driver sets them), the printing timed with its line markers; of the controls it takes
+// --spelling-cost alone (--history-cost defers the history of its second implementation alone, and --guard-cost's
+// entered files move the locations the markers print), and not --clang, which times `clang -E -P`. --only
 // runs one implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena
 // rather than maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each
 // pass runs each implementation with each of them in turn, which must all give the same output. It also reports the
@@ -106,7 +107,7 @@ struct PPBenchmarkSample
     // and --history-cost the second.
     uint64_t token_digest;
     uint64_t digest;
-    // With `print_digest`, of the printed text, from a print into memory after the timed one.
+    // With `print_digest` (the warm-up's), of the printed text, from a print into memory after the timed one.
     uint64_t print_digest;
 };
 
@@ -934,9 +935,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
-    // One control at a time; --markers defers every run's history, which --history-cost compares, and --clang times
-    // `clang -E -P`, without line markers.
-    valid = valid && (uint32_t)history_cost + (uint32_t)guard_cost + (uint32_t)spelling_cost <= 1 && !(with_markers && (history_cost || with_clang));
+    // One control at a time, and with --markers only --spelling-cost: --markers defers every run's history, which
+    // --history-cost compares, a guarded file entered rather than skipped (--guard-cost) moves the locations the line
+    // markers print, and --clang times `clang -E -P`, without line markers.
+    valid = valid && (uint32_t)history_cost + (uint32_t)guard_cost + (uint32_t)spelling_cost <= 1 &&
+            !(with_markers && (history_cost || guard_cost || with_clang));
     const bool parsed = !tables && !defines && embed == 0 && valid && file_count != 0 && with_input != 0 && only != 0 &&
                         pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
     // clang's arguments (pp_clang_arguments): ours but --predefines, with ours' search for --buster-headers, whose links
@@ -1010,7 +1013,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 run.expansion_starts = with_markers;
                 run.no_guard_skip = guard_cost && implementation == 1;
                 run.print_per_token = spelling_cost && implementation == 1;
-                ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, with_markers, spelling_cost && pass == 0, &sample,
+                ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, with_markers, pass == 0, &sample,
                                         &input_tokens, &output_tokens);
                 const uint32_t compared = history_cost ? 0 : implementation;
                 if (!have_digest[compared])
@@ -1023,15 +1026,16 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     fprintf(stderr, history_cost ? "deferring the history changed the output token digest\n" : "the read limit changed the output token digest\n");
                     ran = false;
                 }
-                // The warm-up's prints: --spelling-cost's two printers must print the same bytes.
-                if (spelling_cost && pass == 0 && !have_print_digest)
+                // The warm-up's prints: every run prints the same bytes, with line markers or without (the vectorized
+                // printer and the scalar one, or --spelling-cost's two, at every read limit).
+                if (pass == 0 && !have_print_digest)
                 {
                     expected_print_digest = sample.print_digest;
                     have_print_digest = true;
                 }
-                else if (spelling_cost && pass == 0 && sample.print_digest != expected_print_digest)
+                else if (pass == 0 && sample.print_digest != expected_print_digest)
                 {
-                    fprintf(stderr, "the printer's spellings token by token changed the printed text\n");
+                    fprintf(stderr, spelling_cost ? "the printer's spellings token by token changed the printed text\n" : "the printed text differs between the runs\n");
                     ran = false;
                 }
                 if (guard_cost && !have_token_digest)

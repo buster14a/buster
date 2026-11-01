@@ -5049,11 +5049,13 @@ output's tokens must be the same (#120).
 `--markers` runs and prints as `-E` without `-P` does: with the expansion starts
 the line markers read and the history deferred (`PPOptions.expansion_starts` and
 `defer_history`, as the `-E` driver sets them), the printing timed with its line
-markers and reported as `-E with printing`; it refuses `--history-cost` and
-`--clang`. `--spelling-cost` times the vectorized kernels with the printer's
-spellings by `pp_print_spellings` (`spellings`) and by its general loop for every
-chunk (`per-token`, `PPOptions.print_per_token`), in place of the scalar twins:
-their warm-up prints' bytes must be the same (#649). With line markers the
+markers and reported as `-E with printing`; of the controls it takes
+`--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
+vectorized kernels with the printer's spellings by `pp_print_spellings`
+(`spellings`) and by its general loop for every chunk (`per-token`,
+`PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
+warm-up print, with markers or without, must give the same bytes, whatever the
+implementation and the read limit. With line markers the
 general loop prints in the time the printer before #649 took; with `-P`, it
 printed 7–17% slower than that printer on an AVX-512 Xeon, so `main.c`'s `-P`
 history is `-P`'s before. The 9700X job runs both, with and without
