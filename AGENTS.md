@@ -347,7 +347,14 @@ designs and the compilers already built this way.
   (#179)" have the contract and what is pending.
 
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
-  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  #177, whose steps are Tier 0's frame protocol (callee-saved registers pushed,
+  one subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
+  realignment and its R15 base after the subtraction), which the C driver's
+  unwind tables describe from Tier 1's published frame (`check_tier1_frame`,
+  early returns as tails, an open frame where the code doesn't end in its last
+  epilogue: the frame guide's "Unwind tables"; `test-check-debug --cross-check`
+  unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every instruction).
+  `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
   `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
   variadic saves and guarded page probes. [The frame guide](docs/tier1-frame.md)
@@ -382,7 +389,12 @@ designs and the compilers already built this way.
   them natively against clang -O0's build. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
-  bit builtins' and `expect`'s; `test-checker --program-align` runs them.
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them. The
+  signaling NaNs and the `_Float16` and `__float128` constants (`nans`,
+  `nanf16`, `inff128` and the others) are floating builtins, their NaNs' bits
+  exact in static data and code (`check_action_nan_bits`); `test-checker
+  --program-float-constants` runs them against clang (the guide's "Signaling
+  NaNs and the `_Float16` and `__float128` constants").
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
@@ -392,8 +404,9 @@ designs and the compilers already built this way.
   #126); `test-checker` runs them against clang's code and checks that a
   misaligned one is refused exactly where clang calls libatomic. The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
-  `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
-  `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
+  `xsetbv`, `monitorx`, `mwaitx`, `tzcnt`, `lzcnt_u16`, the fences, `clflush`,
+  `ldmxcsr`, `stmxcsr`, Key Locker's, `umwait`, `tpause` and `xbegin`) are
+  per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
   of vectors and pointers both, and its encryptions' with a branch that branch
   sizing sizes. The library builtins (`c_builtin_library.c`) are calls of their
   C library functions by name, with their rows' prototypes, folded where clang
@@ -499,8 +512,8 @@ designs and the compilers already built this way.
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
-  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, with
-  `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` and
+  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
+  unwind tables alike, #177's `check_tier1_frame`; without `-g`; `--tier1-report` and
   `--tier1-refusals` say which step refused the others, and
   `--tier1-no-rematerialize` compiles them without rematerialization: [the Tier 1
   guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
@@ -894,7 +907,11 @@ designs and the compilers already built this way.
   and gdb's backtrace at every instruction of each function, whose steps must
   reach every instruction of gdb's disassembly of it; and a `SIGILL` handler's
   `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
-  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret).
+  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret);
+  and a `--tier1 --verify` fixture's Tier 1 frames (#177: spill slots alone,
+  pushes, two returns, an open frame, a realigned one, a red-zone leaf, the
+  shapes `--tier1-report`'s counts show), walked by `backtrace()` by each path
+  and linked by GNU ld and lld, and by gdb at every instruction.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -916,11 +933,13 @@ designs and the compilers already built this way.
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
   refuses, and realigned frames', whose `and rsp` and base's `mov` it checks;
   `unwind_tier0_frame_tails` with a function's tail calls' teardowns, #147,
-  each remembered and restored around its jump);
+  each remembered and restored around its jump, and Tier 1's early returns'
+  as such teardowns before their rets, #177);
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
-  batch. `check_program_emit` writes the C driver's unwind tables so, one
-  EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  batch, and for Tier 1's open frames (`UnwindFunction.open`, #177) no epilogue
+  at the end, each return a tail. `check_program_emit` writes the C driver's
+  unwind tables so, one EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
   frame against the analyzer and actual Tier 0 code, a frame pointer's and
   realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges
@@ -1052,8 +1071,12 @@ designs and the compilers already built this way.
   files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
   `__libc_start_main`), which applies their `IRELATIVE` relocations, or
   `--startup-applies-irelative` says the program's own does. It keeps the
-  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
-  pooling and CIE pooling are off by default.
+  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. It takes
+  GCC's `collect2` LTO plugin options (`-plugin` for `liblto_plugin.so` or
+  `LLVMgold.so`, and `-plugin-opt=...`) when no input needs the plugin, and
+  refuses a direct object or loaded archive member with a `.gnu.lto_*` or
+  `.llvm.lto` section, or raw LLVM bitcode, by input, member and section
+  (#816). GC, literal pooling and CIE pooling are off by default.
   It runs on the lanes its objects pay for (#594, `foreign_driver_lanes`): one,
   and one more per 3 MB of its objects, at most 8 and one per core of the CPUs
   it may run on, which lane 0 decides by opening the command line's first inputs
@@ -1274,7 +1297,18 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`); long double's, the 128-bit integers' and the
-  vectors' values keep their own slots there, by their true depths (#780). The
+  vectors' values keep their own slots there, by their true depths (#780).
+  AVX-512's masks (MASK, #179) are a third stack beside the integer and the
+  floating ones, of 1 to 8 bytes each: depths 0 to 6 in k1 to k7, deeper ones in
+  frame slots (`Tier0Frame.mask_area`), saved around calls (every opmask
+  register is caller-saved) and around rows that name opmask registers by
+  number; rows take them by role (`MASK(j)`, `MASK_RESULT`, `MASK_SCRATCH(k)`,
+  borrowing k1 on past k7), and the stack's depths are a column of their own
+  in a function with masks (`Tier0Function.masks`, `tier0_vector_mask_depths`
+  and its twin). `interpreter.c` runs them; `ir_lower.c` refuses them; the
+  front end's AVX-512 builtins are their first user (`check_x86_lower_masks`);
+  `test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over
+  them natively against the interpreter and a model of its own. The
   output is
   the records with #144's branch columns, `LinkReference`s, the frame
   (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
@@ -6114,7 +6148,23 @@ arguments', the parameters' and the result's tables at its edges, on a plain
 function and one with a result object; and in every program above, the
 vector path must take each function, and one change of each in every fourth
 program (a kind, a class or a value, two entries swapped, one removed or
-repeated) only where the scalar validator takes it.
+repeated) only where the scalar validator takes it. Then the `masks` check
+(`tier0_mask_test.c`, #179): `--count` random programs over the mask class,
+each compiled by both paths into the same records and both encoders into the
+same bytes, linked with a callee whose masks fill k1 to k7, and run natively
+where the host has AVX-512 F, VL, BW and DQ, every output byte against the
+check's stack machine and, for the programs without rows or frame objects,
+`interpreter.c`'s: masks of every width loaded, converted from every integer
+class (constants, loads and calls' results) and back, in frame objects, under
+DUP, STORE's kept value and `?:`, chains of 6 to 12 live masks (past k7, where
+the logic meets masks in their slots), calls with masks live and past k7, and
+rows by role (with scratch registers, from and to integers, past k7) and by
+number (under live masks). Its coverage must reach every mask kind of each
+width, conversions from each, every row, both arms, the mask stack past 9,
+both kinds of call and a row past k7. A zero-masked vector move whose
+decoration is a role runs under no live mask and under seven, against C; and
+each of the class's rules is refused (`tier0_validate`'s and
+`tier0_operation_valid`'s), with its valid neighbours taken.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines

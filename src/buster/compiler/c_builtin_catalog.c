@@ -410,7 +410,18 @@
     X(ALIGN_UP, 0x3e0u, "__builtin_align_up", BUSTER_CBUILTIN_CONSTANT) \
     X(ALIGN_DOWN, 0x3e1u, "__builtin_align_down", BUSTER_CBUILTIN_CONSTANT) \
     X(IS_ALIGNED, 0x3e2u, "__builtin_is_aligned", BUSTER_CBUILTIN_CONSTANT) \
-    X(EXPECT_WITH_PROBABILITY, 0x3e3u, "__builtin_expect_with_probability", BUSTER_CBUILTIN_CONSTANT)
+    X(EXPECT_WITH_PROBABILITY, 0x3e3u, "__builtin_expect_with_probability", BUSTER_CBUILTIN_CONSTANT) \
+    X(NANS, 0x3e4u, "__builtin_nans", BUSTER_CBUILTIN_SOURCE) \
+    X(NANSF, 0x3e5u, "__builtin_nansf", BUSTER_CBUILTIN_SOURCE) \
+    X(NANSL, 0x3e6u, "__builtin_nansl", BUSTER_CBUILTIN_SOURCE) \
+    X(NANF16, 0x3e7u, "__builtin_nanf16", BUSTER_CBUILTIN_SOURCE) \
+    X(NANSF16, 0x3e8u, "__builtin_nansf16", BUSTER_CBUILTIN_SOURCE) \
+    X(INFF16, 0x3e9u, "__builtin_inff16", BUSTER_CBUILTIN_SOURCE) \
+    X(HUGE_VALF16, 0x3eau, "__builtin_huge_valf16", BUSTER_CBUILTIN_SOURCE) \
+    X(NANF128, 0x3ebu, "__builtin_nanf128", BUSTER_CBUILTIN_SOURCE) \
+    X(NANSF128, 0x3ecu, "__builtin_nansf128", BUSTER_CBUILTIN_SOURCE) \
+    X(INFF128, 0x3edu, "__builtin_inff128", BUSTER_CBUILTIN_SOURCE) \
+    X(HUGE_VALF128, 0x3eeu, "__builtin_huge_valf128", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -546,6 +557,30 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
 static __attribute__((unused)) bool cbuiltin_vector(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_NONTEMPORAL_STORE) || (id >= CBUILTIN_ELEMENTWISE_ACOS && id <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE);
+    return result;
+}
+
+// The constant floating builtins past huge_val, inf and nan of float, double and long double (0x140 to 0x148): clang's
+// signaling NaNs of those types (nans, nansf and nansl) and the _Float16 and __float128 forms (0x3e4 to 0x3ee), which the
+// checker takes as floating builtins.
+static __attribute__((unused)) bool cbuiltin_float_constant_extra(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_NANS && id <= CBUILTIN_HUGE_VALF128;
+    return result;
+}
+
+// Whether an identity is a NaN's builtin, whose argument is its payload's string: nan, nanf and nanl, and the extra ones.
+static __attribute__((unused)) bool cbuiltin_float_nan(uint32_t id)
+{
+    const bool result = (id >= CBUILTIN_NAN && id <= CBUILTIN_NANL) || (id >= CBUILTIN_NANS && id <= CBUILTIN_NANSF16) ||
+                        id == CBUILTIN_NANF128 || id == CBUILTIN_NANSF128;
+    return result;
+}
+
+// Whether a NaN's builtin gives a signaling NaN (nans, nansf, nansl, nansf16 and nansf128).
+static __attribute__((unused)) bool cbuiltin_float_signaling(uint32_t id)
+{
+    const bool result = (id >= CBUILTIN_NANS && id <= CBUILTIN_NANSL) || id == CBUILTIN_NANSF16 || id == CBUILTIN_NANSF128;
     return result;
 }
 

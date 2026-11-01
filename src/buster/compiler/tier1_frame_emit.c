@@ -4,7 +4,10 @@
 // Native x86-64 SysV consumer of tier1_frame.c's bounded prologue/epilogue steps. Include after the frame planner and
 // x86_64_encoder.c. The shared append buffer also belongs to the Tier 1 instruction consumer: branches and targets
 // are absolute record indices, ready for size_branches once the whole function is present. No byte offsets or unwind
-// rows are published here; #88 still needs actual instruction-PC events from the final encoded function.
+// rows are published here. Without probes the records are Tier 0's frame protocol in Tier 0's forms (push and pop, the
+// frame pointer's and the base's `mov` in their RM64_R64 form, `sub`, `add` and `and` with an imm8 where the amount
+// fits, the reset's `lea` from rbp), which unwind_tier0_frame_tails reads the transitions' PCs from (#177); a probe's
+// loop moves rsp a page at a time, which no unwind table of that protocol describes.
 //
 // R11 is the only temporary register. Reserve it before allocation, in addition to tier1_frame_requirements' mask.
 // Probes preserve the incoming argument registers, XMM registers, and AL. The conditional vector save tests entry AL
@@ -76,6 +79,13 @@ static X86Instruction tier1_frame_emit_memory(uint16_t form, uint32_t reg, uint3
         .displacement = offset,
     };
     return record;
+}
+
+// An immediate's form: the sign-extended imm8 where the value fits it, which the unwind tables' reader takes as the
+// imm32 one (unwind_tier0_adjustment, unwind_tier0_realignment).
+static uint16_t tier1_frame_emit_form(uint16_t imm8, uint16_t imm32, int64_t value)
+{
+    return value >= INT8_MIN && value <= INT8_MAX ? imm8 : imm32;
 }
 
 static void tier1_frame_emit_add(Tier1EmitBuffer* buffer, X86Instruction record)
@@ -159,6 +169,11 @@ static bool tier1_frame_emit_step_valid(const Tier1FrameStep* step, bool epilogu
         valid &= step->reg == X86_REGISTER_RBP && step->base == X86_REGISTER_RSP && step->amount == 8;
         valid &= epilogue == (step->kind == TIER1_FRAME_POP_POINTER);
         break;
+    case TIER1_FRAME_PUSH_REGISTER:
+    case TIER1_FRAME_POP_REGISTER:
+        valid &= step->reg < 16 && ((BUSTER_ABI_CALLEE_SAVED >> step->reg) & 1) != 0 && step->base == X86_REGISTER_RSP && step->amount == 8;
+        valid &= epilogue == (step->kind == TIER1_FRAME_POP_REGISTER);
+        break;
     case TIER1_FRAME_SET_POINTER:
         valid &= !epilogue && step->reg == X86_REGISTER_RBP && step->base == X86_REGISTER_RSP;
         break;
@@ -166,7 +181,7 @@ static bool tier1_frame_emit_step_valid(const Tier1FrameStep* step, bool epilogu
         valid &= !epilogue && step->reg == BUSTER_TIER1_FRAME_REALIGN_BASE && step->base == X86_REGISTER_RSP;
         break;
     case TIER1_FRAME_RESET_STACK:
-        valid &= epilogue && step->reg == X86_REGISTER_RSP && step->base == X86_REGISTER_RBP;
+        valid &= epilogue && step->reg == X86_REGISTER_RSP && step->base == X86_REGISTER_RBP && step->offset <= 0 && step->offset >= -8 * 6 && (step->offset & 7) == 0;
         break;
     case TIER1_FRAME_ALIGN_STACK:
     case TIER1_FRAME_PROBE_ALIGN:
@@ -179,11 +194,8 @@ static bool tier1_frame_emit_step_valid(const Tier1FrameStep* step, bool epilogu
         valid &= step->reg == X86_REGISTER_RSP && step->base == X86_REGISTER_RSP && step->amount != 0 && step->amount <= INT32_MAX;
         valid &= epilogue == (step->kind == TIER1_FRAME_RELEASE);
         break;
-    case TIER1_FRAME_SAVE_REGISTER:
     case TIER1_FRAME_SAVE_VARIADIC_INTEGER:
-    case TIER1_FRAME_RESTORE_REGISTER:
-        valid &= step->reg < 16 && step->reg != X86_REGISTER_RSP && step->amount == 8;
-        valid &= epilogue == (step->kind == TIER1_FRAME_RESTORE_REGISTER);
+        valid &= !epilogue && step->reg < 16 && step->reg != X86_REGISTER_RSP && step->amount == 8;
         break;
     case TIER1_FRAME_SAVE_VARIADIC_VECTOR_IF_AL:
         valid &= !epilogue && step->reg >= BUSTER_ABI_REGISTER_VECTOR && step->reg < BUSTER_ABI_REGISTER_VECTOR + BUSTER_ABI_VECTOR_ARGUMENTS;
@@ -231,30 +243,41 @@ static Tier1FrameEmitError tier1_frame_emit(const Tier1Frame* frame, bool epilog
             {
             case TIER1_FRAME_PUSH_POINTER:
             case TIER1_FRAME_POP_POINTER:
-                tier1_frame_emit_add(&temporary, tier1_frame_emit_register(step.kind == TIER1_FRAME_PUSH_POINTER ? X86_FORM_PUSH_R64 : X86_FORM_POP_R64, 0, step.reg));
+            case TIER1_FRAME_PUSH_REGISTER:
+            case TIER1_FRAME_POP_REGISTER:
+            {
+                const bool push = step.kind == TIER1_FRAME_PUSH_POINTER || step.kind == TIER1_FRAME_PUSH_REGISTER;
+                tier1_frame_emit_add(&temporary, tier1_frame_emit_register(push ? X86_FORM_PUSH_R64 : X86_FORM_POP_R64, 0, step.reg));
                 break;
+            }
             case TIER1_FRAME_SET_POINTER:
             case TIER1_FRAME_SET_REALIGN_BASE:
+                // mov reg, rsp in Tier 0's form: rsp the ModRM reg operand's source.
+                tier1_frame_emit_add(&temporary, tier1_frame_emit_register(X86_FORM_MOV_RM64_R64, step.base, step.reg));
+                break;
             case TIER1_FRAME_RESET_STACK:
-                tier1_frame_emit_add(&temporary, tier1_frame_emit_register(X86_FORM_MOV_R64_RM64, step.reg, step.base));
+                // rsp back to the last push: `lea rsp, [rbp - 8n]`, or `mov rsp, rbp` with no pushes.
+                tier1_frame_emit_add(&temporary, step.offset != 0 ? tier1_frame_emit_memory(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, step.base, step.offset) :
+                                                                     tier1_frame_emit_register(X86_FORM_MOV_RM64_R64, step.base, X86_REGISTER_RSP));
                 break;
             case TIER1_FRAME_ALIGN_STACK:
-                tier1_frame_emit_add(&temporary, tier1_frame_emit_immediate(X86_FORM_AND_RM64_IMM32, X86_REGISTER_RSP, -(int32_t)step.amount));
+                tier1_frame_emit_add(&temporary, tier1_frame_emit_immediate(tier1_frame_emit_form(X86_FORM_AND_RM64_IMM8, X86_FORM_AND_RM64_IMM32, -(int64_t)step.amount),
+                                                                            X86_REGISTER_RSP, -(int32_t)step.amount));
                 break;
             case TIER1_FRAME_PROBE_ALIGN:
                 tier1_frame_emit_probe_align(step.amount, &temporary);
                 break;
             case TIER1_FRAME_ALLOCATE:
+                tier1_frame_emit_add(&temporary, tier1_frame_emit_immediate(tier1_frame_emit_form(X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, step.amount), X86_REGISTER_RSP, (int32_t)step.amount));
+                break;
             case TIER1_FRAME_RELEASE:
-                tier1_frame_emit_add(&temporary, tier1_frame_emit_immediate(step.kind == TIER1_FRAME_ALLOCATE ? X86_FORM_SUB_RM64_IMM32 : X86_FORM_ADD_RM64_IMM32, X86_REGISTER_RSP, (int32_t)step.amount));
+                tier1_frame_emit_add(&temporary, tier1_frame_emit_immediate(tier1_frame_emit_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, step.amount), X86_REGISTER_RSP, (int32_t)step.amount));
                 break;
             case TIER1_FRAME_PROBE_ALLOCATE:
                 tier1_frame_emit_probe_allocate(step.amount, &temporary);
                 break;
-            case TIER1_FRAME_SAVE_REGISTER:
             case TIER1_FRAME_SAVE_VARIADIC_INTEGER:
-            case TIER1_FRAME_RESTORE_REGISTER:
-                tier1_frame_emit_add(&temporary, tier1_frame_emit_memory(step.kind == TIER1_FRAME_RESTORE_REGISTER ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_RM64_R64, step.reg, step.base, step.offset));
+                tier1_frame_emit_add(&temporary, tier1_frame_emit_memory(X86_FORM_MOV_RM64_R64, step.reg, step.base, step.offset));
                 break;
             case TIER1_FRAME_SAVE_VARIADIC_VECTOR_IF_AL:
             {

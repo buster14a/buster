@@ -709,7 +709,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
-    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) ||
+    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) || cbuiltin_float_constant_extra(id) ||
              check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE || cbuiltin_float_class(id) || cbuiltin_float_signbit(id) ||
              cbuiltin_float_canonicalize(id))
     {

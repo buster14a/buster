@@ -1910,10 +1910,11 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_merge(&tally, executable, directory);
         check_units_test_merge_lease(&tally);
         check_units_test_shared(&tally, executable, directory);
-#if __has_feature(thread_sanitizer)
-        // ThreadSanitizer maps shadow for each mapping a run makes and keeps it, so a run neither returns the address space
-        // to its base nor fails at a limit of its own reservations. The other detectors' builds and plain ones check them.
-        printf("  reservations: not failed in turn under ThreadSanitizer, whose shadow grows the address space\n");
+#if BUSTER_SANITIZER_RESOURCES
+        // The detectors map shadow of their own, whose high-water mark the parent's VmPeak keeps above its VmSize: a
+        // probe inherits that peak, which hides the growth a limit would fail at, and a limit below the shadow stops
+        // the detector at its start. The plain builds, whose peak is the run's own, check every reservation's failure.
+        printf("  reservations: not failed in turn under a sanitizer, whose shadow grows the address space\n");
 #else
         check_units_test_limits(&tally, directory);
 #endif

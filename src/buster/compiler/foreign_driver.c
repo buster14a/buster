@@ -92,6 +92,8 @@ static void foreign_driver_usage(void)
                     "Named regular symbols and the inputs' DWARF are emitted by default; -s/--strip-all omits both, preserving\n"
                     "dynamic symbols, and -S/--strip-debug the DWARF alone.\n"
                     "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n"
+                    "-plugin PATH (GCC's liblto_plugin.so or LLVM's LLVMgold.so) and -plugin-opt=... are taken when no input needs\n"
+                    "the plugin; an object with .gnu.lto_* or .llvm.lto sections, or LLVM bitcode, is refused by name.\n"
                     "--time reports each stage's time on standard error.\n");
 }
 
@@ -111,6 +113,26 @@ static bool foreign_driver_count(const char* text, uint32_t* count)
     valid = valid && value != 0;
     *count = valid ? value : 0;
     return valid;
+}
+
+// Whether `path` names an LTO plugin whose options GCC's or LLVM's driver passes to the linker: GCC's
+// liblto_plugin.so (or a versioned liblto_plugin.so.N) or LLVM's LLVMgold.so. Any other plugin may transform ordinary
+// inputs, which this command doesn't run, so it is refused rather than ignored.
+static bool foreign_driver_lto_plugin(const char* path)
+{
+    static const char gcc[] = "liblto_plugin.so";
+    const char* name = strrchr(path, '/');
+    name = name != 0 ? name + 1 : path;
+    bool gcc_plugin = strncmp(name, gcc, sizeof(gcc) - 1) == 0;
+    if (gcc_plugin && name[sizeof(gcc) - 1] != 0)
+    {
+        gcc_plugin = name[sizeof(gcc) - 1] == '.' && name[sizeof(gcc)] != 0;
+        for (uint64_t i = sizeof(gcc); gcc_plugin && name[i] != 0; i += 1)
+        {
+            gcc_plugin = (name[i] >= '0' && name[i] <= '9') || name[i] == '.';
+        }
+    }
+    return gcc_plugin || strcmp(name, "LLVMgold.so") == 0;
 }
 
 static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** argv, Arena* arena)
@@ -278,6 +300,37 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         else if (strcmp(argument, "--time") == 0)
         {
             driver->time = true;
+        }
+        else if (strcmp(argument, "-plugin-opt") == 0 || strcmp(argument, "--plugin-opt") == 0 ||
+                 foreign_starts_with(argument, "-plugin-opt=") || foreign_starts_with(argument, "--plugin-opt="))
+        {
+            // GCC's collect2 passes the LTO wrapper's and the linker's options through it. Without an input that needs
+            // the plugin they change nothing, and an input that needs it is refused by name.
+            const char* equals = strchr(argument, '=');
+            const char* value = equals != 0 ? equals + 1 : i + 1 < argc ? argv[++i] : 0;
+            valid = value != 0 && value[0] != 0;
+            if (!valid)
+            {
+                fprintf(stderr, "link-foreign: invalid or missing value for %s\n", argument);
+            }
+        }
+        else if (strcmp(argument, "-plugin") == 0 || strcmp(argument, "--plugin") == 0 ||
+                 foreign_starts_with(argument, "-plugin=") || foreign_starts_with(argument, "--plugin="))
+        {
+            const char* equals = strchr(argument, '=');
+            const char* value = equals != 0 ? equals + 1 : i + 1 < argc ? argv[++i] : 0;
+            valid = value != 0 && value[0] != 0;
+            if (valid && !foreign_driver_lto_plugin(value))
+            {
+                valid = false;
+                fprintf(stderr, "link-foreign: unsupported plugin: %s (only GCC's liblto_plugin.so or LLVM's LLVMgold.so is taken, "
+                                "and its LTO transformations aren't run)\n",
+                        value);
+            }
+            else if (!valid)
+            {
+                fprintf(stderr, "link-foreign: invalid or missing value for %s\n", argument);
+            }
         }
         else if (strcmp(argument, "--help") == 0)
         {
@@ -771,15 +824,30 @@ static int foreign_driver_link(ForeignDriverRun* run)
                 "unrecognized input format",
                 "malformed input",
                 "unsupported input",
+                "input needs an LTO plugin",
                 "out of memory",
                 "cannot start linker workers",
             };
             const uint32_t error = (uint32_t)foreign.failure.error;
             fprintf(stderr, "link-foreign: %s", error < BUSTER_ARRAY_LENGTH(messages) ? messages[error] : "input resolution failed");
+            if (foreign.failure.error == FOREIGN_ERROR_PLUGIN && foreign.failure.detail_length != 0)
+            {
+                fprintf(stderr, ": %.*s", (int)foreign.failure.detail_length, foreign.failure.detail);
+            }
             if (foreign.failure.input < foreign.input_count)
             {
-                const String8 path = foreign.inputs[foreign.failure.input].path;
+                const ForeignInput* input = &foreign.inputs[foreign.failure.input];
+                const String8 path = input->path;
                 fprintf(stderr, " in %.*s", (int)path.length, path.pointer);
+                if (foreign.failure.member != 0 && input->kind == FOREIGN_KIND_ARCHIVE && input->item < foreign.archive_count)
+                {
+                    const ForeignArchive* archive = &foreign.archives[input->item];
+                    if (foreign.failure.member - 1 < archive->member_count)
+                    {
+                        const String8 member = archive->members[foreign.failure.member - 1].name;
+                        fprintf(stderr, " (%.*s)", (int)member.length, member.pointer);
+                    }
+                }
             }
             if (foreign.failure.system_error != 0)
             {
