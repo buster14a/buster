@@ -299,9 +299,11 @@ than by one 1.6 MB copy afterwards.
 Before building a table, `x86_templates_prepare` commits the ranges the build
 writes (`MADV_POPULATE_WRITE`), one call per range, both ends rounded out to
 pages. For `x86_encode`'s table, which every compile builds, it first asks for
-transparent huge pages (`MADV_HUGEPAGE`). The templates and their marked copies
-are 2 MB apart (`BUSTER_X86_FORM_FIXUP` is 2 MB of entries), so they fall in two
-or three 2 MB pages, depending on where the link places the table.
+transparent huge pages (`MADV_HUGEPAGE`). Each template's marked copy is
+exactly 2 MB after it (`BUSTER_X86_FORM_FIXUP` is 2 MB of entries), so the
+entries the build writes, which are all the ranges count and commit (not the
+padding beside them), fall in two or three 2 MB pages, depending on where the
+link places the table.
 - **Which pages.** `x86_templates_huge_pages` picks those the table fills at
   least 750 KB of: as much as a huge page's clearing costs in base pages on the
   9700X (`lane.c`'s arenas). Asking for a third huge page that the table fills

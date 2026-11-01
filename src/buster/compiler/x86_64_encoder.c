@@ -5577,12 +5577,10 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // range, and for x86_encode's table, which every compile builds, asks for transparent huge pages over it (#590): a kernel
 // whose transparent huge pages are only `madvise`d (Ubuntu's, Debian's and Fedora's) gave .bss's 3.2 MB of it 788 base
 // pages' faults, half of a small file's compile. In main.c's units, whose copy the C driver's compiles build, that table
-// has a huge page's margin on either side, which keeps the huge pages it asks for in its own storage; 4 MB in all, so
-// that what follows it in .bss keeps its place against huge pages (with 67 MB of margins over the benchmarks' copies too,
-// on the 9700X, whose kernel uses huge pages `always`, hello.c's stages that don't build the tables took 0.06 ms more).
-// A unit of its own (a benchmark's) keeps its copy without margins or huge pages, and the other modes' tables, which
-// tests, the disassembler and other modes' entry points build, keep their size. The storage isn't aligned to a huge
-// page: wild 0.10, which links the CI's builds, refuses alignments past 64 KB.
+// has a huge page's margin on either side, 4 MB in all, which keeps the huge pages it asks for in its own storage. A
+// unit of its own (a benchmark's) keeps its copy without margins or huge pages, rather than 4 MB more for each of the 15
+// benchmarks' copies, and the other modes' tables, which tests, the disassembler and other modes' entry points build,
+// keep their size. The storage isn't aligned to a huge page: wild 0.10, which links the CI's builds, refuses alignments past 64 KB.
 #define BUSTER_X86_TEMPLATE_HUGE_PAGE (2u << 20)
 // A table's entries: the padding on either side, the forms' templates and their marked copies.
 #define BUSTER_X86_TEMPLATE_TABLE (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING)
@@ -5602,9 +5600,9 @@ _Static_assert(BUSTER_X86_TEMPLATE_MARGIN * sizeof(X86TemplateEntry) % BUSTER_X8
 BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_TABLE + BUSTER_X86_TEMPLATE_MARGIN]
     __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
 static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
-// In .data rather than .bss, as lane.c's LaneProcess is: in .bss it follows the storage's margin, in a 2 MB region that
-// nothing else a compile writes is in, whose huge page a kernel that uses them `always` cleared for this one flag (2 MB
-// of peak RSS on the 9700X, #590).
+// In .data rather than .bss, as lane.c's LaneProcess is: in .bss it follows the storage's margin into a 2 MB region where
+// a compile writes nothing else, whose huge page a kernel that uses them `always` cleared for this one flag (2 MB of
+// peak RSS on the 9700X, #590).
 BUSTER_X86_SHARED bool x86_encoder_initialized __attribute__((section(".data")));
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
 BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_TABLE] __attribute__((aligned(64)));
@@ -5632,17 +5630,17 @@ static uintptr_t x86_huge_page_bytes(uintptr_t page, uintptr_t begin, uintptr_t 
     return high > low ? high - low : 0;
 }
 
-// The huge pages x86_templates_prepare asks for x86_encode's table: of the 2 MB pages that its written bytes (the
-// templates, and their marked copies 2 MB after them) fall in, two or three as the link places it, those they fill at
-// least BUSTER_X86_TEMPLATE_HUGE_WORTH of. Their starts go in `pages`, which has room for 3; returns how many. On a Xeon
-// VM, asking for a third huge page that the table fills less cost 0.06 to 0.2 ms more than its bytes in base pages.
-// `templates` is the table (past its storage's margin and padding).
+// The huge pages x86_templates_prepare asks for x86_encode's table: of the 2 MB pages that the entries its build writes
+// (the templates, and their marked copies exactly 2 MB after them; not the padding) fall in, two or three as the link
+// places it, those they fill at least BUSTER_X86_TEMPLATE_HUGE_WORTH of. Their starts go in `pages`, which has room for
+// 3; returns how many. On a Xeon VM, asking for a third huge page that the table fills less cost 0.06 to 0.2 ms more
+// than its bytes in base pages. `templates` is the table (past its storage's margin and padding).
 static uint32_t x86_templates_huge_pages(const X86TemplateEntry* templates, uintptr_t* pages)
 {
     const uintptr_t huge = BUSTER_X86_TEMPLATE_HUGE_PAGE;
-    const uintptr_t written = (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry);
-    const uintptr_t forms = (uintptr_t)(templates - BUSTER_X86_TEMPLATE_PADDING);
-    const uintptr_t marked = forms + BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry);
+    const uintptr_t written = BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry);
+    const uintptr_t forms = (uintptr_t)templates;
+    const uintptr_t marked = (uintptr_t)(templates + BUSTER_X86_FORM_FIXUP);
     const uintptr_t last = (marked + written + huge - 1) & ~(huge - 1);
     uint32_t count = 0;
     for (uintptr_t page = forms & ~(huge - 1); page < last; page += huge)
@@ -5663,23 +5661,22 @@ static void x86_templates_commit(uintptr_t begin, uintptr_t bytes)
     madvise((void*)first, last - first, BUSTER_X86_MADV_POPULATE_WRITE);
 }
 
-// Before a table's first build, commits the bytes it writes, the templates and their marked copies, in one call per
+// Before a table's first build, commits the entries it writes, the templates and their marked copies, in one call per
 // range (MADV_POPULATE_WRITE), rather than a fault per page, which took a kernel without transparent huge pages from 1.39
 // to 0.88 ms for the table on a Xeon VM; and for x86_encode's table with its margins (main.c's units') first asks for the
 // huge pages x86_templates_huge_pages picks (MADV_HUGEPAGE), where the commit takes a fault per huge page that comes. A call failing
 // (an older kernel) leaves the pages to their faults, as before. `templates` is the table (past its padding).
 static void x86_templates_prepare(X86TemplateEntry* templates)
 {
-    const uintptr_t written = (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry);
-    const uintptr_t forms = (uintptr_t)(templates - BUSTER_X86_TEMPLATE_PADDING);
+    const uintptr_t written = BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry);
     uintptr_t pages[3];
     const uint32_t count = templates == x86_templates && BUSTER_X86_TEMPLATE_MARGIN != 0 ? x86_templates_huge_pages(templates, pages) : 0;
     for (uint32_t p = 0; p < count; p += 1)
     {
         madvise((void*)pages[p], BUSTER_X86_TEMPLATE_HUGE_PAGE, MADV_HUGEPAGE);
     }
-    x86_templates_commit(forms, written);
-    x86_templates_commit(forms + BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry), written);
+    x86_templates_commit((uintptr_t)templates, written);
+    x86_templates_commit((uintptr_t)(templates + BUSTER_X86_FORM_FIXUP), written);
 }
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general

@@ -905,8 +905,10 @@ What changed:
   - `x86_encoder_initialized` is in `.data`, as `lane.c`'s `LaneProcess` is.
     In `.bss` it followed the margin into a 2 MB region where a compile writes
     nothing else, and an `always` kernel cleared that region's huge page for
-    the one byte. On the 9700X that cost 2 MB of peak RSS, and `hello.c`'s
-    other stages took 0.05 to 0.06 ms more.
+    the one byte. At the earlier heads that had it there (`8da9e479` and
+    `f5179878`), on the 9700X, that cost 2 MB of peak RSS, and `hello.c`'s
+    other stages took 0.05 to 0.06 ms more; the table below is from after the
+    move.
   - The other modes' tables (32-bit addresses, APX, 32- and 16-bit modes),
     which no compile builds, keep their size. They get only the commit.
 - **Tier 0 commits its nine tables' pages in one call per array**
