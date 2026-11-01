@@ -270,11 +270,60 @@ It returns the records, the local branches as branch sizing's columns, its
 symbolic fields as references by name, and its named labels. It accepts
 instructions, labels and the syntax directives. It refuses:
 
-- every other directive: a template has no sections, data or symbols of its own;
+- every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
   addend, and `loop` and `jrcxz` to any of its labels;
 - undefined numeric labels;
 - what the matcher doesn't take.
+
+### Templates that take directives
+
+A template with a directive besides the syntax switches is not records: the
+planner assembles it with `asm_assemble`, the `assemble` command's assembler,
+which already takes the sections, data, alignment and symbols of a `.s` file
+and file-scope `asm` (#619). A template that emits code (`AsmResult.entry_code`)
+is assembled as the whole helper: its frame, its operand block's loads, the
+template, its stores and its epilogue are one source, so a `.p2align` pads
+inside the helper's own code and its atoms carry the alignment. Its atoms,
+symbols and fixups are published by the emission
+(`check_program_emit_asm_unit`), its labels and names joining the unit's as
+file-scope assembly's do. The directives are the assembler's: `.p2align`,
+`.balign`, `.align`, `.nops`, `.skip`, `.space`, `.zero`, `.byte`, `.word`,
+`.long`, `.quad`, `.ascii`, `.asciz`, `.string`, the section switches
+`.section`, `.text`, `.data`, `.bss`, `.pushsection`, `.popsection`,
+`.previous`, the bindings `.globl`, `.global`, `.local`, `.weak`, and `.set`,
+`.equ`, `.equiv`, `.type` and `.size`. Data and hand-encoded bytes execute in
+the statement's helper, as clang's inline bytes execute in its function; a
+`.pushsection` body's bytes go into the named section's atom, as file-scope
+assembly's, and `.popsection` or `.previous` returns to the template's own
+code. A pushed `.note.GNU-stack` is the writer's empty note, as `.section`'s is.
+
+A template of alignment, section and symbol directives alone has no code
+(`entry_code` is false): its sections, data and defined labels are published,
+and the statement calls nothing, so zstd's `__asm__(".p2align 5")` before a hot loop
+adds no call. The alignment aligns a helper's own code or atom, not the
+caller's. A naked function's templates are one source too, without a prologue
+or epilogue; CFI directives stay refused, since a helper's frame is its own
+unwind entry's and a naked function's unit would carry an `EH_FRAME` atom the
+emission doesn't publish.
+
+The templates of a unit are assembled apart, so a directive's symbols are the
+template's: another template's reference to a `.set`/`.equ` absolute symbol is
+refused by name (`inline assembly absolute symbols are per-template`), while
+two templates may define the same absolute name, each its own; a `.globl` or
+visibility declaration upgrades a label another template defines, while a
+`.type` or `.size` declaration applies to its own template's label alone.
+These match what one template does; clang's module-wide assembler would carry
+the rest across statements. A `.globl`, `.local` or visibility directive on one
+of the unit's C symbols changes that symbol's own binding or visibility, while
+`.weak` applies to a function's, an extern's or a static or block-scope
+variable's (a defined variable of external linkage is refused, as clang
+refuses it), and `.size` applies once the definition's atom exists: a function's or a variable's, where an extern's is the no-op both
+compilers make it. A `.size` past that atom is refused by name. `.nops`'s
+optional control is accepted and ignored, an undefined
+`.globl`, `.weak` or visibility declaration that no template refers to is left
+out of `-c`'s object (clang keeps its undefined symbol), and so is a
+`.set`/`.equ` absolute symbol (clang writes a local `ABS` symbol).
 
 The matcher's index admits every form the assembler's syntax takes, whatever
 the unit's target. GNU as and clang's integrated assembler take any instruction
@@ -374,7 +423,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
 - statements of more than 64 operands;
-- templates the assembler refuses, with its message;
+- templates the assembler refuses, with its message, and a template's CFI
+  directives, whose frame would be the helper's own unwind entry's;
 - a label two templates define, a `.L` name no template defines, and a label
   with one of the unit's symbols' names, which GNU as and clang reject;
 - a label in a template of no instructions, which would be a place in its
@@ -495,14 +545,25 @@ has the commands, the logs and the default path's numbers against main.
     one, outputs pushed by the template, a `float`'s and a `double`'s operands,
     templates of no instructions); and a `float`'s and a `double`'s signaling
     NaNs through `+t` in templates of no instructions, the results' bits and the
-    status word's invalid-operation flag as clang's build gives them.
+    status word's invalid-operation flag as clang's build gives them;
+  - templates that take directives: alignment and fill, bytes and `.long`,
+    `.pushsection`/`.popsection` and `.section`/`.previous` records read back,
+    `.weak`/`.globl` labels and an undefined `.globl` declaration,
+    `.hidden`/`.type`/`.size` on a data label, `.equ` with `.set`, `.ascii`,
+    `.asciz`, `.string`, `.quad`, `.word`, `.zero`, `.space` and `.bss`, a
+    `.nops` control, and a naked function's `.p2align` and `.byte`; and the
+    refusals of a `.set` used by another template, a template that returns
+    before any branch, and CFI.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one
   through the driver, beside an executable the direct path links, from both
   paths into the same bytes. That executable's naked function has a label
   another template takes the address of, and its template calls libc's `puts`
-  by name.
+  by name. The driver's `-c` object of a template's directives is compared with
+  clang's too: its `.L` and numeric labels are the assembler's temporary
+  symbols, its undefined `.globl` declaration and `.set` absolute are left out,
+  and its `.hidden` label has its visibility as clang's object gives it.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the
   branch columns, the references, each refusal, and the arenas after a failure.
   `--cross-check` compares the newly admitted instructions with GNU as.

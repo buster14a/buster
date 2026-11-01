@@ -199,11 +199,11 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes; `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size` |
 | Constants | `.equ`/`.set` (absolute and defined before use; either may reassign), `.equiv` (rejects redefinition) |
-| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.zero` |
-| Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none) |
+| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.zero`, `.skip`/`.space` (with an optional fill byte) |
+| Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
 | Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file`, `.loc`, and LLVM's `.prefalign` are accepted but add no debug or alignment information |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
 
@@ -219,7 +219,9 @@ accepted; the note must remain empty and non-executable.
 Code alignment without a fill, or with `0x90`, pads with GNU as's NOPs: a
 one-byte nop first when the section's last statement was data, a jump over the
 rest past seven NOPs' worth, then the remainder's NOP and 11-byte ones. Other
-fills, and other sections, use the fill byte (zero by default). `.` in a data
+fills, and other sections, use the fill byte (zero by default). `.nops` writes
+those NOPs of the length it asks for; its optional control is accepted and
+ignored. `.` in a data
 directive is the address of its own datum.
 Direct branches require label or symbol targets. Absolute numeric destinations
 are diagnosed because the shared writer has no absolute-symbol relocation;
@@ -291,7 +293,8 @@ It returns `AsmCode`:
 
 It takes instructions, labels and the syntax directives, and refuses:
 
-- every other directive: the code has no sections, data or symbols of its own;
+- every other directive: the code has no sections, data or symbols of its own (the C checker assembles such a template
+  whole instead, `asm_assemble`'s unit, c-inline-assembly.md's "Templates that take directives");
 - its numeric labels and `.` but as a `jmp`'s or `jcc`'s target without an
   addend, and `loop` and `jrcxz` to its labels;
 - undefined numeric labels.
@@ -305,7 +308,15 @@ columns, references and diagnostics.
 ## Data-parallel design and scalar twin
 
 `asm_assemble(source, index, options, arena)` returns `AsmResult`, containing a
-`Link`, a diagnostic byte offset/message and phase timings. The source, index
+`Link`, a diagnostic byte offset/message and phase timings. Its `entry_atom` is
+the default text section's atom (the source's first byte), `entry_code` says
+whether that section holds code (anything but labels and alignment or NOP
+fill), and `ret_first` says whether the first control flow is a return before
+any branch. `absolutes` lists the source's `.set`/`.equ` symbols with their
+values; they are not in the `Link`, as no object owns them (another source's
+reference is the C checker's to refuse). `directives` says, for each link
+symbol, whether a binding or `.size` directive gave it, which the C checker
+applies to a program symbol the name maps to. The source, index
 and output arena must remain alive while the result is consumed. Initialize
 the caller-owned `X86MatchIndex` and encoder once. Failure restores the caller's
 arena position and clears the output link. Sources are bounded to 64 MiB,
