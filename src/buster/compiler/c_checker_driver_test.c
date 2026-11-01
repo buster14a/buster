@@ -2855,7 +2855,10 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
                                            "\ntime-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n",
                                            "\ntime-process\tstage-system-boundary\tresource-marks\n",
-                                           "\ntime-process\tstage-system-accuracy\tunqualified\n",
+                                           "\ntime-process\tstage-system-status\t",
+                                           "\ntime-process\tstage-system-accuracy\tlow-confidence\n",
+                                           "\ntime-process\tstage-system-reason\tresource-mark-getrusage-deltas\n",
+                                           "\ntime-process\tstage-system-validation\tdocs-compile-time-clock-accounting-control\n",
                                            "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t",
                                            "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
@@ -2884,11 +2887,71 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
 }
 
+// Builds one whole report for check_clock_read: every stage and the preprocessor's phases once, then the total and the
+// system/peak statuses. `system_status` and `peak_status` are 0 for no status line, 1 for available and 2 for
+// unavailable. `system_available` and `peak_available` choose numeric columns or their -1 form; `alter_one_system`
+// makes one stage numeric in an otherwise unavailable report. Returns false if the text doesn't fit.
+static bool check_test_driver_clock_text(char* text, size_t capacity, bool system_available, bool peak_available, int system_status, int peak_status,
+                                         bool alter_one_system)
+{
+    size_t used = 0;
+    bool fits = true;
+    for (uint32_t s = 0; fits && s < CHECK_STAGE_COUNT; s += 1)
+    {
+        const bool numeric = system_available || (alter_one_system && s == CHECK_STAGE_PREPROCESS);
+        const int written = numeric ? snprintf(text + used, capacity - used, "time-stage\t%s\t1.000\t0.1\t0.500\t2\t%d\n", check_stage_names[s], peak_available ? 3 : -1) :
+                                      snprintf(text + used, capacity - used, "time-stage\t%s\t1.000\t0.1\t-1.000\t-1\t%d\n", check_stage_names[s], peak_available ? 3 : -1);
+        fits = written > 0 && (size_t)written < capacity - used;
+        used += fits ? (size_t)written : 0;
+    }
+    for (uint32_t p = 0; fits && p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
+    {
+        const int written = snprintf(text + used, capacity - used, "time-stage\t%s\t0.100\t0.0\n", check_clock_phase_names[p]);
+        fits = written > 0 && (size_t)written < capacity - used;
+        used += fits ? (size_t)written : 0;
+    }
+    const char* system_line = system_status == 1 ? "time-process\tstage-system-status\tavailable\n" :
+                              system_status == 2 ? "time-process\tstage-system-status\tunavailable\n" : "";
+    const char* peak_line = peak_status == 1 ? "time-process\tpeak-rss-status\tavailable\n" :
+                            peak_status == 2 ? "time-process\tpeak-rss-status\tunavailable\n" : "";
+    const int written = snprintf(text + used, capacity - used, "time-stage\ttotal\t1.000\t100.0\ntime-check\texpressions\t0.100\t0.0\n%s%s", system_line, peak_line);
+    fits = written > 0 && (size_t)written < capacity - used;
+    return fits;
+}
+
+// check_clock_read's availability contract: numeric legacy reports still read, an unavailable status needs every
+// system and fault column at -1, an available status or none refuses any -1, and one substituted numeric column in an
+// unavailable report is refused rather than hiding a distorted later delta.
+static void check_test_driver_clock_reader(CheckTest* test)
+{
+    char text[16384];
+    double stages[CHECK_STAGE_COUNT] = { 0 };
+    double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
+    double usage[3 * CHECK_STAGE_COUNT] = { 0 };
+    double total = 0;
+    double walk = 0;
+    const bool numeric = check_test_driver_clock_text(text, sizeof(text), true, true, 0, 0, false) &&
+                         check_clock_read(text, stages, phases, &total, &walk, usage) && total == 1.0 && walk == 0.1 && usage[0] == 0.5 && usage[1] == 2 && usage[2] == 3;
+    memset(stages, 0, sizeof(stages));
+    memset(usage, 0, sizeof(usage));
+    const bool unavailable = check_test_driver_clock_text(text, sizeof(text), false, true, 2, 0, false) &&
+                             check_clock_read(text, stages, phases, &total, &walk, usage) && total == 1.0 && walk == 0.1 && usage[0] == -1 && usage[1] == -1 && usage[2] == 3;
+    const bool false_available = check_test_driver_clock_text(text, sizeof(text), false, true, 1, 0, false) &&
+                                 !check_clock_read(text, stages, phases, &total, &walk, usage);
+    const bool mixed = check_test_driver_clock_text(text, sizeof(text), false, true, 2, 0, true) &&
+                       !check_clock_read(text, stages, phases, &total, &walk, usage);
+    const bool numeric_without_status = check_test_driver_clock_text(text, sizeof(text), true, true, 0, 0, false) &&
+                                        check_clock_read(text, stages, phases, &total, &walk, usage);
+    check_test_expect(test, numeric && unavailable && false_available && mixed && numeric_without_status,
+                      "--time-stages' reader accepts numeric and wholly unavailable system-time reports and refuses mixed or falsely available ones");
+}
+
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
 // its report must account for every stage once, adding up to its total; so must the direct path's, whose executable
 // runs, with -g too, whose DWARF and static data are stages of their own, and -fsyntax-only's, which emits nothing.
 static void check_test_driver_time_stages(CheckTest* test, const char* executable, const char* directory)
 {
+    check_test_driver_clock_reader(test);
     static const char program[] = "#include <stdio.h>\n"
                                   "static int table[4] = { 1, 2, 3, 4 };\n"
                                   "static int sum(int n) { int s = 0; for (int i = 0; i < n; i++) s += table[i & 3]; return s; }\n"
@@ -3031,7 +3094,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
-    const bool qualified = text != NULL && strstr(text, "stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks") != NULL;
+    const bool qualified = text != NULL && strstr(text, "stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable") != NULL;
     // The reader's expressions' walk (#1038), under its stage.
     const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
     free(text);
