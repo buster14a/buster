@@ -5538,7 +5538,9 @@ lazy session.
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
-every run one lane's code. Run it under the 9700X's lock without `taskset`,
+every run one lane's code, for the target its options give (#1045:
+`test-checker` measures a unit of 512-bit vectors with `-march=znver5` and
+fails it without, `c_check_lanes_benchmark_test.c`). Run it under the 9700X's lock without `taskset`,
 with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
 and the benchmark on the frozen SQLite source where the emission changes.
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the

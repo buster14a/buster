@@ -5675,6 +5675,7 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
+static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
@@ -5946,6 +5947,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_source_benchmark(&test);
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
+            check_test_check_lanes_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
         // The program harness's build directory, which the sections' programs share: removed after the last of them,
