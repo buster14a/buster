@@ -139,7 +139,7 @@ own and doubles when it is three quarters full, rebuilt from the hash column;
 ids never change.
 
 `type_derive_batch` takes requests as columns. It hashes eight keys per vector
-(`vpmullq`), prefetches their buckets, and compares each bucket's four slots
+(`vpmullq`) and compares each bucket's four slots
 with one vector compare. Misses go through `type_derive`, the one-at-a-time
 path, in request order, so the ids never depend on the batch; so do functions,
 extents past 32 bits and complex types of builtin elements. So does an

@@ -26,14 +26,13 @@
 //      compressed (vpcompressd) into dense arrays, and per 64 a mask of the identifiers. A gap that is only line splices
 //      needs a backslash, so a step of 64 tokens whose gaps lie in chunks without one is done; the others go to
 //      refine_step_splices, where a non-first-of-line token whose gap ends in a newline byte (only a line splice can do
-//      that) has the scalar refine_gap_is_splices decide its bit. For a file lexed whole first, each step also
-//      prefetches the columns' step BUSTER_REFINE_PREFETCH_TOKENS on and some source bytes past the scan: the lexer's
-//      pass over the file has evicted them.
+//      that) has the scalar refine_gap_is_splices decide its bit.
 //   B. refine_pass_b interns the block's identifiers in batches of 64 (RefineVariant has the other sizes the benchmark
-//      compares), pipelined: a batch's stage 1 runs in the middle of the batch before's stages 2 to 3.
+//      compares), pipelined: a batch's stage 1 runs in the middle of the batch before's stages 2 to 3, so the
+//      out-of-order core overlaps the next batch's bucket loads with this one's work.
 //      1. refine_hash_batch reads each identifier's first 32 bytes (with plain loads, its bytes past its length
 //         cleared, where they lie in the source, else with a masked load, never outside the token), hashes four at a
-//         time (intern_hash_vectors4_short; the rare longer ones again, whole), then prefetches their buckets. A batch
+//         time (intern_hash_vectors4_short; the rare longer ones again, whole). A batch
 //         whose loads had a backslash checks each identifier for one (refine_batch_specials): those, and identifiers
 //         past BUSTER_INTERN_FAST_LENGTH, go to the scalar key.
 //      2. Each bucket's four slots are compared with the identifier's first 12 bytes in one compare (refine_probe),
@@ -67,8 +66,6 @@
 // windowed refinement took about 1.55 ms with blocks of 1,024 tokens, 1.53 with 2,048, 1.51-1.52 with 4,096 and 8,192,
 // and 1.53 with 16,384 (docs/c-refinement.md).
 #define BUSTER_REFINE_BLOCK_TOKENS 4096
-// How far ahead pass A prefetches the columns of a whole file lexed before its refinement: a step 1,024 tokens on.
-#define BUSTER_REFINE_PREFETCH_TOKENS 1024
 // Pass A's step: the kinds of 64 tokens are one vector, their starts and ends four.
 #define BUSTER_REFINE_STEP_TOKENS 64
 #define BUSTER_REFINE_LANES 16
@@ -76,8 +73,6 @@
 #define BUSTER_REFINE_WINDOW_BYTES 128
 // The dense arrays get whole-vector stores past their last entry.
 #define BUSTER_REFINE_DENSE_SLACK BUSTER_REFINE_LANES
-// The source bytes pass A prefetches per step, ahead of the scan: a block's 64 steps' worth, 32 KB, is about its source.
-#define BUSTER_REFINE_PREFETCH_SOURCE 512
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Identifier keys and ends
@@ -448,12 +443,10 @@ static __attribute__((noinline)) uint64_t refine_step_splices(const uint8_t* sou
 // identifiers'), the dense identifier arrays and the steps' identifier masks. `previous_ends` carries the ends of the 16
 // tokens before `begin` (lane 15 is the last one's), read before pass C could overwrite them in place. A step of 64
 // tokens whose gaps hold no backslash (most: `backslash_chunks`, from refine_scan_chunks) is done with its gap bits; the
-// others go to refine_step_splices; a block whose gaps hold none (most) asks once, not per step. With `prefetch`, each
-// step fetches the next block's columns and source, which a whole file lexed before its refinement has evicted; tokens
-// refined a window at a time (refine_tokens_blocks) are in the caches already.
+// others go to refine_step_splices; a block whose gaps hold none (most) asks once, not per step.
 BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint64_t begin,
                                     uint64_t end, uint32_t* values, uint64_t* space, uint32_t flags, const uint64_t* backslash_chunks, __m512i previous_ends,
-                                    RefineIdentifiers* identifiers, uint64_t count, uint64_t scanned_bytes, const bool separate, const bool prefetch)
+                                    RefineIdentifiers* identifiers, const bool separate)
 {
     uint32_t identifier_count = 0;
     // The block's gaps lie between the end of the token before it and the start of its last token.
@@ -461,25 +454,6 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
     const bool block_backslashes = begin < end && refine_chunks_have_backslash(backslash_chunks, block_gaps_begin, starts[end - 1]);
     for (uint64_t step = begin; step < end; step += BUSTER_REFINE_STEP_TOKENS)
     {
-        // The step BUSTER_REFINE_PREFETCH_TOKENS on in the token columns, and BUSTER_REFINE_PREFETCH_SOURCE bytes of the
-        // source past what the scan has read: fetched from memory while this block's pass B runs, so that the steps after
-        // find them in the caches (the columns were written a whole file before, and the lexer's pass over the source
-        // evicted them).
-        const uint64_t ahead = step + BUSTER_REFINE_PREFETCH_TOKENS;
-        if (prefetch && ahead < count)
-        {
-            _mm_prefetch((const char*)(kinds + ahead), _MM_HINT_T0);
-            for (uint32_t line = 0; line < BUSTER_REFINE_STEP_TOKENS * sizeof(uint32_t); line += 64)
-            {
-                _mm_prefetch((const char*)starts + ahead * sizeof(uint32_t) + line, _MM_HINT_T0);
-                _mm_prefetch((const char*)ends + ahead * sizeof(uint32_t) + line, _MM_HINT_T0);
-            }
-        }
-        const uint64_t source_ahead = scanned_bytes + (step - begin) / BUSTER_REFINE_STEP_TOKENS * BUSTER_REFINE_PREFETCH_SOURCE;
-        for (uint64_t line = 0; prefetch && line < BUSTER_REFINE_PREFETCH_SOURCE && source_ahead + line < length; line += 64)
-        {
-            _mm_prefetch((const char*)(source + source_ahead + line), _MM_HINT_T0);
-        }
         const uint64_t remaining = end - step;
         const uint64_t step_count = remaining >= BUSTER_REFINE_STEP_TOKENS ? BUSTER_REFINE_STEP_TOKENS : remaining;
         const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)step_count);
@@ -692,7 +666,7 @@ struct RefineHashes
 };
 
 // Stage 1 for `count` identifiers (at most 64) of the dense arrays from `starts` and `lengths`, of a source of `length`
-// bytes: each identifier loaded, hashed and its bucket prefetched. Four at a time, each identifier's first 32 bytes are
+// bytes: each identifier loaded and hashed. Four at a time, each identifier's first 32 bytes are
 // hashed (intern_hash_vectors4_short): all of it but in the rare longer ones, which are hashed again from all their bytes
 // after; the rest one at a time. The four are read with plain loads of 32 bytes, and the bytes past each one's length
 // cleared with a masked move per two identifiers, when the batch's last one's 32 bytes lie in the source (the starts
@@ -705,7 +679,6 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
                                      RefineHashes* hashes, const bool trigraphs)
 {
     const bool plain = count != 0 && (uint64_t)starts[count - 1] + 32 <= length;
-    const uint8_t* const buckets = table->buckets;
     const uint64_t offset_mask = table->bucket_mask * BUSTER_INTERN_BUCKET_BYTES;
     uint64_t* const offsets = hashes->offsets;
     __m128i* const keys = hashes->keys;
@@ -755,17 +728,7 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
         _mm512_store_si512(keys + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
         _mm512_store_si512(offsets + 2 * j, _mm512_and_si512(_mm512_slli_epi64(group_hashes, 6), _mm512_set1_epi64((long long)offset_mask)));
     }
-    // Their buckets' prefetches, from the offsets stored. Moving each group's four offsets out of its vector as it was
-    // made (three extracts and four moves), in the loop above, made sqlite3.c's windowed refinement take 0.015 ms more on
-    // the 9700X.
-    for (uint32_t k = 0; k < j; k += 4)
-    {
-        _mm_prefetch((const char*)(buckets + offsets[2 * k]), _MM_HINT_T0);
-        _mm_prefetch((const char*)(buckets + offsets[2 * k + 2]), _MM_HINT_T0);
-        _mm_prefetch((const char*)(buckets + offsets[2 * k + 4]), _MM_HINT_T0);
-        _mm_prefetch((const char*)(buckets + offsets[2 * k + 6]), _MM_HINT_T0);
-    }
-    // Those of 33 bytes or more among them: their whole loads, hashes and prefetches (a longer one than
+    // Those of 33 bytes or more among them: their whole loads and hashes (a longer one than
     // BUSTER_INTERN_FAST_LENGTH is slow, and its hash unused, but its bytes are checked all the same).
     uint64_t longer_than_32 = 0;
     for (uint32_t group = 0; group < j; group += BUSTER_REFINE_LANES)
@@ -784,7 +747,6 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
         }
         const uint64_t offset = (intern_hash_vector(bytes, lengths[i]) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
         offsets[2 * i] = offset;
-        _mm_prefetch((const char*)(buckets + offset), _MM_HINT_T0);
     }
     for (; j < count; j += 1)
     {
@@ -798,7 +760,6 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
         const uint64_t offset = (intern_hash_vector(bytes, identifier_length) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
         offsets[2 * j] = offset;
         keys[j] = refine_key(_mm512_castsi512_si128(bytes));
-        _mm_prefetch((const char*)(buckets + offset), _MM_HINT_T0);
     }
     uint64_t special = _mm512_testn_epi8_mask(backslashes, backslashes);
     if (trigraphs)
@@ -811,7 +772,8 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
 
 // Pass B over a block's identifiers (identifiers->count of them), in batches of `batch` (at most 64), with each
 // identifier's id in `identifiers->ids`, pipelined: a batch's stages 2 to 3 run with the next batch's stage 1 in their
-// middle, before 2b, so that the buckets a batch probes were prefetched a batch earlier. A batch's stages:
+// middle, before 2b, so that the out-of-order core has a batch's worth of time to cover the loads the probe needs.
+// A batch's stages:
 //   2. Each identifier's bucket is probed for its prefix with one compare.
 //   Bookkeeping, 16 identifiers at a time from their lengths and ids, as bits of masks: which are slow (longer than
 //   BUSTER_INTERN_FAST_LENGTH, or with a backslash), unmatched, or candidates (longer than BUSTER_INTERN_SHORT_LENGTH,
@@ -986,12 +948,11 @@ static void refine_progress_begin(RefineProgress* progress, uint64_t* backslash_
 }
 
 // The vectorized path over the blocks of tokens [begin, end) (`begin` a multiple of BUSTER_REFINE_BLOCK_TOKENS, from
-// `progress` as the blocks before left it), with `count` tokens lexed, which bounds pass A's prefetches (`prefetch`): an
-// instantiation per trigraph setting, batch size, form of pass B and prefetching. Each block's source bytes are scanned
-// for backslashes just before its passes.
+// `progress` as the blocks before left it): an instantiation per trigraph setting, batch size and form of pass B.
+// Each block's source bytes are scanned for backslashes just before its passes.
 BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
-                                      uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused,
-                                      const bool prefetch, uint64_t begin, uint64_t end, RefineProgress* progress)
+                                      uint32_t* values, uint64_t* space, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused,
+                                      uint64_t begin, uint64_t end, RefineProgress* progress)
 {
     RefineIdentifiers identifiers;
     __m512i previous_ends = progress->previous_ends;
@@ -1005,13 +966,11 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
         scanned = refine_scan_chunks(source, length, backslash_chunks, scanned, ends[block_end - 1], trigraphs);
         if (values != ends)
         {
-            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, count,
-                                          scanned * 4096, true, prefetch);
+            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, true);
         }
         else
         {
-            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, count,
-                                          scanned * 4096, false, prefetch);
+            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, false);
         }
         if (fused)
         {
@@ -1052,7 +1011,7 @@ BUSTER_INLINE bool refine_tokens_whole(InternTable* table, const uint8_t* source
     uint64_t* backslash_chunks = arena_push_array(scratch.arena, refine_progress_words(length), sizeof(uint64_t), 64);
     refine_progress_begin(&progress, backslash_chunks);
     const bool result = backslash_chunks != 0 &&
-                        refine_tokens_with(table, source, length, kinds, starts, ends, count, values, space, flags, trigraphs, batch, fused, true, 0, count, &progress);
+                        refine_tokens_with(table, source, length, kinds, starts, ends, values, space, flags, trigraphs, batch, fused, 0, count, &progress);
     scratch_end(scratch);
     return result;
 }
@@ -1129,7 +1088,7 @@ static __attribute__((unused)) bool refine_tokens(InternTable* table, const uint
     __attribute__((noinline)) static bool name(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, \
                                                const uint32_t* ends, uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, RefineProgress* progress) \
     { \
-        return refine_tokens_with(table, source, length, kinds, starts, ends, count, values, space, flags, trigraphs, 64, false, true, 0, count, progress); \
+        return refine_tokens_with(table, source, length, kinds, starts, ends, values, space, flags, trigraphs, 64, false, 0, count, progress); \
     }
 
 BUSTER_REFINE_CHUNKS_INSTANTIATE(refine_tokens_chunks_plain, false)
@@ -1142,13 +1101,12 @@ static __attribute__((unused)) bool refine_tokens_chunks(InternTable* table, con
                                                                                                                   space, flags, progress);
 }
 
-// refine_tokens_blocks' instantiations, a function per trigraph setting: pass B in batches of 64, and pass A without
-// prefetches.
+// refine_tokens_blocks' instantiations, a function per trigraph setting: pass B in batches of 64.
 #define BUSTER_REFINE_BLOCKS_INSTANTIATE(name, trigraphs) \
     __attribute__((noinline)) static bool name(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, \
                                                uint32_t* values, uint64_t* space, uint32_t flags, uint64_t begin, uint64_t end, RefineProgress* progress) \
     { \
-        return refine_tokens_with(table, source, length, kinds, starts, values, end, values, space, flags, trigraphs, 64, false, false, begin, end, progress); \
+        return refine_tokens_with(table, source, length, kinds, starts, values, values, space, flags, trigraphs, 64, false, begin, end, progress); \
     }
 
 BUSTER_REFINE_BLOCKS_INSTANTIATE(refine_tokens_blocks_plain, false)
