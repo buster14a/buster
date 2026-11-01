@@ -1406,8 +1406,8 @@ location, with the converted immediate and its valid bounds, through
 mappings start from that error baseline (`-Wno-error=`, `-Wno-`, `-Werror=`,
 re-enabling it after `-Wno-`, and `-Weverything`/`-Wno-everything`), and
 diagnostic pragmas then downgrade or suppress it at their locations; `-w`
-suppresses it too. A failed or incomplete program leaves unknown events for
-conservative reporting rather than dropping them.
+suppresses it over any pragma, as clang does. A failed or incomplete program
+leaves unknown events for conservative reporting rather than dropping them.
 
 Only an actual range event allocates the temporary reachability worklist.
 It uses one visited byte and one 64-bit stack slot per graph node/control,

@@ -226,6 +226,7 @@ static void check_test_x86_command_line_mappings(CheckTest* test, const char* cl
         { "error then everything disabled", "unsigned f(V a){return BAD;}", { "-Werror", "-Wno-everything" }, 2 },
         { "everything then demoted", "unsigned f(V a){return BAD;}", { "-Weverything", "-Wno-error=argument-outside-range" }, 2 },
         { "disabled then error", "unsigned f(V a){return BAD;}", { "-Wno-argument-outside-range", "-Werror" }, 2 },
+        { "disabled then explicit error", "unsigned f(V a){return BAD;}", { "-Wno-argument-outside-range", "-Werror=argument-outside-range" }, 2 },
         { "explicit error then no-error", "unsigned f(V a){return BAD;}", { "-Werror=argument-outside-range", "-Wno-error" }, 2 },
         { "demoted then error then error", "unsigned f(V a){return BAD;}", { "-Werror", "-Wno-error=argument-outside-range", "-Werror" }, 3 },
         { "unknown reachability demoted", "unsigned f(V a,int n){if(n)return BAD;return 0;}", { "-Wno-error=argument-outside-range" }, 1 },
@@ -235,6 +236,7 @@ static void check_test_x86_command_line_mappings(CheckTest* test, const char* cl
         { "error, warning pragma", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Werror" }, 1 },
         { "error, ignored pragma", "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Werror" }, 1 },
         { "everything disabled, warning pragma", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Wno-everything" }, 1 },
+        { "-w, error pragma", "#pragma clang diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-w" }, 1 },
         { "demoted, GCC fatal pragma", "#pragma GCC diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Wno-error=argument-outside-range" }, 1 },
     };
     const char prefix[] = "typedef char V __attribute__((vector_size(16)));\n"

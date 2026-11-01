@@ -18,7 +18,9 @@ static int check_test_packed_run(const char* executable, const char* source, con
     int result = -1;
     char* arguments[32];
     uint32_t count = 0;
-    const bool fits = option_count <= BUSTER_ARRAY_LENGTH(arguments) - (executable != NULL ? 7u : 6u);
+    // The fixed arguments, the source and, for an external run, its NULL terminator.
+    const uint32_t fixed = executable != NULL ? 7u : 5u;
+    const bool fits = option_count <= BUSTER_ARRAY_LENGTH(arguments) - fixed;
     if (fits && executable != NULL)
     {
         arguments[count++] = (char*)executable;

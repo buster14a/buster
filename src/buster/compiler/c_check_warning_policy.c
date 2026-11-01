@@ -49,12 +49,13 @@ struct CheckWarningCommandLine
     bool system_headers;
 };
 
-static CheckWarningCommandLine check_warning_command_line(const PPOptions* options, uint32_t id, bool default_ignored)
+// A diagnostic's command-line mapping starts from its intrinsic default: ignored, error (clang's DefaultError, as
+// the x86 range events are) or warning. `-Wno-error=NAME` demotes a default error and keeps it a warning through a
+// later `-Werror`; `-Werror=NAME` after it wins; `-WNAME` re-enables a disabled diagnostic as a warning (#1080).
+static CheckWarningCommandLine check_warning_command_line(const PPOptions* options, uint32_t id, bool default_ignored, bool default_error)
 {
-    // Clang's argument-outside-range is a DefaultError warning: its baseline is an error, which the ordered
-    // mappings below may demote, disable or restore like any other warning's (#1080).
     CheckWarningSeverity mapped = default_ignored ? CHECK_WARNING_IGNORE :
-                                  id == CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+                                  default_error ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
     bool explicit_mapping = false;
     bool no_error = false;
     bool errors = false;

@@ -368,9 +368,12 @@ struct CheckInput
     bool kr_warning_quiet;
     bool kr_warning_system;
     bool kr_warning_errors;
-    // The x86 builtins' out-of-range immediate warning is a DefaultError diagnostic whose baseline the command line
-    // maps (#1080); source pragmas still override this snapshot at their locations.
-    uint8_t x86_range_severity;
+    // The x86 builtins' out-of-range immediate diagnostic is a DefaultError warning whose baseline the command line
+    // maps (#1080). Its two possible intrinsic defaults (an ordinary warning at 0, DefaultError at 1) are snapshotted
+    // so an event's own default_error flag selects the right baseline; source pragmas still override it at their
+    // locations, but `-w` suppresses it over any pragma.
+    uint8_t x86_range_severities[2];
+    bool x86_range_quiet;
     bool x86_range_policy;
     uint8_t* explicit_abis;
     uint32_t* objects;

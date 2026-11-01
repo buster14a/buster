@@ -242,16 +242,16 @@ static void check_test_warning_policy_prefix(CheckTest* test)
     {
         const char* options[] = { cases[i].first, cases[i].second };
         const PPOptions command = { .semantic_warning_options = options, .semantic_warning_option_count = cases[i].second != NULL ? 2 : 1 };
-        check_test_expect(test, check_warning_command_line(&command, cases[i].id, false).severity == cases[i].expected,
+        check_test_expect(test, check_warning_command_line(&command, cases[i].id, false, false).severity == cases[i].expected,
                           "shared warning policy preserves the independently observed Clang group and promotion rules");
     }
     const char* hidden[] = { "-Wno-system-headers" };
     PPOptions programmatic = { .system_header_warnings = true };
-    check_test_expect(test, check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false).system_headers,
+    check_test_expect(test, check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false, false).system_headers,
                       "a programmatic system-header warning policy is retained without a CLI option slice");
     programmatic.semantic_warning_options = hidden;
     programmatic.semantic_warning_option_count = BUSTER_ARRAY_LENGTH(hidden);
-    check_test_expect(test, !check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false).system_headers,
+    check_test_expect(test, !check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false, false).system_headers,
                       "an ordered visibility option overrides the programmatic baseline");
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     char* ordered[] = { "-Wno-everything", "-include", "-Werror=deprecated-non-prototype", "-Wdeprecated-non-prototype", "source.c", "-o", "-Werror", "-pedantic-errors" };
@@ -264,7 +264,7 @@ static void check_test_warning_policy_prefix(CheckTest* test)
                            strcmp(parsed.semantic_warning_options[0], "-Wno-everything") == 0 &&
                            strcmp(parsed.semantic_warning_options[1], "-Wdeprecated-non-prototype") == 0 &&
                            strcmp(parsed.semantic_warning_options[2], "-pedantic-errors") == 0 &&
-                           check_warning_command_line(&parsed, CHECK_WARNING_ID_KR_DEFINITION, false).severity == CHECK_WARNING_WARNING,
+                           check_warning_command_line(&parsed, CHECK_WARNING_ID_KR_DEFINITION, false, false).severity == CHECK_WARNING_WARNING,
                       "shared CLI capture preserves option order and excludes include/output filenames");
     arena_release(&arena);
 }
@@ -293,6 +293,7 @@ static void check_test_warning_policy_x86_range(CheckTest* test)
         { { "-Werror", "-Wno-everything" }, 2, CHECK_WARNING_IGNORE },
         { { "-Weverything", "-Wno-error=argument-outside-range" }, 2, CHECK_WARNING_WARNING },
         { { "-Wno-argument-outside-range", "-Werror" }, 2, CHECK_WARNING_IGNORE },
+        { { "-Wno-argument-outside-range", "-Werror=argument-outside-range" }, 2, CHECK_WARNING_ERROR },
         { { "-Werror=argument-outside-range", "-Wno-error" }, 2, CHECK_WARNING_ERROR },
         { { "-Werror", "-Wno-error=argument-outside-range", "-Werror" }, 3, CHECK_WARNING_WARNING },
         { { "-w", "-Werror=argument-outside-range" }, 2, CHECK_WARNING_IGNORE },
@@ -300,11 +301,14 @@ static void check_test_warning_policy_x86_range(CheckTest* test)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
         const PPOptions command = { .semantic_warning_options = cases[i].options, .semantic_warning_option_count = cases[i].count };
-        check_test_expect(test, check_warning_command_line(&command, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false).severity == cases[i].expected,
+        check_test_expect(test, check_warning_command_line(&command, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, true).severity == cases[i].expected,
                           "x86 range warning command-line mapping starts from its DefaultError baseline");
     }
-    CheckInput input = { .x86_range_policy = true, .x86_range_severity = CHECK_WARNING_WARNING };
-    check_test_expect(test, check_diagnostic_severity(&input, 0, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) == CHECK_WARNING_WARNING,
+    const PPOptions empty = { 0 };
+    check_test_expect(test, check_warning_command_line(&empty, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, false).severity == CHECK_WARNING_WARNING,
+                      "an ordinary warning default for the same ID starts from a warning");
+    CheckInput input = { .x86_range_policy = true, .x86_range_severities = { CHECK_WARNING_WARNING, CHECK_WARNING_WARNING } };
+    check_test_expect(test, check_diagnostic_range_severity(&input, 0, true) == CHECK_WARNING_WARNING,
                       "the checked input's x86 range policy snapshot replaces the default error");
     CheckInputDiagnosticPragma record =
     {
@@ -315,10 +319,13 @@ static void check_test_warning_policy_x86_range(CheckTest* test)
         .operation = CHECK_DIAGNOSTIC_ERROR,
     };
     CheckInputDiagnosticPragmas history = { .records = &record, .count = 1, .final_state = 0 };
-    input.x86_range_severity = CHECK_WARNING_IGNORE;
+    input.x86_range_severities[1] = CHECK_WARNING_IGNORE;
     input.diagnostic_pragmas = &history;
-    check_test_expect(test, check_diagnostic_severity(&input, 0, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) == CHECK_WARNING_ERROR,
+    check_test_expect(test, check_diagnostic_range_severity(&input, 0, true) == CHECK_WARNING_ERROR,
                       "a source pragma overrides the x86 range warning's command-line snapshot");
+    input.x86_range_quiet = true;
+    check_test_expect(test, check_diagnostic_range_severity(&input, 0, true) == CHECK_WARNING_IGNORE,
+                      "-w suppresses the x86 range warning over a source error pragma");
 }
 
 static __attribute__((noinline)) void check_test_diagnostic_policy(CheckTest* test)

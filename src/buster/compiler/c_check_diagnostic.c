@@ -9,7 +9,6 @@
 #define CHECK_WARNING_UNKNOWN_PRAGMA 0x200u
 #define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
 #define CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER 0x10000u
-#define CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE 0x20000u
 #define CHECK_WARNING_RETURN_TYPE 0x40000u
 #define CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION 0x80000u
 #define CHECK_WARNING_VISIBILITY_PRAGMA 0x100000u
@@ -148,13 +147,20 @@ static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* inp
 
 static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
 {
-    // The x86 range warning's command-line baseline is a snapshot of its DefaultError severity; a CheckInput built
-    // outside the reader (tests and fragments) keeps the default error.
-    const bool mapped_range = warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE && input->x86_range_policy;
-    const CheckWarningSeverity severity = mapped_range ? (CheckWarningSeverity)input->x86_range_severity :
-                                          default_ignored ? CHECK_WARNING_IGNORE :
-                                          warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
     return check_diagnostic_severity_from(input, token, source, warning, severity);
+}
+
+// The x86 range diagnostics' severity: the command line's mapping of the event's intrinsic default (a warning, or
+// clang's DefaultError), then a source pragma at the event's token. A CheckInput built outside the reader keeps the
+// intrinsic default. Clang's -w suppresses this diagnostic over any pragma, even an error one.
+static CheckWarningSeverity check_diagnostic_range_severity(const CheckInput* input, uint32_t token, bool default_error)
+{
+    const uint32_t index = default_error ? 1u : 0u;
+    const CheckWarningSeverity baseline = input->x86_range_policy ? (CheckWarningSeverity)input->x86_range_severities[index] :
+                                          default_error ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    const bool quiet = input->x86_range_policy && input->x86_range_quiet;
+    return quiet ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, baseline);
 }
 
 static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t token)
@@ -185,15 +191,19 @@ static void check_input_warning_policy(CheckInput* input, const PPOptions* optio
                    "the K&R policy snapshot covers its four stable IDs");
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(input->kr_warning_severities); i += 1)
     {
-        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false);
+        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false, false);
         input->kr_warning_severities[i] = (uint8_t)command.severity;
         input->kr_warning_quiet = command.quiet;
         input->kr_warning_system = command.system_headers;
         input->kr_warning_errors |= command.severity >= CHECK_WARNING_ERROR;
     }
     input->kr_warning_policy = true;
-    const CheckWarningCommandLine x86_range = check_warning_command_line(options, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false);
-    input->x86_range_severity = (uint8_t)x86_range.severity;
+    for (uint32_t default_error = 0; default_error < BUSTER_ARRAY_LENGTH(input->x86_range_severities); default_error += 1)
+    {
+        const CheckWarningCommandLine x86_range = check_warning_command_line(options, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, default_error != 0);
+        input->x86_range_severities[default_error] = (uint8_t)x86_range.severity;
+        input->x86_range_quiet |= x86_range.quiet;
+    }
     input->x86_range_policy = true;
 }
 
@@ -317,7 +327,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
         for (uint32_t e = 0; e < effect->range_event_count; e += 1)
         {
             if (effect->range_events[e].disposition == CHECK_BUILTIN_X86_READY && at < first &&
-                check_diagnostic_severity(input, at, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) >= CHECK_WARNING_ERROR)
+                check_diagnostic_range_severity(input, at, effect->range_events[e].default_error) >= CHECK_WARNING_ERROR)
             {
                 first = at;
             }
