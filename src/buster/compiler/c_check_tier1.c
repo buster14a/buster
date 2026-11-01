@@ -115,7 +115,9 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .block_count = dominators.block_count,
         };
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = tier1_select_plan(ir, &dominance, &lane->steps[4], scratch, !scalar, &plan, &node);
+        // ir_optimize verified its result, its uses dominated by their definitions, before it returned: the plan doesn't
+        // verify it again (#141).
+        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[4], scratch, !scalar, &plan, &node);
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         *operation = selected == TIER1_SELECT_OK ? 0 : selected == TIER1_SELECT_ERROR_UNSUPPORTED ? refused : IR_OP_COUNT + (uint32_t)selected;
         stage = selected == TIER1_SELECT_OK ? stage : CHECK_TIER1_SELECTION;

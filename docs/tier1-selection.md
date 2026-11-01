@@ -150,7 +150,15 @@ without weakening that API's checks.
 `tier1_select_plan(function, dominance, output, scratch, vector, result,
 error_node)` returns `Tier1SelectError`. Both the vector and scalar paths invoke
 their corresponding IR verifier. A cross-block value use requires the supplied
-dominator intervals; structural verification alone is insufficient. This slice
+dominator intervals; structural verification alone is insufficient.
+`tier1_select_plan_verified`, with the same arguments, gives the same plan
+without the verification: it takes a function its caller has verified with
+those dominator intervals, as the C driver's `--tier1` takes `ir_optimize`'s
+result, which `ir_optimize` verifies before it returns (`c_check_tier1.c`). On
+the frozen `sqlite3.c`, the verification was a quarter of selection's cycles
+(#141). The selector's tests plan their functions both ways, and the pipeline
+test plans each optimized function as the driver does and checks it against the
+verifying plan, field by field. This slice
 requires value definitions to precede uses in physical instruction order, but
 for a phi's operands, which may follow it (a loop's back edge). An integer phi
 selects `TIER1_RULE_PHI` (#140): no records and no effective uses, since its
@@ -478,7 +486,7 @@ The latter is not a whole-pipeline peak-memory measurement.
 [preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
 selection on real C: every function `-c` compiles of the files, lowered, promoted
 and optimized as the C driver's `--tier1` takes it, with its dominance, outside
-the time; then `tier1_select_plan` of each, the IR verification it runs included,
+the time; then `tier1_select_plan_verified` of each, as the driver plans it,
 by both paths, in 21 passes that alternate which path runs first, as nanoseconds,
 core cycles, instructions and the throttle (PMCx1A0's umask 0x08, #199) per IR
 instruction and cycles per typed entry. A function a step before selection

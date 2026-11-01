@@ -47,7 +47,8 @@ static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tie
     {
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        failures += tier1_select_plan(&corpus->functions[f], &corpus->dominance[f], output, scratch, variant == BUSTER_TIER1_SELECT_SOURCE_VECTOR, &plan, &node) != TIER1_SELECT_OK;
+        // As the driver's --tier1 plans the optimizer's verified result (c_check_tier1.c).
+        failures += tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], output, scratch, variant == BUSTER_TIER1_SELECT_SOURCE_VECTOR, &plan, &node) != TIER1_SELECT_OK;
         arena_pop_to(output, output_mark);
     }
     const Tier0BenchmarkReading end = tier0_benchmark_read(counters);

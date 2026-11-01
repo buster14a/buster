@@ -634,6 +634,42 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
     return result;
 }
 
+// Whether two plans of one function by one path are the same, field by field: what tier1_select_plan_verified gives a
+// verified function against tier1_select_plan's (#141). Their arenas' bytes may differ by alignment where they start.
+static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1SelectPlan* b)
+{
+    const uint32_t count = a->function->instruction_count;
+    bool equal = a->function == b->function && a->vector == b->vector && a->estimated_cost == b->estimated_cost && a->effective_use_count == b->effective_use_count;
+    for (uint32_t node = 0; equal && node < count; node += 1)
+    {
+        const Tier1SelectPattern* p = &a->patterns[node];
+        const Tier1SelectPattern* q = &b->patterns[node];
+        equal = p->immediate == q->immediate && memcmp(p->values, q->values, sizeof(p->values)) == 0 && p->displacement == q->displacement &&
+                p->stack_object == q->stack_object && p->rule == q->rule && p->operation == q->operation && p->width == q->width &&
+                p->source_width == q->source_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
+                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->nops == q->nops;
+        equal = equal && a->covered[node] == b->covered[node] && a->costs[node] == b->costs[node] && a->effective_use_offsets[node] == b->effective_use_offsets[node];
+    }
+    equal = equal && a->effective_use_offsets[count] == b->effective_use_offsets[count];
+    equal = equal && (a->effective_use_count == 0 || memcmp(a->effective_use_values, b->effective_use_values, (size_t)a->effective_use_count * sizeof(uint32_t)) == 0);
+    return equal;
+}
+
+// Plans the verified `function` again by `plan`'s path, by tier1_select_plan with `verify` and otherwise by
+// tier1_select_plan_verified: whether that gives `plan`'s plan. It leaves nothing on the arenas.
+static bool tier1_select_test_plan_again(const IrFunction* function, const IrDominance* dominance, const Tier1SelectPlan* plan, bool verify, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    Tier1SelectPlan again;
+    uint32_t node = BUSTER_IR_NONE;
+    const Tier1SelectError error = verify ? tier1_select_plan(function, dominance, output, scratch, plan->vector, &again, &node) :
+                                            tier1_select_plan_verified(function, dominance, output, scratch, plan->vector, &again, &node);
+    const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && tier1_select_test_plans_equal(plan, &again);
+    arena_pop_to(output, mark);
+    return equal;
+}
+
 static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFunction* function, const uint8_t* registers, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -645,6 +681,8 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
     tier1_select_test_expect(test, ve == TIER1_SELECT_OK && se == TIER1_SELECT_OK, "real IR produces both selection covers");
     if (ve == TIER1_SELECT_OK && se == TIER1_SELECT_OK)
     {
+        tier1_select_test_expect(test, tier1_select_test_plan_again(function, 0, &vector, false, output, scratch) && tier1_select_test_plan_again(function, 0, &scalar, false, output, scratch),
+                                 "a verified function's plan without verification is the same, by both paths");
         tier1_select_test_expect(test, vector.estimated_cost <= scalar.estimated_cost, "bottom-up cover never costs more than maximal munch");
         const Tier1SelectPlan* plans[] = {&vector, &scalar};
         uint64_t random = UINT64_C(0x7a87b0c525ee96fb);
@@ -2079,6 +2117,10 @@ static uint32_t tier1_select_test_walk_plans(Tier1SelectTest* test, const IrFunc
         const Tier1SelectError error = tier1_select_plan(function, dominance, output, scratch, path == 0, &plans[path], &failed);
         tier1_select_test_expect(test, error == TIER1_SELECT_OK && scratch->length == 0, label);
         planned += error == TIER1_SELECT_OK ? 1 : 0;
+    }
+    for (uint32_t path = 0; planned == 2 && path < 2; path += 1)
+    {
+        tier1_select_test_expect(test, tier1_select_test_plan_again(function, dominance, &plans[path], false, output, scratch), "a walked function's plan without verification is the same");
     }
     if (planned == 2)
     {
