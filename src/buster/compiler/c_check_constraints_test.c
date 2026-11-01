@@ -990,6 +990,15 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a[sizeof(s) - 1];\n", 2
     },
     {
+        // #1000: a library builtin's fold still evaluates its argument in an enumeration's value, so a
+        // discarded read the evaluator cannot take keeps the call from folding.
+        "6.6p3", "a library fold's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "enum { E = __builtin_abs((s, -3)) };\n",
+        "static int s;\n"
+        "enum { E = __builtin_abs((&s, -3)) };\n",
+    },
+    {
         "6.6p4", "a constant expression's value in range of its type", CHECK_CONSTRAINT_WARNING, 0,
         "int x;\n"
         "_Static_assert(0x7fffffff + 1 < 0, \"\");\n",
@@ -1081,6 +1090,40 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "static int d = ((s = 1), 3);\n",
         "static int s;\n"
         "static int d = (1, 3);\n",
+    },
+    {
+        // #1000: a vector conditional's condition in a static initializer is still a constant expression,
+        // which a discarded read the evaluator cannot take fails where an address would not.
+        "6.6p7", "a vector static initializer's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "typedef int v4si __attribute__((vector_size(16)));\n"
+        "static int s;\n"
+        "static v4si v = (s, 3) ? (v4si){ 1, 2, 3, 4 } : (v4si){ 5, 6, 7, 8 };\n",
+        "typedef int v4si __attribute__((vector_size(16)));\n"
+        "static int s;\n"
+        "static v4si v = (&s, 3) ? (v4si){ 1, 2, 3, 4 } : (v4si){ 5, 6, 7, 8 };\n",
+    },
+    {
+        // #1000: a library builtin's fold still evaluates its argument, so a discarded read the evaluator
+        // cannot take keeps the call, and the static initializer, from being a constant.
+        "6.6p7", "a library fold's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int a = __builtin_abs((s, -3));\n",
+        "static int s;\n"
+        "static int a = __builtin_abs((&s, -3));\n",
+    },
+    {
+        "6.6p7", "a library fold's discarded read under a void cast is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static double d = __builtin_fmax(((void)s, 1.0), 2.0);\n",
+        "static int s;\n"
+        "static double d = __builtin_fmax(((void)0, 1.0), 2.0);\n",
+    },
+    {
+        "6.6p7", "a string fold's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int b = __builtin_strlen((s, \"abc\"));\n",
+        "static int s;\n"
+        "static int b = __builtin_strlen((\"x\", \"abc\"));\n",
     },
     {
         "6.6p9", "a block-scope static's address constant of an automatic object", CHECK_CONSTRAINT_ERROR, 0,
@@ -1977,6 +2020,24 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "_Static_assert((s, 3), \"\");\n",
         "static int s;\n"
         "_Static_assert((&s, 3), \"\");\n",
+    },
+    {
+        // #1000: a floating static assertion's discarded operand is still evaluated, which a variable's
+        // read fails where an address the evaluator takes would not.
+        "6.7.10p2", "a floating static assertion's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "_Static_assert((s, 0.5), \"\");\n",
+        "static int s;\n"
+        "_Static_assert((&s, 0.5), \"\");\n",
+    },
+    {
+        // #1000: a library builtin's fold still evaluates its argument in a static assertion, so a
+        // discarded read the evaluator cannot take rejects it.
+        "6.7.10p2", "a static assertion's library fold keeps a discarded read", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "_Static_assert(__builtin_abs((s, -3)) == 3, \"\");\n",
+        "static int s;\n"
+        "_Static_assert(__builtin_abs((&s, -3)) == 3, \"\");\n",
     },
     {
         "6.7.10p2", "a static assertion of floating type", CHECK_CONSTRAINT_ACCEPT, 0,

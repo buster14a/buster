@@ -2605,11 +2605,13 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
 }
 
 // Whether `value`, a static assertion's in its GNU context, is a real floating constant, which clang folds and converts to
-// _Bool there (`_Static_assert(0.5, "")` holds), as a GNU constant.
+// _Bool there (`_Static_assert(0.5, "")` holds), as a GNU constant. Its discarded operand's read the evaluator can't take
+// fails it too (BUSTER_CHECK_DISCARDED_UNEVALUABLE: `(s, 0.5)`), as the integer-constant rejection already has it.
 static bool check_graph_floating_assertion(uint32_t context, const CheckValue* value)
 {
     return (context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 &&
-           value->constant_kind == CHECK_CONSTANT_FLOATING && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+           value->constant_kind == CHECK_CONSTANT_FLOATING && value->fault == CHECK_FAULT_NONE &&
+           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
 }
 
 // Whether `value`, in `context`, is a GNU constant where an ICE is required: an integer constant that isn't an ICE, or a

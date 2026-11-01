@@ -618,7 +618,8 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                     {
                         bool truth = false;
                         const CheckValue condition = source < node ? check_init_constant_value(walker, source) : (CheckValue){ 0 };
-                        valid = source < node && condition.fault == CHECK_FAULT_NONE && (condition.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                        valid = source < node && condition.fault == CHECK_FAULT_NONE &&
+                                (condition.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                                 check_action_truth(walker->types, &condition, &truth);
                         selected = truth ? graph->operand1[node] : graph->operand2[node];
                     }
