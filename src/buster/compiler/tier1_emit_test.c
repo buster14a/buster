@@ -662,10 +662,13 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
 // Frame objects' lifetimes (#177, tier1_emit_cfg_lifetimes), on IR with lifetime markers, each object 64 bytes. Shape 0:
 // two objects whose lifetimes don't meet, which share one frame row; shape 1: two whose lifetimes overlap, which don't;
 // shape 2: an object that one branch ends and the other keeps, read after the join, beside one started there, which may
-// not take its row. Each returns a + b (shape 2 where b isn't zero, the path that keeps the first object) natively.
+// not take its row; shape 3: an object that only markers refer to (as SROA and the rebuild keep one), whose lifetime
+// ends before the other's starts, so that the two share a row. Each returns a + b (shape 2 where b isn't zero, the path
+// that keeps the first object) natively.
 static bool tier1_emit_test_lifetime_fixture(Tier1EmitTest* test, uint32_t shape, IrFunction* function)
 {
-    const IrSizes sizes = { .instruction_count = shape == 2 ? 18 : 14, .block_count = shape == 2 ? 3 : 1, .constant_count = shape == 2 ? 1 : 0, .slot_count = 2, .parameter_count = 2 };
+    const uint32_t instructions = shape == 2 ? 18 : shape == 3 ? 11 : 14;
+    const IrSizes sizes = { .instruction_count = instructions, .block_count = shape == 2 ? 3 : 1, .constant_count = shape == 2 ? 1 : 0, .slot_count = 2, .parameter_count = 2 };
     const bool ok = ir_create(&test->input, &sizes, function) == IR_OK;
     if (ok)
     {
@@ -708,6 +711,19 @@ static bool tier1_emit_test_lifetime_fixture(Tier1EmitTest* test, uint32_t shape
             tier1_emit_test_node(function, 12, IR_ADD, IR_I64, 8, 9);
             tier1_emit_test_node(function, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE);
         }
+        else if (shape == 3)
+        {
+            function->block_offsets[1] = 11;
+            tier1_emit_test_node(function, 2, IR_LIFETIME, IR_VOID, 0, 0);
+            tier1_emit_test_node(function, 3, IR_LIFETIME, IR_VOID, 0, 1);
+            tier1_emit_test_node(function, 4, IR_LIFETIME, IR_VOID, 1, 0);
+            tier1_emit_test_node(function, 5, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6, IR_STORE, IR_VOID, 5, 0);
+            tier1_emit_test_node(function, 7, IR_LOAD, IR_I64, 5, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 8, IR_LIFETIME, IR_VOID, 1, 1);
+            tier1_emit_test_node(function, 9, IR_ADD, IR_I64, 7, 1);
+            tier1_emit_test_node(function, 10, IR_RET, IR_VOID, 9, BUSTER_IR_NONE);
+        }
         else
         {
             // b0: the first object started and stored, then to b1 where b is zero and to b2 otherwise; b1 ends it; b2
@@ -741,7 +757,7 @@ static bool tier1_emit_test_lifetime_fixture(Tier1EmitTest* test, uint32_t shape
 
 static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
 {
-    for (uint32_t shape = 0; shape < 3; shape += 1)
+    for (uint32_t shape = 0; shape < 4; shape += 1)
     {
         for (uint32_t vector = 0; vector < 2; vector += 1)
         {
@@ -773,8 +789,10 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
                     int32_t first = 0;
                     int32_t second = 0;
                     const bool found = tier1_emit_cfg_object(&emitted, 0, &first) && tier1_emit_cfg_object(&emitted, 1, &second);
-                    tier1_emit_test_expect(test, found && (shape == 0 ? first == second : first != second && (first - second >= 64 || second - first >= 64)),
-                                           shape == 0 ? "objects whose lifetimes don't meet share a frame row" : "objects whose lifetimes meet take rows of their own");
+                    const bool apart = shape == 0 || shape == 3;
+                    tier1_emit_test_expect(test, found && (apart ? first == second : first != second && (first - second >= 64 || second - first >= 64)),
+                                           shape == 3 ? "an object only markers refer to shares its row by its markers" :
+                                           apart ? "objects whose lifetimes don't meet share a frame row" : "objects whose lifetimes meet take rows of their own");
                     tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "lifetime emission returns scratch");
                     Tier1SelectCode* code = &emitted.code;
                     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);

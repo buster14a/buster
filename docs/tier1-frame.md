@@ -195,7 +195,7 @@ Tier 1's frame lets objects that are never live at once share a slot (#177's
 design: an address-taken local's lifetime is its scope, conservatively, since
 its address can escape within it). The lifetimes are C's own: an automatic
 object lives from its block's entry to the block's exit, however either
-happens, wherever its declaration is in the block (C17 6.2.4p6).
+happens, wherever its declaration is in the block (C17 6.2.4p5).
 
 - The checked program, asked by `--tier1` (`CheckProgramOptions.lifetimes`,
   `c_check_program_lifetime.c`), lists each block's local declarations by its
@@ -212,7 +212,9 @@ happens, wherever its declaration is in the block (C17 6.2.4p6).
   lifetimes; its objects live throughout the function, as clang leaves out the
   markers of an object a goto bypasses (`VarBypassDetector`). Such blocks are:
   - those between a goto's label (or an asm goto's) and the innermost block
-    that holds the jump too;
+    that holds the jump too. No emitted body reaches the asm goto part yet:
+    the lowering refuses asm goto by name (`CheckProgramAsm.reason`), and the
+    part stands ready for when it takes one;
   - those between a case or default label and its switch, the switch's own
     block among them, whose opening brace never runs;
   - every block around a label whose address is taken;

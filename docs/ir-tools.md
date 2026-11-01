@@ -191,6 +191,11 @@ The pairs, and what each records:
   each address becomes a stack address of its field's slot. This pass's stores
   legitimately move to another slot's address, so this pair compares values and
   statuses but not the executor's address-keyed store trace.
+- `sroa-lifetimes` (private-field replacement with #177's `lifetime` markers):
+  a slot that only markers refer to stays, with its markers renumbered; a
+  16-byte slot that splits gives its markers to its first field and compacts
+  away; an address-taken slot, which the pass refuses, keeps its markers and
+  takes the freed number. It compares as `sroa-private-fields` does.
 
 The text form carries no unused sparse rows: the passes keep the original
 constant, slot, address and call-type indices (only new folded constants append,

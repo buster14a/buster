@@ -3,10 +3,11 @@
 //
 // Structural test-tool rewrites of the public scalar IR. A plan selects/permutates existing blocks and rows;
 // direct aliases replace a removed value only with a retained value of the same type. Rebuild every sparse slice
-// by occurrence, compact used stack slots and remap phi predecessors. Symbols and the function ABI stay stable.
-// Input, output and scratch are disjoint. Both verifier paths, including reachable SSA dominance, must approve
-// before a new view is published. Unknown operations and new vector/mask types fail closed, and so does metadata the
-// rebuild doesn't remap (labels, by-value aggregates' ABI records, a variadic definition's incoming frame).
+// by occurrence, compact the stack slots that addresses and lifetime markers use and remap phi predecessors. Symbols
+// and the function ABI stay stable. Input, output and scratch are disjoint. Both verifier paths, including reachable
+// SSA dominance, must approve before a new view is published. Unknown operations and new vector/mask types fail
+// closed, and so does metadata the rebuild doesn't remap (labels, by-value aggregates' ABI records, a variadic
+// definition's incoming frame).
 #ifndef BUSTER_IR_REBUILD_INCLUDED
 #define BUSTER_IR_REBUILD_INCLUDED
 
@@ -289,7 +290,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
         {
             sizes.constant_count += 1;
         }
-        else if (op == IR_STACK_ADDR && slot_map[a] == BUSTER_IR_NONE)
+        else if ((op == IR_STACK_ADDR || op == IR_LIFETIME) && slot_map[a] == BUSTER_IR_NONE)
         {
             if (source->slots[a].type > IR_PTR)
             {
@@ -389,7 +390,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
                 candidate.a[i] = constant;
                 candidate.constants[constant++] = source->constants[a];
             }
-            else if (op == IR_STACK_ADDR)
+            else if (op == IR_STACK_ADDR || op == IR_LIFETIME)
             {
                 candidate.a[i] = slot_map[a];
             }

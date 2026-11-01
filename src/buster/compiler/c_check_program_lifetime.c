@@ -3,7 +3,7 @@
 //
 // The lifetimes of a unit's block-scope objects (#177), for Tier 1's frame, which shares a slot between objects that are
 // never live at once (tier1_emit_cfg_lifetimes). C gives an automatic object its block's lifetime: from the block's entry
-// to its exit, however either happens (C17 6.2.4p6), whatever its declaration's place in the block. So each block that
+// to its exit, however either happens (C17 6.2.4p5), whatever its declaration's place in the block. So each block that
 // declares locals (CheckProgram.lifetime_first, by its closing brace) gets a CHECK_CONTROL_LIFETIME start where its
 // statements begin, and an end where they end and before each break, continue or goto that leaves it
 // (check_control_lifetimes_left); a return, a computed goto and the function's own end need none, since nothing follows
@@ -15,7 +15,8 @@
 // between a goto's label (or an asm goto's) and the innermost block that holds the jump too, between a case or default
 // label and its switch (a switch's own block among them, whose opening brace never runs), and every block around a label
 // whose address is taken. So is a statement expression's block (its region's), whose value the region computes after
-// its statements.
+// its statements. No emitted body reaches the asm goto part yet: the lowering refuses asm goto by name
+// (CheckProgramAsm.reason, c_check_program_asm.c), and the part stands ready for when it takes one.
 //
 // Included by c_check_program.c. Only a program asked for them (CheckProgramOptions.lifetimes, the C driver's --tier1)
 // computes them, so a compile without --tier1 pays nothing for them. Their passes are walks up the parse tree from a
@@ -140,7 +141,7 @@ static void check_program_lifetime_entered(const CheckProgram* program, const Pa
         check_program_lifetime_stamp(parser, stamps, epoch, program->cases[c].owner);
         check_program_lifetime_bypass(parser, stamps, epoch, program->cases[c].token, first);
     }
-    // An asm goto's labels, which its statement may jump to.
+    // An asm goto's labels, which its statement may jump to (unreached while the lowering refuses asm goto).
     for (uint32_t a = 0; a < input->asm_count; a += 1)
     {
         const CheckInputAsm* assembly = input->asm_statements + a;
