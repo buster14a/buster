@@ -606,16 +606,16 @@ which agree within 40 KB; the reader's end is the high-water mark when
 when the checker's reader, graph, parser, program or arena sources change, so
 this PR's job ran the step's own `measure-compile --runs 11` on the frozen
 `sqlite3.c` with `-march=znver5`. Main's latest successful scheduled run of the
-same step (`ebee03e`) against this PR's merge (`5473ef3a`):
+same step (`ebee03e`) against this PR's merge (`f74aa39f`):
 
 | build | wall | user | system | peak RSS | check-input | check-expressions | check-program | lower |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | main `ebee03e` | 134.574 ms | 111.333 ms | 22.938 ms | 401,724 KiB | 58.902 ms | 14.033 ms | 13.824 ms | 14.125 ms |
-| this PR `5473ef3a` | 121.988 ms | 104.308 ms | 16.827 ms | 332,080 KiB | 53.086 ms | 14.152 ms | 10.168 ms | 13.460 ms |
+| this PR `f74aa39f` | 117.485 ms | 100.340 ms | 16.720 ms | 325,528 KiB | 49.142 ms | 14.281 ms | 10.066 ms | 13.565 ms |
 
 The kernel's cycles (`perf stat`'s `cycles:k`) were 110,131,476 on main and
-95,451,739 on this PR. Its minor faults rose from 2,139 to 5,083, the rare
-columns' base pages and the discard's first touches, for the 69,644 KiB lower
+93,768,014 on this PR. Its minor faults rose from 2,139 to 5,098, the rare
+columns' base pages and the discard's first touches, for the 76,196 KiB lower
 peak. The PR's merge includes main's later checker changes, so this table is
 the final branch against main's latest successful scheduled run; the VM table
 above is the isolated PR change.
