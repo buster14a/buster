@@ -389,6 +389,48 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int *a(void) { int x[3]; return &x[0]; }\n"
         "struct S { int m; };\n"
         "int *c(void) { struct S s; return &s.m; }\n";
+    static const char generic_selection[] =
+        "int a(void) { int x; return _Generic(1, int: x, default: 0); }\n"
+        "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"
+        "int c(void) { int x; return __builtin_choose_expr(1, 0, x); }\n"
+        "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n";
+    static const char self_initialization[] =
+        "int a(void) { int x = x; return x; }\n"
+        "int b(void) { int x = x + 1; return x; }\n";
+    static const char unused_but_set_parameters[] =
+        "int a(int x) { x++; return 0; }\n"
+        "int b(int x) { x += 1; return 0; }\n"
+        "int c(int x) { x = 1; return 0; }\n";
+    static const char empty_else_body[] =
+        "int a(int x) { if (x); else x++; return 0; }\n"
+        "int b(int x) { if (x); return 0; }\n";
+    static const char zero_length_array[] =
+        "int a(void) { int x[0]; return x[0]; }\n"
+        "int b(void) { int x[0]; return x[1]; }\n";
+    static const char switch_fixed_shadow[] =
+        "enum E : int { A, B, C };\n"
+        "int f(enum E e) { switch (e) { case A: return 1; } return 0; }\n"
+        "int g(void) { enum E { A, B }; enum E e = A; switch (e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int h(void) { enum E { A, B, C }; enum E e = A; switch (e) { case A: return 1; case B: return 2; } return 0; }\n";
+    static const char format_mismatches[] =
+        "#include <stdio.h>\n"
+        "void a(void){ printf(\"%lld\\n\", 1); }\n"
+        "void b(void){ printf(\"%zd\\n\", 1); }\n"
+        "void c(void){ printf(\"%n\\n\", (char*)0); }\n"
+        "void d(void){ printf(\"%d\\n\", 1, 2); }\n"
+        "void e(void){ printf(\"%d\\n\"); }\n"
+        "void f(void){ printf(\"%*d\\n\", \"x\", 1); }\n"
+        "void g(void){ printf(\"%ls\\n\", (unsigned int*)0); }\n";
+    static const char unused_value_statements[] =
+        "int f(int x){ (int)x; return 0; }\n"
+        "int g(int x){ x ? 1 : 2; return 0; }\n"
+        "int h(int x,int y){ (x, y); return 0; }\n"
+        "int i(int x){ (void)x; return 0; }\n";
+    static const char for_condition[] =
+        "int a(int x){ for (; x = 2; ) { x++; } return x; }\n";
+    static const char vla_bounds[] =
+        "int f(void) { int x; return sizeof(int[x]); }\n"
+        "int g(void) { int x; int y[x]; return y[0]; }\n";
     static const struct
     {
         const char* source;
@@ -408,6 +450,16 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_chains, { "-Wall", NULL, NULL, NULL } },
         { unused_values, { "-Wall", NULL, NULL, NULL } },
         { return_stack, { "-Wall", NULL, NULL, NULL } },
+        { generic_selection, { "-Wall", NULL, NULL, NULL } },
+        { self_initialization, { "-Wall", NULL, NULL, NULL } },
+        { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
+        { empty_else_body, { "-Wall", NULL, NULL, NULL } },
+        { zero_length_array, { "-Wall", NULL, NULL, NULL } },
+        { switch_fixed_shadow, { "-Wall", NULL, NULL, NULL } },
+        { format_mismatches, { "-Wall", NULL, NULL, NULL } },
+        { unused_value_statements, { "-Wall", NULL, NULL, NULL } },
+        { for_condition, { "-Wall", NULL, NULL, NULL } },
+        { vla_bounds, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
     };
