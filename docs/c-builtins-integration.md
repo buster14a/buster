@@ -1474,9 +1474,9 @@ which clang tests inline, are the floating builtins' ("Floating checking"),
 not calls. The table's other `F` rows stay refused, and `__has_builtin`
 answers 0 for them. The lowering refuses by name those the checker can type:
 `__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
-Tier 0's allocation doesn't take), and the signaling NaNs' and the `_Float128`
-and `_Float16` NaNs' (constants clang folds that no library function makes).
-The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
+Tier 0's allocation doesn't take). The signaling NaNs and the `_Float128` and
+`_Float16` NaNs, which clang folds, are the floating builtins' constants
+("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
 function takes or returns `__fp16`), the matrix builtins, and the `FILE`
 builtins (`fprintf` and its kin).
 
