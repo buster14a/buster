@@ -391,9 +391,12 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "char*ndup=__builtin_strndup(a,3);r+=(int)__builtin_strlen(ndup)*19;__builtin_free(ndup);r+=__builtin_strcasecmp(\"HeLLo\",a)<0;"
         "r+=__builtin_strncasecmp(\"HELLO\",a,3)==0;r+=at(__builtin_index(a,'l'),a)*23+at(__builtin_rindex(a,'l'),a)*29;return r;}",
         "library-strings", clang);
+    // The wide characters stay positive: glibc's x86 wcscmp variants disagree on whether a negative wchar_t is less
+    // than a positive one, and which variant runs depends on the strings' addresses, so a negative one's comparison
+    // changed sign from run to run (the 9700X job's n=-3 with ASLR).
     check_test_program_source(test,
         "typedef int wchar;static int at(const wchar*p,const wchar*a){return p?(int)(p-a):-1;}"
-        "int tested(int n){wchar a[16]={'w','i','d','e',0},b[16]={'w','i','d','f',0};a[n&3]=(wchar)(n*0x10001);"
+        "int tested(int n){wchar a[16]={'w','i','d','e',0},b[16]={'w','i','d','f',0};a[n&3]=(wchar)((n+4)*0x10001);"
         "int r=(int)__builtin_wcslen(a)+__builtin_wcscmp(a,b)*3+__builtin_wcsncmp(a,b,(unsigned)(n&3))*5+__builtin_wmemcmp(a,b,4)*7;"
         "r+=at(__builtin_wcschr(a,'d'),a)*11+at(__builtin_wmemchr(a,'e',4),a)*13;wchar d[16];"
         "r+=at(__builtin_wmemcpy(d,a,5),d);r+=d[3];__builtin_wmemmove(d+1,d,4);return r+d[1]*17+d[4];}",
