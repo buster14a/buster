@@ -597,7 +597,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
     }
     if (check.error == IR_OK)
     {

@@ -270,15 +270,69 @@ but writes only those that fit in the slot's 16, so a form that doesn't fit
 rejected without writing past its template.
 
 A segment override is the form's too, as `lock` and `rep` are: the form number
-plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (8,189 or twice that) names a
+plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (8,354 or twice that) names a
 template of its own, which starts with the prefix as a static byte (64 or 65,
-before the other prefixes, as GNU as puts it). `x86_encoder_initialize` builds
-every form's template three times, 24,567 entries and 1.57 MB in all, of which a
-stream touches its own forms' lines; a form without a memory operand gets copies
-that take no operand at all. So x86_encode does nothing for an override that it
-doesn't do for every form, and its loop is the same code with them as without.
-The fixup flag works the same way (see "Fixups"): the templates are copied again
-at the flag's index, 1.57 MB more.
+before the other prefixes, as GNU as puts it). Every form has three templates,
+25,062 entries and 1.6 MB in all, of which a stream touches its own forms'
+lines; a form without a memory operand gets copies that take no operand at all.
+So x86_encode does nothing for an override that it doesn't do for every form,
+and its loop is the same code with them as without. The fixup flag works the
+same way (see "Fixups"): the templates are copied again at the flag's index,
+1.6 MB more.
+
+In 64-bit mode, `x86_encoder_initialize` builds each form's template once and
+makes its FS and GS templates from it (`x86_template_with_segment`, #590): in
+64-bit mode an override changes nothing for a form without a memory operand,
+and for one with it adds the override's static byte after FWAIT's `9B` (or
+first), moves every later position one further and makes the static length
+one longer, with the same checks. It fits where `build_template`'s would
+(within 15 bytes, the static length's field and the 8 static positions, which
+`X86TemplateShape` gives from the form's own build), and otherwise the template
+is the form's own without a memory operand, as `build_mode_template` makes it.
+The other modes' tables build all three, since their overrides interact with
+other positions (a `67`, REX2's payload, the decorations' override).
+`test-x86-encoder` and `test-x86-target-selection` compare every entry and its
+marked copy with `build_mode_template`'s. Each entry's marked copy is written in
+the same per-entry pass that writes its halves the other way around, rather
+than by one 1.6 MB copy afterwards.
+
+Before building a table, `x86_templates_prepare` commits the ranges the build
+writes (`MADV_POPULATE_WRITE`), one call per range, both ends rounded out to
+pages. For `x86_encode`'s table, which every compile builds, it first asks for
+transparent huge pages (`MADV_HUGEPAGE`). Each template's marked copy is
+exactly 2 MB after it (`BUSTER_X86_FORM_FIXUP` is 2 MB of entries), so the
+entries the build writes, which are all the ranges count and commit (not the
+padding beside them), fall in two or three 2 MB pages, depending on where the
+link places the table.
+- **Which pages.** `x86_templates_huge_pages` picks those the table fills at
+  least 750 KB of: as much as a huge page's clearing costs in base pages on the
+  9700X (`lane.c`'s arenas). Asking for a third huge page that the table fills
+  less cost 0.06 to 0.2 ms more, on a Xeon VM, than leaving its bytes to base
+  pages.
+- **Where.** A huge page's margin on either side keeps those pages in the
+  table's own storage. The storage isn't aligned to a huge page, because wild
+  0.10, which links CI's builds, refuses alignments past 64 KB. Only the copy
+  in `main.c`'s units (`BUSTER_UNIT`), the one a compile builds, has the
+  margins; the benchmarks' units keep theirs without them.
+  `x86_encoder_initialized` is in `.data`, as `lane.c`'s `LaneProcess` is: in
+  `.bss` it followed the margin into a 2 MB region of its own, which an
+  `always` kernel cleared whole for that one byte.
+- **The other tables.** Tests, the disassembler and the other modes' entry
+  points build the other modes' tables. Those keep their size, without margins
+  or huge pages, because the benchmarks' units have copies of them all.
+- **Faults.** Where huge pages come, that is a fault per huge page, and the
+  rest base pages committed in one call per range. Where none come (`never`,
+  or none free), all are base pages committed so. The kernel still counts
+  each such page as a minor fault, but none is taken one at a time.
+- **Why.** On a kernel whose transparent huge pages are only `madvise`d
+  (Ubuntu's, Debian's and Fedora's default), `.bss`'s 3.2 MB had faulted in 788
+  base pages, half of a small file's compile. The 9700X's kernel uses
+  `always`, which already gave `.bss` huge pages, so it hid the cost.
+- **Measured.** On a 2.1 GHz Xeon VM with `madvise`, a process's first
+  `x86_encoder_initialize` fell from a median of 1.8–2.6 ms with 788 faults to
+  0.9–1.0 ms. Its work without faults fell from 0.94 to 0.53 ms. The whole
+  change's figures, the 9700X's among them, are in `docs/compile-time.md`'s
+  "The backend's tables when a function is emitted (#590)".
 
 ### VEX and EVEX
 
@@ -503,8 +557,9 @@ lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
 64-byte store appends to the fixup ends (their capacity has 16 more than the
 marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
 mask's popcount; the zeroed copy's padding isn't marked. A marked form's
-template is a copy at its own index: `x86_encoder_initialize` copies the 18,351
-templates to `BUSTER_X86_FORM_FIXUP` and up (the pages between stay unmapped),
+template is a copy at its own index: `x86_encoder_initialize` writes each of
+the 25,062 templates again at `BUSTER_X86_FORM_FIXUP` and up, in the table's
+second huge page (see "Templates and the canonical slot"),
 so Phase I looks a form up as the record has it, and the loop without offsets
 and fixup ends is the same code as before. Taking the flag off each form with
 an AND instead cost the compiler mix 2.4% (15 interleaved rounds, after #35's

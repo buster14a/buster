@@ -583,8 +583,10 @@ decoration's role of another kind (both of its bits) or past the scratch registe
 with masks, and mask operands and scratch registers past the seven a borrowing row has (and, as in any row, a form with
 a segment override). `interpreter.c` runs mask entries (but rows and objects, which it doesn't model), each mask's bits
 in its value's low word and its bytes in the high word;
-`ir_lower.c` refuses a function with masks, since the IR's `m8` to `m64` have no conversion to or from an integer
-(`docs/ir-simd.md`), so that `--tier1` leaves it to Tier 0.
+`ir_lower.c` lowers them to the IR's `m8` to `m64`, its conversions through `bitcast` to and from the integer of the
+mask's bits, and the front end's `_k*` rows through `ir_simd_typed.c`'s decoder; a row it doesn't decode (a vector's, or
+one that names opmask registers by number) is refused, so that `--tier1` leaves that function to Tier 0
+(`docs/ir-simd.md`'s "Masks from the typed stream").
 
 The front end's AVX-512 builtins are the class's first user (`check_x86_lower_masks`, `c_check_program_x86.c`): a row
 whose mask operands its records move into opmask registers from their integers, and whose mask result one moves out,
@@ -978,8 +980,13 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,951 templates from the encoder's forms and compiles each into one cache line. A byte the
-template fixes is that byte; a hole's is its index in the hole block. Expansion is copy and patch:
+`tier0_initialize` builds 1,962 templates from the encoder's forms and compiles each into one cache line. A byte the
+template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1 MB, are separate static
+arrays, whose pages it commits first with one `MADV_POPULATE_WRITE` call each (`tier0_prepare_tables`, #590): a kernel
+whose transparent huge pages are only `madvise`d gave them 257 base pages' faults in every compile. Grouping them in
+one structure, in a huge page of its own, took `tier0_initialize` from 82 to 184 million instructions in 60 builds
+(callgrind, baseline x86-64), as LLVM can't tell that one object's members don't overlap.
+Expansion is copy and patch:
 
 1. one load of the line;
 2. one `vpermb` from the hole block;

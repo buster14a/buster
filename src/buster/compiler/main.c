@@ -521,6 +521,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
+#include "buster/compiler/c_check_lanes_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
 #pragma clang optimize on
 

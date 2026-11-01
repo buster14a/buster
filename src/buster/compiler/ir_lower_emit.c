@@ -214,7 +214,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             case BUSTER_TYPED_X86:
                 depth -= input->operations[value].operand_count;
-                stack[depth] = ir_typed_vector_operation(&sink, plan->operations + value, type, stack + depth);
+                // A row of opmask instructions alone (#179), or a vector operation.
+                stack[depth] = plan->operations[value].mask_bytes != 0 ? ir_typed_mask_row(&sink, plan->operations + value, stack + depth)
+                                                                       : ir_typed_vector_operation(&sink, plan->operations + value, type, stack + depth);
                 classes[depth] = class;
                 depth += 1;
                 break;

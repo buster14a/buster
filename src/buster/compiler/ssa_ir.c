@@ -15,6 +15,9 @@
 // the SSA constructor's trivial-phi cleanup applies to its newly created phis.
 
 _Static_assert(IR_VOID == BUSTER_SSA_TYPE_VOID && IR_I1 == BUSTER_SSA_TYPE_I1 && IR_I8 == BUSTER_SSA_TYPE_I8 && IR_I16 == BUSTER_SSA_TYPE_I16 && IR_I32 == BUSTER_SSA_TYPE_I32 && IR_I64 == BUSTER_SSA_TYPE_I64 && IR_I128 == BUSTER_SSA_TYPE_I128 && IR_F32 == BUSTER_SSA_TYPE_F32 && IR_F64 == BUSTER_SSA_TYPE_F64 && IR_F80 == BUSTER_SSA_TYPE_F80 && IR_PTR == BUSTER_SSA_TYPE_PTR, "SSA and IR scalar types must agree");
+_Static_assert(IR_V4I32 == BUSTER_SSA_TYPE_V4I32 && IR_V8I32 == BUSTER_SSA_TYPE_V8I32 && IR_V16I32 == BUSTER_SSA_TYPE_V16I32 && IR_M8 == BUSTER_SSA_TYPE_M8 &&
+                   IR_M16 == BUSTER_SSA_TYPE_M16 && IR_M32 == BUSTER_SSA_TYPE_M32 && IR_M64 == BUSTER_SSA_TYPE_M64 && IR_TYPE_COUNT == BUSTER_SSA_TYPE_AGGREGATE,
+               "SSA and IR vector and mask types must agree, the aggregate past them");
 
 static __attribute__((unused)) IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
 static __attribute__((unused)) IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
@@ -639,7 +642,9 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
     }
-    if (check.error == IR_OK && ir_function_has_simd(input))
+    // A function with vectors stays unpromoted (#141's); one whose only SIMD values are masks promotes (#179), its masks'
+    // slots as any scalar's.
+    if (check.error == IR_OK && ir_function_has_vectors(input))
     {
         check.error = IR_ERROR_UNSUPPORTED;
     }
