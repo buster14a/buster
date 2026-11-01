@@ -82,6 +82,20 @@ static uint32_t check_data_declared_index(const CheckDataPrepared* prepared, uin
     return index;
 }
 
+// A declared object's alignment past its type's, its log2 (CheckDataObject.alignment_log2): its declarations' largest
+// alignment attribute's (`attribute`, its log2 plus 1, 0 for none), or without one at least 16 bytes for an array of 16
+// bytes or more, as the x86-64 psABI and clang align a global array (type_large_array, #978); a compound literal its
+// type's alone.
+static uint8_t check_data_declared_alignment(const CheckInput* input, const TypeTable* types, uint32_t object, TypeId type, uint8_t attribute)
+{
+    uint8_t result = attribute != 0 ? (uint8_t)(attribute - 1) : 0;
+    if (attribute == 0 && !input->compound_objects[object - 1] && type_large_array(types, type))
+    {
+        result = 4;
+    }
+    return result;
+}
+
 // The last static declaration of `object`, or BUSTER_CHECK_NONE where it has none.
 static uint32_t check_data_latest(const CheckDataPrepared* prepared, uint32_t object)
 {
@@ -259,7 +273,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                     .initializer = input->initializer_nodes[selected],
                     .token = selected,
                     .initializer_plan = plan,
-                    .alignment_log2 = alignments[at] != 0 ? (uint8_t)(alignments[at] - 1) : 0,
+                    .alignment_log2 = check_data_declared_alignment(input, types, object, type, alignments[at]),
                 };
                 result->reference_offsets[written] = result->reference_count;
                 const uint64_t reference_mark = scratch->length;

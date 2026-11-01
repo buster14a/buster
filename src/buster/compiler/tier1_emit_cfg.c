@@ -595,6 +595,54 @@ static Tier1EmitError tier1_emit_cfg_fixed(Tier1EmitResult* emitted, const Tier1
     return appended ? TIER1_EMIT_OK : (saved & ~emitted->prepared.call_save_mask) != 0 ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_MEMORY;
 }
 
+// The entry's moves: each parameter free at its definition (Tier1CfgInput.definition_registers 0 for it, every
+// parameter where the allocation needed them all free) from its incoming register into the register its allocation has
+// it in at the entry, its definition's, as one parallel move through the scratch register. A parameter bound to its
+// incoming register is there already.
+static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, Arena* scratch, Tier1EmitBuffer* buffer)
+{
+    const IrFunction* function = plan->function;
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const Tier1Allocation* allocation = &emitted->cfg.allocation;
+    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS];
+    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS];
+    uint32_t count = 0;
+    Tier1EmitError error = TIER1_EMIT_OK;
+    for (uint32_t node = 0; error == TIER1_EMIT_OK && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
+    {
+        const uint32_t v = emitted->node_values[node];
+        const bool free = function->op[node] == IR_PARAM && v != BUSTER_TIER1_CFG_NONE && (input->definition_registers == 0 || input->definition_registers[v] == 0);
+        const uint32_t interval = free ? tier1_cfg_interval_at(&emitted->cfg, v, 0) : BUSTER_TIER1_CFG_NONE;
+        const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? allocation->fragment_offsets[interval] : 0;
+        error = !free || (interval != BUSTER_TIER1_CFG_NONE && allocation->kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER && count < BUSTER_ABI_INTEGER_ARGUMENTS) ? error : TIER1_EMIT_ALLOCATION;
+        if (free && error == TIER1_EMIT_OK && allocation->registers[fragment] != tier1_select_parameter_registers[function->a[node]])
+        {
+            sources[count] = tier1_select_parameter_registers[function->a[node]];
+            destinations[count] = allocation->registers[fragment];
+            count += 1;
+        }
+    }
+    const Tier1ParallelMoves moves = {
+        .sources = sources,
+        .destinations = destinations,
+        .count = count,
+        .scratch = BUSTER_TIER1_SELECT_SCRATCH,
+    };
+    const uint64_t scratch_mark = scratch->length;
+    Tier1ResolvedMoves resolved = { 0 };
+    if (error == TIER1_EMIT_OK && count != 0)
+    {
+        const Tier1AllocationError moved = tier1_resolve_moves(&moves, scratch, &resolved);
+        error = moved == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : moved == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
+    }
+    for (uint32_t move = 0; error == TIER1_EMIT_OK && count != 0 && move < resolved.count; move += 1)
+    {
+        error = tier1_emit_append(buffer, tier1_emit_move(resolved.sources[move], resolved.destinations[move], 8)) ? error : TIER1_EMIT_MEMORY;
+    }
+    arena_pop_to(scratch, scratch_mark);
+    return error;
+}
+
 // Moves [first, end) of tier1_cfg's columns: registers and slots by tier1_cfg's location ids, and recomputations of
 // constants, into a slot through the scratch register.
 static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t first, uint32_t end, Tier1EmitBuffer* buffer)
@@ -872,6 +920,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             error = tier1_emit_append(&buffer, extend) ? error : TIER1_EMIT_MEMORY;
         }
     }
+    if (error == TIER1_EMIT_OK)
+    {
+        error = tier1_emit_cfg_entry(plan, emitted, scratch, &buffer);
+    }
     for (uint32_t b = 0; error == TIER1_EMIT_OK && b < blocks; b += 1)
     {
         block_first[b] = b == 0 ? 0 : buffer.count;
@@ -991,7 +1043,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     // with its immediate's request.
                     const Tier1SelectRecords selected_records = tier1_select_expand(&holes);
                     const uint32_t compares = selected_records.count >= 2 ? selected_records.count - 2u : 0;
-                    error = selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
+                    error = !selected_records.overflowed && selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
                     const uint32_t compare_first = buffer.count;
                     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < compares; r += 1)
                     {
@@ -1011,6 +1063,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             else if (error == TIER1_EMIT_OK && selected)
             {
                 Tier1SelectRecords selected_records = tier1_select_expand(&holes);
+                error = selected_records.overflowed ? TIER1_EMIT_INVALID : error;
                 // A frame object's address, from the frame's base at the object's offset.
                 int32_t object_offset = 0;
                 if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
@@ -1158,6 +1211,10 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
             }
             crosses |= low < call_count && calls[low] < end && calls[low] != base + 2 * node + 1;
         }
+        // A parameter keeps its incoming register over its definition's interval, as in the first allocation: free there
+        // too, in a callee-saved register from the entry on, it would hold one for the whole entry block, which spilled
+        // more than its saves around the calls there cost (on speedtest1, a slower run). A parameter the first
+        // allocation already freed (tier1_emit_cfg_function) stays free, the entry's moves bringing it.
         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
         allowed[v] = (crosses ? callee : caller) | defined;
         crossing += crosses;
@@ -1197,7 +1254,14 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
     if (error == TIER1_EMIT_OK)
     {
-        const Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
+        Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
+        // A parameter bound to its incoming register over its definition's interval may leave a use there no register:
+        // then every parameter is free, the entry's moves bringing each where its allocation has it.
+        if (allocated == TIER1_CFG_CONSTRAINT)
+        {
+            emitted->cfg_input.definition_registers = 0;
+            allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
+        }
         error = allocated == TIER1_CFG_OK ? TIER1_EMIT_OK : allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : allocated == TIER1_CFG_CONSTRAINT ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_INVALID;
         // Without fixed ranges there are no splits; the general class alone has values.
         error = error != TIER1_EMIT_OK || (emitted->cfg.split_count == 0 && (emitted->cfg.temp_slots & ~1u) == 0) ? error : TIER1_EMIT_ALLOCATION;

@@ -142,14 +142,15 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_emit_test_call(co
     return function(a, b);
 }
 
-static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* function, Tier1EmitResult* emitted)
+// The code with its branches sized, encoded into `bytes` of new pages and made executable: whether it runs natively
+// here. The caller unmaps `executable` (MAP_FAILED where nothing was mapped).
+static bool tier1_emit_test_load(Tier1EmitTest* test, Tier1SelectCode* code, void** executable, uint64_t* bytes)
 {
-    Tier1SelectCode* code = &emitted->code;
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
-    const uint64_t bytes = (capacity + 4095) & ~UINT64_C(4095);
-    void* executable = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    *bytes = (capacity + 4095) & ~UINT64_C(4095);
+    *executable = mmap(0, *bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
-    bool ready = executable != MAP_FAILED && offsets != 0;
+    bool ready = *executable != MAP_FAILED && offsets != 0;
     tier1_emit_test_expect(test, ready, "native execution buffer");
     if (ready)
     {
@@ -167,12 +168,20 @@ static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* funct
             covered &= x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE;
         }
         tier1_emit_test_expect(test, covered, "every frame and body record has a covered form");
-        ready = x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, executable, capacity, 0, 0) > 0;
+        ready = x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, *executable, capacity, 0, 0) > 0;
         tier1_emit_test_expect(test, ready, "baseline encoder accepts complete frame and body");
-        ready = ready && mprotect(executable, bytes, PROT_READ | PROT_EXEC) == 0;
+        ready = ready && mprotect(*executable, *bytes, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "native code made executable");
     }
-    if (ready && tier1_emit_test_native(test, code->records, code->count))
+    free(offsets);
+    return ready && tier1_emit_test_native(test, code->records, code->count);
+}
+
+static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* function, Tier1EmitResult* emitted)
+{
+    void* executable = MAP_FAILED;
+    uint64_t bytes = 0;
+    if (tier1_emit_test_load(test, &emitted->code, &executable, &bytes))
     {
         uint64_t random = UINT64_C(0x0a3385510b49decd);
         for (uint32_t sample = 0; sample < 64; sample += 1)
@@ -187,7 +196,6 @@ static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* funct
     {
         munmap(executable, bytes);
     }
-    free(offsets);
 }
 
 static void tier1_emit_test_pressure(Tier1EmitTest* test)
@@ -366,6 +374,141 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 #include "tier1_narrow_test.c"
 #include "tier1_terminal_test.c"
 
+// #989's review: a node's sequence at its room and past it, in a consumer. `node` takes no-ops before its records
+// (Tier1SelectPattern.nops), one more each time: while its sequence fits its room, the function emits with that many
+// more records and runs as before (the pressure fixture's oracle, or with `branching` that of
+// tier1_emit_test_overlong's CFG); past it, the function fails at the node as an invalid one, its arenas and result as
+// they were. Returns how many no-ops fit.
+static uint32_t tier1_emit_test_overlong_node(Tier1EmitTest* test, Tier1SelectPlan* plan, const IrFunction* function, const Tier1EmitOptions* options, uint32_t node, uint32_t base, bool branching)
+{
+    uint32_t fitted = 0;
+    bool refused = false;
+    for (uint32_t nops = 0; nops <= BUSTER_TIER1_SELECT_RECORDS_PER_NODE; nops += 1)
+    {
+        plan->patterns[node].nops = (uint8_t)nops;
+        const uint64_t mark = test->output.length;
+        const uint64_t scratch_mark = test->scratch.length;
+        Tier1EmitResult result;
+        memset(&result, 0xa5, sizeof(result));
+        Tier1EmitResult before;
+        memcpy(&before, &result, sizeof(result));
+        uint32_t failed = BUSTER_IR_NONE;
+        const Tier1EmitError error = tier1_emit_function(plan, options, test->allowed, &test->output, &test->scratch, &result, &failed);
+        if (error == TIER1_EMIT_OK)
+        {
+            tier1_emit_test_expect(test, !refused && result.code.count == base + nops && result.general == branching, "a node's no-ops up to its room are its records");
+            fitted += refused ? 0 : 1;
+            if (!branching)
+            {
+                tier1_emit_test_execute(test, function, &result);
+            }
+            void* executable = MAP_FAILED;
+            uint64_t bytes = 0;
+            if (branching && tier1_emit_test_load(test, &result.code, &executable, &bytes))
+            {
+                uint64_t random = UINT64_C(0x6c0d2b9e17a4f385) + nops;
+                for (uint32_t sample = 0; sample < 32; sample += 1)
+                {
+                    const uint64_t a = sample < 4 ? UINT64_MAX >> sample : tier1_emit_test_random(&random);
+                    const uint64_t b = sample < 2 ? sample : tier1_emit_test_random(&random);
+                    const uint64_t s = a + b;
+                    tier1_emit_test_expect(test, tier1_emit_test_call(executable, a, b) == (s < b ? s ^ a : s - b), "a node's sequence at its room runs through the CFG consumer");
+                }
+            }
+            if (executable != MAP_FAILED)
+            {
+                munmap(executable, bytes);
+            }
+        }
+        else
+        {
+            tier1_emit_test_expect(test, error == TIER1_EMIT_INVALID && failed == node && test->output.length == mark && test->scratch.length == scratch_mark && memcmp(&result, &before, sizeof(result)) == 0,
+                                   "a node's sequence past its room fails the function at the node, its arenas and result as they were");
+            refused = true;
+        }
+        arena_pop_to(&test->output, mark);
+    }
+    tier1_emit_test_expect(test, refused, "a node's sequence past its room is refused");
+    plan->patterns[node].nops = 0;
+    return fitted;
+}
+
+// #989's review: both consumers refuse a node's sequence past its room. The straight-line consumer on the pressure
+// fixture and the CFG consumer on s = a + b, then s < b (unsigned) ? s ^ a : s - b, whose branch's comparison is its
+// sequence's conditional jump's (its comparison, the jump and the jump to the other block: three records): every node
+// that writes records, by both paths.
+static void tier1_emit_test_overlong(Tier1EmitTest* test)
+{
+    test->terms = 3;
+    test->width = 8;
+    test->selects = true;
+    for (uint32_t branching = 0; branching < 2; branching += 1)
+    {
+        IrFunction function;
+        bool ready = false;
+        if (branching == 0)
+        {
+            ready = tier1_emit_test_fixture(test, &function);
+        }
+        else
+        {
+            const IrSizes sizes = { .instruction_count = 9, .block_count = 3, .parameter_count = 2 };
+            ready = ir_create(&test->input, &sizes, &function) == IR_OK;
+            if (ready)
+            {
+                function.result_type = IR_I64;
+                function.parameter_types[0] = IR_I64;
+                function.parameter_types[1] = IR_I64;
+                function.block_offsets[1] = 5;
+                function.block_offsets[2] = 7;
+                function.block_offsets[3] = 9;
+                tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 2, IR_ADD, IR_I64, 0, 1);
+                tier1_emit_test_node(&function, 3, IR_ICMP, IR_I1, 2, 1);
+                function.c[3] = IR_ULT;
+                tier1_emit_test_node(&function, 4, IR_CBR, IR_VOID, 3, 1);
+                function.c[4] = 2;
+                tier1_emit_test_node(&function, 5, IR_XOR, IR_I64, 2, 0);
+                tier1_emit_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 7, IR_SUB, IR_I64, 2, 1);
+                tier1_emit_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE);
+                ready = ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+            }
+        }
+        tier1_emit_test_expect(test, ready, "overlong fixture is valid IR");
+        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        {
+            IrDominance dominance;
+            const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
+            tier1_emit_test_expect(test, planned, "overlong fixture selects");
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector != 0 };
+            Tier1EmitResult base;
+            const bool based = planned && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &base, &node) == TIER1_EMIT_OK && base.general == (branching != 0);
+            tier1_emit_test_expect(test, based, "overlong fixture emits through its consumer");
+            uint32_t swept = 0;
+            for (uint32_t n = 0; based && n < function.instruction_count; n += 1)
+            {
+                const uint32_t op = function.op[n];
+                const uint32_t rule = plan.patterns[n].rule;
+                if (!plan.covered[n] && op != IR_PARAM && op != IR_PHI && op != IR_BR && op != IR_CALL && op != IR_CALL_INDIRECT && rule != TIER1_RULE_DIVIDE && rule != TIER1_RULE_SHIFT)
+                {
+                    const uint32_t fitted = tier1_emit_test_overlong_node(test, &plan, &function, &options, n, base.code.count, branching != 0);
+                    tier1_emit_test_expect(test, op != IR_CBR || (plan.patterns[n].rule == TIER1_RULE_BRANCH_COMPARE && fitted == BUSTER_TIER1_SELECT_RECORDS_PER_NODE - 2),
+                                           "a branch's comparison, conditional jump and jump take three records of its room");
+                    swept += 1;
+                }
+            }
+            tier1_emit_test_expect(test, swept >= (branching != 0 ? 5u : 7u), "every node that writes records is swept");
+            arena_pop_to(&test->output, 0);
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static int run_tier1_emit_tests(int argc, char** argv)
 {
     (void)argv;
@@ -401,6 +544,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_call_tests(&test);
             tier1_narrow_tests(&test);
             tier1_terminal_tests(&test);
+            tier1_emit_test_overlong(&test);
             printf("tier1 fragment emission: %" PRIu64 " checks, %" PRIu64 " failures; stores=%" PRIu64 " reloads=%" PRIu64 " rematerializations=%" PRIu64 "\n", test.checks, test.failures, test.stores, test.loads, test.copies);
             arena_release(&test.input);
             arena_release(&test.output);

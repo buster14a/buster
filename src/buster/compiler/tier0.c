@@ -8388,8 +8388,9 @@ static bool tier0_push_output(Tier0Code* code, Arena* output, uint64_t records, 
     if (room)
     {
         code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records + BUSTER_TIER0_TEMPLATE_RECORDS);
-        code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
-        code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+        // #892: 8 past the last branch — the vector emitter's compressed stores write whole vectors.
+        code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 8);
+        code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 8);
         code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
         // The entries' positions are final once measured: emission writes each entry's records from its position.
         code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
@@ -8618,15 +8619,19 @@ static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choic
         const bool clear = (shape & BUSTER_TIER0_SHAPE_CLEAR) != 0;
         const bool twice = (shape & BUSTER_TIER0_SHAPE_TWICE) != 0;
         const uint32_t shift = (bytes >= 4 ? 32 : 64 - 8 * bytes) & 63;
-        const uint64_t immediate = bytes == 0 ? 0 : (uint32_t)((int64_t)(value << shift) >> shift);
-        const uint64_t displacement = bytes == 8 ? value >> 32 : clear ? 0 : low >> 32;
+        // #892: the selects read as ?: but clang emitted branches for them; masks keep the row branch-free.
+        const uint64_t has_bytes = -(uint64_t)(bytes != 0);
+        const uint64_t immediate = (uint32_t)((int64_t)(value << shift) >> shift) & has_bytes;
+        const uint64_t displacement = (value >> 32 & -(uint64_t)(bytes == 8)) | (low >> 32 & -(uint64_t)(bytes != 8) & -(uint64_t)!clear);
         const uint64_t operands = high & 0xffffffffull;
-        const uint64_t chosen_operands = clear ? 0 : twice ? (operands & ~0xffull) | (operands >> 8 & 0xff) : operands;
+        const uint64_t swapped = (operands & ~0xffull) | (operands >> 8 & 0xff);
+        const uint64_t chosen_operands = (operands ^ ((operands ^ swapped) & -(uint64_t)twice)) & -(uint64_t)!clear;
         const uint64_t chosen_form = form | (high >> 32 & BUSTER_X86_FORM_FIXUP);
         const uint64_t chosen_low = immediate | displacement << 32;
         const uint64_t chosen_high = chosen_operands | chosen_form << 32 | (high & 0xffff000000000000ull);
-        low = form == X86_FORM_NONE ? low : chosen_low;
-        high = form == X86_FORM_NONE ? high : chosen_high;
+        const uint64_t apply = -(uint64_t)(form != X86_FORM_NONE);
+        low = (low & ~apply) | (chosen_low & apply);
+        high = (high & ~apply) | (chosen_high & apply);
         memcpy(record, &low, sizeof(low));
         memcpy(record + 8, &high, sizeof(high));
     }
@@ -10807,38 +10812,37 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         __m512i word = _mm512_maskz_loadu_epi64(lanes, words + first);
         const __mmask8 dependent = _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_HOME_DEPENDENT)) &
                                    _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
-        if (dependent != 0)
+        // #892: an empty `dependent` mask already makes every masked row below a no-op (its gather keeps its own guard),
+        // so the block runs unconditionally rather than mispredicting the guard.
+        const __m512i a_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_A_SHIFT), seven);
+        const __m512i b_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_B_SHIFT), seven);
+        const __mmask8 a_valid = dependent & _mm512_cmpneq_epi64_mask(a_offset, seven);
+        const __mmask8 b_valid = dependent & _mm512_cmpneq_epi64_mask(b_offset, seven);
+        const __m512i a_local = tier0_value_back(previous, current, a_offset);
+        const __m512i b_local = tier0_value_back(previous, current, b_offset);
+        __mmask8 a_register = 0;
+        __mmask8 b_register = 0;
+        if (few)
         {
-            const __m512i a_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_A_SHIFT), seven);
-            const __m512i b_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_B_SHIFT), seven);
-            const __mmask8 a_valid = dependent & _mm512_cmpneq_epi64_mask(a_offset, seven);
-            const __mmask8 b_valid = dependent & _mm512_cmpneq_epi64_mask(b_offset, seven);
-            const __m512i a_local = tier0_value_back(previous, current, a_offset);
-            const __m512i b_local = tier0_value_back(previous, current, b_offset);
-            __mmask8 a_register = 0;
-            __mmask8 b_register = 0;
-            if (few)
-            {
-                a_register = a_valid & _mm512_test_epi64_mask(_mm512_srlv_epi64(register_bits, a_local), one);
-                b_register = b_valid & _mm512_test_epi64_mask(_mm512_srlv_epi64(register_bits, b_local), one);
-            }
-            else
-            {
-                a_register = _mm512_test_epi64_mask(tier0_home_lookup(&table, a_local, a_valid), is_register);
-                b_register = _mm512_test_epi64_mask(tier0_home_lookup(&table, b_local, b_valid), is_register);
-            }
-            __m512i cases = _mm512_maskz_mov_epi64(a_register, one);
-            cases = _mm512_mask_add_epi64(cases, b_register, cases, _mm512_set1_epi64(2));
-            const __mmask8 uniform = dependent & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_HOME_UNIFORM));
-            const __mmask8 gathered = dependent & ~uniform;
-            word = _mm512_mask_add_epi64(word, uniform, word, cases);
-            if (gathered != 0)
-            {
-                const __m512i index = _mm512_add_epi64(_mm512_and_si512(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_TEMPLATE)), cases);
-                word = _mm512_mask_i64gather_epi64(word, gathered, index, tier0_template_words, 8);
-            }
-            word = _mm512_mask_andnot_epi64(word, dependent, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_HOME_DEPENDENT | BUSTER_TIER0_WORD_HOME_UNIFORM)), word);
+            a_register = a_valid & _mm512_test_epi64_mask(_mm512_srlv_epi64(register_bits, a_local), one);
+            b_register = b_valid & _mm512_test_epi64_mask(_mm512_srlv_epi64(register_bits, b_local), one);
         }
+        else
+        {
+            a_register = _mm512_test_epi64_mask(tier0_home_lookup(&table, a_local, a_valid), is_register);
+            b_register = _mm512_test_epi64_mask(tier0_home_lookup(&table, b_local, b_valid), is_register);
+        }
+        __m512i cases = _mm512_maskz_mov_epi64(a_register, one);
+        cases = _mm512_mask_add_epi64(cases, b_register, cases, _mm512_set1_epi64(2));
+        const __mmask8 uniform = dependent & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_HOME_UNIFORM));
+        const __mmask8 gathered = dependent & ~uniform;
+        word = _mm512_mask_add_epi64(word, uniform, word, cases);
+        if (gathered != 0)
+        {
+            const __m512i index = _mm512_add_epi64(_mm512_and_si512(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_TEMPLATE)), cases);
+            word = _mm512_mask_i64gather_epi64(word, gathered, index, tier0_template_words, 8);
+        }
+        word = _mm512_mask_andnot_epi64(word, dependent, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_HOME_DEPENDENT | BUSTER_TIER0_WORD_HOME_UNIFORM)), word);
         _mm512_storeu_si512(words + first, word);
         const __mmask8 deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
         const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ABSORBED)));
@@ -10997,7 +11001,8 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
         fields = tier0_expand(words, positions, records, first + 7, 7, pair3, choice_fields, fields);
         const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ABSORBED)));
         const __mmask8 choice = template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE));
-        if (choice != 0)
+        // #892: an empty `choice` mask already makes the compressed columns' stores dead (their 8-entry tail room takes
+        // the lanes) and `requests` keeps its count, so the block runs unconditionally rather than mispredicting the guard.
         {
             // The context of each request (tier0_choice_context's) from its record's rm and mode, then the four columns
             // compressed, each stored whole (the columns have room for 8 past the last request).
@@ -11017,17 +11022,23 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
             _mm_storeu_si128((__m128i*)(contexts + requests), _mm_maskz_compress_epi16(choice, _mm512_cvtepi64_epi16(context)));
             requests += (uint32_t)__builtin_popcount(choice);
         }
-        uint32_t branch = template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH));
-        while (branch != 0)
-        {
-            const uint32_t i = first + (uint32_t)__builtin_ctz(branch);
-            branch &= branch - 1;
-            const uint64_t entry_word = words[i];
-            const uint32_t target = (entry_word & BUSTER_TIER0_WORD_END) != 0 ? count : (uint32_t)values[i];
-            branch_records[branches] = positions[i] + (uint32_t)(entry_word >> BUSTER_TIER0_WORD_BRANCH_SHIFT & 3);
-            targets[branches] = positions[target];
-            branches += 1;
-        }
+        // #892: the branches' records and targets stored compressed, as the choices' columns are — each lane's
+        // (position + branch field) and its target's position, the targets gathered under the branch mask, rather than
+        // a lane-at-a-time loop whose exit mispredicts. Both columns have room for 8 past the last branch.
+        const __mmask8 branch = template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH));
+        const __m512i branch_position = _mm512_cvtepu32_epi64(_mm256_loadu_si256((const __m256i*)(positions + first)));
+        const __m512i branch_field = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_BRANCH_SHIFT), _mm512_set1_epi64(3));
+        _mm256_storeu_si256((__m256i*)(branch_records + branches),
+                            _mm256_maskz_compress_epi32(branch, _mm512_cvtepi64_epi32(_mm512_add_epi64(branch_position, branch_field))));
+        const __mmask8 branch_end = _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_END));
+        const __m512i branch_target = _mm512_mask_mov_epi64(_mm512_and_si512(current, _mm512_set1_epi64(0xffffffff)), branch_end, _mm512_set1_epi64(count));
+        // #975: `_mm512_mask_i64gather_epi32` expands to `__builtin_ia32_gatherdiv16si`, which neither the checker's
+        // catalogue nor the backend's rows (there is no VPGATHERQD row) have, so the compiler could not check or lower
+        // this file. The 64-bit gather is the measure pass's, and a position's low half is the whole value.
+        const __m512i target_qwords = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), branch, branch_target, positions, 4);
+        const __m256i target_position = _mm512_cvtepi64_epi32(target_qwords);
+        _mm256_storeu_si256((__m256i*)(targets + branches), _mm256_maskz_compress_epi32(branch, target_position));
+        branches += (uint32_t)__builtin_popcount(branch);
         // The references and the deferred entries, in entry order: a call's references come where its records do.
         const uint32_t deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
         uint32_t rest = deferred | (template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));

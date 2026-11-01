@@ -482,6 +482,76 @@ mingw's `fmaxl`. Separate programs check float/double subnormals with DAZ on
 and off, and each ordered builtin's signaling-NaN exception after a second
 argument clears the flags, including quiet-NaN/signaling-NaN pairs.
 
+### The rest of clang's classifications (#148)
+
+`isnormal`, `issubnormal`, `iszero`, `issignaling` and `isfpclass` take a real
+floating argument unconverted, as clang's `BuiltinFPClassification` does.
+`isfpclass` also takes a vector of them, whose result is the signed vector of
+its elements' width (`check_vector_mask_type`), and a mask, unconverted and
+never evaluated, that must be an integer constant expression. Clang's
+`BuiltinConstantArgRange` takes the mask's value sign-extended from its own
+type's width, whatever its signedness, and that must be in [0, 1023]:
+`(unsigned char)200` and `(_Bool)1` are errors. The mask's bits are LLVM's
+`FPClassTest`: 1 signaling NaN, 2 quiet NaN, 4 -infinity, 8 -normal,
+16 -subnormal, 32 -0, 64 +0, 128 +subnormal, 256 +normal and 512 +infinity.
+The other classifiers are `isfpclass` of their own masks (264, 144, 96 and 1),
+as clang's code is (`createIsFPClass`). `signbitf` and `signbitl` convert
+their argument to `float` and `long double`, as their prototypes say, then
+take its sign. Each folds as clang's evaluator does (APFloat's `isNormal`,
+`isDenormal`, `isZero`, `isSignaling`, `classify() & mask` and `isNegative`),
+an integer constant expression; a vector never folds. `canonicalize`,
+`canonicalizef` and `canonicalizel` take their prototypes' conversions and
+never fold: clang's rows aren't constexpr, so a call in a static initializer
+is an error. Under `FENV_ACCESS` they may raise invalid
+(`check_builtin_float_strict`), as fpclassify's and isinf_sign's compares do.
+
+The lowering tests a classification's mask by a table of 64 bits, which the
+recipe indexes by six bits of the argument's representation
+(`cbuiltin_float_lower_class_table`): the exponent zero, the exponent all
+ones, the integer bit (a float's or double's implicit one, its exponent's
+being nonzero), the fraction below it zero, the fraction's top bit, and the
+sign. A float's or double's entry is its class's bit in the mask. An x87
+one's is what clang 23's -O0 code gives, which isn't the classes' bits.
+LLVM's `expandIS_FPCLASS` tests a mask that one quiet compare can test by the
+x87's compare (NaNs alone, zeros or NaNs, one infinity or NaNs, zeros,
+subnormals or NaNs, or those masks' inverses), unless `FENV_ACCESS` makes the
+code strict. It tests any other mask by integer tests of the encoding's
+fields. In those, an unsupported encoding or a pseudo-denormal is a NaN when
+the mask holds both NaNs, a pseudo-denormal is a zero or subnormal when the
+mask holds both of those, and either is in no class otherwise: of a
+pseudo-denormal, `isfpclass(x, 0xf0)` is 1, and `isfpclass(x, 0x60)` and
+`isfpclass(x, 0x90)` are 0. `cbuiltin_float_lower_x87_class` models that for
+x86's rules (`SETOEQ` and `SETUNE` aren't legal, `fabs` isn't free), and
+gives clang's answers for all 1024 masks on every class of encoding, under
+`FENV_ACCESS` and not. `signbitf` and `signbitl` are `signbit`'s recipes of
+their converted arguments. `canonicalize` is the argument times 1.0 of its
+class, as clang's `mulss`, `mulsd` and `fld1`, `fmulp` are: a signaling NaN
+comes out quiet, an unsupported x87 encoding the default NaN, and a
+pseudo-denormal normalized. `isfpclass` of a vector of floats or doubles
+stores the vector into a frame object and classifies each lane by the scalar
+recipe, the lane loaded into the recipe's argument, storing its 1 or 0 into
+the result's frame object as an `int` or a `long long`, as clang's zero
+extension of `llvm.is.fpclass`'s lanes gives (`check_lower_floating_lanes`);
+a vector of half-precision or `__bf16` lanes stays refused, as their scalars
+are, and so does one of `long double` elements, whose 16-byte lanes clang
+gives a vector of `__int128` results.
+
+`test-check-builtins-float` checks each fold against the host compiler's own
+builtins in each format (`isfpclass`'s with every mask), the mask's rules and
+the signbits' conversions, and clang's acceptance of the sources behind those
+checks. `test-builtin-float-lowering` runs each recipe by both paths on float,
+double and x87 inputs: the classifiers', the signbits' and canonicalize's
+against the host's builtins and the x87 fixture of clang -O0's results, and
+`isfpclass`'s, with every mask LLVM treats apart and every 37th, against the
+model. `test-checker` (`c_check_program_classify_test.c`) checks the rules'
+sources by both paths against clang, and runs programs natively against clang
+-O0's builds: `isfpclass` with all 1024 masks on every class of float, double
+and x87 encoding, under `FENV_ACCESS` and not; the other classifiers, the
+signbits and canonicalize's results; folds; operands evaluated once; and
+vectors of 4 to 64 bytes of floats and doubles, GNU's and clang's extended
+ones, at x86-64-v4. Clang -O3's code differs from -O0's for eight masks of x87
+values, so -O0's builds are the oracle.
+
 ## Atomic and terminal helper calls
 
 `c_check_builtin_atomic_c11.c` supplies the C11 `__c11_atomic_*` family used by
@@ -1270,16 +1340,17 @@ for 'sin'`, both under `-Wimplicit-function-declaration`, and a prototype with
 (const char *)')`). The call then converts its arguments to the prototype's
 parameters (`sin(1)` passes 1.0), in C89 as clang's does.
 
-**Refused.** The table's other `F` rows stay refused, and `__has_builtin`
+**Refused.** The classification builtins of custom checking
+(`__builtin_isnormal` and its kin) and `__builtin_signbitf` and `signbitl`,
+which clang tests inline, are the floating builtins' ("Floating checking"),
+not calls. The table's other `F` rows stay refused, and `__has_builtin`
 answers 0 for them. The lowering refuses by name those the checker can type:
 `__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
-Tier 0's allocation doesn't take), `__builtin_signbitf` and `signbitl` (clang
-tests the bit inline; no library function has the name), and the signaling
-NaNs' and the `_Float128` and `_Float16` NaNs' (constants clang folds that no
-library function makes). The prototypes of the rest don't decode: the 35
-`__fp16` builtins (no C function takes or returns `__fp16`), the
-classification builtins of custom checking (`__builtin_isnormal` and its kin),
-the matrix builtins, and the `FILE` builtins (`fprintf` and its kin).
+Tier 0's allocation doesn't take), and the signaling NaNs' and the `_Float128`
+and `_Float16` NaNs' (constants clang folds that no library function makes).
+The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
+function takes or returns `__fp16`), the matrix builtins, and the `FILE`
+builtins (`fprintf` and its kin).
 
 `test-checker` (`c_check_program_library_test.c`, alone with
 `--program-library`) checks the lists against clang's table and accounts for
