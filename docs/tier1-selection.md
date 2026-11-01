@@ -457,11 +457,19 @@ need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
 | `copy` | `TIER1_RULE_MASK_COPY` | `kmov k, k`, none where allocation gave both one register |
 | `and`, `or`, `xor` | `TIER1_RULE_MASK_LOGIC` | `kand`, `kor`, `kxor` `k, k, k` |
 | `not` | `TIER1_RULE_MASK_NOT` | `knot k, k` |
+| `bitcast` of an `iN` to `mN` | `TIER1_RULE_MASK_FROM_INTEGER` | `kmov k, r32` (`kmovq k, r64` for `m64`), the integer's register's low bits |
+| `bitcast` of an `mN` to `iN` | `TIER1_RULE_MASK_TO_INTEGER` | `kmov r32, k` (`kmovq r64, k`), the bits past the mask's zero, as `iN`'s canonical 32-bit storage has them |
+| `bitcast` of an `mN` to `mN` | `TIER1_RULE_MASK_COPY` | as `copy`'s |
 | `load`, `store` | `TIER1_RULE_MASK_LOAD`, `_STORE`, and their `_ADDRESS` folds | `kmov k, m` and `kmov m, k`, the address folded as an integer access's, a frame object's among them |
 | `phi` | `TIER1_RULE_PHI` | none: its operands are its edges' moves |
 
 The opmask instructions of a width leave the bits past it zero, as the IR's masks
-have them, so no record extends a mask. A node's register is its allocation's
+have them, so no record extends a mask. The `bitcast`s are the boundary the typed
+stream's conversions between masks and integers lower through (the [IR SIMD
+guide](ir-simd.md)'s "Masks from the typed stream"): a `kmovb` or `kmovw` from a
+general register reads its low byte or word, so an `i8` or `i16` in canonical
+32-bit storage converts with no extension, and a `kmov` into one zeroes the
+register past the mask's bits. A node's register is its allocation's
 location, class 2's `64 + k`, whose low three bits the expansion takes as k. A
 mask's `select`, `vcmp` and `vselect` have no rule and are refused at their node:
 `cmov` has no opmask form, and the comparisons and selection need vectors.

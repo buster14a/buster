@@ -58,9 +58,12 @@ spills and reloads a mask at its width, moves it along CFG edges with `kmov` and
 saves it around calls ([the selection guide](tier1-selection.md)'s "AVX-512's
 masks"): `test-tier1-masks` runs hand-written IR of masks natively against the
 shared IR's interpreter. Neither consumer may reinterpret a mask as an ordinary
-GPR value or infer target permission from the compiler host. Scalar-only
-promotion and optimization still refuse SIMD functions before publication, and
-selection refuses vectors; this handoff does not claim native Tier 1 vector
+GPR value or infer target permission from the compiler host. SSA promotion and
+SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
+stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
+guide](ir-simd.md)'s "Masks from the typed stream"), and refuse one with vectors;
+GVN, LICM, SROA and the inliner still refuse every SIMD function, and selection
+refuses vectors; this handoff does not claim native Tier 1 vector
 execution, full vector ABI support or a throughput gain.
 
 ## Required evidence

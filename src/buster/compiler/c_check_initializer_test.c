@@ -309,7 +309,7 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
     }
     CheckValue value = { 0 };
     CheckStream stream = {
-        .values = &value,
+        .dense_values = &value,
         .count = 1,
     };
     CheckInitWalker walker = {

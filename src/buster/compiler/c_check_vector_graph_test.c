@@ -34,10 +34,10 @@ static __attribute__((noinline)) void check_test_vector_graph(CheckTest* test, T
         if (checked)
         {
             const TypeId pair = type_vector(table, BUSTER_TYPE_INT, 2, true);
-            check_test_expect(test, scalar.values[first].type == pair && scalar.values[first].category == CHECK_LVALUE &&
-                                   (scalar.values[first].flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 &&
-                                   (scalar.values[first].flags & BUSTER_CHECK_VECTOR_DUPLICATE) == 0 &&
-                                   scalar.values[second].type == pair && (scalar.values[second].flags & BUSTER_CHECK_VECTOR_DUPLICATE) != 0,
+            check_test_expect(test, check_stream_type(&scalar, first) == pair && check_stream_category(&scalar, first) == CHECK_LVALUE &&
+                                   (check_stream_flags(&scalar, first) & BUSTER_CHECK_VECTOR_ELEMENT) != 0 &&
+                                   (check_stream_flags(&scalar, first) & BUSTER_CHECK_VECTOR_DUPLICATE) == 0 &&
+                                   check_stream_type(&scalar, second) == pair && (check_stream_flags(&scalar, second) & BUSTER_CHECK_VECTOR_DUPLICATE) != 0,
                               "member lane order and duplicate classification preserve exact vector result types");
             const uint64_t mark = output.length;
             for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
@@ -67,7 +67,7 @@ static __attribute__((noinline)) void check_test_vector_graph(CheckTest* test, T
                 CheckStream invalid;
                 check_test_expect(test, !check_graph_run(table, &invalid_graph, &output, &scratch, &scalar_options, &invalid) &&
                                        invalid.status == CHECK_STATUS_INVALID_GRAPH && output.length == mark && scratch.length == 0 &&
-                                       invalid.values == NULL && invalid.count == 0,
+                                       !check_stream_has_values(&invalid) && invalid.count == 0,
                                   "malformed compact vector metadata fails within its bounds and rolls publication back");
             }
         }

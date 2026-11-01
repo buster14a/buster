@@ -239,12 +239,16 @@ reaches the handler.
 A third, compiled by `--tier1 --verify` (#177), has every function but `main`
 by Tier 1: a frame of spill slots alone, one with pushes, two returns each after
 its own epilogue, an open frame whose loop's latch comes last, a realigned frame,
-and a leaf whose spills are in the red zone, whose shapes `--tier1-report`'s
-counts must show. By each path (whose frames may be colored apart, so not the same bytes)
-and from its object linked by GNU ld and lld, `backtrace()` walks through every
-frame to `main`, and without unwind tables stops at the first; GDB's backtrace
-at every instruction of each of the seven, without `-g`, gives the function and
-`main`.
+the same open and with two returns, and a leaf whose spills are in the red zone,
+whose shapes `--tier1-report`'s counts must show, and each function's FDE as
+`readelf -wF` interprets it: a row with the CFA rsp+8 at each return's `ret`,
+a last row with another CFA exactly for the open frames, the CFA rbp's exactly
+for the realigned ones, and the leaf's one row. By each path (whose frames may
+be colored apart, so not the same bytes), by `--lanes 1` and 8 into the vector
+path's bytes, and from its object linked by GNU ld and lld, `backtrace()` walks
+through every frame to `main`, and without unwind tables stops at the first;
+GDB's backtrace at every instruction of each of the nine, without `-g`, gives
+the function and `main`.
 
 ## Checks and measurements
 

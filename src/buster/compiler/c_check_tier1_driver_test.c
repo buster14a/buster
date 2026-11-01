@@ -324,6 +324,45 @@ static const char check_test_tier1_variadic_source[] =
     "    return 0;\n"
     "}\n";
 
+// The opmask fixture (#179): tier1_masks is the function under test, every _k* builtin's row of its two words' masks (the
+// words truncated to each width, as the builtins' prototypes convert them), folded into one hash; main prints the hash
+// over pairs of words around each width's edges.
+static const char check_test_tier1_masks_source[] =
+    "#include <stdio.h>\n"
+    "typedef unsigned long long u64;\n"
+    "#define B(name) h = h * 31 + __builtin_ia32_##name(a, b);\n"
+    "#define U(name) h = h * 31 + __builtin_ia32_##name(a);\n"
+    "#define S(name) h = h * 31 + __builtin_ia32_##name(a, 0); h = h * 31 + __builtin_ia32_##name(a, 1); h = h * 31 + __builtin_ia32_##name(a, 7); \\\n"
+    "    h = h * 31 + __builtin_ia32_##name(a, 8); h = h * 31 + __builtin_ia32_##name(a, 31); h = h * 31 + __builtin_ia32_##name(a, 64);\n"
+    "u64 tier1_masks(u64 a, u64 b)\n"
+    "{\n"
+    "    u64 h = 0;\n"
+    "    B(kandqi) B(kandhi) B(kandsi) B(kanddi) B(kandnqi) B(kandnhi) B(kandnsi) B(kandndi)\n"
+    "    B(korqi) B(korhi) B(korsi) B(kordi) B(kxorqi) B(kxorhi) B(kxorsi) B(kxordi)\n"
+    "    B(kxnorqi) B(kxnorhi) B(kxnorsi) B(kxnordi) B(kaddqi) B(kaddhi) B(kaddsi) B(kadddi)\n"
+    "    B(kunpckhi) B(kunpcksi) B(kunpckdi)\n"
+    "    B(kortestzqi) B(kortestzhi) B(kortestzsi) B(kortestzdi) B(kortestcqi) B(kortestchi) B(kortestcsi) B(kortestcdi)\n"
+    "    B(ktestzqi) B(ktestzhi) B(ktestzsi) B(ktestzdi) B(ktestcqi) B(ktestchi) B(ktestcsi) B(ktestcdi)\n"
+    "    U(knotqi) U(knothi) U(knotsi) U(knotdi) U(kmovb) U(kmovw) U(kmovd) U(kmovq)\n"
+    "    S(kshiftliqi) S(kshiftlihi) S(kshiftlisi) S(kshiftlidi) S(kshiftriqi) S(kshiftrihi) S(kshiftrisi) S(kshiftridi)\n"
+    "    return h;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    static const u64 words[] = { 0, 1, 0x80, 0xff, 0x8000, 0xffff, 0x80000000ull, 0xffffffffull, 0x8000000000000000ull, ~0ull,\n"
+    "                                 0x0123456789abcdefull, 0x5555aaaa33330f0full };\n"
+    "    u64 h = 0;\n"
+    "    for (unsigned i = 0; i < 12; i += 1)\n"
+    "    {\n"
+    "        for (unsigned j = 0; j < 12; j += 1)\n"
+    "        {\n"
+    "            h = h * 1000003 + tier1_masks(words[i], words[j]);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%llx\\n\", h);\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -471,13 +510,18 @@ static bool check_test_tier1_taken(const char* text, const char* const* names, u
 }
 
 // A fixture compiled by --tier1 with and without rematerialization (`rematerialize`) by each path, into an executable
-// (`-o output`) or with `object` an object (-c), whose report goes into *build: whether it compiled with each of its
-// `name_count` functions `names` by Tier 1 (check_test_tier1_taken).
+// (`-o output`) or with `object` an object (-c), with `option` (as -march=x86-64-v4) where it isn't NULL, whose report
+// goes into *build: whether it compiled with each of its `name_count` functions `names` by Tier 1
+// (check_test_tier1_taken).
 static bool check_test_tier1_build_names(const char* executable, const char* source, const char* const* names, uint32_t name_count, const char* output, bool rematerialize, bool scalar, bool object,
-                                         CheckTestTier1Build* build)
+                                         const char* option, CheckTestTier1Build* build)
 {
     char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
     uint32_t count = 5;
+    if (option != NULL)
+    {
+        arguments[count++] = (char*)option;
+    }
     if (!rematerialize)
     {
         arguments[count++] = "--tier1-no-rematerialize";
@@ -511,9 +555,10 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
 }
 
 // check_test_tier1_build_names of one function `name`, or with an empty name every function.
-static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, CheckTestTier1Build* build)
+static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, const char* option,
+                                   CheckTestTier1Build* build)
 {
-    return check_test_tier1_build_names(executable, source, &name, 1, output, rematerialize, scalar, object, build);
+    return check_test_tier1_build_names(executable, source, &name, 1, output, rematerialize, scalar, object, option, build);
 }
 
 // The fixture's object, decoded: every zeroing xor leaves no status flag live (#178: a recomputed zero is an xor only
@@ -628,8 +673,8 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
             snprintf(linked, sizeof(linked), "%s/tier1-remat-%u-%u-cc", directory, rematerialize, path);
             // The executable by the direct path, and the object, which cc links.
             CheckTestTier1Build object_build;
-            const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
-            const bool compiled = check_test_tier1_build(executable, source, "tier1_remat", object, rematerialize != 0, path != 0, true, &object_build);
+            const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, rematerialize != 0, path != 0, false, NULL, &builds[rematerialize][path]);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_remat", object, rematerialize != 0, path != 0, true, NULL, &object_build);
             check_test_expect(test, built && compiled, "the fixture compiles by --tier1, its function Tier 1's");
             char* cc_arguments[] = { "cc", "-o", linked, object, NULL };
             char* cc_text = NULL;
@@ -707,9 +752,9 @@ static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, c
             snprintf(main_object, sizeof(main_object), "%s/tier1-divide-main-%u-%u.o", directory, rematerialize, path);
             CheckTestTier1Build object_build;
             CheckTestTier1Build main_build;
-            const bool built = check_test_tier1_build(executable, source, "tier1_divide", output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
-            const bool compiled = check_test_tier1_build(executable, source, "tier1_divide", object, rematerialize != 0, path != 0, true, &object_build);
-            const bool main_compiled = check_test_tier1_build(executable, main_source, "main", main_object, rematerialize != 0, path != 0, true, &main_build);
+            const bool built = check_test_tier1_build(executable, source, "tier1_divide", output, rematerialize != 0, path != 0, false, NULL, &builds[rematerialize][path]);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_divide", object, rematerialize != 0, path != 0, true, NULL, &object_build);
+            const bool main_compiled = check_test_tier1_build(executable, main_source, "main", main_object, rematerialize != 0, path != 0, true, NULL, &main_build);
             check_test_expect(test, built && compiled && main_compiled, "the division fixture compiles by --tier1, its functions Tier 1's");
             check_test_expect(test, main_compiled && main_build.call_stores == 0, "the division fixture's main alone saves nothing around its calls");
             char actual[256] = { 0 };
@@ -820,8 +865,8 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             snprintf(object, sizeof(object), "%s/tier1-labels-%u-%u.o", directory, rematerialize, path);
             CheckTestTier1Build build;
             CheckTestTier1Build object_build;
-            const bool built = check_test_tier1_build(executable, source, "", output, rematerialize != 0, path != 0, false, &build);
-            const bool compiled = check_test_tier1_build(executable, source, "", object, rematerialize != 0, path != 0, true, &object_build);
+            const bool built = check_test_tier1_build(executable, source, "", output, rematerialize != 0, path != 0, false, NULL, &build);
+            const bool compiled = check_test_tier1_build(executable, source, "", object, rematerialize != 0, path != 0, true, NULL, &object_build);
             check_test_expect(test, built && compiled, "the labels fixture compiles by --tier1, every function Tier 1's");
             char actual[512] = { 0 };
             check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
@@ -954,8 +999,8 @@ static void check_test_driver_tier1_variadic(CheckTest* test, const char* clang,
             snprintf(object, sizeof(object), "%s/tier1-variadic-%u-%u.o", directory, rematerialize, path);
             CheckTestTier1Build build;
             CheckTestTier1Build object_build;
-            const bool built = check_test_tier1_build_names(executable, source, names, BUSTER_ARRAY_LENGTH(names), output, rematerialize != 0, path != 0, false, &build);
-            const bool compiled = check_test_tier1_build_names(executable, source, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, &object_build);
+            const bool built = check_test_tier1_build_names(executable, source, names, BUSTER_ARRAY_LENGTH(names), output, rematerialize != 0, path != 0, false, NULL, &build);
+            const bool compiled = check_test_tier1_build_names(executable, source, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, NULL, &object_build);
             check_test_expect(test, built && compiled, "the variadic fixture compiles by --tier1, every variadic definition Tier 1's");
             char actual[512] = { 0 };
             check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
@@ -981,4 +1026,73 @@ static void check_test_driver_tier1_variadic(CheckTest* test, const char* clang,
     unlink(source);
     unlink(reference);
     unlink(tier0);
+}
+
+// The opmask fixture (#179), by each path, with and without rematerialization, for x86-64-v4: its function of every _k*
+// builtin compiles by Tier 1 (its rows through ir_simd_typed.c's decoder, its masks in the opmask class), and where the
+// host has AVX-512 F, BW, DQ and VL its executable prints clang -O0's build's output. Its object holds opmask
+// instructions: the masks stay in k registers between their conversions.
+static void check_test_driver_tier1_masks(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_MASKS_RECORDS = 16384,
+    };
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-masks.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-masks-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_masks_source, sizeof(check_test_tier1_masks_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-march=x86-64-v4", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    check_test_expect(test, referenced, "clang builds the opmask fixture");
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool host = (x86_target_native().features & needed) == needed;
+    char expected[256] = { 0 };
+    const bool ran = referenced && host && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, !host || ran, "clang's build of the opmask fixture runs");
+    const bool ready = referenced && x86_disassembler_initialize();
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_MASKS_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_MASKS_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_MASKS_RECORDS, sizeof(uint32_t));
+    uint32_t opmask = 0;
+    for (uint32_t rematerialize = 0; ready && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            char object[512];
+            snprintf(output, sizeof(output), "%s/tier1-masks-%u-%u", directory, rematerialize, path);
+            snprintf(object, sizeof(object), "%s/tier1-masks-%u-%u.o", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            CheckTestTier1Build object_build;
+            const bool built = check_test_tier1_build(executable, source, "tier1_masks", output, rematerialize != 0, path != 0, false, "-march=x86-64-v4", &build);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_masks", object, rematerialize != 0, path != 0, true, "-march=x86-64-v4", &object_build);
+            check_test_expect(test, built && compiled, "the opmask fixture compiles by --tier1, its function of _k* builtins Tier 1's");
+            char actual[256] = { 0 };
+            check_test_expect(test, !host || (built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0),
+                              "the opmask fixture prints clang's build's output");
+            uint32_t relocations = 0;
+            const uint32_t count = compiled && records != NULL && offsets != NULL && types != NULL ?
+                                       check_test_tier1_function(object, "tier1_masks", records, CHECK_TEST_TIER1_MASKS_RECORDS, offsets, types, &relocations) : 0;
+            uint32_t found = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const X86FormDescription* description = x86_form_description(records[i].instruction.form & BUSTER_X86_FORM_NUMBER);
+                found += (description->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_OPMASK || (description->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_OPMASK;
+            }
+            check_test_expect(test, count != 0 && found != 0, "the opmask fixture's function keeps its masks in opmask registers");
+            opmask = found > opmask ? found : opmask;
+            unlink(output);
+            unlink(object);
+        }
+    }
+    printf("  Tier 1's opmask builtins: %u instructions on opmask registers%s\n", opmask, host ? "" : " (compiled only: no AVX-512 here)");
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(reference);
 }

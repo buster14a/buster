@@ -78,7 +78,7 @@ static const uint8_t* check_init_constant_bytes(const CheckInitWalker* walker, u
     const uint8_t* result = entry != NULL ? entry->bytes : NULL;
     if (result == NULL && walker->graph != NULL && node < walker->stream->count)
     {
-        const CheckValue value = walker->stream->values[node];
+        const CheckValue value = check_stream_value(walker->stream, node);
         const TypeId type = type_strip_aligned(walker->types, value.type);
         const uint32_t slot = check_init_object_slot(walker->objects, value.object);
         if (slot != BUSTER_CHECK_NONE && value.offset == 0 && check_vector_type(walker->types, type) &&
@@ -98,7 +98,7 @@ static const uint8_t* check_init_constant_bytes(const CheckInitWalker* walker, u
 static CheckValue check_init_constant_value(const CheckInitWalker* walker, uint32_t node)
 {
     const CheckInitConstant* entry = check_init_constant(walker, node);
-    return entry != NULL && entry->scalar != NULL ? *entry->scalar : walker->stream->values[node];
+    return entry != NULL && entry->scalar != NULL ? *entry->scalar : check_stream_value(walker->stream, node);
 }
 
 static bool check_init_constant_known(const CheckValue* value)
@@ -296,7 +296,7 @@ static const uint8_t* check_init_vector_operand(CheckInitWalker* walker, uint32_
 static bool check_init_vector_literal(CheckInitWalker* walker, uint32_t node, uint32_t opener, uint8_t* bytes, uint64_t size)
 {
     const Parser* parser = walker->parser;
-    const TypeId type = walker->stream->values[node].type;
+    const TypeId type = check_stream_type(walker->stream, node);
     const TypeId element = check_vector_element(walker->types, type);
     const uint32_t count = check_vector_count(walker->types, type);
     const uint32_t end = parser->tree.parents[opener];
@@ -372,7 +372,7 @@ static bool check_init_vector_fold(CheckInitWalker* walker, uint32_t node, uint8
 {
     const CheckGraph* graph = walker->graph;
     const CheckOp op = graph->ops[node];
-    const TypeId target = walker->stream->values[node].type;
+    const TypeId target = check_stream_type(walker->stream, node);
     const uint32_t count = check_vector_count(walker->types, target);
     const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR;
     const uint32_t left_node = graph->operand0[node];
@@ -380,7 +380,7 @@ static bool check_init_vector_fold(CheckInitWalker* walker, uint32_t node, uint8
     const CheckNodeConversions* conversions = walker->stream->conversions != NULL ? walker->stream->conversions + node : NULL;
     TypeId left_type = conversions != NULL ? conversions->operands[0].type : 0;
     TypeId right_type = conversions != NULL ? conversions->operands[1].type : 0;
-    left_type = check_vector_type(walker->types, left_type) ? left_type : walker->stream->values[left_node].type;
+    left_type = check_vector_type(walker->types, left_type) ? left_type : check_stream_type(walker->stream, left_node);
     right_type = binary && check_vector_type(walker->types, right_type) ? right_type : left_type;
     bool valid = check_vector_type(walker->types, left_type) && check_vector_type(walker->types, right_type) &&
                  check_vector_count(walker->types, left_type) == count && check_vector_count(walker->types, right_type) == count;
@@ -463,14 +463,14 @@ static bool check_init_vector_select(CheckInitWalker* walker, uint32_t node, uin
 {
     const CheckGraph* graph = walker->graph;
     const uint32_t base_node = graph->operand0[node];
-    const TypeId base_type = walker->stream->values[base_node].type;
+    const TypeId base_type = check_stream_type(walker->stream, base_node);
     const uint8_t* base = check_init_constant_bytes(walker, base_node);
-    const TypeId target = walker->stream->values[node].type;
+    const TypeId target = check_stream_type(walker->stream, node);
     const bool vector = check_vector_type(walker->types, target);
     const uint32_t count = vector ? check_vector_count(walker->types, target) : 1;
     bool valid = check_vector_type(walker->types, base_type) && base != NULL &&
                  (type_qualifiers(type_strip_aligned(walker->types, base_type)) & BUSTER_TYPE_VOLATILE) == 0 &&
-                 (walker->stream->values[base_node].flags & BUSTER_CHECK_VOLATILE_PART) == 0;
+                 (check_stream_flags(walker->stream, base_node) & BUSTER_CHECK_VOLATILE_PART) == 0;
     CheckAction action = { 0 };
     if (valid)
     {
@@ -489,7 +489,7 @@ static bool check_init_vector_select(CheckInitWalker* walker, uint32_t node, uin
         else
         {
             const CheckVectorMember* member = action.vector_member;
-            valid = member != NULL && (walker->stream->values[base_node].category != CHECK_LVALUE ||
+            valid = member != NULL && (check_stream_category(walker->stream, base_node) != CHECK_LVALUE ||
                     (!vector && graph->ops[base_node] != CHECK_OP_MEMBER));
             if (valid)
             {
@@ -563,7 +563,7 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
     walker->constants = cache;
     for (uint32_t node = first; walker->result->status == CHECK_INIT_OK && node <= root; node += 1)
     {
-        const CheckValue checked = walker->stream->values[node];
+        const CheckValue checked = check_stream_value(walker->stream, node);
         CheckInitConstant* entry = cache->entries + node - first;
         const CheckOp op = graph->ops[node];
         const bool vector = check_vector_type(walker->types, checked.type);
@@ -646,7 +646,7 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                         memcpy(bytes, converted, size);
                     }
                 }
-                else if (!vector && convert && source < node && check_vector_type(walker->types, walker->stream->values[source].type))
+                else if (!vector && convert && source < node && check_vector_type(walker->types, check_stream_type(walker->stream, source)))
                 {
                     // Clang accepts this bitcast as an ordinary expression, but excludes vector-to-scalar
                     // reinterpretation from C static constant expressions. Keep that source constraint here.
@@ -693,9 +693,10 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
 static void check_init_vector_parts(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node, const uint8_t* bytes)
 {
     const uint64_t size = type_size(walker->types, selected->type);
-    const uint64_t source_size = type_size(walker->types, walker->stream->values[node].type);
+    const uint64_t source_size = type_size(walker->types, check_stream_type(walker->stream, node));
     CheckActionResult assignment = { 0 };
-    if (size != source_size || !check_vector_assignable(walker->types, selected->type, walker->stream->values + node, &assignment))
+    const CheckValue source = check_stream_value(walker->stream, node);
+    if (size != source_size || !check_vector_assignable(walker->types, selected->type, &source, &assignment))
     {
         check_init_fail(walker, CHECK_INIT_INVALID, token);
     }
