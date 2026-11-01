@@ -162,6 +162,9 @@ struct CheckClock
     // command that never reached its flow).
     uint32_t lanes_asked;
     uint32_t lanes;
+    // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
+    // #1038), which the report gives on a `time-check` line.
+    uint64_t expression_ticks;
 };
 
 // Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock. The driver calls it, but
@@ -232,8 +235,9 @@ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
 
 // Writes the report to `stream`: a line per stage, `time-stage NAME MILLISECONDS PERCENT SYSTEM_MS MINOR_FAULTS
 // PEAK_KB_ADDED` (tab-separated: its marks' resource use), the preprocessor's phases inside its stage as
-// `preprocess.NAME` with their milliseconds and percent alone (the main loop the rest of the stage), the total, and
-// the process's resource use so far as `time-process NAME VALUE` lines. `pp_ticks` are the preprocessor's phases'
+// `preprocess.NAME` with their milliseconds and percent alone (the main loop the rest of the stage), the total, the
+// reader's expressions' walk inside its stage as `time-check expressions MILLISECONDS PERCENT`, and the process's
+// resource use so far as `time-process NAME VALUE` lines. `pp_ticks` are the preprocessor's phases'
 // ticks (PP_PHASE_READ to PP_PHASE_DIRECTIVES, in their order), or null. Call it after the last lap.
 static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp_ticks, uint32_t pp_phase_count, FILE* stream)
 {
@@ -273,6 +277,8 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         }
     }
     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
+    const double expressions = (double)stage_clock->expression_ticks / ticks_per_millisecond;
+    fprintf(stream, "time-check\texpressions\t%.3f\t%.1f\n", expressions, total > 0 ? expressions * 100.0 / total : 0.0);
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
@@ -315,14 +321,18 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
 }
 
 // Reads a report check_clock_report wrote, in `text` among other lines (a compile's diagnostics): each stage's
-// milliseconds into `stages` (by CheckStage), the preprocessor's rows into `phases` (by check_clock_phase_names) and the
-// total into `*total`, and unless `usage` is null each stage's system milliseconds, minor faults and peak KB added into
-// usage[3 * stage] to usage[3 * stage + 2]. Every row must occur once. Values are nonnegative except
-// that every stage's RSS may be -1 together, with an explicit unavailable status. Legacy numeric reports
-// remain readable, but cannot claim an unavailable reading by silently substituting zero.
-static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* usage)
+// milliseconds into `stages` (by CheckStage), the preprocessor's rows into `phases` (by check_clock_phase_names), the
+// total into `*total`, the reader's expressions' walk (its `time-check expressions` row, #1038) into `*walk`, and unless
+// `usage` is null each stage's system milliseconds, minor faults and peak KB added into usage[3 * stage] to
+// usage[3 * stage + 2]. Every row must occur once, and the walk's within its stage's time (each rounded to a
+// microsecond). Values are nonnegative except
+// that every stage's RSS may be -1 together, with an explicit unavailable status. A report without the status
+// line has numeric peaks, and cannot claim an unavailable reading by silently substituting zero. A report from
+// before the walk's row (#1038) has no such row and is not read: its readers (measure-compile, the tests) read
+// this build's reports.
+static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* walk, double* usage)
 {
-    uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 1] = { 0 };
+    uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 2] = { 0 };
     uint32_t missing_peaks = 0;
     uint32_t peak_status_count = 0;
     bool peak_unavailable = false;
@@ -378,12 +388,20 @@ static bool check_clock_read(const char* text, double* stages, double* phases, d
             matches += whole;
             valid = valid && matches == 1 && value >= 0;
         }
+        double walked = -1;
+        if (strncmp(line, "time-check\texpressions\t", sizeof("time-check\texpressions\t") - 1) == 0)
+        {
+            valid = valid && sscanf(line + sizeof("time-check\texpressions\t") - 1, "%lf", &walked) == 1 && walked >= 0;
+            *walk = walked;
+            seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 1] += 1;
+        }
         at = end != NULL ? end + 1 : NULL;
     }
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(seen); i += 1)
     {
         valid = seen[i] == 1;
     }
+    valid = valid && *walk <= stages[CHECK_STAGE_CHECK_INPUT] + 0.001;
     valid = valid && peak_status_count <= 1 &&
             (missing_peaks == 0 ? !peak_unavailable : missing_peaks == CHECK_STAGE_COUNT && peak_unavailable);
     return valid;
