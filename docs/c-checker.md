@@ -3434,9 +3434,10 @@ they do per token where little of it was per declaration or expression:
   (0.20% of `00204.c`'s); on the rule's multi-lane reading the fixed head's
   token-weighted total is `bc11fddb`'s (54.13 against 54.11 ms). The
   campaign's main, `97824e90`, is 148 first-parent merges past `d11a91d2`;
-  its further +1.5% token-weighted one-lane reading (+1.5% of `sqlite3.c`'s
-  instructions) accumulates over that range's later checker features (#927,
-  #966, #968, #1002 and the merges between), outside this change.
+  its further +2.8% token-weighted one-lane reading over `d11a91d2`'s
+  (+3.9% of `sqlite3.c`'s instructions) accumulates over that range's later
+  checker features (#927, #966, #968 and #1002 among them), outside this
+  change.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
