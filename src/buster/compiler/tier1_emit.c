@@ -147,6 +147,10 @@ struct Tier1EmitResult
     // Recomputed values' definitions that nothing read, which the CFG consumer leaves out (tier1_emit_cfg_dead_definition).
     uint32_t dropped_definitions;
     uint32_t jumps;
+    // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
+    // `exit_count` of them. The C driver's unwind tables take the early returns' teardowns from them (#177).
+    uint32_t* exits;
+    uint32_t exit_count;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -767,6 +771,9 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             result->references = ir_allocate(output, result->prepared.call_count, sizeof(LinkReference), &ok);
             result->reference_capacity = result->prepared.call_count;
         }
+        // A straight-line chain returns once at most, at its end.
+        result->exits = ir_allocate(output, 1, 4, &ok);
+        result->exit_count = 0;
         if (!ok)
         {
             error = TIER1_EMIT_MEMORY;
@@ -877,6 +884,15 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             if (error == TIER1_EMIT_OK)
             {
                 tier1_select_requests_add(&requests, &selected, first, buffer.records);
+            }
+            if (error == TIER1_EMIT_OK && returns && result->exit_count == 0)
+            {
+                result->exits[0] = buffer.count - 1;
+                result->exit_count = 1;
+            }
+            else if (error == TIER1_EMIT_OK && returns)
+            {
+                error = TIER1_EMIT_INVALID;
             }
         }
         if (error == TIER1_EMIT_OK && !plan->covered[node] && plan->function->type[node] != IR_VOID)

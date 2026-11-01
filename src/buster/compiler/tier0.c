@@ -601,7 +601,9 @@ typedef enum Tier0Error
 // release (an add, or with a frame pointer the lea or mov), pops and ret its last. `tail_records` has, for each of the
 // function's TAIL_CALL entries in their order, `tail_count` of them (0 for a function without them), the record of its
 // jump to its callee, which the epilogue's release and pops come right before (tier0_emit_teardown), as the unwind
-// tables' tail calls take them.
+// tables' tail calls take them. Tier 1's code in Tier 0's place (c_check_tier1.c, #177) publishes the same frame, and
+// its early returns' rets as `tail_records` after their epilogues; `frame_open` when its last record isn't its last
+// epilogue's ret, every return then among `tail_records` (UnwindFunction.open). Tier 0's code ends in its epilogue.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -630,6 +632,7 @@ struct Tier0Code
     bool frame_pointer;
     uint8_t frame_alignment_log2;
     bool frame_base;
+    bool frame_open;
     Tier0Error error;
     uint32_t node;
 };
