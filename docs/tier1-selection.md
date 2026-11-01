@@ -656,6 +656,5 @@ heads and at its merge with main, `cc3387f`:
   Buster's.
 
 Full pattern-state generation, the remaining scalar/ABI/spill consumers, and
-whole-C integration (the functions selection refuses whole: labels as values,
-switches, aggregates by value and variadic definitions among them) are
-outstanding.
+whole-C integration (the functions selection refuses whole: switches,
+aggregates by value and variadic definitions among them) are outstanding.
