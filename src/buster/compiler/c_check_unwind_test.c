@@ -36,6 +36,23 @@
 // - A second fixture (#523) whose SIGILL handler counts the frames from __builtin_trap()'s helper, a ud2 alone with an
 //   FDE of no transitions: by each path, the same bytes, and its object linked by cc through GNU ld, the unwinder walks
 //   from the handler through the helper to main; without unwind tables, it still traps into the handler.
+// - A third (#177) compiled by --tier1 with --verify, every function but main by Tier 1 (none named by
+//   --tier1-refusals), whose frames are Tier 0's protocol with Tier 1's shapes: a frame of spill slots alone (`kept`),
+//   one with callee-saved registers' pushes too (`crowded`), two returns each after its own epilogue (`early`, the
+//   first one's teardown remembered and restored), a loop whose latch's jump is the code's last record, so that its
+//   frame is open and its one return a teardown of its own (`spin`), a realigned frame (`aligned`), with a frame
+//   pointer, the same open (`aligned_spin`) and with two returns (`aligned_early`), and a leaf whose spills are in the
+//   red zone below an unmoved rsp (`red_leaf`: gdb's `break *leaf` finds a library's `leaf` once the program runs).
+//   --tier1-report's counts must show those shapes: two open frames at least, four returns published as tails (early's
+//   and aligned_early's first, spin's and aligned_spin's) and a red zone; and readelf -wF's table of each function's
+//   FDE, from its entry's row, its own: as many rows after the entry's with the CFA rsp+8 (each at a return's ret)
+//   as its returns, a last row with another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in some
+//   row exactly for the frame pointers, and red_leaf's one row, its whole description. By each path (whose frames'
+//   slots may be colored apart, so not the same bytes), by --lanes 1 and 8 into the vector path's bytes, and its object
+//   linked by cc through GNU ld and lld, the unwinder walks through every function to main; without unwind tables it
+//   stops at the first, and the program prints 1 1 1 1 -1 1 1 1 1 -1. And gdb, without -g (which --tier1 refuses), at
+//   every instruction of each of the nine from its first to its ret, the two-return functions' both returns and the
+//   loops' iterations among them: each backtrace's frames are the function and main.
 
 static const char check_unwind_test_text[] =
     "#include <execinfo.h>\n"
@@ -235,6 +252,150 @@ static const char check_unwind_test_trap_text[] =
     "    return 2;\n"
     "}\n";
 
+// The Tier 1 fixture (#177, see the file's comment): main, which calls printf, is Tier 0's; the others Tier 1's.
+static const char check_unwind_test_tier1_text[] =
+    "#include <execinfo.h>\n"
+    "#include <stdio.h>\n"
+    "\n"
+    "int depth(void)\n"
+    "{\n"
+    "    void* frames[64];\n"
+    "    return backtrace(frames, 64);\n"
+    "}\n"
+    "\n"
+    "long kept(long x)\n"
+    "{\n"
+    "    long a = x * 3 + 1;\n"
+    "    long b = x * 5 + 2;\n"
+    "    long c = x * 7 + 3;\n"
+    "    long d = x * 11 + 4;\n"
+    "    long frames = depth();\n"
+    "    return a + b + c + d - 26 * x - 10 + frames;\n"
+    "}\n"
+    "\n"
+    "long crowded(long x)\n"
+    "{\n"
+    "    long a = x + 1;\n"
+    "    long b = x + 2;\n"
+    "    long c = x + 3;\n"
+    "    long d = x + 4;\n"
+    "    long e = x + 5;\n"
+    "    long f = x + 6;\n"
+    "    long g = x + 7;\n"
+    "    long h = x + 8;\n"
+    "    long i = x + 9;\n"
+    "    long j = x + 10;\n"
+    "    long k = x + 11;\n"
+    "    long l = x + 12;\n"
+    "    long m = x + 13;\n"
+    "    long n = x + 14;\n"
+    "    long frames = depth();\n"
+    "    long sum = a + b + c + d + e + f + g + h + i + j + k + l + m + n;\n"
+    "    return sum - 14 * x - 105 + frames;\n"
+    "}\n"
+    "\n"
+    "long early(long x)\n"
+    "{\n"
+    "    long a = x * 3 + 1;\n"
+    "    long b = x * 5 + 2;\n"
+    "    if (x < 0)\n"
+    "    {\n"
+    "        long frames = depth();\n"
+    "        return a + b - 8 * x - 3 - frames;\n"
+    "    }\n"
+    "    long frames = depth();\n"
+    "    return a + b - 8 * x - 3 + frames;\n"
+    "}\n"
+    "\n"
+    "long spin(long n)\n"
+    "{\n"
+    "    long total = 0;\n"
+    "    long rounds = 0;\n"
+    "    for (;;)\n"
+    "    {\n"
+    "        total += depth();\n"
+    "        rounds += 1;\n"
+    "        if (rounds == n)\n"
+    "        {\n"
+    "            return total / rounds;\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "int aligned(int x)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { x, x + 1, x + 2, x + 3 };\n"
+    "    return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
+    "}\n"
+    "\n"
+    "int aligned_spin(int n)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { n, n + 1, n + 2, n + 3 };\n"
+    "    int total = 0;\n"
+    "    int rounds = 0;\n"
+    "    for (;;)\n"
+    "    {\n"
+    "        total += depth() + values[rounds & 3] - n - (rounds & 3) + (int)((unsigned long)values & 63);\n"
+    "        rounds += 1;\n"
+    "        if (rounds == n)\n"
+    "        {\n"
+    "            return total / rounds;\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "int aligned_early(int x)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { x, x + 1, x + 2, x + 3 };\n"
+    "    if (x < 0)\n"
+    "    {\n"
+    "        return -(depth() + values[3] - x - 3 + (int)((unsigned long)values & 63));\n"
+    "    }\n"
+    "    return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
+    "}\n"
+    "\n"
+    "long red_leaf(long x)\n"
+    "{\n"
+    "    long a = x * 3 + 1;\n"
+    "    long b = x * 5 + 2;\n"
+    "    long c = x * 7 + 3;\n"
+    "    long d = x * 11 + 4;\n"
+    "    long e = x * 13 + 5;\n"
+    "    long f = x * 17 + 6;\n"
+    "    long g = x * 19 + 7;\n"
+    "    long h = x * 23 + 8;\n"
+    "    long i = x * 29 + 9;\n"
+    "    long j = x * 31 + 10;\n"
+    "    long k = x * 37 + 11;\n"
+    "    long l = x * 41 + 12;\n"
+    "    return a * b + c * d + e * f + g * h + i * j + k * l;\n"
+    "}\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    if (red_leaf(2) != 17010)\n"
+    "    {\n"
+    "        return 2;\n"
+    "    }\n"
+    "    int baseline = depth();\n"
+    "    long held = kept(5);\n"
+    "    long crowd = crowded(-3);\n"
+    "    long positive = early(4);\n"
+    "    long negative = early(-4);\n"
+    "    long spun = spin(3);\n"
+    "    int realigned = aligned(7);\n"
+    "    int realigned_spun = aligned_spin(3);\n"
+    "    int realigned_positive = aligned_early(7);\n"
+    "    int realigned_negative = aligned_early(-7);\n"
+    "    printf(\"%d %ld %ld %ld %ld %ld %d %d %d %d\\n\", baseline, held, crowd, positive, negative, spun, realigned, realigned_spun,\n"
+    "           realigned_positive, realigned_negative);\n"
+    "    return baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && positive == baseline + 1 && negative == -(baseline + 1) &&\n"
+    "                   spun == baseline + 1 && realigned == baseline + 1 && realigned_spun == baseline + 1 && realigned_positive == baseline + 1 &&\n"
+    "                   realigned_negative == -(baseline + 1) ?\n"
+    "               0 :\n"
+    "               1;\n"
+    "}\n";
+
 // An option set of the driver's: whether its output has unwind tables; whether the fixture's executables and objects
 // are made with it (`programs`), and whether its object is compared with clang's (`policy`), which writes the call
 // frame information to .eh_frame, or with debug information alone to .debug_frame (`debug_frame`).
@@ -423,8 +584,8 @@ static bool check_unwind_test_census(String8 object, const char* name, uint32_t 
     return valid;
 }
 
-// The size of the function `name` in an executable's .symtab, or 0.
-static uint64_t check_unwind_test_size(String8 file, const char* name)
+// The size of the function `name` in an executable's .symtab, or 0, and its address into *address (0 without it).
+static uint64_t check_unwind_test_symbol(String8 file, const char* name, uint64_t* address)
 {
     const ExecutableTestImage image = executable_test_image_of(file, ET_DYN);
     const Elf64_Shdr* symbols = image.valid ? executable_test_section(&image, ".symtab") : 0;
@@ -432,15 +593,66 @@ static uint64_t check_unwind_test_size(String8 file, const char* name)
                        symbols->sh_offset <= file.length && symbols->sh_size <= file.length - symbols->sh_offset;
     const Elf64_Shdr* strings = valid ? &image.section_headers[symbols->sh_link] : 0;
     uint64_t size = 0;
+    *address = 0;
     for (uint64_t s = 1; valid && strings->sh_offset + strings->sh_size <= file.length && s < symbols->sh_size / sizeof(Elf64_Sym); s += 1)
     {
         Elf64_Sym symbol;
         memcpy(&symbol, file.pointer + symbols->sh_offset + s * sizeof(symbol), sizeof(symbol));
         const char* text = symbol.st_name < strings->sh_size ? file.pointer + strings->sh_offset + symbol.st_name : 0;
         const bool named = text != 0 && memchr(text, 0, strings->sh_size - symbol.st_name) != 0 && strcmp(text, name) == 0;
-        size = named && ELF64_ST_TYPE(symbol.st_info) == STT_FUNC ? symbol.st_size : size;
+        const bool function = named && ELF64_ST_TYPE(symbol.st_info) == STT_FUNC;
+        size = function ? symbol.st_size : size;
+        *address = function ? symbol.st_value : *address;
     }
     return size;
+}
+
+// What readelf -wF's table of a function's FDE says (#177), the FDE from `address` to `address + size` in `text`: its
+// rows; those after its first whose CFA is rsp+8, each a return's, at its ret; whether its last row's CFA is
+// another, an open frame's (its code doesn't end in its last epilogue, and the FDE has no epilogue's rows); and whether
+// a row's CFA is rbp's, a frame pointer's.
+typedef struct CheckUnwindTestRows CheckUnwindTestRows;
+struct CheckUnwindTestRows
+{
+    uint32_t rows;
+    uint32_t returns;
+    bool open;
+    bool frame_pointer;
+};
+
+// The function's FDE's rows in readelf -wF's `text` into *rows; false without the FDE, or with a row it can't read or
+// outside the function, or with a first row that isn't the function's entry's (CFA rsp+8 at its address). readelf
+// prints no table for an FDE of no instructions: its one row is the CIE's, the entry's.
+static bool check_unwind_test_rows(const char* text, uint64_t address, uint64_t size, CheckUnwindTestRows* rows)
+{
+    char range[80];
+    const int length = snprintf(range, sizeof(range), " pc=%016" PRIx64 "..%016" PRIx64 "\n", address, address + size);
+    const char* fde = text != 0 && size != 0 ? strstr(text, range) : 0;
+    const char* after = fde != 0 ? fde + length : 0;
+    const bool table = after != 0 && strncmp(after, "   LOC ", 7) == 0;
+    const bool bare = after != 0 && (after[0] == '\n' || after[0] == 0);
+    const char* first = table ? strchr(after, '\n') : 0;
+    *rows = (CheckUnwindTestRows){ 0 };
+    rows->rows = bare ? 1 : 0;
+    bool valid = first != 0 || bare;
+    bool entry = bare;
+    bool returned = bare;
+    for (const char* line = first != 0 ? first + 1 : ""; valid && line[0] != '\n' && line[0] != 0;)
+    {
+        char* end = 0;
+        const uint64_t location = strtoull(line, &end, 16);
+        const char* cfa = end + strspn(end, " ");
+        const char* next = strchr(line, '\n');
+        returned = strncmp(cfa, "rsp+8 ", 6) == 0;
+        valid = end != line && cfa != end && location >= address && location < address + size;
+        entry = rows->rows == 0 ? location == address && returned : entry;
+        rows->returns += rows->rows != 0 && returned ? 1 : 0;
+        rows->frame_pointer = rows->frame_pointer || strncmp(cfa, "rbp+", 4) == 0;
+        rows->rows += 1;
+        line = next != 0 ? next + 1 : line + strlen(line);
+    }
+    rows->open = !returned;
+    return valid && entry;
 }
 
 // The most bytes of a function the steps' coverage takes: a bit per byte offset.
@@ -506,7 +718,8 @@ static void check_unwind_test_gdb(CheckDebugTestTally* tally, const char* progra
                                   Arena* arena)
 {
     const char* function = names[0];
-    const uint64_t size = check_unwind_test_size(file, function);
+    uint64_t address = 0;
+    const uint64_t size = check_unwind_test_symbol(file, function, &address);
     char script[PATH_MAX + 32];
     char report[PATH_MAX + 32];
     snprintf(script, sizeof(script), "%s.%s.gdb", program, function);
@@ -634,6 +847,229 @@ static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* direc
     }
 }
 
+// The Tier 1 fixture by --tier1 --tier1-refusals --verify (and --scalar with `scalar`, --lanes with `lanes`), into an
+// executable or with `object` an object, with unwind tables or without (`tables`); its refusals go to `output`.err.
+static bool check_unwind_test_tier1_compile(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes)
+{
+    char errors[PATH_MAX + 8];
+    snprintf(errors, sizeof(errors), "%s.err", output);
+    char* arguments[16] = { (char*)"/proc/self/exe", (char*)"--tier1", (char*)"--tier1-refusals", (char*)"--tier1-report", (char*)"--verify" };
+    uint32_t count = 5;
+    arguments[count] = tables ? 0 : (char*)"-fno-asynchronous-unwind-tables";
+    count += tables ? 0 : 1;
+    arguments[count] = object ? (char*)"-c" : 0;
+    count += object ? 1 : 0;
+    arguments[count] = scalar ? (char*)"--scalar" : 0;
+    count += scalar ? 1 : 0;
+    arguments[count] = lanes != 0 ? (char*)"--lanes" : 0;
+    arguments[count + 1] = (char*)lanes;
+    count += lanes != 0 ? 2 : 0;
+    arguments[count] = (char*)"-o";
+    arguments[count + 1] = (char*)output;
+    arguments[count + 2] = (char*)source;
+    arguments[count + 3] = 0;
+    return object_test_run(arguments, "/dev/null", errors) == 0;
+}
+
+// Whether the Tier 1 fixture's program runs as its unwind tables (or their absence) make it: with them, it returns 0
+// having printed depths that walk through main; without them, it returns 1 having printed 1 1 1 1 -1 1 1 1 1 -1.
+static bool check_unwind_test_tier1_run(const char* program, bool tables, Arena* arena)
+{
+    char report[PATH_MAX + 8];
+    snprintf(report, sizeof(report), "%s.out", program);
+    char* run[] = { (char*)program, 0 };
+    const int status = object_test_run(run, report, "/dev/null");
+    const String8 printed = foreign_test_read(arena, report);
+    int baseline = 0;
+    long held = 0;
+    long crowd = 0;
+    long positive = 0;
+    long negative = 0;
+    long spun = 0;
+    int realigned = 0;
+    int realigned_spun = 0;
+    int realigned_positive = 0;
+    int realigned_negative = 0;
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %ld %ld %ld %ld %ld %d %d %d %d", &baseline, &held, &crowd, &positive, &negative, &spun,
+                                                     &realigned, &realigned_spun, &realigned_positive, &realigned_negative) == 10;
+    const bool walked = status == 0 && baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && positive == baseline + 1 && negative == -(baseline + 1) &&
+                        spun == baseline + 1 && realigned == baseline + 1 && realigned_spun == baseline + 1 && realigned_positive == baseline + 1 &&
+                        realigned_negative == -(baseline + 1);
+    const bool stopped = status == 1 && baseline == 1 && held == 1 && crowd == 1 && positive == 1 && negative == -1 && spun == 1 && realigned == 1 &&
+                         realigned_spun == 1 && realigned_positive == 1 && realigned_negative == -1;
+    return read && (tables ? walked : stopped);
+}
+
+// A Tier 1 function of the fixture and the shape its FDE must have (#177): the returns its rows show, whether it is
+// open and whether it has a frame pointer; a function without returns has no frame, and its FDE one row.
+typedef struct CheckUnwindTestShape CheckUnwindTestShape;
+struct CheckUnwindTestShape
+{
+    const char* name;
+    uint32_t returns;
+    bool open;
+    bool frame_pointer;
+};
+
+static const CheckUnwindTestShape check_unwind_test_tier1_shapes[] = {
+    { .name = "depth", .returns = 1, .open = false, .frame_pointer = false },
+    { .name = "kept", .returns = 1, .open = false, .frame_pointer = false },
+    { .name = "crowded", .returns = 1, .open = false, .frame_pointer = false },
+    { .name = "early", .returns = 2, .open = false, .frame_pointer = false },
+    { .name = "spin", .returns = 1, .open = true, .frame_pointer = false },
+    { .name = "aligned", .returns = 1, .open = false, .frame_pointer = true },
+    { .name = "aligned_spin", .returns = 1, .open = true, .frame_pointer = true },
+    { .name = "aligned_early", .returns = 2, .open = false, .frame_pointer = true },
+    { .name = "red_leaf", .returns = 0, .open = false, .frame_pointer = false },
+};
+
+// Each Tier 1 function's FDE in `program` (its bytes `file`) against its shape, from readelf -wF's reading of it.
+static void check_unwind_test_tier1_shapes_of(CheckDebugTestTally* tally, const char* program, String8 file, Arena* arena)
+{
+    char report[PATH_MAX + 32];
+    snprintf(report, sizeof(report), "%s.frames", program);
+    char* arguments[] = { (char*)"readelf", (char*)"-wF", (char*)program, 0 };
+    const bool ran = object_test_run(arguments, report, "/dev/null") == 0;
+    const String8 text = ran ? foreign_test_read(arena, report) : (String8){ 0 };
+    check_debug_test_expect(tally, text.pointer != 0, "readelf -wF reads the Tier 1 program's unwind tables", report);
+    for (uint32_t k = 0; text.pointer != 0 && k < BUSTER_ARRAY_LENGTH(check_unwind_test_tier1_shapes); k += 1)
+    {
+        const CheckUnwindTestShape* shape = &check_unwind_test_tier1_shapes[k];
+        uint64_t address = 0;
+        const uint64_t size = check_unwind_test_symbol(file, shape->name, &address);
+        CheckUnwindTestRows rows;
+        const bool read = check_unwind_test_rows(text.pointer, address, size, &rows);
+        const bool shaped = read && rows.returns == shape->returns && rows.open == shape->open && rows.frame_pointer == shape->frame_pointer &&
+                            (shape->returns != 0 || rows.rows == 1);
+        char detail[PATH_MAX + 160];
+        snprintf(detail, sizeof(detail), "%s: %s, %u rows, %u returns, %s, %s", report, shape->name, rows.rows, rows.returns, rows.open ? "open" : "closed",
+                 rows.frame_pointer ? "a frame pointer" : "no frame pointer");
+        check_debug_test_expect(tally, shaped, "a Tier 1 function's FDE covers it with its frame's shape: its returns, open or closed, a frame pointer or none", detail);
+    }
+}
+
+// A field of --tier1-report's line in `text` (the compile's standard error), into *value; false without it.
+static bool check_unwind_test_tier1_field(const char* text, const char* name, uint64_t* value)
+{
+    const char* line = text != NULL ? strstr(text, "tier1\tfunctions=") : NULL;
+    char key[64];
+    snprintf(key, sizeof(key), "\t%s=", name);
+    const char* end = line != NULL ? strchr(line, '\n') : NULL;
+    const char* field = line != NULL ? strstr(line, key) : NULL;
+    const bool found = field != NULL && (end == NULL || field < end);
+    *value = found ? strtoull(field + strlen(key), NULL, 10) : 0;
+    return found;
+}
+
+// The Tier 1 fixture (check_unwind_test_tier1_text, #177; see the file's comment).
+static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_tier1.c", directory);
+    const bool written = foreign_test_write(source, check_unwind_test_tier1_text, sizeof(check_unwind_test_tier1_text) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 unwind fixture", source);
+    char outputs[2][PATH_MAX + 32];
+    String8 files[2] = { 0 };
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_tier1%s", directory, path == 0 ? "" : ".scalar");
+        const bool made = check_unwind_test_tier1_compile(source, outputs[path], true, false, path != 0, 0);
+        check_debug_test_expect(tally, made, "the driver links the Tier 1 unwind fixture by --tier1", outputs[path]);
+        files[path] = made ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
+        // Every function but main by Tier 1: --tier1-refusals names no other.
+        char errors[PATH_MAX + 40];
+        snprintf(errors, sizeof(errors), "%s.err", outputs[path]);
+        const String8 refusals = made ? foreign_test_read(arena, errors) : (String8){ 0 };
+        bool tier1 = refusals.pointer != 0;
+        for (uint32_t k = 0; tier1 && k < BUSTER_ARRAY_LENGTH(check_unwind_test_tier1_shapes); k += 1)
+        {
+            char line[64];
+            snprintf(line, sizeof(line), "tier1-refused\t%s\t", check_unwind_test_tier1_shapes[k].name);
+            tier1 = strstr(refusals.pointer, line) == 0;
+        }
+        check_debug_test_expect(tally, tier1, "Tier 1 compiles every function of the fixture but main", errors);
+        // The frames' shapes the fixture is for, which a change of layout could take away unseen: spin's and
+        // aligned_spin's open frames, early's and aligned_early's first returns and spin's and aligned_spin's one as
+        // tails, and red_leaf's red zone; then each function's FDE, by its rows.
+        uint64_t open_frames = 0;
+        uint64_t return_tails = 0;
+        uint64_t red_zones = 0;
+        const bool counted = refusals.pointer != 0 && check_unwind_test_tier1_field(refusals.pointer, "open_frames", &open_frames) &&
+                             check_unwind_test_tier1_field(refusals.pointer, "return_tails", &return_tails) &&
+                             check_unwind_test_tier1_field(refusals.pointer, "red_zones", &red_zones);
+        check_debug_test_expect(tally, counted && open_frames >= 2 && return_tails >= 4 && red_zones >= 1,
+                                "the Tier 1 fixture's frames are open, end in returns published as tails and use the red zone", errors);
+        if (files[path].pointer != 0)
+        {
+            check_unwind_test_tier1_shapes_of(tally, outputs[path], files[path], arena);
+        }
+    }
+    // On lanes (#151), the program is one lane's, byte for byte: --lanes 8 (as many as the CPUs allow) and --lanes 1.
+    for (uint32_t count = 0; files[0].pointer != 0 && count < 2; count += 1)
+    {
+        char lanes[PATH_MAX + 40];
+        snprintf(lanes, sizeof(lanes), "%s.lanes%s", outputs[0], count == 0 ? "1" : "8");
+        const bool made = check_unwind_test_tier1_compile(source, lanes, true, false, false, count == 0 ? "1" : "8");
+        const String8 file = made ? foreign_test_read(arena, lanes) : (String8){ 0 };
+        check_debug_test_expect(tally, file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0,
+                                count == 0 ? "the Tier 1 program by --lanes 1 is the same bytes" : "the Tier 1 program by --lanes 8 is one lane's, byte for byte", lanes);
+    }
+    // Tier 1's paths may color its frames' slots apart (tier1_frame.c), so their executables needn't be the same bytes:
+    // each must walk.
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        check_debug_test_expect(tally, files[path].pointer != 0 && check_unwind_test_tier1_run(outputs[path], true, arena),
+                                path == 0 ? "the unwinder walks through every Tier 1 frame of the program" : "the unwinder walks through every Tier 1 frame of --scalar's program",
+                                outputs[path]);
+    }
+    char none[PATH_MAX + 32];
+    snprintf(none, sizeof(none), "%s/dbg_tier1.none", directory);
+    const bool bare = written && check_unwind_test_tier1_compile(source, none, false, false, false, 0);
+    check_debug_test_expect(tally, bare && check_unwind_test_tier1_run(none, false, arena),
+                            "without unwind tables, the unwinder stops at the Tier 1 fixture's first function", none);
+    // The object, linked by cc through GNU ld and lld.
+    char object[PATH_MAX + 32];
+    snprintf(object, sizeof(object), "%s/dbg_tier1.o", directory);
+    const bool made = written && check_unwind_test_tier1_compile(source, object, true, true, false, 0);
+    check_debug_test_expect(tally, made, "the driver writes the Tier 1 fixture's object", object);
+    for (uint32_t linker = 0; made && linker < 2; linker += 1)
+    {
+        char program[PATH_MAX + 48];
+        char errors[PATH_MAX + 56];
+        snprintf(program, sizeof(program), "%s.%s", object, linker == 0 ? "bfd" : "lld");
+        snprintf(errors, sizeof(errors), "%s.err", program);
+        char* arguments[] = { (char*)"cc", linker == 0 ? (char*)"-fuse-ld=bfd" : (char*)"-fuse-ld=lld", (char*)"-o", program, object, 0 };
+        const bool linked = object_test_run(arguments, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, linked, linker == 0 ? "cc links the Tier 1 fixture's object through GNU ld" : "cc links the Tier 1 fixture's object through lld",
+                                errors);
+        check_debug_test_expect(tally, linked && check_unwind_test_tier1_run(program, true, arena), "the linked Tier 1 program's unwinder walks through every frame", program);
+    }
+    // gdb at every instruction of each Tier 1 function: early's and aligned_early's two calls take both of their
+    // returns, and spin's and aligned_spin's one call their loops' iterations and their returns; depth's first caller
+    // is main.
+    static const char* const depth[] = { "depth", "main" };
+    static const char* const kept[] = { "kept", "main" };
+    static const char* const crowded[] = { "crowded", "main" };
+    static const char* const early[] = { "early", "main" };
+    static const char* const spin[] = { "spin", "main" };
+    static const char* const aligned[] = { "aligned", "main" };
+    static const char* const aligned_spin[] = { "aligned_spin", "main" };
+    static const char* const aligned_early[] = { "aligned_early", "main" };
+    static const char* const red_leaf[] = { "red_leaf", "main" };
+    if (files[0].pointer != 0)
+    {
+        check_unwind_test_gdb(tally, outputs[0], files[0], red_leaf, BUSTER_ARRAY_LENGTH(red_leaf), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], kept, BUSTER_ARRAY_LENGTH(kept), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], crowded, BUSTER_ARRAY_LENGTH(crowded), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], early, BUSTER_ARRAY_LENGTH(early), 2, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], spin, BUSTER_ARRAY_LENGTH(spin), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], aligned, BUSTER_ARRAY_LENGTH(aligned), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], aligned_spin, BUSTER_ARRAY_LENGTH(aligned_spin), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], aligned_early, BUSTER_ARRAY_LENGTH(aligned_early), 2, arena);
+    }
+}
+
 // The fixture's executables and objects, the options' rule, and gdb on its -g executable (see the file's comment).
 static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
@@ -747,4 +1183,5 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
         check_unwind_test_gdb(tally, debug_program, file, based, BUSTER_ARRAY_LENGTH(based), 1, arena);
     }
     check_unwind_test_trap(tally, directory, arena);
+    check_unwind_test_tier1(tally, directory, arena);
 }

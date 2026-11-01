@@ -378,6 +378,168 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             0,
             true,
         },
+        {
+            // AVX-512's arithmetic by the rounding its last argument asks for (#148): the 64-byte vectors' sums, differences,
+            // products, quotients and square roots, the scalar ones under masks of some and all, the conversions of integers
+            // to floats and of floats to doubles under masks, the scalar conversions to integers and from them, and the FMAs merged into a,
+            // zeroed and merged into c, each at the current mode (4) and at each embedded rounding (8 to 11; the widening
+            // conversion's exceptions' suppression, 8), of inexact values.
+            "x86-rest-rounded-arithmetic",
+            "#define R5(F,...) F(4,__VA_ARGS__)F(8,__VA_ARGS__)F(9,__VA_ARGS__)F(10,__VA_ARGS__)F(11,__VA_ARGS__)\n"
+            "#define A2(r,N,a,b) __builtin_ia32_##N(a,b,r),\n"
+            "#define A1(r,N,a) __builtin_ia32_##N(a,r),\n"
+            "#define A4(r,N,a,b,c,k) __builtin_ia32_##N(a,b,c,k,r),\n"
+            "#define A3(r,N,a,b,k) __builtin_ia32_##N(a,b,k,r),\n"
+            "#define B(N,T,a,b) {T r[]={R5(A2,N,a,b)};FOLD(r);}\n"
+            "#define U(N,T,a) {T r[]={R5(A1,N,a)};FOLD(r);}\n"
+            "#define S(N,T,a,b,w,k) {T r[]={R5(A4,N,a,b,w,k)};FOLD(r);}\n"
+            "#define C(N,T,a,w,k) {T r[]={R5(A3,N,a,w,k)};FOLD(r);}\n"
+            "#define I(N,T,a) {T r[]={R5(A1,N,a)};FOLD(r);}\n"
+            "#define F(N,T,a,b,c,k) {T r[]={R5(A4,N,a,b,c,k)};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v16sf a16,b16,c16;v8df p8,q8,s8;v4sf a4,b4,w4;v2df p2,q2,w2;v16si i16;v8di l8;v8sf f8;\n"
+            "for(int i=0;i<16;i++){a16[i]=(float)(n*7+i)/3.0f;b16[i]=(float)(i*13-n)/7.0f;c16[i]=(float)(n+i*i)/11.0f;i16[i]=(n+i)*0x3fffff7+i;"
+            "if(i<8){p8[i]=(double)(n*5+i)/3.0;q8[i]=(double)(i*11-n)/7.0;s8[i]=(double)(n-i*3)/13.0;l8[i]=(long long)(n+i)*0x1fffffffffff3ll;"
+            "f8[i]=(float)(n*3+i)/9.0f;}if(i<4){a4[i]=(float)(n+i)/3.0f;b4[i]=(float)(i-n)/7.0f;w4[i]=(float)i;}if(i<2){p2[i]=(double)(n+i)/3.0;"
+            "q2[i]=(double)(i-n*3)/7.0;w2[i]=(double)i+0.5;}}\n"
+            "unsigned long long m=mask(n);unsigned char k8=(unsigned char)m;unsigned short k16=(unsigned short)(m>>8);\n"
+            "B(addpd512,v8df,p8,q8)B(addps512,v16sf,a16,b16)B(subpd512,v8df,p8,q8)B(subps512,v16sf,a16,b16)B(mulpd512,v8df,p8,q8)"
+            "B(mulps512,v16sf,a16,b16)B(divpd512,v8df,p8,q8)B(divps512,v16sf,a16,b16)U(sqrtpd512,v8df,p8)U(sqrtps512,v16sf,a16)\n"
+            "S(addsd_round_mask,v2df,p2,q2,w2,k8)S(addss_round_mask,v4sf,a4,b4,w4,k8)S(subsd_round_mask,v2df,p2,q2,w2,0xff)"
+            "S(subss_round_mask,v4sf,a4,b4,w4,0xff)S(mulsd_round_mask,v2df,p2,q2,w2,k8)S(mulss_round_mask,v4sf,a4,b4,w4,k8)"
+            "S(divsd_round_mask,v2df,p2,q2,w2,0xff)S(divss_round_mask,v4sf,a4,b4,w4,k8)S(divss_round_mask,v4sf,a4,b4,w4,0)\n"
+            "C(cvtdq2ps512_mask,v16sf,i16,a16,k16)C(cvtdq2ps512_mask,v16sf,i16,a16,0xffff)C(cvtudq2ps512_mask,v16sf,i16,b16,k16)"
+            "C(cvtqq2pd512_mask,v8df,l8,p8,k8)C(cvtqq2pd512_mask,v8df,l8,p8,0xff)C(cvtuqq2pd512_mask,v8df,l8,q8,k8)\n"
+            "{v8df r[]={__builtin_ia32_cvtps2pd512_mask(f8,p8,k8,4),__builtin_ia32_cvtps2pd512_mask(f8,q8,0xff,8)};FOLD(r);}\n"
+            "I(vcvtsd2si32,int,p2)I(vcvtsd2si64,long long,q2)I(vcvtss2si32,int,a4)I(vcvtss2si64,long long,b4)\n"
+            "F(vfmaddpd512_mask,v8df,p8,q8,s8,k8)F(vfmaddpd512_maskz,v8df,p8,q8,s8,k8)F(vfmaddpd512_mask3,v8df,p8,q8,s8,k8)"
+            "F(vfmsubpd512_mask3,v8df,p8,q8,s8,k8)F(vfmaddps512_mask,v16sf,a16,b16,c16,k16)F(vfmaddps512_maskz,v16sf,a16,b16,c16,0xffff)"
+            "F(vfmaddps512_mask3,v16sf,a16,b16,c16,k16)F(vfmsubps512_mask3,v16sf,a16,b16,c16,k16)\n"
+            "long long ll=(long long)n*0x1fffffffffff7ll+3;unsigned long long ul=0x8000000000000001ull*(unsigned)(n|1)+0xfff;int ii=n*0x3fffff7+5;"
+            "unsigned ui=0x80000001u*(unsigned)n+0x1ff;B(cvtsi2sd64,v2df,p2,ll)B(cvtsi2ss32,v4sf,a4,ii)B(cvtsi2ss64,v4sf,a4,ll)"
+            "B(cvtusi2sd64,v2df,q2,ul)B(cvtusi2ss32,v4sf,b4,ui)B(cvtusi2ss64,v4sf,b4,ul)\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // The rest of the gathers and scatters (#148): AVX-512's of floats and doubles at 64 bytes and of every element at
+            // 16 and 32 bytes, under masks of some lanes and all, at the elements' scales and by byte and word offsets at
+            // scales 1 and 2; the scatters into tables whose bytes are hashed after them; and AVX2's gathers under vectors'
+            // signs.
+            "x86-rest-gathers",
+            "#define G(N,T,...) {T r=__builtin_ia32_##N(__VA_ARGS__);FOLD(r);}\n"
+            "#define S(N,...) __builtin_ia32_##N(__VA_ARGS__);\n"
+            "int tested(int n){unsigned h=2166136261u;float tf[64];double td[64];int ti[64];long long tq[64];float sf[64]={0};double sd[64]={0};"
+            "int si[64]={0};long long sq[64]={0};\n"
+            "for(int i=0;i<64;i++){tf[i]=(float)i*1.5f+(float)n;td[i]=(double)i*2.25+(double)n;ti[i]=i*7+n;tq[i]=(long long)i*0x100000001ll+n;}\n"
+            "v4sf a4,f4;v8sf f8;v16sf a16;v2df p2;v4df p4;v8df p8;v4si i4,x4;v8si i8,x8;v16si x16;v2di q2,y2;v4di q4,y4;v8di y8;fill(&a4,16,n);"
+            "fill(&f4,16,n+1);fill(&f8,32,n+2);fill(&a16,64,n+3);fill(&p2,16,n+4);fill(&p4,32,n+5);fill(&p8,64,n+6);fill(&i4,16,n+7);fill(&i8,32,n+8);"
+            "fill(&q2,16,n+9);fill(&q4,32,n+10);\n"
+            "for(int i=0;i<16;i++){x16[i]=(i*3+n)&63;if(i<8){x8[i]=(i*5+n*3)&63;y8[i]=(i*7+n)&63;}if(i<4){x4[i]=(i*11+n)&63;y4[i]=(i*13+n*5)&63;}"
+            "if(i<2)y2[i]=(i*17+n*7)&63;}\n"
+            "unsigned long long m=mask(n);unsigned char k8=(unsigned char)m;unsigned short k16=(unsigned short)(m>>8);\n"
+            "G(gathersiv16sf,v16sf,a16,tf,x16,k16,4)G(gathersiv16sf,v16sf,a16,tf,x16,0xffff,4)G(gathersiv8df,v8df,p8,td,x8,k8,8)"
+            "G(gatherdiv16sf,v8sf,f8,tf,y8,k8,4)G(gatherdiv16si,v8si,i8,ti,y8,k8,4)G(gatherdiv8df,v8df,p8,td,y8,0xff,8)\n"
+            "G(gather3div2df,v2df,p2,td,y2,k8,8)G(gather3div2di,v2di,q2,tq,y2,k8,8)G(gather3div4df,v4df,p4,td,y4,k8,8)"
+            "G(gather3div4di,v4di,q4,tq,y4,0xff,8)G(gather3div4sf,v4sf,a4,tf,y2,k8,4)G(gather3div4si,v4si,i4,ti,y2,0xff,4)"
+            "G(gather3div8sf,v4sf,f4,tf,y4,k8,4)G(gather3div8si,v4si,i4,ti,y4,k8,4)G(gather3siv2df,v2df,p2,td,x4,k8,8)"
+            "G(gather3siv2di,v2di,q2,tq,x4,0xff,8)G(gather3siv4df,v4df,p4,td,x4,k8,8)G(gather3siv4di,v4di,q4,tq,x4,k8,8)"
+            "G(gather3siv4sf,v4sf,a4,tf,x4,k8,4)G(gather3siv4si,v4si,i4,ti,x4,k8,4)G(gather3siv8sf,v8sf,f8,tf,x8,k8,4)"
+            "G(gather3siv8si,v8si,i8,ti,x8,0xff,4)G(gather3siv4si,v4si,i4,ti,x4*4,0xff,1)G(gather3siv4si,v4si,i4,ti,x4*2,k8,2)\n"
+            "S(scatterdiv16sf,sf,k8,y8,f8,4)S(scatterdiv8df,sd,k8,y8,p8,8)S(scattersiv16sf,sf,k16,x16,a16,4)S(scattersiv8df,sd,0xff,x8,p8,8)"
+            "S(scattersiv8di,sq,k8,x8,(v8di)p8,8)S(scatterdiv2df,sd,k8,y2,p2,8)S(scatterdiv2di,sq,0xff,y2,q2,8)S(scatterdiv4df,sd,k8,y4,p4,8)"
+            "S(scatterdiv4di,sq,k8,y4,q4,8)S(scatterdiv4sf,sf,k8,y2,a4,4)S(scatterdiv4si,si,k8,y2,i4,4)S(scatterdiv8sf,sf,0xff,y4,f4,4)"
+            "S(scatterdiv8si,si,k8,y4,i4,4)S(scattersiv2df,sd,k8,x4,p2,8)S(scattersiv2di,sq,k8,x4,q2,8)S(scattersiv4df,sd,0xff,x4,p4,8)"
+            "S(scattersiv4di,sq,k8,x4,q4,8)S(scattersiv4sf,sf,k8,x4,a4,4)S(scattersiv4si,si,k8,x4,i4,4)S(scattersiv8sf,sf,k8,x8,f8,4)"
+            "S(scattersiv8si,si,k8,x8,i8,4)S(scattersiv4si,si,0xff,x4*2,i4,2)FOLD(sf);FOLD(sd);FOLD(si);FOLD(sq);\n"
+            "v4si m4={-1,0,-(n&1),-1};v8si m8={-1,0,-1,-(n&1),0,-1,-1,-(n&2)};v2di m2={-1,-(long long)(n&1)};v4di m4q={0,-1,-1,-(long long)(n&1)};\n"
+            "G(gatherd_d,v4si,i4,ti,x4,m4,4)G(gatherd_d256,v8si,i8,ti,x8,m8,4)G(gatherd_pd,v2df,p2,td,x4,(v2df)m2,8)"
+            "G(gatherd_pd256,v4df,p4,td,x4,(v4df)m4q,8)G(gatherd_ps,v4sf,a4,tf,x4,(v4sf)m4,4)G(gatherd_ps256,v8sf,f8,tf,x8,(v8sf)m8,4)"
+            "G(gatherd_q,v2di,q2,tq,x4,m2,8)G(gatherd_q256,v4di,q4,tq,x4,m4q,8)G(gatherq_d,v4si,i4,ti,y2,m4,4)G(gatherq_d256,v4si,i4,ti,y4,m4,4)"
+            "G(gatherq_pd,v2df,p2,td,y2,(v2df)m2,8)G(gatherq_pd256,v4df,p4,td,y4,(v4df)m4q,8)G(gatherq_ps,v4sf,a4,tf,y2,(v4sf)m4,4)"
+            "G(gatherq_ps256,v4sf,f4,tf,y4,(v4sf)m4,4)G(gatherq_q,v2di,q2,tq,y2,m2,8)G(gatherq_q256,v4di,q4,tq,y4,m4q,8)"
+            "G(gatherd_d,v4si,i4,ti,x4*4,m4,1)\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // SSE4.1's roundings at every mode, packed and of b's first element into a; its dot products under masks of
+            // some, all and no elements; AES's key assist and SHA's four rounds at their selectors; and F16C's
+            // conversions to halves at every rounding control and the current mode's, of values with halves and ties.
+            "x86-rest-sse-immediates",
+            "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\n"
+            "#define M16(F,...) F(0,__VA_ARGS__)F(1,__VA_ARGS__)F(2,__VA_ARGS__)F(3,__VA_ARGS__)F(4,__VA_ARGS__)F(5,__VA_ARGS__)F(6,__VA_ARGS__)"
+            "F(7,__VA_ARGS__)F(8,__VA_ARGS__)F(9,__VA_ARGS__)F(10,__VA_ARGS__)F(11,__VA_ARGS__)F(12,__VA_ARGS__)F(13,__VA_ARGS__)F(14,__VA_ARGS__)"
+            "F(15,__VA_ARGS__)\n"
+            "#define A1(i,N,a) __builtin_ia32_##N(a,i),\n"
+            "#define A2(i,N,a,b) __builtin_ia32_##N(a,b,i),\n"
+            "#define U(N,T,a) {T r[]={M16(A1,N,a)};FOLD(r);}\n"
+            "#define B(N,T,a,b) {T r[]={M16(A2,N,a,b)};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf a4,b4;v8sf a8,b8;v2df p2,q2;v4df p4;v2di k2;v4si s4,t4;\n"
+            "for(int i=0;i<8;i++){float f=(float)(n*3+i*5-17)*0.25f+(i&1?0.5f:-0.75f);a8[i]=f;b8[i]=(float)(i-n)/3.0f;if(i<4){a4[i]=f*1.5f;b4[i]=-f;"
+            "p4[i]=(double)f*2.5+0.5;}if(i<2){p2[i]=(double)f-0.5;q2[i]=(double)(n+i)/7.0;}}\n"
+            "fill(&k2,16,n);fill(&s4,16,n+1);fill(&t4,16,n+2);\n"
+            "U(roundps,v4sf,a4)U(roundpd,v2df,p2)U(roundps256,v8sf,a8)U(roundpd256,v4df,p4)B(roundss,v4sf,b4,a4)B(roundsd,v2df,q2,p2)\n"
+            "{v4sf r[]={__builtin_ia32_dpps(a4,b4,0xff),__builtin_ia32_dpps(a4,b4,0x31),__builtin_ia32_dpps(a4,b4,0xe5),__builtin_ia32_dpps(a4,b4,0x0f),"
+            "__builtin_ia32_dpps(a4,b4,0xf0)};FOLD(r);}"
+            "{v8sf r[]={__builtin_ia32_dpps256(a8,b8,0xff),__builtin_ia32_dpps256(a8,b8,0x7a),__builtin_ia32_dpps256(a8,b8,0x13)};FOLD(r);}"
+            "{v2df r[]={__builtin_ia32_dppd(p2,q2,0x33),__builtin_ia32_dppd(p2,q2,0x31),__builtin_ia32_dppd(p2,q2,0x12),__builtin_ia32_dppd(p2,q2,0xff),"
+            "__builtin_ia32_dppd(p2,q2,0x03)};FOLD(r);}\n"
+            "{v2di r[]={__builtin_ia32_aeskeygenassist128(k2,0),__builtin_ia32_aeskeygenassist128(k2,1),__builtin_ia32_aeskeygenassist128(k2,0x1b),"
+            "__builtin_ia32_aeskeygenassist128(k2,0x80),__builtin_ia32_aeskeygenassist128(k2,0xff)};FOLD(r);}"
+            "{v4si r[]={__builtin_ia32_sha1rnds4(s4,t4,0),__builtin_ia32_sha1rnds4(s4,t4,1),__builtin_ia32_sha1rnds4(s4,t4,2),"
+            "__builtin_ia32_sha1rnds4(s4,t4,3),__builtin_ia32_sha1rnds4(s4,t4,7)};FOLD(r);}\n"
+            "U(vcvtps2ph,v8hi,a4)U(vcvtps2ph256,v8hi,a8)\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // The leaves of the system builtins (#148): lzcnt_u16 of every 16-bit edge, rdtsc's order, the fences, a line
+            // flushed and read again, and MXCSR stored, its rounding changed, an inexact sum rounded by it, and restored.
+            "x86-rest-system-leaves",
+            "int tested(int n){unsigned h=2166136261u;\n"
+            "static const unsigned short v[]={0,1,2,3,0x7f,0x80,0xff,0x100,0x7fff,0x8000,0xffff,0x1234};"
+            "for(int i=0;i<12;i++){unsigned short r=__builtin_ia32_lzcnt_u16((unsigned short)(v[i]^(unsigned short)(n&i)));FOLD(r);}\n"
+            "unsigned long long t0=__builtin_ia32_rdtsc(),t1=__builtin_ia32_rdtsc();int ordered=t1>=t0;FOLD(ordered);\n"
+            "__builtin_ia32_lfence();__builtin_ia32_mfence();__builtin_ia32_sfence();\n"
+            "static int line[16];line[n&15]=n;__builtin_ia32_clflush(line);__builtin_ia32_mfence();int back=line[n&15];FOLD(back);\n"
+            "unsigned csr=__builtin_ia32_stmxcsr();unsigned bits=csr&0xffc0u;FOLD(bits);volatile float a=1.0f,b=(float)(n|1)*1e-8f;"
+            "for(unsigned mode=0;mode<4;mode++){__builtin_ia32_ldmxcsr((csr&~0x6000u)|mode<<13);float s=a+b,d=a-b;FOLD(s);FOLD(d);"
+            "unsigned now=__builtin_ia32_stmxcsr()&0x6000u;FOLD(now);}__builtin_ia32_ldmxcsr(csr);\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // A builtin under the program's own declarations with external linkage, at file scope and at block scope,
+            // which keep it the builtin as clang keeps it, and a local variable of one's name, which hides it.
+            "x86-rest-declared-builtins",
+            "void _mm_pause(void);unsigned _mm_getcsr(void);void _mm_lfence(void);\n"
+            "int tested(int n){unsigned h=2166136261u;_mm_pause();_mm_lfence();unsigned c=_mm_getcsr()&0xffc0u;FOLD(c);"
+            "{int _mm_lfence=n*7;FOLD(_mm_lfence);}{void _mm_sfence(void);_mm_sfence();void _mm_clflush(const void*);static int l[4];l[n&3]=n;"
+            "_mm_clflush(l);int b=l[n&3];FOLD(b);}return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // Definitions with internal linkage of builtins' names, which are the program's functions, as clang takes
+            // them: a call of each calls it.
+            "x86-rest-static-builtin-names",
+            "static unsigned _mm_getcsr(void){return 42;}static int fenced;static void _mm_sfence(void){fenced+=3;}\n"
+            "int tested(int n){unsigned h=2166136261u;unsigned c=_mm_getcsr()+(unsigned)n;FOLD(c);_mm_sfence();_mm_sfence();FOLD(fenced);"
+            "return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // xsetbv, which only the kernel may run: compiled and linked against clang's build of the same.
+            "x86-rest-xsetbv",
+            "int tested(int n){if(n==12345)__builtin_ia32_xsetbv((unsigned)n,(unsigned long long)n<<33|7);return n;}",
+            0,
+            true,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
@@ -390,6 +552,17 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
         }
         check_test_program_x86_source(test, clang, target, run, programs[i].name, programs[i].body);
     }
+    // The header builtins (#148): the names <xmmintrin.h>, <emmintrin.h> and <prfchwintrin.h> declare, which stay builtins
+    // under their declarations, as clang keeps them: the fences, pause, a flushed and prefetched line read back, and MXCSR
+    // stored, its rounding changed, an inexact sum rounded by it, and restored. The headers' search is -c's.
+    check_test_program_includes = true;
+    check_test_program_x86_source(test, clang, target, run_native, "x86-rest-header-builtins",
+                                  "#include <x86intrin.h>\n"
+            "int tested(int n){unsigned h=2166136261u;static int line[16];line[n&15]=n*3;_mm_lfence();_mm_mfence();_mm_sfence();_mm_pause();"
+            "_mm_clflush(line);_m_prefetch(line);_m_prefetchw(line);int back=line[n&15];FOLD(back);unsigned csr=_mm_getcsr();unsigned bits=csr&0xffc0u;"
+            "FOLD(bits);volatile float a=1.0f,b=(float)(n|1)*1e-8f;for(unsigned mode=0;mode<4;mode++){_mm_setcsr((csr&~0x6000u)|mode<<13);"
+            "float s=a+b;FOLD(s);}_mm_setcsr(csr);return (int)h;}");
+    check_test_program_includes = false;
 }
 
 // The rest's programs at znver5's target, where the host runs what its features allow (check_test_program_x86's rule).

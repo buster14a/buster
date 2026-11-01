@@ -302,9 +302,11 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
     }
     IrError error = slots <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
     IrFunction view = *f;
+    uint32_t* firsts = NULL;
     if (error == IR_OK)
     {
         bool ok = true;
+        firsts = ir_allocate(scratch, f->slot_count, 4, &ok);
         view.op = ir_allocate(scratch, f->instruction_count, 1, &ok);
         view.a = ir_allocate(scratch, f->instruction_count, 4, &ok);
         view.b = ir_allocate(scratch, f->instruction_count, 4, &ok);
@@ -318,6 +320,7 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
         for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
         {
             view.slots[slot] = f->slots[slot];
+            firsts[slot] = BUSTER_IR_NONE;
             work->statistics.refused_slots += work->refused[slot] != 0;
             work->statistics.split_slots += work->refused[slot] == 0 && work->field_counts[slot] != 0;
         }
@@ -328,6 +331,7 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             work->field_slots[field] = BUSTER_IR_NONE;
             if (work->refused[root] == 0)
             {
+                firsts[root] = firsts[root] == BUSTER_IR_NONE ? next : firsts[root];
                 work->field_slots[field] = next;
                 view.slots[next++] = (IrSlot){
                     .size = work->field_sizes[field],
@@ -344,6 +348,12 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             view.a[i] = f->a[i];
             view.b[i] = f->b[i];
             view.c[i] = f->c[i];
+            // A split slot's lifetime markers go to its first field, which no access reaches outside the slot's
+            // lifetime; its other fields keep the whole function's, and the slot itself, without references, goes.
+            if (f->op[i] == IR_LIFETIME && firsts[f->a[i]] != BUSTER_IR_NONE)
+            {
+                view.a[i] = firsts[f->a[i]];
+            }
             const uint32_t root = work->roots[i];
             if (root != BUSTER_IR_NONE && work->refused[root] == 0)
             {
@@ -374,9 +384,10 @@ static IrError ir_sroa_compact_slots(IrFunction* f, Arena* scratch)
         {
             memset(slots, 0xff, (uint64_t)f->slot_count * 4);
         }
+        // A lifetime marker refers to its slot as an address does: a slot only markers refer to stays, with them.
         for (uint32_t i = 0; i < f->instruction_count; i += 1)
         {
-            if (f->op[i] == IR_STACK_ADDR)
+            if (f->op[i] == IR_STACK_ADDR || f->op[i] == IR_LIFETIME)
             {
                 slots[f->a[i]] = 0;
             }
@@ -392,7 +403,7 @@ static IrError ir_sroa_compact_slots(IrFunction* f, Arena* scratch)
         }
         for (uint32_t i = 0; i < f->instruction_count; i += 1)
         {
-            if (f->op[i] == IR_STACK_ADDR)
+            if (f->op[i] == IR_STACK_ADDR || f->op[i] == IR_LIFETIME)
             {
                 f->a[i] = slots[f->a[i]];
             }
@@ -411,7 +422,7 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
     }
     if (check.error == IR_OK)
     {

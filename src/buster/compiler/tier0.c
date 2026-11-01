@@ -77,6 +77,9 @@
 #include <string.h>
 #include "host_isa.h"
 
+// OS-dependent includes
+#include <sys/mman.h>
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The typed stream
 
@@ -89,7 +92,10 @@
 // (Tier0Frame.memory_area), not in its register: calls and the arms of ?: then need nothing of their own for it. A
 // VECTOR value does too, in that depth's 64-byte frame slot (Tier0Frame.vector_area), its bytes from the slot's first;
 // its width is the entry's (LOAD's value, an object's size, a constant's), which tier0_validate follows from depth to
-// depth, as a class.
+// depth, as a class. A MASK value (#179) is an AVX-512 opmask of 1, 2, 4 or 8 bytes (8, 16, 32 or 64 bits), its width
+// the entry's too, followed the same way: it takes a depth of a third stack of its own, the mask stack, whose depths
+// 0 to 6 are k1 to k7 (tier0_mask_register) and whose deeper ones live in their 8-byte frame slots (Tier0Frame's
+// mask_area), its bits in the low bits and zeros past them, in a register or a slot.
 #define BUSTER_TYPED_CLASS_VOID 0
 #define BUSTER_TYPED_CLASS_I8 1
 #define BUSTER_TYPED_CLASS_U8 2
@@ -105,7 +111,8 @@
 #define BUSTER_TYPED_CLASS_I128 12
 #define BUSTER_TYPED_CLASS_U128 13
 #define BUSTER_TYPED_CLASS_VECTOR 14
-#define BUSTER_TYPED_CLASSES 15
+#define BUSTER_TYPED_CLASS_MASK 15
+#define BUSTER_TYPED_CLASSES 16
 // Every class below 16, so that a kind and a class make a byte table's index.
 #define BUSTER_TYPED_CLASS_LIMIT 16
 
@@ -196,6 +203,13 @@
 // them through calls as aggregates: an argument, a parameter or a result of one is an object whose bytes one vector
 // register holds whole (an XMM, YMM or ZMM register) or a vector of 4 or 8 bytes an XMM register's low bytes, as the
 // convention passes it, or the stack.
+// Masks (MASK, #179) take CONVERT (to a mask from an integer class, its value's low bits, as C converts it to the
+// unsigned integer of the mask's width; from a mask to an integer class, as C converts that unsigned integer; `value` the
+// mask's bytes either way), LOAD, STORE and SET (`value` the mask's bytes at the address), LOCAL, STORE_LOCAL and
+// SET_LOCAL (of an object of the mask's size), AND, OR, XOR and NOT (`value` their masks' bytes, which their operands
+// have), DUP, DISCARD and JUMP_VALUE, in a function that says it has them (Tier0Function.masks); and X86 entries' rows take
+// and push them. A constant is an integer's CONST converted. No call passes or returns a mask, nor does a RETURN: the
+// convention passes nothing in the opmask registers, which are all caller-saved, so that a call saves the masks in them.
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
 // WebAssembly validator): tier0_validate checks it. A label of label_entries is a target JUMP_INDIRECT may reach, with
@@ -292,16 +306,26 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 
 // A machine operation, a row of Tier0Function.operations, which X86 entries name: `record_count` records (up to
 // BUSTER_TIER0_OPERATION_RECORDS), emitted in order, with `operand_count` operands (operand_classes, the first pushed
-// first: integers, floating values and VECTORs, each VECTOR one's bytes in operand_bytes) and a result (result_class,
-// VOID for none; a VECTOR one's bytes in result_bytes). Its records name registers by role, never by number
-// (BUSTER_TIER0_ROLE_*), and Tier 0 places each role where the entry's depths leave room:
+// first: integers, floating values, VECTORs and MASKs, each VECTOR or MASK one's bytes in operand_bytes) and a result
+// (result_class, VOID for none; a VECTOR or MASK one's bytes in result_bytes). Its records name registers by role, never
+// by number but an opmask register's (BUSTER_TIER0_ROLE_*), and Tier 0 places each role where the entry's depths leave
+// room:
 //   - in a vector register's field (XMM, YMM or ZMM: reg, vvvv, rm, a VSIB operand's index, and an /is4 operand, whose
 //     immediate's bits 7 to 4 hold j for VECTOR(j)): VECTOR(j), the operation's vector register j (0 to 15), which
 //     holds VECTOR operand j when the records start, and whose register 0 holds the VECTOR result when they end, the
 //     others free; FLOATING(j), floating operand j's XMM register; FLOATING_RESULT, the floating result's;
 //   - in a general register's field (reg, vvvv, rm, a memory operand's base and index): INTEGER(j), integer operand j's
 //     register (an address among them); INTEGER_RESULT, the integer result's; SCRATCH(k), a free one (0 to 3);
-//   - an opmask register (a K field, and EVEX's mask decoration): itself, k0 to k7, which no value keeps between entries.
+//   - in an opmask register's field (a K field: reg, vvvv or rm): MASK(j), mask operand j's register (#179), which holds
+//     it when the records start; MASK_RESULT, the mask result's, which holds it when they end; MASK_SCRATCH(k), a free
+//     one (0 to 3); and in EVEX's opmask decoration (decorations' bits 0 to 2) MASK(j) and MASK_SCRATCH(k) by
+//     BUSTER_TIER0_DECORATION_MASK(j) and BUSTER_TIER0_DECORATION_MASK_SCRATCH(k), in bits 3 and 4, which every 64-bit
+//     mode record has zero: a segment override is theirs only in 16- and 32-bit modes (BUSTER_X86_DECORATION_SEGMENT),
+//     and Tier 0's code is 64-bit mode's, whose FS and GS overrides are a form's (BUSTER_X86_FORM_FS and _GS), which no
+//     row has (tier0_operation_form_valid). Placing a record clears them and keeps the rest: zeroing, and an _ER form's
+//     rounding in bits 5 and 6. The roles are k1 to k7, the mask stack's (tier0_operation_mask_plan): a row with a mask
+//     operand or result names its opmask registers by role, or k0, which no value takes. Any other row may name them by
+//     number, k0 to k7, as its scratch, and Tier 0 saves around it the masks the ones it names hold (tier0_emit_operation).
 // Each form is a VEX or an EVEX one with its operands in its fields alone, without a branch, a symbol or another class of
 // register (tier0_operation_valid), so that a row reads and writes its operands, its result, its scratch registers, the
 // opmask registers and memory through its addresses, and nothing else. The VECTOR registers are the floating stack's free
@@ -319,6 +343,12 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 #define BUSTER_TIER0_ROLE_INTEGER(j) (BUSTER_TIER0_ROLE | (j))
 #define BUSTER_TIER0_ROLE_INTEGER_RESULT (BUSTER_TIER0_ROLE | 0x10)
 #define BUSTER_TIER0_ROLE_SCRATCH(k) (BUSTER_TIER0_ROLE | 0x20 | (k))
+#define BUSTER_TIER0_ROLE_MASK(j) (BUSTER_TIER0_ROLE | (j))
+#define BUSTER_TIER0_ROLE_MASK_RESULT (BUSTER_TIER0_ROLE | 0x10)
+#define BUSTER_TIER0_ROLE_MASK_SCRATCH(k) (BUSTER_TIER0_ROLE | 0x20 | (k))
+#define BUSTER_TIER0_DECORATION_MASK(j) (0x08 | (j))
+#define BUSTER_TIER0_DECORATION_MASK_SCRATCH(k) (0x10 | (k))
+#define BUSTER_TIER0_DECORATION_ROLE 0x18
 
 typedef struct Tier0Operation Tier0Operation;
 struct Tier0Operation
@@ -339,7 +369,7 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
 #define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
-// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
+// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes; the mask stack's too (#179).
 #define BUSTER_TIER0_MAX_DEPTH 240
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS (BUSTER_TIER0_MAX_DEPTH - 1)
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
@@ -413,7 +443,9 @@ struct Tier0Operation
 // value indexes. `vectors` says whether the function has VECTOR values or X86 entries. A function with them has the
 // vectors' slots in its frame, and only its compile looks for their entries, as long double's are looked for; and it
 // runs on a processor with AVX-512 (F, VL, BW and DQ), whose EVEX forms Tier 0's own records for its vectors are: a
-// front end gives one to a unit whose target has them, as the intrinsics that make vectors of 64 bytes need.
+// front end gives one to a unit whose target has them, as the intrinsics that make vectors of 64 bytes need. `masks` says
+// whether it has MASK values (#179): a function with them has `vectors` too, on the EVEX path (vector_bytes 0), the mask
+// stack's depths per entry and its masks' slots, and only its compile looks for them.
 //
 // The labels whose addresses the code takes (GNU C's labels as values, which JUMP_INDIRECT goes to) are an optional
 // column too, 0 for a function without them: label_entries holds label_count entries' indices, each a statement's start
@@ -479,6 +511,7 @@ struct Tier0Function
     const Tier0Operation* operations;
     uint32_t operation_count;
     bool vectors;
+    bool masks;
     // Vector transport: 0 preserves the EVEX path; 16 uses SSE2 and 32 uses AVX.
     // This is the generated function's target, never the compiler host's ISA.
     uint8_t vector_bytes;
@@ -490,7 +523,16 @@ struct Tier0Function
     const uint8_t* call_tails;
     bool entry_records;
     bool choice_requests;
+    // Optional lifetimes of the frame's objects (#177), which Tier 0 ignores and ir_lower turns into IR_LIFETIME markers
+    // before their entries: lifetime_count events, event k before entry lifetime_entries[k] (nondecreasing, below
+    // count), of local lifetime_locals[k] without BUSTER_TIER0_LIFETIME_END, the end of its object's lifetime where that
+    // bit is set and its start otherwise. A local without events lives throughout its function.
+    const uint32_t* lifetime_entries;
+    const uint32_t* lifetime_locals;
+    uint32_t lifetime_count;
 };
+
+#define BUSTER_TIER0_LIFETIME_END 0x80000000u
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
 static bool tier0_is_object(const Tier0Function* function, uint64_t local)
@@ -540,7 +582,8 @@ typedef enum Tier0Error
     TIER0_OK,
     // An entry no template or deferred emitter covers yet: `node` names it.
     TIER0_ERROR_UNSUPPORTED,
-    // A stack deeper than the deep slots take (BUSTER_TIER0_MAX_DEPTH, tier0_select_deep).
+    // A stack deeper than the deep slots take (BUSTER_TIER0_MAX_DEPTH, tier0_select_deep), the mask stack's among them
+    // (tier0_mask_depths_scalar).
     TIER0_ERROR_DEPTH,
     // The output arena or the scratch arena has no room.
     TIER0_ERROR_MEMORY,
@@ -570,7 +613,9 @@ typedef enum Tier0Error
 // release (an add, or with a frame pointer the lea or mov), pops and ret its last. `tail_records` has, for each of the
 // function's TAIL_CALL entries in their order, `tail_count` of them (0 for a function without them), the record of its
 // jump to its callee, which the epilogue's release and pops come right before (tier0_emit_teardown), as the unwind
-// tables' tail calls take them.
+// tables' tail calls take them. Tier 1's code in Tier 0's place (c_check_tier1.c, #177) publishes the same frame, and
+// its early returns' rets as `tail_records` after their epilogues; `frame_open` when its last record isn't its last
+// epilogue's ret, every return then among `tail_records` (UnwindFunction.open). Tier 0's code ends in its epilogue.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -599,6 +644,7 @@ struct Tier0Code
     bool frame_pointer;
     uint8_t frame_alignment_log2;
     bool frame_base;
+    bool frame_open;
     Tier0Error error;
     uint32_t node;
 };
@@ -657,6 +703,18 @@ static const uint8_t tier0_integer_depths[BUSTER_TIER0_INTEGER_DEPTHS] = {
     X86_REGISTER_R15,
     X86_REGISTER_RBP,
 };
+
+// The mask stack's depths in registers (#179): depth d's mask in k(d + 1), k1 to k7, the opmask registers an EVEX form
+// may take as its write mask; k0, which none may, is the mask entries' scratch (BUSTER_TIER0_MASK_SCRATCH). A deeper
+// mask lives in its frame slot (Tier0Frame.mask_area), where a call or a row that names its register saves one of
+// these too.
+#define BUSTER_TIER0_MASK_DEPTHS 7
+#define BUSTER_TIER0_MASK_SCRATCH 0
+
+static uint8_t tier0_mask_register(uint32_t depth)
+{
+    return (uint8_t)(depth + 1);
+}
 
 // Whether an entry of this kind is one of the stack's, which give its function a frame pointer: those that move rsp in
 // the body or read it (ALLOCA, STACK_SAVE and STACK_RESTORE), and FRAME_ADDRESS, which reads the frame pointer itself.
@@ -815,10 +873,22 @@ static bool tier0_class_vector(uint32_t class)
     return class == BUSTER_TYPED_CLASS_VECTOR;
 }
 
-// A class's width in bytes (0 for VOID), a long double's and a vector's their slots'.
+// Whether a class is a mask's (#179), whose values take the mask stack's depths (tier0_mask_register).
+static bool tier0_class_mask(uint32_t class)
+{
+    return class == BUSTER_TYPED_CLASS_MASK;
+}
+
+// Whether a mask's bytes are a width Tier 0 has: 1, 2, 4 or 8, kmovb's, kmovw's, kmovd's and kmovq's.
+static bool tier0_mask_bytes_valid(uint64_t bytes)
+{
+    return bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8;
+}
+
+// A class's width in bytes (0 for VOID), a long double's, a vector's and a mask's their slots'.
 static uint32_t tier0_class_bytes(uint32_t class)
 {
-    static const uint8_t bytes[BUSTER_TYPED_CLASS_LIMIT] = { 0, 1, 1, 2, 2, 4, 4, 8, 8, 4, 8, 16, 16, 16, 64 };
+    static const uint8_t bytes[BUSTER_TYPED_CLASS_LIMIT] = { 0, 1, 1, 2, 2, 4, 4, 8, 8, 4, 8, 16, 16, 16, 64, 8 };
     return bytes[class & (BUSTER_TYPED_CLASS_LIMIT - 1)];
 }
 
@@ -2935,7 +3005,28 @@ static void tier0_define_templates(void)
     tier0_begin();
     tier0_add(tier0_branch(X86_FORM_JMP_REL8, BUSTER_TIER0_RECORD_BRANCH));
     tier0_end(BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_PLAIN, 0);
-    for (uint32_t class = BUSTER_TYPED_CLASS_VOID; class <= BUSTER_TYPED_CLASS_VECTOR; class += 1)
+    // Masks (#179): every entry tier0_emit_mask's, as the vectors' are, but DISCARD and JUMP_VALUE, whose values stay at
+    // their depths' places, and the conversions to and from the integer classes. No constant, local or address fuses
+    // into one.
+    static const uint8_t mask_kinds[] = {
+        BUSTER_TYPED_DUP, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET, BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL,
+        BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_AND, BUSTER_TYPED_OR, BUSTER_TYPED_XOR, BUSTER_TYPED_NOT,
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(mask_kinds); k += 1)
+    {
+        tier0_defer(mask_kinds[k], BUSTER_TYPED_CLASS_MASK, BUSTER_TIER0_VARIANT_PLAIN);
+    }
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_U64; class += 1)
+    {
+        tier0_defer(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, class);
+        tier0_defer(BUSTER_TYPED_CONVERT, class, BUSTER_TYPED_CLASS_MASK);
+    }
+    tier0_begin();
+    tier0_end(BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_MASK, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    tier0_begin();
+    tier0_add(tier0_branch(X86_FORM_JMP_REL8, BUSTER_TIER0_RECORD_BRANCH));
+    tier0_end(BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_MASK, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    for (uint32_t class = BUSTER_TYPED_CLASS_VOID; class <= BUSTER_TYPED_CLASS_MASK; class += 1)
     {
         if (!tier0_class_memory(class))
         {
@@ -2972,11 +3063,41 @@ static bool tier0_inc_dec_costs_no_more(void)
     return cheaper;
 }
 
+// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name.
+#define BUSTER_TIER0_MADV_POPULATE_WRITE 23
+
+// Before tier0_initialize writes its tables (about 1 MB), their pages, both ends rounded out, committed in one call each
+// (MADV_POPULATE_WRITE) rather than a fault each (#590): a kernel whose transparent huge pages are only `madvise`d gave them 257 base pages'
+// faults in every compile. Each stays a separate array, which the passes' code needs: one structure of them, in a huge
+// page of its own, took tier0_initialize from 82 to 184 million instructions in 60 builds, as LLVM can't tell that its
+// members don't overlap. A call failing (an older kernel) leaves the pages to their faults.
+static void tier0_commit(const void* table, uintptr_t bytes)
+{
+    const uintptr_t page = 4096;
+    const uintptr_t first = (uintptr_t)table & ~(page - 1);
+    const uintptr_t last = ((uintptr_t)table + bytes + page - 1) & ~(page - 1);
+    madvise((void*)first, last - first, BUSTER_TIER0_MADV_POPULATE_WRITE);
+}
+
+static void tier0_prepare_tables(void)
+{
+    tier0_commit(tier0_templates, sizeof(tier0_templates));
+    tier0_commit(tier0_template_infos, sizeof(tier0_template_infos));
+    tier0_commit(tier0_compiled, sizeof(tier0_compiled));
+    tier0_commit(tier0_slot_words, sizeof(tier0_slot_words));
+    tier0_commit(tier0_template_words, sizeof(tier0_template_words));
+    tier0_commit(tier0_masks, sizeof(tier0_masks));
+    tier0_commit(tier0_slots, sizeof(tier0_slots));
+    tier0_commit(tier0_slot_bases, sizeof(tier0_slot_bases));
+    tier0_commit(tier0_choice_shapes, sizeof(tier0_choice_shapes));
+}
+
 static bool tier0_initialize(void)
 {
     // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
     if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
     {
+        tier0_prepare_tables();
         tier0_inc_dec = tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0;
         memset(tier0_slot_bases, 0, sizeof(tier0_slot_bases));
         tier0_template_count = 0;
@@ -3163,6 +3284,11 @@ struct Tier0Entries
     uint8_t* deep;
     uint8_t* deep_depths;
     uint8_t* deep_floating_depths;
+    // The mask stack (#179), 0 in a function without masks: each entry's depth before it (tier0_vector_mask_depths and
+    // tier0_mask_depths_scalar), below BUSTER_TIER0_MAX_DEPTH as the other stacks' (both refuse a deeper one), and the
+    // most masks any entry leaves or finds on it.
+    uint8_t* mask_depths;
+    uint32_t mask_top;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -3231,9 +3357,11 @@ static void tier0_labels(const Tier0Function* function, uint64_t* labels)
 }
 
 // Which stack a class's values live on: 0 for none (VOID), 1 for the integer stack, 2 for the floating one.
+// The stack a class's values take: 1 the integer one (and the memory classes' and vectors', in their slots), 2 the
+// floating one, and 0 none: VOID's, and a mask's (#179), whose stack is its own (Tier0Entries.mask_depths).
 static uint32_t tier0_stack(uint32_t class)
 {
-    return tier0_class_floating(class) ? 2 : class == BUSTER_TYPED_CLASS_VOID ? 0 : 1;
+    return tier0_class_floating(class) ? 2 : class == BUSTER_TYPED_CLASS_VOID || class == BUSTER_TYPED_CLASS_MASK ? 0 : 1;
 }
 
 // Entry i's own effects on the integer and floating stacks (what it pushes less what it pops), without fusion.
@@ -3569,6 +3697,56 @@ static void tier0_depths_scalar(const Tier0Function* function, Tier0Entries* ent
     }
 }
 
+// Entry i's effect on the mask stack (#179), the masks it pushes less those it pops, as tier0_raw_effects counts the other
+// stacks': its shape's operands and result of class MASK, or an X86 entry's row's. A call takes and gives none
+// (tier0_validate refuses a mask argument or result), and a mask's entry neither absorbs nor is absorbed (no template of a
+// mask's has a fused variant), so that every entry's effect is its own.
+static int32_t tier0_mask_effect(const Tier0Function* function, uint32_t i)
+{
+    const uint8_t kind = function->kinds[i];
+    const uint8_t class = function->classes[i];
+    const uint8_t operand = i > 0 ? function->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
+    int32_t effect = 0;
+    if (kind == BUSTER_TYPED_X86)
+    {
+        const Tier0Operation* operation = &function->operations[function->values[i]];
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
+        {
+            effect -= tier0_class_mask(operation->operand_classes[j]) ? 1 : 0;
+        }
+        effect += tier0_class_mask(class) ? 1 : 0;
+    }
+    else if (kind != BUSTER_TYPED_CALL && kind != BUSTER_TYPED_TAIL_CALL)
+    {
+        const Tier0Shape shape = tier0_shapes[kind];
+        const bool returns_nothing = kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID;
+        const bool first = (shape.first == BUSTER_TIER0_STACK_CLASS && tier0_class_mask(class)) || (shape.first == BUSTER_TIER0_STACK_OPERAND && tier0_class_mask(operand));
+        effect -= first ? 1 : 0;
+        effect -= shape.last == BUSTER_TIER0_STACK_OPERAND && !returns_nothing && tier0_class_mask(operand) ? 1 : 0;
+        effect += shape.push == BUSTER_TIER0_STACK_CLASS && tier0_class_mask(class) ? 1 : 0;
+    }
+    return effect;
+}
+
+// The mask stack's depth before each entry (Tier0Entries.mask_depths), its effects' exclusive prefix sum, and the most
+// masks on it at once (mask_top), for a function with masks: tier0_vector_mask_depths' twin. Both paths make it after
+// phase 2, as a column of its own, so that a function without masks counts nothing for them. Returns TIER0_OK, or
+// TIER0_ERROR_DEPTH where an entry finds BUSTER_TIER0_MAX_DEPTH masks or more, as tier0_select_deep refuses the other
+// stacks: the column's bytes would wrap past 255 (a depth of 256 read as 0, its slot and register the first mask's).
+static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
+{
+    int32_t depth = 0;
+    int32_t deepest = 0;
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        entries->mask_depths[i] = (uint8_t)depth;
+        deepest = depth > deepest ? depth : deepest;
+        depth += tier0_mask_effect(function, i);
+    }
+    entries->mask_top = (uint32_t)(depth > deepest ? depth : deepest);
+    return deepest >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Homes and the frame
 
@@ -3590,8 +3768,9 @@ _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 // the floating stack's: tier0_select_deep's, none without deep entries), the memory classes' slots (`memory_slots`: 16
 // bytes per integer depth from `memory_area`, an F80, I128 or U128 value at depth d in slot d), the vectors' (`vectors`:
 // 64 bytes per integer depth from `vector_area`, a VECTOR value at depth d in slot d), both for `memory_depths` depths
-// (BUSTER_TIER0_INTEGER_DEPTHS, or a function with deep entries' deepest: tier0_select_deep's), the optional incoming
-// variadic register-save area, the locals' slots, then the objects. Incoming saves never share outgoing
+// (BUSTER_TIER0_INTEGER_DEPTHS, or a function with deep entries' deepest: tier0_select_deep's), the masks' (`masks`: 8
+// bytes per depth of the mask stack from `mask_area`, the mask at depth d in slot d past the registers, or saved there),
+// the optional incoming variadic register-save area, the locals' slots, then the objects. Incoming saves never share outgoing
 // call-preservation storage. `size` is what the prologue subtracts from rsp (with the pushes and the return address, a
 // multiple of 16 when the function calls or has an object aligned to 16, but in a realigned frame, whose rsp the prologue
 // rounds down after it); `saved` has a bit per tier0_callee_saved
@@ -3630,6 +3809,8 @@ struct Tier0Frame
     uint32_t memory_area;
     uint32_t vector_area;
     uint32_t memory_depths;
+    uint32_t mask_area;
+    uint32_t mask_slots;
     uint32_t variadic_area;
     uint32_t overflow_area;
     uint32_t outgoing;
@@ -3656,12 +3837,17 @@ struct Tier0Frame
     bool memory_slots;
     bool vectors;
     bool x87_result;
+    // Whether the function has masks (Tier0Function.masks), whose slots, 8 bytes per depth of the mask stack from
+    // `mask_area`, `mask_slots` of them, hold the masks past its registers and those a call or a row saves (#179).
+    bool masks;
 };
 
 // A memory class's slot: 16 bytes for each integer depth, of which an x87 value takes 10 and a 128-bit integer 16.
 #define BUSTER_TIER0_MEMORY_SLOT_BYTES 16
 // A vector's slot: 64 bytes for each integer depth, of which a VECTOR value takes its bytes from the first.
 #define BUSTER_TIER0_VECTOR_SLOT_BYTES 64
+// A mask's slot: 8 bytes for each depth of the mask stack, which a mask fills whole, zeros past its bytes.
+#define BUSTER_TIER0_MASK_SLOT_BYTES 8
 
 // Whether a function has values of the memory classes or vectors (Tier0Frame.memory): long doubles, 128-bit integers,
 // VECTOR values or X86 entries, each of whose entries its compile looks for, out of line.
@@ -4266,6 +4452,12 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         valid = valid && offset <= INT32_MAX;
         frame->vector_area = valid ? (uint32_t)offset : 0;
         offset += BUSTER_TIER0_VECTOR_SLOT_BYTES * memory_depths;
+    }
+    if (frame->masks)
+    {
+        valid = valid && offset <= INT32_MAX;
+        frame->mask_area = valid ? (uint32_t)offset : 0;
+        offset += BUSTER_TIER0_MASK_SLOT_BYTES * (uint64_t)frame->mask_slots;
     }
     if (function->incoming_variadic != 0)
     {
@@ -5284,6 +5476,104 @@ static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* funct
     }
 }
 
+// The masks a call at entry i saves around itself (#179): those in their registers, every one an opmask register holds,
+// since the convention passes none and all of them are caller-saved; 0 in a function without masks.
+static uint32_t tier0_saved_masks(const Tier0Entries* entries, uint32_t i)
+{
+    const uint32_t depth = entries->mask_depths != 0 ? entries->mask_depths[i] : 0;
+    return depth < BUSTER_TIER0_MASK_DEPTHS ? depth : BUSTER_TIER0_MASK_DEPTHS;
+}
+
+// Whether entry i is a mask's (tier0_emit_mask's, #179): keyed by class MASK, or a conversion from a mask (whose variant
+// is its operand's class).
+static bool tier0_mask_entry(const Tier0Entries* entries, uint32_t i)
+{
+    return tier0_class_mask(entries->key_classes[i]) || (entries->key_kinds[i] == BUSTER_TYPED_CONVERT && tier0_class_mask(entries->variants[i]));
+}
+
+// A mask's form by its bytes (1, 2, 4 or 8): kmovb's, kmovw's, kmovd's and kmovq's, or kand's, kor's, kxor's and knot's,
+// each of which writes its width and zeroes the register past it.
+static uint32_t tier0_mask_form(uint64_t bytes, uint32_t form1, uint32_t form2, uint32_t form4, uint32_t form8)
+{
+    return bytes == 1 ? form1 : bytes == 2 ? form2 : bytes == 4 ? form4 : form8;
+}
+
+// Mask slot `depth` (Tier0Frame.mask_area), from rsp (or rbp with a frame pointer), as the memory operand of `form`, with
+// opmask register `reg`.
+static X86Instruction tier0_mask_slot(uint32_t form, const Tier0Frame* frame, uint32_t depth, uint8_t reg)
+{
+    const int64_t displacement = (int64_t)frame->mask_area + BUSTER_TIER0_MASK_SLOT_BYTES * (int64_t)depth + frame->bias;
+    return tier0_instruction(form, reg, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)displacement, 0);
+}
+
+// Whether the mask at `depth` is in its register (k1 to k7) rather than its slot.
+static bool tier0_mask_in_register(uint32_t depth)
+{
+    return depth < BUSTER_TIER0_MASK_DEPTHS;
+}
+
+// The register an entry computes the mask at `depth` in: its own, or past the registers k0, the scratch, from which its
+// slot takes it.
+static uint8_t tier0_mask_working(uint32_t depth)
+{
+    return tier0_mask_in_register(depth) ? tier0_mask_register(depth) : BUSTER_TIER0_MASK_SCRATCH;
+}
+
+// The mask at `depth` into opmask register `to`, whole (its zeros past its bytes kept), from its register or its slot:
+// nothing where it is in `to` already.
+static void tier0_mask_take(Tier0Writer* writer, const Tier0Frame* frame, uint32_t depth, uint8_t to)
+{
+    if (!tier0_mask_in_register(depth))
+    {
+        tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_K_M64, frame, depth, to));
+    }
+    else if (tier0_mask_register(depth) != to)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_KMOVQ_K_K, to, tier0_mask_register(depth), 0, 0, 0));
+    }
+}
+
+// Opmask register `from` into the place of the mask at `depth`, its register or its slot: nothing where `from` is it.
+static void tier0_mask_give(Tier0Writer* writer, const Tier0Frame* frame, uint32_t depth, uint8_t from)
+{
+    if (!tier0_mask_in_register(depth))
+    {
+        tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, depth, from));
+    }
+    else if (tier0_mask_register(depth) != from)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_KMOVQ_K_K, tier0_mask_register(depth), from, 0, 0, 0));
+    }
+}
+
+// How many records tier0_mask_take or tier0_mask_give writes.
+static uint32_t tier0_count_mask_move(uint32_t depth, uint8_t reg)
+{
+    return !tier0_mask_in_register(depth) || tier0_mask_register(depth) != reg ? 1 : 0;
+}
+
+// The extension of an integer of class `class` that a conversion to a mask of `bytes` takes first, in place: to its
+// width's register by the class's signedness where the class is narrower (C converts the integer to the mask's unsigned
+// integer, which then holds its bits), X86_FORM_NONE where it isn't. kmovb, kmovw and kmovd read a 32-bit register's low
+// bits and kmovq a 64-bit one's.
+static uint32_t tier0_mask_extension(uint32_t class, uint64_t bytes)
+{
+    const uint32_t from = tier0_class_bytes(class);
+    const bool sign = tier0_class_signed(class);
+    uint32_t form = X86_FORM_NONE;
+    if (from < bytes && bytes == 8)
+    {
+        form = from == 1 ? (sign ? X86_FORM_MOVSX_R64_RM8 : X86_FORM_MOVZX_R32_RM8)
+               : from == 2 ? (sign ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVZX_R32_RM16)
+                           : (sign ? X86_FORM_MOVSXD_R64_RM32 : X86_FORM_MOV_R32_RM32);
+    }
+    else if (from < bytes)
+    {
+        form = from == 1 ? (sign ? X86_FORM_MOVSX_R32_RM8 : X86_FORM_MOVZX_R32_RM8) : (sign ? X86_FORM_MOVSX_R32_RM16 : X86_FORM_MOVZX_R32_RM16);
+    }
+    return form;
+}
+
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
 // ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
 // call, the call, the result moved to its depth, and the saved depths restored.
@@ -5335,6 +5625,12 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     for (uint32_t d = 0; d < floating_below; d += 1)
     {
         tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
+    }
+    // The masks in their registers (#179), which the call may overwrite, saved into their slots and loaded back.
+    const uint32_t masks = memory ? tier0_saved_masks(entries, i) : 0;
+    for (uint32_t d = 0; d < masks; d += 1)
+    {
+        tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, d, tier0_mask_register(d)));
     }
     uint8_t to[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
     uint8_t from[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
@@ -5474,6 +5770,10 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         for (uint32_t d = 0; d < floating_below; d += 1)
         {
             tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), true);
+        }
+        for (uint32_t d = 0; d < masks; d += 1)
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_K_M64, frame, d, tier0_mask_register(d)));
         }
     }
 }
@@ -6201,11 +6501,13 @@ static uint32_t tier0_count_int128(const Tier0Function* function, const Tier0Ent
     return count;
 }
 
-// Whether entry i is a vector's (tier0_emit_vector_entry's): an X86 entry, or one keyed by class VECTOR. A call is
-// tier0_emit_call's, and none passes or returns a VECTOR value.
+// Whether entry i is a vector's (tier0_emit_vector_entry's): an X86 entry, or one keyed by class VECTOR, or a mask's
+// (tier0_mask_entry's, #179: keyed by class MASK, or a conversion from one). A call is tier0_emit_call's, and none passes
+// or returns a VECTOR value or a mask.
 static bool tier0_vector_entry(const Tier0Entries* entries, uint32_t i)
 {
-    return entries->key_kinds[i] == BUSTER_TYPED_X86 || tier0_class_vector(entries->key_classes[i]);
+    return entries->key_kinds[i] == BUSTER_TYPED_X86 || entries->key_classes[i] >= BUSTER_TYPED_CLASS_VECTOR ||
+           (entries->key_kinds[i] == BUSTER_TYPED_CONVERT && entries->variants[i] == BUSTER_TYPED_CLASS_MASK);
 }
 
 // A vector's slot of integer depth `depth`, from rsp (or rbp with a frame pointer), as the memory operand of `form`, with
@@ -6387,6 +6689,153 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
     return count;
 }
 
+// A mask's entry's records (tier0_mask_entry's, but X86's), with d its integer depth and m its mask stack's depth before
+// it (Tier0Entries.mask_depths), each mask in its register (k1 to k7) or past them in its slot, computed in its register
+// or in k0 (tier0_mask_working):
+//   - CONVERT to a mask: the integer at d − 1, extended first where it is narrower than the mask (tier0_mask_extension),
+//     into mask m by the mask's kmov; from a mask: mask m − 1 into the register at d by its kmov, which zeroes it past the
+//     mask, or past the registers its slot's 8 bytes by a mov;
+//   - LOAD: the mask's bytes at the address in the register at d − 1 into mask m; STORE and SET: mask m − 1 into the
+//     bytes at the address in the register at d − 1, STORE's kept where it is;
+//   - LOCAL: its object's bytes into mask m; STORE_LOCAL and SET_LOCAL: mask m − 1 into them;
+//   - DUP: mask m − 1 copied into mask m;
+//   - AND, OR and XOR: masks m − 2 and m − 1 into m − 2, the second through k0 where it is in its slot, and with both in
+//     their slots k1 too, saved into slot 0 and loaded back around them; NOT: mask m − 1 complemented in place.
+static void tier0_emit_mask(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                            Tier0Writer* writer)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    const uint32_t depth = entries->depths[i];
+    const uint32_t mask = entries->mask_depths[i];
+    const uint64_t value = function->values[i];
+    if (kind == BUSTER_TYPED_CONVERT && tier0_class_mask(entries->key_classes[i]))
+    {
+        const uint8_t reg = tier0_integer_depths[depth - 1];
+        const uint32_t extension = tier0_mask_extension(entries->variants[i], value);
+        const uint8_t working = tier0_mask_working(mask);
+        if (extension != X86_FORM_NONE)
+        {
+            tier0_put(writer, tier0_instruction(extension, reg, reg, 0, 0, 0));
+        }
+        tier0_put(writer, tier0_instruction(tier0_mask_form(value, X86_FORM_KMOVB_K_R32, X86_FORM_KMOVW_K_R32, X86_FORM_KMOVD_K_R32, X86_FORM_KMOVQ_K_R64), working, reg,
+                                            0, 0, 0));
+        tier0_mask_give(writer, frame, mask, working);
+    }
+    else if (kind == BUSTER_TYPED_CONVERT)
+    {
+        const uint8_t reg = tier0_integer_depths[depth];
+        if (tier0_mask_in_register(mask - 1))
+        {
+            tier0_put(writer, tier0_instruction(tier0_mask_form(value, X86_FORM_KMOVB_R32_K, X86_FORM_KMOVW_R32_K, X86_FORM_KMOVD_R32_K, X86_FORM_KMOVQ_R64_K), reg,
+                                                tier0_mask_register(mask - 1), 0, 0, 0));
+        }
+        else
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_MOV_R64_RM64, frame, mask - 1, reg));
+        }
+    }
+    else if (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_LOCAL)
+    {
+        const uint32_t bytes = kind == BUSTER_TYPED_LOAD ? (uint32_t)value : function->local_sizes[value];
+        const uint8_t working = tier0_mask_working(mask);
+        const uint32_t form = tier0_mask_form(bytes, X86_FORM_KMOVB_K_M8, X86_FORM_KMOVW_K_M16, X86_FORM_KMOVD_K_M32, X86_FORM_KMOVQ_K_M64);
+        const Tier0Home home = kind == BUSTER_TYPED_LOCAL ? homes[value] : (Tier0Home){ 0, tier0_integer_depths[depth - 1], BUSTER_X86_MEMORY_BASE, 0, 0 };
+        tier0_put(writer, tier0_instruction(form, working, home.reg, home.mode, home.displacement, 0));
+        tier0_mask_give(writer, frame, mask, working);
+    }
+    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+    {
+        const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+        const uint32_t bytes = local ? function->local_sizes[value] : (uint32_t)value;
+        const uint8_t working = tier0_mask_working(mask - 1);
+        const uint32_t form = tier0_mask_form(bytes, X86_FORM_KMOVB_M8_K, X86_FORM_KMOVW_M16_K, X86_FORM_KMOVD_M32_K, X86_FORM_KMOVQ_M64_K);
+        const Tier0Home home = local ? homes[value] : (Tier0Home){ 0, tier0_integer_depths[depth - 1], BUSTER_X86_MEMORY_BASE, 0, 0 };
+        tier0_mask_take(writer, frame, mask - 1, working);
+        tier0_put(writer, tier0_instruction(form, working, home.reg, home.mode, home.displacement, 0));
+    }
+    else if (kind == BUSTER_TYPED_DUP)
+    {
+        // Through the copy's register where it has one, the source's where only it does, k0 between two slots.
+        const uint8_t working = tier0_mask_in_register(mask) ? tier0_mask_register(mask) : tier0_mask_working(mask - 1);
+        tier0_mask_take(writer, frame, mask - 1, working);
+        tier0_mask_give(writer, frame, mask, working);
+    }
+    else if (kind == BUSTER_TYPED_NOT)
+    {
+        const uint8_t working = tier0_mask_working(mask - 1);
+        tier0_mask_take(writer, frame, mask - 1, working);
+        tier0_put(writer, tier0_instruction(tier0_mask_form(value, X86_FORM_KNOTB_K_K, X86_FORM_KNOTW_K_K, X86_FORM_KNOTD_K_K, X86_FORM_KNOTQ_K_K), working, working, 0, 0, 0));
+        tier0_mask_give(writer, frame, mask - 1, working);
+    }
+    else
+    {
+        // AND, OR and XOR of masks m − 2 and m − 1.
+        const uint32_t form = kind == BUSTER_TYPED_AND  ? tier0_mask_form(value, X86_FORM_KANDB_K_K_K, X86_FORM_KANDW_K_K_K, X86_FORM_KANDD_K_K_K, X86_FORM_KANDQ_K_K_K)
+                              : kind == BUSTER_TYPED_OR ? tier0_mask_form(value, X86_FORM_KORB_K_K_K, X86_FORM_KORW_K_K_K, X86_FORM_KORD_K_K_K, X86_FORM_KORQ_K_K_K)
+                                                        : tier0_mask_form(value, X86_FORM_KXORB_K_K_K, X86_FORM_KXORW_K_K_K, X86_FORM_KXORD_K_K_K, X86_FORM_KXORQ_K_K_K);
+        const bool both = !tier0_mask_in_register(mask - 2);
+        const uint8_t first = tier0_mask_working(mask - 2);
+        const uint8_t second = both ? tier0_mask_register(0) : tier0_mask_in_register(mask - 1) ? tier0_mask_register(mask - 1) : BUSTER_TIER0_MASK_SCRATCH;
+        if (both)
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, 0, second));
+        }
+        tier0_mask_take(writer, frame, mask - 1, second);
+        tier0_mask_take(writer, frame, mask - 2, first);
+        X86Instruction record = tier0_instruction(form, first, second, 0, 0, 0);
+        record.vvvv = first;
+        tier0_put(writer, record);
+        tier0_mask_give(writer, frame, mask - 2, first);
+        if (both)
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_K_M64, frame, 0, second));
+        }
+    }
+}
+
+// How many records tier0_emit_mask writes for entry i, without writing them (tier0_count_deferred's).
+static uint32_t tier0_count_mask(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    const uint32_t mask = entries->mask_depths[i];
+    const uint64_t value = function->values[i];
+    uint32_t count = 0;
+    if (kind == BUSTER_TYPED_CONVERT && tier0_class_mask(entries->key_classes[i]))
+    {
+        count = (tier0_mask_extension(entries->variants[i], value) != X86_FORM_NONE ? 1u : 0u) + 1 + tier0_count_mask_move(mask, tier0_mask_working(mask));
+    }
+    else if (kind == BUSTER_TYPED_CONVERT)
+    {
+        count = 1;
+    }
+    else if (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_LOCAL)
+    {
+        count = 1 + tier0_count_mask_move(mask, tier0_mask_working(mask));
+    }
+    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+    {
+        count = tier0_count_mask_move(mask - 1, tier0_mask_working(mask - 1)) + 1;
+    }
+    else if (kind == BUSTER_TYPED_DUP)
+    {
+        const uint8_t working = tier0_mask_in_register(mask) ? tier0_mask_register(mask) : tier0_mask_working(mask - 1);
+        count = tier0_count_mask_move(mask - 1, working) + tier0_count_mask_move(mask, working);
+    }
+    else if (kind == BUSTER_TYPED_NOT)
+    {
+        const uint8_t working = tier0_mask_working(mask - 1);
+        count = 2 * tier0_count_mask_move(mask - 1, working) + 1;
+    }
+    else
+    {
+        const bool both = !tier0_mask_in_register(mask - 2);
+        const uint8_t first = tier0_mask_working(mask - 2);
+        const uint8_t second = both ? tier0_mask_register(0) : tier0_mask_in_register(mask - 1) ? tier0_mask_register(mask - 1) : BUSTER_TIER0_MASK_SCRATCH;
+        count = (both ? 2u : 0u) + tier0_count_mask_move(mask - 1, second) + 2 * tier0_count_mask_move(mask - 2, first) + 1;
+    }
+    return count;
+}
+
 // Where an X86 entry's roles are (tier0_operation_placement), from its depths before it, d and f: each operand's place
 // by operand, the first pushed first at the lowest depth of its stack (an integer's register, a floating value's XMM
 // register, a VECTOR's integer depth, its slot's); the integer result's register and the floating result's, at the
@@ -6404,6 +6853,11 @@ struct Tier0Placement
     uint8_t vector;
     int32_t scratch_depth;
     int32_t result_depth;
+    // The opmask registers' roles (#179, tier0_operation_mask_place): each mask operand's, the mask result's and the
+    // mask scratch registers'.
+    uint8_t masks[BUSTER_TIER0_OPERATION_OPERANDS];
+    uint8_t mask_scratch[BUSTER_TIER0_SCRATCH];
+    uint8_t mask_result;
 };
 
 static Tier0Placement tier0_operation_placement(const Tier0Operation* operation, int32_t depth, int32_t floating)
@@ -6414,9 +6868,9 @@ static Tier0Placement tier0_operation_placement(const Tier0Operation* operation,
     uint32_t floatings = 0;
     for (uint32_t j = 0; j < operation->operand_count; j += 1)
     {
-        const bool on_floating = tier0_stack(operation->operand_classes[j]) == 2;
-        integers += on_floating ? 0 : 1;
-        floatings += on_floating ? 1 : 0;
+        const uint32_t stack = tier0_stack(operation->operand_classes[j]);
+        integers += stack == 1 ? 1 : 0;
+        floatings += stack == 2 ? 1 : 0;
     }
     const int32_t integer_first = depth - (int32_t)integers;
     const int32_t floating_first = floating - (int32_t)floatings;
@@ -6428,7 +6882,7 @@ static Tier0Placement tier0_operation_placement(const Tier0Operation* operation,
         const int32_t at = tier0_stack(class) == 2 ? floating_first + (int32_t)floating_index : integer_first + (int32_t)integer;
         const bool in_table = at >= 0 && at < BUSTER_TIER0_INTEGER_DEPTHS;
         placement.operands[j] = (uint8_t)(tier0_stack(class) == 2 || tier0_class_vector(class) ? at : in_table ? tier0_integer_depths[at] : X86_REGISTER_RAX);
-        integer += tier0_stack(class) == 2 ? 0 : 1;
+        integer += tier0_stack(class) == 1 ? 1 : 0;
         floating_index += tier0_stack(class) == 2 ? 1 : 0;
     }
     const uint32_t result = operation->result_class;
@@ -6524,7 +6978,7 @@ static bool tier0_general_register_class(uint32_t class)
 
 // A role's register by `placement` (tier0_operation_placement's), in a field of register class `class`: in a vector
 // register's, VECTOR(j)'s, FLOATING(j)'s or FLOATING_RESULT's; in a general register's, INTEGER(j)'s, INTEGER_RESULT's or
-// SCRATCH(k)'s; an opmask register, itself.
+// SCRATCH(k)'s; in an opmask register's, MASK(j)'s, MASK_RESULT's or MASK_SCRATCH(k)'s, or a number, itself.
 static uint8_t tier0_operation_register(uint8_t role, uint32_t class, const Tier0Placement* placement)
 {
     uint8_t reg = role;
@@ -6539,6 +6993,12 @@ static uint8_t tier0_operation_register(uint8_t role, uint32_t class, const Tier
         reg = role == BUSTER_TIER0_ROLE_INTEGER_RESULT ? placement->integer_result
               : role >= BUSTER_TIER0_ROLE_SCRATCH(0)   ? placement->scratch[role & 3]
                                                        : placement->operands[role & 7];
+    }
+    else if (class == BUSTER_X86_CLASS_OPMASK && role >= BUSTER_TIER0_ROLE)
+    {
+        reg = role == BUSTER_TIER0_ROLE_MASK_RESULT       ? placement->mask_result
+              : role >= BUSTER_TIER0_ROLE_MASK_SCRATCH(0) ? placement->mask_scratch[role & 3]
+                                                          : placement->masks[role & 7];
     }
     return reg;
 }
@@ -6555,6 +7015,13 @@ static X86Instruction tier0_operation_place(X86Instruction record, const Tier0Pl
     {
         const uint32_t reg = (uint32_t)placement->vector + ((uint32_t)record.immediate >> 4 & 15);
         record.immediate = (int32_t)((reg << 4) | ((uint32_t)record.immediate & 15));
+    }
+    if ((record.decorations & BUSTER_TIER0_DECORATION_ROLE) != 0)
+    {
+        // An opmask decoration's role, MASK(j) or MASK_SCRATCH(k), as its register.
+        const uint32_t index = record.decorations & BUSTER_X86_DECORATION_MASK;
+        const uint8_t reg = (record.decorations & BUSTER_TIER0_DECORATION_MASK_SCRATCH(0)) != 0 ? placement->mask_scratch[index & 3] : placement->masks[index];
+        record.decorations = (uint8_t)((record.decorations & ~(BUSTER_TIER0_DECORATION_ROLE | BUSTER_X86_DECORATION_MASK)) | reg);
     }
     return record;
 }
@@ -6606,14 +7073,215 @@ static Tier0Reach tier0_operation_reach(const Tier0Operation* operation)
     return reach;
 }
 
+// What a row's records do with the opmask registers (#179, tier0_operation_masks): its mask operands, whether its result
+// is a mask, one past the highest MASK_SCRATCH(k) its fields and decorations name (0 for none), whether they name a
+// role at all, and the registers they name by number, k1 to k7 (a bit per register, a pair's two: VP2INTERSECT's).
+typedef struct Tier0Masks Tier0Masks;
+struct Tier0Masks
+{
+    uint32_t operands;
+    bool result;
+    uint32_t scratch;
+    bool roles;
+    uint32_t named;
+};
+
+static Tier0Masks tier0_operation_masks(const Tier0Operation* operation)
+{
+    Tier0Masks masks = { 0, tier0_class_mask(operation->result_class), 0, false, 0 };
+    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    {
+        masks.operands += tier0_class_mask(operation->operand_classes[j]) ? 1 : 0;
+    }
+    for (uint32_t r = 0; r < operation->record_count; r += 1)
+    {
+        const X86Instruction* record = &operation->records[r];
+        const X86FormDescription* description = x86_form_description(record->form);
+        const uint16_t operands[3] = { description->reg, description->vvvv, record->mode == BUSTER_X86_REGISTER_DIRECT ? description->rm : (uint16_t)0 };
+        const uint8_t fields[3] = { record->reg, record->vvvv, record->rm };
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            if ((operands[k] & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_OPMASK)
+            {
+                const uint8_t role = fields[k];
+                const bool scratch = role >= BUSTER_TIER0_ROLE_MASK_SCRATCH(0);
+                masks.roles |= role >= BUSTER_TIER0_ROLE;
+                masks.scratch = scratch && (uint32_t)(role & 3) + 1 > masks.scratch ? (uint32_t)(role & 3) + 1 : masks.scratch;
+                masks.named |= role < 8 ? (operands[k] == BUSTER_X86_OPERAND_KP ? 3u : 1u) << role : 0;
+            }
+        }
+        const uint32_t decoration = record->decorations;
+        const uint32_t index = decoration & BUSTER_X86_DECORATION_MASK;
+        const bool scratch = (decoration & BUSTER_TIER0_DECORATION_MASK_SCRATCH(0)) != 0;
+        masks.roles |= (decoration & BUSTER_TIER0_DECORATION_ROLE) != 0;
+        masks.scratch = scratch && (index & 3) + 1 > masks.scratch ? (index & 3) + 1 : masks.scratch;
+        masks.named |= (decoration & BUSTER_TIER0_DECORATION_ROLE) == 0 ? 1u << index : 0;
+    }
+    masks.named &= 0xfe;
+    return masks;
+}
+
+// Where a row's masks are (tier0_operation_mask_plan), from the mask stack's depth before it, m: its n mask operands at
+// depths m − n to m − 1, its mask result at m − n (m with no mask operand), and its mask scratch registers from m on
+// (from m + 1 where a result without operands takes m's). Where all of those are k1 to k7 (`fits`), each is its depth's
+// register; past them, the row borrows the mask stack's first `borrowed` registers, its operands from k1 on, its result
+// k1 and its scratch past both, whose masks it saves into their slots first and loads back last (tier0_emit_operation).
+typedef struct Tier0MaskPlan Tier0MaskPlan;
+struct Tier0MaskPlan
+{
+    Tier0Masks masks;
+    uint32_t depth;
+    uint32_t base;
+    uint32_t scratch_depth;
+    uint32_t borrowed;
+    bool fits;
+};
+
+static Tier0MaskPlan tier0_operation_mask_plan(const Tier0Operation* operation, uint32_t depth)
+{
+    Tier0MaskPlan plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.masks = tier0_operation_masks(operation);
+    plan.depth = depth;
+    plan.base = depth - plan.masks.operands;
+    plan.scratch_depth = depth + (plan.masks.result && plan.masks.operands == 0 ? 1 : 0);
+    int32_t highest = plan.masks.operands != 0 ? (int32_t)depth - 1 : -1;
+    highest = plan.masks.result && (int32_t)plan.base > highest ? (int32_t)plan.base : highest;
+    highest = plan.masks.scratch != 0 && (int32_t)(plan.scratch_depth + plan.masks.scratch - 1) > highest ? (int32_t)(plan.scratch_depth + plan.masks.scratch - 1) : highest;
+    plan.fits = highest < BUSTER_TIER0_MASK_DEPTHS;
+    const uint32_t width = plan.masks.operands > (plan.masks.result ? 1u : 0u) ? plan.masks.operands : (plan.masks.result ? 1u : 0u);
+    plan.borrowed = plan.fits ? 0 : width + plan.masks.scratch;
+    return plan;
+}
+
+// The opmask registers of `plan` into `placement`'s mask roles (tier0_operation_place's).
+static void tier0_operation_mask_place(const Tier0Operation* operation, const Tier0MaskPlan* plan, Tier0Placement* placement)
+{
+    uint32_t index = 0;
+    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    {
+        if (tier0_class_mask(operation->operand_classes[j]))
+        {
+            placement->masks[j] = plan->fits ? tier0_mask_register(plan->base + index) : (uint8_t)(1 + index);
+            index += 1;
+        }
+    }
+    const uint32_t width = plan->masks.operands > (plan->masks.result ? 1u : 0u) ? plan->masks.operands : (plan->masks.result ? 1u : 0u);
+    placement->mask_result = plan->fits ? tier0_mask_register(plan->base) : 1;
+    for (uint32_t k = 0; k < BUSTER_TIER0_SCRATCH; k += 1)
+    {
+        const uint32_t reg = plan->fits ? tier0_mask_register(plan->scratch_depth + k) : 1 + width + k;
+        placement->mask_scratch[k] = (uint8_t)(reg < 8 ? reg : 0);
+    }
+}
+
+// The masks a row's records would overwrite, saved into their slots before it (`before`) or loaded back after it: a row
+// that names opmask registers by number, the masks those hold; a row past the registers (a plan that doesn't fit), the
+// masks its borrowed registers hold, with its mask operands moved into them before, its result moved into its place
+// after. Nothing for a row that fits.
+static void tier0_emit_operation_masks(const Tier0Operation* operation, const Tier0Frame* frame, const Tier0MaskPlan* plan, bool before, Tier0Writer* writer)
+{
+    const uint32_t live = plan->depth < BUSTER_TIER0_MASK_DEPTHS ? plan->depth : BUSTER_TIER0_MASK_DEPTHS;
+    if (plan->masks.named != 0)
+    {
+        for (uint32_t d = 0; d < live; d += 1)
+        {
+            if ((plan->masks.named >> tier0_mask_register(d) & 1) != 0)
+            {
+                tier0_put(writer, tier0_mask_slot(before ? X86_FORM_KMOVQ_M64_K : X86_FORM_KMOVQ_K_M64, frame, d, tier0_mask_register(d)));
+            }
+        }
+    }
+    else if (!plan->fits && before)
+    {
+        for (uint32_t d = 0; d < plan->borrowed && d < live; d += 1)
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, d, tier0_mask_register(d)));
+        }
+        uint32_t index = 0;
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
+        {
+            if (tier0_class_mask(operation->operand_classes[j]))
+            {
+                tier0_mask_take(writer, frame, plan->base + index, (uint8_t)(1 + index));
+                index += 1;
+            }
+        }
+    }
+    else if (!plan->fits)
+    {
+        const uint32_t after = plan->base + (plan->masks.result ? 1 : 0);
+        if (plan->masks.result && plan->base < plan->borrowed)
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, plan->base, 1));
+        }
+        else if (plan->masks.result)
+        {
+            tier0_mask_give(writer, frame, plan->base, 1);
+        }
+        for (uint32_t d = 0; d < plan->borrowed && d < after && d < BUSTER_TIER0_MASK_DEPTHS; d += 1)
+        {
+            tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_K_M64, frame, d, tier0_mask_register(d)));
+        }
+    }
+}
+
+// How many records tier0_emit_operation_masks writes.
+static uint32_t tier0_count_operation_masks(const Tier0Operation* operation, const Tier0MaskPlan* plan, bool before)
+{
+    const uint32_t live = plan->depth < BUSTER_TIER0_MASK_DEPTHS ? plan->depth : BUSTER_TIER0_MASK_DEPTHS;
+    uint32_t count = 0;
+    if (plan->masks.named != 0)
+    {
+        for (uint32_t d = 0; d < live; d += 1)
+        {
+            count += (plan->masks.named >> tier0_mask_register(d) & 1) != 0 ? 1 : 0;
+        }
+    }
+    else if (!plan->fits && before)
+    {
+        count += plan->borrowed < live ? plan->borrowed : live;
+        uint32_t index = 0;
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
+        {
+            if (tier0_class_mask(operation->operand_classes[j]))
+            {
+                count += tier0_count_mask_move(plan->base + index, (uint8_t)(1 + index));
+                index += 1;
+            }
+        }
+    }
+    else if (!plan->fits)
+    {
+        const uint32_t after = plan->base + (plan->masks.result ? 1 : 0);
+        count += plan->masks.result && plan->base < plan->borrowed ? 1 : plan->masks.result ? tier0_count_mask_move(plan->base, 1) : 0;
+        for (uint32_t d = 0; d < plan->borrowed && d < after && d < BUSTER_TIER0_MASK_DEPTHS; d += 1)
+        {
+            count += 1;
+        }
+    }
+    return count;
+}
+
 // An X86 entry's records (tier0_vector_entry's): each VECTOR operand j's slot loaded into VECTOR(j) at its width, which
 // zeroes the register past the operand's bytes, so that a form that reads it wider reads zeros rather than the slot's
 // unspecified bytes past the value (#556's review); the row's records with their roles placed
-// (tier0_operation_placement); and a VECTOR result stored whole from VECTOR(0) into its slot.
+// (tier0_operation_placement, and its masks' by tier0_operation_mask_plan in a function with masks, around which
+// tier0_emit_operation_masks saves and loads back the masks the records would overwrite); and a VECTOR result stored
+// whole from VECTOR(0) into its slot.
 static void tier0_emit_operation(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const Tier0Operation* operation = &function->operations[function->values[i]];
-    const Tier0Placement placement = tier0_operation_placement(operation, entries->depths[i], entries->floating_depths[i]);
+    Tier0Placement placement = tier0_operation_placement(operation, entries->depths[i], entries->floating_depths[i]);
+    Tier0MaskPlan plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.fits = true;
+    if (entries->mask_depths != 0)
+    {
+        plan = tier0_operation_mask_plan(operation, entries->mask_depths[i]);
+        tier0_operation_mask_place(operation, &plan, &placement);
+        tier0_emit_operation_masks(operation, frame, &plan, true, writer);
+    }
     for (uint32_t j = 0; j < operation->operand_count; j += 1)
     {
         if (tier0_class_vector(operation->operand_classes[j]))
@@ -6629,16 +7297,25 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
     {
         tier0_put(writer, tier0_vector_slot(tier0_vector_target_store(function, function->vector_bytes == 0 ? 64 : operation->result_bytes), frame, (uint32_t)placement.result_depth, placement.vector));
     }
+    if (entries->mask_depths != 0)
+    {
+        tier0_emit_operation_masks(operation, frame, &plan, false, writer);
+    }
 }
 
 // How many records tier0_emit_operation writes for entry i (tier0_count_deferred's).
-static uint32_t tier0_count_operation(const Tier0Function* function, uint32_t i)
+static uint32_t tier0_count_operation(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
     const Tier0Operation* operation = &function->operations[function->values[i]];
     uint32_t count = operation->record_count + (tier0_class_vector(operation->result_class) ? 1u : 0u);
     for (uint32_t j = 0; j < operation->operand_count; j += 1)
     {
         count += tier0_class_vector(operation->operand_classes[j]) ? 1 : 0;
+    }
+    if (entries->mask_depths != 0)
+    {
+        const Tier0MaskPlan plan = tier0_operation_mask_plan(operation, entries->mask_depths[i]);
+        count += tier0_count_operation_masks(operation, &plan, true) + tier0_count_operation_masks(operation, &plan, false);
     }
     return count;
 }
@@ -6651,6 +7328,10 @@ static void tier0_emit_vector_entry(const Tier0Function* function, const Tier0En
     {
         tier0_emit_operation(function, entries, frame, i, writer);
     }
+    else if (tier0_mask_entry(entries, i))
+    {
+        tier0_emit_mask(function, entries, frame, homes, i, writer);
+    }
     else
     {
         tier0_emit_vector_value(function, entries, frame, homes, i, writer);
@@ -6659,7 +7340,9 @@ static void tier0_emit_vector_entry(const Tier0Function* function, const Tier0En
 
 static uint32_t tier0_count_vector_entry(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
-    return entries->key_kinds[i] == BUSTER_TYPED_X86 ? tier0_count_operation(function, i) : tier0_count_vector_value(function, entries, i);
+    return entries->key_kinds[i] == BUSTER_TYPED_X86 ? tier0_count_operation(function, entries, i)
+           : tier0_mask_entry(entries, i)            ? tier0_count_mask(function, entries, i)
+                                                     : tier0_count_vector_value(function, entries, i);
 }
 
 // What a vector's entry (tier0_vector_entry's) writes besides its slots, both selections', as the stacks' tops: an X86
@@ -6675,7 +7358,13 @@ static void tier0_vector_tops(const Tier0Function* function, const Tier0Entries*
     int32_t integer = -1;
     int32_t floating = -1;
     int32_t slot = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOCAL ? depth : -1;
-    if (kind == BUSTER_TYPED_X86)
+    if (kind != BUSTER_TYPED_X86 && tier0_mask_entry(entries, i))
+    {
+        // A mask's entry (#179) writes no vector slot, and of the integer stack only a conversion from a mask's result.
+        slot = -1;
+        integer = kind == BUSTER_TYPED_CONVERT && !tier0_class_mask(entries->key_classes[i]) ? depth : -1;
+    }
+    else if (kind == BUSTER_TYPED_X86)
     {
         const Tier0Operation* operation = &function->operations[function->values[i]];
         const Tier0Placement placement = tier0_operation_placement(operation, depth, entries->floating_depths[i]);
@@ -7033,6 +7722,12 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
     const uint32_t below = deep.before[0] - integer_arguments - (indirect ? 1 : 0);
     const uint32_t floating_below = deep.before[1] - floating_arguments;
     tier0_deep_enter(writer, frame, &deep, flags & (BUSTER_TIER0_DEEP_SPILL_INTEGER | BUSTER_TIER0_DEEP_SPILL_FLOATING));
+    // The masks in their registers (#179), as tier0_emit_call saves them.
+    const uint32_t masks = tier0_saved_masks(entries, i);
+    for (uint32_t d = 0; d < masks; d += 1)
+    {
+        tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, d, tier0_mask_register(d)));
+    }
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
         uint32_t integer = 0;
@@ -7170,6 +7865,10 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
             const uint32_t stack = result - 1;
             tier0_spill(writer, frame, tier0_stack_register(stack, 0), tier0_deep_slot(frame, stack, stack == 0 ? below : floating_below), false);
         }
+    }
+    for (uint32_t d = 0; d < masks; d += 1)
+    {
+        tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_K_M64, frame, d, tier0_mask_register(d)));
     }
     tier0_deep_leave(writer, frame, &deep, flags & (BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING));
 }
@@ -7463,7 +8162,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     moves += callee != X86_REGISTER_R11 ? 1 : 0;
     const uint32_t floating_below = floating_depth - floating_after;
     const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
-    count += 2 * (saved + floating_below);
+    count += 2 * (saved + floating_below + (memory ? tier0_saved_masks(entries, i) : 0));
     // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
     uint8_t source_of[32];
     uint32_t pending = 0;
@@ -8363,6 +9062,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += function->call_variadic[call] ? 1 : 0;
         count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
+        count += 2 * tier0_saved_masks(entries, i);
         counts->references += indirect ? 0 : 1;
     }
     else
@@ -8623,6 +9323,8 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->deep = 0;
     entries->deep_depths = 0;
     entries->deep_floating_depths = 0;
+    entries->mask_depths = 0;
+    entries->mask_top = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
@@ -8702,6 +9404,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     frame.memory_slots = function->x87 || function->int128;
     frame.vectors = function->vectors;
     frame.x87_result = function->x87 && tier0_x87_returns(function);
+    // The masks' slots: one per depth the mask stack reaches, and at least one per register, which a deep row's
+    // borrowing saves (tier0_emit_operation).
+    frame.masks = function->masks;
+    frame.mask_slots = function->masks ? (entries->mask_top > BUSTER_TIER0_MASK_DEPTHS ? entries->mask_top : BUSTER_TIER0_MASK_DEPTHS) : 0;
     if (unsupported != function->count)
     {
         error = TIER0_ERROR_UNSUPPORTED;
@@ -8877,7 +9583,16 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
             tier0_operation_effects(function, &entries);
         }
         tier0_depths_scalar(function, &entries);
-        error = tier0_generate(function, &entries, scratch.arena, output, &code, false);
+        if (function->masks)
+        {
+            entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
+            error = entries.mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+        }
+        if (error == TIER0_OK && function->masks)
+        {
+            error = tier0_mask_depths_scalar(function, &entries);
+        }
+        error = error == TIER0_OK ? tier0_generate(function, &entries, scratch.arena, output, &code, false) : error;
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
         error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
@@ -8989,11 +9704,35 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
 // A VECTOR value in tier0_validate's stack: its bytes in a byte of its own past the classes (17, 18, 20, 24 and 32 for
 // 4, 8, 16, 32 and 64), so that a vector's width follows it from depth to depth, and a join compares it, as a class.
 #define BUSTER_TIER0_STACK_VECTOR(bytes) (BUSTER_TYPED_CLASS_LIMIT + ((bytes) >> 2))
+// A MASK value's (#179), past the vectors': 33, 34, 35 and 36 for 1, 2, 4 and 8 bytes, BUSTER_TIER0_STACK_MASKS for none.
+#define BUSTER_TIER0_STACK_MASKS (BUSTER_TIER0_STACK_VECTOR(64) + 1)
 
-// The class of a byte of tier0_validate's stack: VECTOR for a vector's, the class itself otherwise.
+static uint32_t tier0_stack_mask(uint64_t bytes)
+{
+    return bytes == 1 ? BUSTER_TIER0_STACK_MASKS : bytes == 2 ? BUSTER_TIER0_STACK_MASKS + 1 : bytes == 4 ? BUSTER_TIER0_STACK_MASKS + 2 : bytes == 8 ? BUSTER_TIER0_STACK_MASKS + 3 : 0;
+}
+
+// Whether a byte of tier0_validate's stack is a mask's, and a vector's.
+static bool tier0_stack_is_mask(uint32_t entry)
+{
+    return entry >= BUSTER_TIER0_STACK_MASKS && entry < BUSTER_TIER0_STACK_MASKS + 4;
+}
+
+static bool tier0_stack_is_vector(uint32_t entry)
+{
+    return entry >= BUSTER_TYPED_CLASS_LIMIT && entry < BUSTER_TIER0_STACK_MASKS;
+}
+
+// The class of a byte of tier0_validate's stack: VECTOR for a vector's, MASK for a mask's, the class itself otherwise.
 static uint32_t tier0_stack_class(uint32_t entry)
 {
-    return entry >= BUSTER_TYPED_CLASS_LIMIT ? BUSTER_TYPED_CLASS_VECTOR : entry;
+    return entry >= BUSTER_TIER0_STACK_MASKS ? BUSTER_TYPED_CLASS_MASK : entry >= BUSTER_TYPED_CLASS_LIMIT ? BUSTER_TYPED_CLASS_VECTOR : entry;
+}
+
+// A row's operand's or result's place in tier0_validate's stack: a VECTOR one's or a MASK one's by its bytes.
+static uint32_t tier0_stack_operand(uint32_t class, uint32_t bytes)
+{
+    return tier0_class_vector(class) ? BUSTER_TIER0_STACK_VECTOR(bytes) : tier0_class_mask(class) ? tier0_stack_mask(bytes) : class;
 }
 
 // Whether entry i takes its last operand (tier0_takes_last) from a stack whose top has another class than the entry
@@ -9026,7 +9765,7 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_MOVDIRI_M64_R64, X86_FORM_MOVDIR64B_R64_M512, X86_FORM_CLWB_M8, X86_FORM_CLFLUSHOPT_M8, X86_FORM_PREFETCHIT0_M8, X86_FORM_PREFETCHIT1_M8,
     X86_FORM_FXSAVE_M, X86_FORM_FXSAVE64_M, X86_FORM_RDSSPD_R32, X86_FORM_RDSSPQ_R64, X86_FORM_INCSSPD_R32, X86_FORM_INCSSPQ_R64, X86_FORM_WRSSD_M32_R32,
     X86_FORM_WRSSQ_M64_R64, X86_FORM_WRUSSD_M32_R32, X86_FORM_WRUSSQ_M64_R64, X86_FORM_RSTORSSP_M64, X86_FORM_CLRSSBSY_M64, X86_FORM_SAVEPREVSSP,
-    X86_FORM_SETSSBSY, X86_FORM_SHA1MSG1_X_XM128, X86_FORM_SHA1MSG2_X_XM128, X86_FORM_SHA1NEXTE_X_XM128, X86_FORM_SHA256MSG1_X_XM128,
+    X86_FORM_SETSSBSY, X86_FORM_SHA1MSG1_X_XM128, X86_FORM_SHA1MSG2_X_XM128, X86_FORM_SHA1NEXTE_X_XM128, X86_FORM_SHA1RNDS4_X_XM128_IMM8, X86_FORM_SHA256MSG1_X_XM128,
     X86_FORM_SHA256MSG2_X_XM128, X86_FORM_EXTRQ_X_X, X86_FORM_INSERTQ_X_X, X86_FORM_MOVNTSD_M64_X, X86_FORM_MOVNTSS_M32_X, X86_FORM_EMMS, X86_FORM_WBINVD,
     X86_FORM_WBNOINVD, X86_FORM_INVPCID_R64_M128, X86_FORM_AADD_M32_R32, X86_FORM_AADD_M64_R64, X86_FORM_AAND_M32_R32, X86_FORM_AAND_M64_R64,
     X86_FORM_AOR_M32_R32, X86_FORM_AOR_M64_R64, X86_FORM_AXOR_M32_R32, X86_FORM_AXOR_M64_R64, X86_FORM_CLDEMOTE_M8, X86_FORM_SERIALIZE, X86_FORM_CLUI,
@@ -9036,14 +9775,15 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_UWRMSR_R64_R64,
 };
 
-// Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
-// branch, whose syntax names its operands (or that has none: TILERELEASE, and VZEROUPPER and VZEROALL, which the effects
-// keep out), that has a vector or an opmask operand when it is EVEX (APX's forms of general registers alone are a
-// target's that Tier 0 doesn't take), and whose effects (x86_semantics.c's, #760) touch nothing its syntax doesn't name:
-// a covered form without implicit registers (mulx's rdx) or vzeroupper's every vector register. A form the tables don't
-// cover has the conservative record, whose registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the
-// string compares (rax, rcx, rdx and xmm0) among them. Or one of tier0_operation_legacy_forms. Requires
-// x86_semantics_initialize, as tier0_compile does.
+// Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override (below
+// X86_FORM_COUNT: without BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS, the only ones 64-bit mode has; a 64-bit-mode
+// record's decorations have none), a symbol or a branch, whose syntax names its operands (or that has none:
+// TILERELEASE, and VZEROUPPER and VZEROALL, which the effects keep out), that has a vector or an opmask operand when it
+// is EVEX (APX's forms of general registers alone are a target's that Tier 0 doesn't take), and whose effects
+// (x86_semantics.c's, #760) touch nothing its syntax doesn't name: a covered form without implicit registers (mulx's
+// rdx) or vzeroupper's every vector register. A form the tables don't cover has the conservative record, whose
+// registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the string compares (rax, rcx, rdx and xmm0)
+// among them. Or one of tier0_operation_legacy_forms. Requires x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
     bool valid = form < X86_FORM_COUNT;
@@ -9111,9 +9851,26 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
     }
     else if (class == BUSTER_X86_CLASS_OPMASK)
     {
-        valid = role < 8;
+        // A number, k0 to k7; or MASK(j) for a mask operand j, MASK_RESULT for a mask result and MASK_SCRATCH(k) (#179).
+        valid = role < 8 ||
+                (role >= BUSTER_TIER0_ROLE_MASK(0) && role < BUSTER_TIER0_ROLE_MASK(BUSTER_TIER0_OPERATION_OPERANDS) && operand &&
+                 tier0_class_mask(operation->operand_classes[j])) ||
+                (role == BUSTER_TIER0_ROLE_MASK_RESULT && tier0_class_mask(operation->result_class)) ||
+                (role >= BUSTER_TIER0_ROLE_MASK_SCRATCH(0) && role < BUSTER_TIER0_ROLE_MASK_SCRATCH(BUSTER_TIER0_SCRATCH));
     }
     return valid;
+}
+
+// Whether a record's opmask decoration is a number, k0 to k7, or a role a row may have there (#179): MASK(j) of a mask
+// operand j, or MASK_SCRATCH(k), by bits 3 and 4 (BUSTER_TIER0_DECORATION_ROLE: one of them, or neither for a number),
+// which no segment override has in 64-bit mode. Its other bits are x86_validate's once the role is placed: bit 5, which
+// the 16- and 32-bit modes' FS and GS overrides set, is rounding's in 64-bit mode, of an _ER form alone.
+static bool tier0_operation_decoration_valid(const Tier0Operation* operation, uint32_t decorations)
+{
+    const uint32_t index = decorations & BUSTER_X86_DECORATION_MASK;
+    const uint32_t role = decorations & BUSTER_TIER0_DECORATION_ROLE;
+    return role == 0 || (role == BUSTER_TIER0_DECORATION_MASK(0) && index < operation->operand_count && tier0_class_mask(operation->operand_classes[index])) ||
+           (role == BUSTER_TIER0_DECORATION_MASK_SCRATCH(0) && index < BUSTER_TIER0_SCRATCH);
 }
 
 // Whether a machine operation's row is one Tier 0 places and emits as Tier0Operation has it: its counts within their
@@ -9124,26 +9881,42 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
 // roles placed somewhere (VECTOR(j) as register j), a record x86_validate takes.
 static bool tier0_operation_valid(const Tier0Operation* operation)
 {
-    bool valid = operation->record_count <= BUSTER_TIER0_OPERATION_RECORDS && operation->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
+    // A row past the fixed columns is refused before any of them is read: the mask analysis and the sample placement
+    // below index them by the row's counts.
+    if (operation->record_count > BUSTER_TIER0_OPERATION_RECORDS || operation->operand_count > BUSTER_TIER0_OPERATION_OPERANDS)
+    {
+        return false;
+    }
+    bool valid = true;
     for (uint32_t j = 0; valid && j < operation->operand_count; j += 1)
     {
         const uint32_t class = operation->operand_classes[j];
-        valid = tier0_class_integer(class) || tier0_class_floating(class) || (tier0_class_vector(class) && tier0_vector_value_bytes_valid(operation->operand_bytes[j]));
+        valid = tier0_class_integer(class) || tier0_class_floating(class) || (tier0_class_vector(class) && tier0_vector_value_bytes_valid(operation->operand_bytes[j])) ||
+                (tier0_class_mask(class) && tier0_mask_bytes_valid(operation->operand_bytes[j]));
     }
     const uint32_t result = operation->result_class;
     valid = valid && (result == BUSTER_TYPED_CLASS_VOID || tier0_class_integer(result) || tier0_class_floating(result) ||
-                      (tier0_class_vector(result) && tier0_vector_value_bytes_valid(operation->result_bytes)));
+                      (tier0_class_vector(result) && tier0_vector_value_bytes_valid(operation->result_bytes)) ||
+                      (tier0_class_mask(result) && tier0_mask_bytes_valid(operation->result_bytes)));
+    // A row with masks (#179) names k1 to k7 by role alone, and its mask operands (or its result) and its mask scratch
+    // registers come to no more than the seven a row past the mask registers borrows.
+    const Tier0Masks masks = tier0_operation_masks(operation);
+    const uint32_t width = masks.operands > (masks.result ? 1u : 0u) ? masks.operands : (masks.result ? 1u : 0u);
+    valid = valid && (masks.named == 0 || (masks.operands == 0 && !masks.result && !masks.roles)) && width + masks.scratch <= BUSTER_TIER0_MASK_DEPTHS;
     Tier0Placement sample;
     memset(&sample, 0, sizeof(sample));
     for (uint32_t j = 0; j < BUSTER_TIER0_OPERATION_OPERANDS; j += 1)
     {
         sample.operands[j] = tier0_class_floating(operation->operand_classes[j]) ? (uint8_t)j : X86_REGISTER_RSI;
+        sample.masks[j] = 1;
     }
     for (uint32_t k = 0; k < BUSTER_TIER0_SCRATCH; k += 1)
     {
         sample.scratch[k] = X86_REGISTER_RDX;
+        sample.mask_scratch[k] = (uint8_t)(2 + k);
     }
     sample.integer_result = X86_REGISTER_RAX;
+    sample.mask_result = 1;
     for (uint32_t r = 0; valid && r < operation->record_count; r += 1)
     {
         X86Instruction record = operation->records[r];
@@ -9159,11 +9932,117 @@ static bool tier0_operation_valid(const Tier0Operation* operation)
             {
                 valid = tier0_operation_role_valid(operation, *fields.bytes[k], fields.classes[k]);
             }
+            valid = valid && tier0_operation_decoration_valid(operation, record.decorations);
             const X86Instruction placed = tier0_operation_place(record, &sample);
             valid = valid && x86_validate(&placed, 1) == 1;
         }
     }
     return valid;
+}
+
+// Whether local `local` (below the count) is an object a mask's LOCAL, STORE_LOCAL and SET_LOCAL may name (#179): one of
+// a mask's bytes (1, 2, 4 or 8), all of which they read or write, but an address-only one.
+static bool tier0_mask_object(const Tier0Function* function, uint64_t local)
+{
+    return tier0_is_object(function, local) && tier0_mask_bytes_valid(function->local_sizes[local]) &&
+           (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
+}
+
+// tier0_validate's rules for a mask's entry (#179: one of class MASK but an X86 entry), its operands and result in the
+// validator's stack as their widths' (tier0_stack_mask): kinds, bytes and objects as Tier0Function has them, in a function
+// with masks. A conversion from a mask is the CONVERT case's.
+static void tier0_validate_mask(const Tier0Function* function, Tier0Validator* validator, uint64_t* hashes, uint8_t* seen, uint32_t i)
+{
+    const uint8_t kind = function->kinds[i];
+    const uint64_t value = function->values[i];
+    const uint32_t entry = tier0_stack_mask(value);
+    if (!function->masks || function->vector_bytes != 0)
+    {
+        tier0_reject(validator, i, "a mask entry in a function without masks, or on a vector transport without AVX-512");
+    }
+    else if (kind == BUSTER_TYPED_CONVERT)
+    {
+        if (!tier0_class_integer(tier0_pop(validator, i)) || entry == 0)
+        {
+            tier0_reject(validator, i, "a CONVERT to a mask from a class that isn't an integer's, or of other bytes than 1, 2, 4 or 8");
+        }
+        tier0_push(validator, entry);
+    }
+    else if (kind == BUSTER_TYPED_LOAD)
+    {
+        if (tier0_pop(validator, i) != BUSTER_TYPED_CLASS_U64 || entry == 0)
+        {
+            tier0_reject(validator, i, "a mask's LOAD from something that isn't U64, or of other bytes than 1, 2, 4 or 8");
+        }
+        tier0_push(validator, entry);
+    }
+    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
+    {
+        const uint32_t stored = tier0_pop(validator, i);
+        const uint32_t address = tier0_pop(validator, i);
+        if (address != BUSTER_TYPED_CLASS_U64 || entry == 0 || stored != entry)
+        {
+            tier0_reject(validator, i, "a mask's store's address, or a mask of other bytes than its own");
+        }
+        if (kind == BUSTER_TYPED_STORE)
+        {
+            tier0_push(validator, stored);
+        }
+    }
+    else if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+    {
+        const bool object = value < function->local_count && tier0_mask_object(function, value);
+        const uint32_t local = object ? tier0_stack_mask(function->local_sizes[value]) : 0;
+        if (!object || (kind != BUSTER_TYPED_LOCAL && tier0_pop(validator, i) != local))
+        {
+            tier0_reject(validator, i, "a mask's local that isn't an object of its bytes (1, 2, 4 or 8)");
+        }
+        if (kind != BUSTER_TYPED_SET_LOCAL)
+        {
+            tier0_push(validator, local);
+        }
+    }
+    else if (kind == BUSTER_TYPED_AND || kind == BUSTER_TYPED_OR || kind == BUSTER_TYPED_XOR || kind == BUSTER_TYPED_NOT)
+    {
+        const bool binary = kind != BUSTER_TYPED_NOT;
+        const uint32_t last = tier0_pop(validator, i);
+        const uint32_t first = binary ? tier0_pop(validator, i) : entry;
+        if (entry == 0 || last != entry || first != entry)
+        {
+            tier0_reject(validator, i, "a mask's logic of masks of other bytes than its value's");
+        }
+        tier0_push(validator, entry);
+    }
+    else if (kind == BUSTER_TYPED_DUP)
+    {
+        if (validator->depth == 0 || !tier0_stack_is_mask(validator->stack[validator->depth - 1]))
+        {
+            tier0_reject(validator, i, "DUP of a mask it doesn't have");
+        }
+        else
+        {
+            tier0_push(validator, validator->stack[validator->depth - 1]);
+        }
+    }
+    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE)
+    {
+        const uint32_t taken = tier0_pop(validator, i);
+        if (!tier0_stack_is_mask(taken))
+        {
+            tier0_reject(validator, i, "DISCARD or JUMP_VALUE of a mask it doesn't have");
+        }
+        if (kind == BUSTER_TYPED_JUMP_VALUE)
+        {
+            tier0_push(validator, taken);
+            tier0_arrive(validator, hashes, seen, (uint32_t)value, i);
+            validator->depth -= 1;
+            validator->reachable = false;
+        }
+    }
+    else
+    {
+        tier0_reject(validator, i, "a mask entry of a kind masks don't take (no constant, call, return or compare has one)");
+    }
 }
 
 // tier0_validate's rules for a vector's entry (an X86 entry, or one of class VECTOR), whose operands and result take
@@ -9185,10 +10064,13 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
         {
             tier0_reject(validator, i, "an X86 entry past the operations, or of another class than its row's result");
         }
+        if (operation != 0 && !function->masks && (tier0_operation_masks(operation).operands != 0 || tier0_class_mask(operation->result_class)))
+        {
+            tier0_reject(validator, i, "an X86 entry of a row with masks in a function without masks");
+        }
         for (uint32_t j = operation != 0 ? operation->operand_count : 0; j > 0 && validator->check.error == TIER0_OK; j -= 1)
         {
-            const uint32_t operand = operation->operand_classes[j - 1];
-            const uint32_t expected = tier0_class_vector(operand) ? BUSTER_TIER0_STACK_VECTOR(operation->operand_bytes[j - 1]) : operand;
+            const uint32_t expected = tier0_stack_operand(operation->operand_classes[j - 1], operation->operand_bytes[j - 1]);
             if (tier0_pop(validator, i) != expected)
             {
                 tier0_reject(validator, i, "an X86 entry's operand of another class or width than its row's");
@@ -9196,8 +10078,12 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
         }
         if (operation != 0 && class != BUSTER_TYPED_CLASS_VOID)
         {
-            tier0_push(validator, tier0_class_vector(class) ? BUSTER_TIER0_STACK_VECTOR(operation->result_bytes) : class);
+            tier0_push(validator, tier0_stack_operand(class, operation->result_bytes));
         }
+    }
+    else if (tier0_class_mask(class))
+    {
+        tier0_validate_mask(function, validator, hashes, seen, i);
     }
     else if (kind == BUSTER_TYPED_CONST)
     {
@@ -9212,7 +10098,7 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
     }
     else if (kind == BUSTER_TYPED_DUP)
     {
-        if (validator->depth == 0 || validator->stack[validator->depth - 1] < BUSTER_TYPED_CLASS_LIMIT)
+        if (validator->depth == 0 || !tier0_stack_is_vector(validator->stack[validator->depth - 1]))
         {
             tier0_reject(validator, i, "DUP of a vector it doesn't have");
         }
@@ -9258,7 +10144,7 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
     else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE)
     {
         const uint32_t taken = tier0_pop(validator, i);
-        if (taken < BUSTER_TYPED_CLASS_LIMIT)
+        if (!tier0_stack_is_vector(taken))
         {
             tier0_reject(validator, i, "DISCARD or JUMP_VALUE of a vector it doesn't have");
         }
@@ -9284,6 +10170,10 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
     if (function->vector_bytes != 0 && function->vector_bytes != 16 && function->vector_bytes != 32)
     {
         tier0_reject(validator, 0, "vector transport other than EVEX, SSE2 or AVX");
+    }
+    if (function->masks && (!function->vectors || function->vector_bytes != 0))
+    {
+        tier0_reject(validator, 0, "masks in a function without vectors, or on a vector transport without AVX-512");
     }
     if (function->local_sizes != 0 && function->local_alignments == 0)
     {
@@ -9311,9 +10201,9 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
         {
             tier0_reject(validator, 0, "a long double or 128-bit integer local that isn't an object");
         }
-        else if (tier0_class_vector(function->local_classes[l]))
+        else if (tier0_class_vector(function->local_classes[l]) || tier0_class_mask(function->local_classes[l]))
         {
-            tier0_reject(validator, 0, "a vector local that isn't an object");
+            tier0_reject(validator, 0, "a vector or mask local that isn't an object");
         }
     }
     // The vectors' constants, 4, 8, 16, 32 or 64 bytes each, and the machine operations' rows (tier0_operation_valid).
@@ -9626,6 +10516,11 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                 {
                     tier0_reject(&validator, i, "a CONVERT of a vector, whose conversions are X86 entries");
                 }
+                // A mask's (#179), to an integer class, of its value's bytes.
+                if (tier0_stack_is_mask(from) && (!function->masks || !tier0_class_integer(class) || from != tier0_stack_mask(value)))
+                {
+                    tier0_reject(&validator, i, "a CONVERT from a mask to a class that isn't an integer's, or of other bytes than its value, or without masks");
+                }
                 // A 128-bit integer converts to and from the other integers alone: a front end calls its runtime's
                 // functions for the floating classes, as clang's code does.
                 if ((tier0_class_int128(from) && !tier0_class_integer(class) && !tier0_class_int128(class)) ||
@@ -9866,9 +10761,9 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                 const bool shift = kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR;
                 const bool integer_only = shift || kind == BUSTER_TYPED_MOD || kind == BUSTER_TYPED_AND || kind == BUSTER_TYPED_OR || kind == BUSTER_TYPED_XOR;
                 // A compare's operands are alike, and two vectors' stack bytes are too, which a vector's compares (X86
-                // entries) don't leave here (#556's review).
+                // entries) don't leave here (#556's review), and two masks' (#179), which no compare takes.
                 bool valid = compare ? first == last && class == BUSTER_TYPED_CLASS_I32 && first != BUSTER_TYPED_CLASS_VOID &&
-                                           tier0_stack_class(first) != BUSTER_TYPED_CLASS_VECTOR
+                                           tier0_stack_class(first) != BUSTER_TYPED_CLASS_VECTOR && !tier0_stack_is_mask(first)
                                      : first == class && (shift ? tier0_class_integer(last) : last == class) && class != BUSTER_TYPED_CLASS_VOID;
                 valid &= !integer_only || tier0_class_integer(class) || (tier0_class_int128(class) && kind != BUSTER_TYPED_MOD);
                 valid &= compare || tier0_class_bytes(class) >= 4;
@@ -10544,6 +11439,84 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
         previous_integer = integer_raw;
         previous_floating = floating_raw;
     }
+}
+
+// tier0_mask_depths_scalar's twin, 64 entries at a time: each entry's effect from its shape's codes
+// (tier0_vector_shapes) and the classes, as P1 makes the other stacks' raw effects, an X86 entry's from its row (they are
+// few, as calls are), and the depths their exclusive prefix sums, as P4 makes the others'. Its sums are bytes, the
+// depths modulo 256 (a block's own sum among them, which rows of many masks take past an int8's range), exact while the
+// depths stay below 256; and since an entry pushes one mask at most, the first entry that finds BUSTER_TIER0_MAX_DEPTH
+// masks or more finds exactly that many, so that the highest of the bytes refuses what the twin refuses.
+static Tier0Error tier0_vector_mask_depths(const Tier0Function* function, Tier0Entries* entries)
+{
+    const uint32_t count = function->count;
+    const __m512i one = _mm512_set1_epi8(1);
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i masks = _mm512_set1_epi8(BUSTER_TYPED_CLASS_MASK);
+    __m512i previous_classes = zero;
+    __m512i highest = zero;
+    int32_t depth = 0;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const __m512i classes = tier0_bytes_at(function->classes, first, count);
+        const __m512i classes_1 = tier0_shift_back(classes, previous_classes, 1);
+        const __m512i shape = tier0_lookup(tier0_vector_shapes, kinds);
+        const __m512i first_code = _mm512_and_si512(shape, _mm512_set1_epi8(3));
+        const __m512i push_code = _mm512_and_si512(_mm512_srli_epi16(shape, 3), _mm512_set1_epi8(3));
+        const __mmask64 mask = _mm512_cmpeq_epi8_mask(classes, masks);
+        const __mmask64 mask_1 = _mm512_cmpeq_epi8_mask(classes_1, masks);
+        const __mmask64 rows = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_X86)) & lanes;
+        const __mmask64 own = ~(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) |
+                                _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_TAIL_CALL)) | rows) &
+                              lanes;
+        const __mmask64 returns_nothing = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_RETURN)) & _mm512_testn_epi8_mask(classes, classes);
+        const __mmask64 has_last = _mm512_test_epi8_mask(shape, _mm512_set1_epi8(4)) & ~returns_nothing;
+        const __mmask64 pop_first = ((_mm512_cmpeq_epi8_mask(first_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_CLASS)) & mask) |
+                                     (_mm512_cmpeq_epi8_mask(first_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_OPERAND)) & mask_1)) &
+                                    own;
+        const __mmask64 pop_last = has_last & mask_1 & own;
+        const __mmask64 push = _mm512_cmpeq_epi8_mask(push_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_CLASS)) & mask & own;
+        __m512i effect = _mm512_maskz_mov_epi8(push, one);
+        effect = _mm512_mask_sub_epi8(effect, pop_first, effect, one);
+        effect = _mm512_mask_sub_epi8(effect, pop_last, effect, one);
+        if (rows != 0)
+        {
+            int8_t effects[64];
+            _mm512_storeu_si512(effects, effect);
+            for (uint64_t left = rows; left != 0; left &= left - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(left);
+                effects[lane] = (int8_t)tier0_mask_effect(function, first + lane);
+            }
+            effect = _mm512_loadu_si512(effects);
+        }
+        __m512i sum = effect;
+        for (uint32_t step = 1; step < 64; step *= 2)
+        {
+            sum = _mm512_add_epi8(sum, tier0_shift_back(sum, zero, step));
+        }
+        const __m512i depths = _mm512_add_epi8(tier0_shift_back(sum, zero, 1), _mm512_set1_epi8((char)depth));
+        _mm512_mask_storeu_epi8(entries->mask_depths + first, lanes, depths);
+        highest = _mm512_max_epu8(highest, _mm512_maskz_mov_epi8(lanes, depths));
+        depth += (int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(sum, 3), 15);
+        previous_classes = classes;
+    }
+    const uint32_t quarters[4] = {
+        _mm512_reduce_max_epu32(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(highest, 0))),
+        _mm512_reduce_max_epu32(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(highest, 1))),
+        _mm512_reduce_max_epu32(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(highest, 2))),
+        _mm512_reduce_max_epu32(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(highest, 3))),
+    };
+    uint32_t deepest = 0;
+    for (uint32_t quarter = 0; quarter < 4; quarter += 1)
+    {
+        deepest = quarters[quarter] > deepest ? quarters[quarter] : deepest;
+    }
+    const uint32_t last = (uint8_t)depth;
+    entries->mask_top = last > deepest ? last : deepest;
+    return deepest >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
 }
 
 // A template's word (a slot's adds HOME_DEPENDENT and HOME_UNIFORM, in tier0_build_words).
@@ -11223,7 +12196,16 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
             tier0_operation_effects(function, &entries);
         }
         tier0_vector_depths(function, &bits, &entries);
-        error = tier0_generate(function, &entries, scratch.arena, output, &code, true);
+        if (function->masks)
+        {
+            entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
+            error = entries.mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+        }
+        if (error == TIER0_OK && function->masks)
+        {
+            error = tier0_vector_mask_depths(function, &entries);
+        }
+        error = error == TIER0_OK ? tier0_generate(function, &entries, scratch.arena, output, &code, true) : error;
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
         error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
@@ -11439,10 +12421,10 @@ static const uint8_t tier0_scan_sides[BUSTER_TYPED_KIND_LIMIT] __attribute__((al
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SIDE_TRANSFER,
 };
 
-// Masks of classes, a bit per class: every class but the vectors' (which the vector path leaves to the scalar validator),
-// every one with a value, those without the memory classes, the integers, the widths arithmetic takes (4 bytes and more),
-// those division takes (no 128-bit integers), remainder's and the bitwise operations' (integers, and the 128-bit ones
-// but for remainder), NOT's, PTR_ADD's index's, and single classes.
+// Masks of classes, a bit per class: every class but the vectors' and the masks' (which the vector path leaves to the
+// scalar validator), every one with a value, those without the memory classes, the integers, the widths arithmetic
+// takes (4 bytes and more), those division takes (no 128-bit integers), remainder's and the bitwise operations'
+// (integers, and the 128-bit ones but for remainder), NOT's, PTR_ADD's index's, and single classes.
 #define BUSTER_TIER0_CLASSES_ALL 0x3fff
 #define BUSTER_TIER0_CLASSES_VALUES 0x3ffe
 #define BUSTER_TIER0_CLASSES_SCALARS 0x07fe
@@ -11914,8 +12896,8 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t local_count = function->local_count;
     const uint32_t call_count = function->call_count;
     // What tier0_validate_scalar checks before the stream: the limits, the frame, the calls, the parameters and the tables.
-    // A function with vectors or tail calls is the scalar validator's (its TAIL_CALL entries are refused below too).
-    bool valid = !function->vectors && function->call_tails == 0 && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) &&
+    // A function with vectors, masks or tail calls is the scalar validator's (its TAIL_CALL entries are refused below too).
+    bool valid = !function->vectors && !function->masks && function->call_tails == 0 && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) &&
                  tier0_jump_tables_valid(function) && tier0_scan_tables(function);
     Scratch scratch = scratch_begin(0);
     // Per entry, the depth before it (and room for a block's store past the last); per entry and the end, the depth the

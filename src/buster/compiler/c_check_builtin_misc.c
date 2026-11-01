@@ -647,6 +647,109 @@ static void check_builtin_misc_frame(TypeTable* table, const CheckBuiltinMiscAct
     check_action_inherit(&output->action.value, values);
 }
 
+// GCC's type class of a type, as clang's evaluator gives it in C (EvaluateBuiltinClassifyType): void 0, an integer or an
+// enumeration 1, bool 4, a pointer, an array or a function (each decays) 5, a floating type 8, a complex one 9, a struct 12,
+// a union 13, a _BitInt 18, a vector 19, and nullptr_t none (-1). An _Atomic type is its value type's class, and
+// qualifiers and alignment don't count.
+static int32_t check_builtin_misc_type_class(const TypeTable* table, TypeId type)
+{
+    TypeId base = type_strip_aligned(table, type);
+    while (type_kind(table, base) == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        base = type_strip_aligned(table, type_element(table, base));
+    }
+    int32_t result = -1;
+    switch (type_kind(table, base))
+    {
+        case BUSTER_TYPE_KIND_VOID: result = 0; break;
+        case BUSTER_TYPE_KIND_INTEGER: result = type_unqualified(base) == BUSTER_TYPE_BOOL ? 4 : 1; break;
+        case BUSTER_TYPE_KIND_ENUM: result = 1; break;
+        case BUSTER_TYPE_KIND_FLOATING: result = 8; break;
+        case BUSTER_TYPE_KIND_COMPLEX: result = 9; break;
+        case BUSTER_TYPE_KIND_POINTER:
+        case BUSTER_TYPE_KIND_ARRAY:
+        case BUSTER_TYPE_KIND_INCOMPLETE_ARRAY:
+        case BUSTER_TYPE_KIND_VARIABLE_ARRAY:
+        case BUSTER_TYPE_KIND_FUNCTION: result = 5; break;
+        case BUSTER_TYPE_KIND_STRUCT: result = 12; break;
+        case BUSTER_TYPE_KIND_UNION: result = 13; break;
+        case BUSTER_TYPE_KIND_BIT_INT: result = 18; break;
+        case BUSTER_TYPE_KIND_VECTOR:
+        case BUSTER_TYPE_KIND_EXT_VECTOR: result = 19; break;
+        default: result = -1; break;
+    }
+    return result;
+}
+
+// An int constant expression of `value`, as the generic builtins below fold: no operand runs.
+static void check_builtin_misc_fold_int(CheckBuiltinMiscResult* output, int32_t value)
+{
+    output->action.value = (CheckValue){
+        .type = BUSTER_TYPE_INT,
+        .category = CHECK_RVALUE,
+        .flags = BUSTER_CHECK_ICE,
+        .constant_kind = CHECK_CONSTANT_INTEGER,
+        .integer = (unsigned __int128)(__int128)value,
+    };
+    output->constant_value = output->action.value;
+    output->constant_evaluated_operands = 0;
+    output->evaluated_operands = 0;
+}
+
+// clang's generic builtins of #148 that its Sema checks itself (custom typing or a constant argument):
+// - __builtin_classify_type(e): its operand's GCC type class (check_builtin_misc_type_class), an int constant expression;
+//   the operand, which never runs, is any expression, of an incomplete type too, by its type before any conversion;
+// - __builtin_eh_return_data_regno(n): the DWARF register of x86-64's n-th exception data register, rax's 0 and rdx's 1,
+//   and -1 for any other n, an int constant expression of n, which must be an integer constant expression;
+// - __builtin_dwarf_cfa(): the function's canonical frame address, the caller's rsp before its call, which clang -O0's code
+//   computes as rbp + 16 (its frame pointer's);
+// - __builtin_launder(p): p, of its type, which must be a pointer to a complete object type: not void's nor a function's.
+static void check_builtin_misc_generic(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
+{
+    if (input->id == CBUILTIN_CLASSIFY_TYPE)
+    {
+        check_builtin_misc_fold_int(output, check_builtin_misc_type_class(table, input->arguments[0].type));
+    }
+    else if (input->id == CBUILTIN_EH_RETURN_DATA_REGNO)
+    {
+        if (check_builtin_misc_convert(table, input, output, values, 0, BUSTER_TYPE_INT) && check_builtin_misc_constant(table, values, 0, output))
+        {
+            const __int128 n = (__int128)values[0].integer;
+            check_builtin_misc_fold_int(output, n == 0 ? 0 : n == 1 ? 1 : -1);
+        }
+    }
+    else if (input->id == CBUILTIN_DWARF_CFA)
+    {
+        const TypeId pointer = check_builtin_misc_pointer(table, BUSTER_TYPE_VOID, 0);
+        output->action.value.type = pointer;
+        output->reads_memory = true;
+        if (pointer == 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
+        }
+    }
+    else
+    {
+        const uint8_t kind = check_action_kind(table, values[0].type);
+        const TypeId element = kind == BUSTER_TYPE_KIND_POINTER ? type_element(table, type_strip_aligned(table, values[0].type)) : 0;
+        const uint8_t pointee = element != 0 ? check_action_kind(table, element) : 0;
+        if (kind != BUSTER_TYPE_KIND_POINTER || pointee == BUSTER_TYPE_KIND_VOID || pointee == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (!check_builtin_misc_source_complete(table, element, input))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPLETE, 0);
+        }
+        else
+        {
+            output->action.value = values[0];
+            output->action.value.category = CHECK_RVALUE;
+            output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER);
+        }
+    }
+}
+
 #include "c_check_builtin_bits.c"
 
 static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output)
@@ -673,7 +776,11 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_FRAME_ADDRESS:
         case CBUILTIN_RETURN_ADDRESS:
         case CBUILTIN_EXTRACT_RETURN_ADDR:
-        case CBUILTIN_FROB_RETURN_ADDR: minimum = maximum = 1; break;
+        case CBUILTIN_FROB_RETURN_ADDR:
+        case CBUILTIN_CLASSIFY_TYPE:
+        case CBUILTIN_EH_RETURN_DATA_REGNO:
+        case CBUILTIN_LAUNDER: minimum = maximum = 1; break;
+        case CBUILTIN_DWARF_CFA: minimum = maximum = 0; break;
         default:
             if (cbuiltin_bits(input->id))
             {
@@ -702,7 +809,13 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         CheckValue values[4] = { 0 };
         output->runtime_builtin = input->id;
         output->evaluated_operands = (UINT32_C(1) << input->argument_count) - 1;
-        for (uint32_t i = 0; i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+        // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches.
+        const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE;
+        if (classify && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+        }
+        for (uint32_t i = 0; !classify && i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
         {
             values[i] = check_builtin_misc_argument(table, input, output, i);
             check_action_inherit(&output->action.value, values + i);
@@ -731,6 +844,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                 case CBUILTIN_RETURN_ADDRESS:
                 case CBUILTIN_EXTRACT_RETURN_ADDR:
                 case CBUILTIN_FROB_RETURN_ADDR: check_builtin_misc_frame(table, input, output, values); break;
+                case CBUILTIN_CLASSIFY_TYPE:
+                case CBUILTIN_EH_RETURN_DATA_REGNO:
+                case CBUILTIN_DWARF_CFA:
+                case CBUILTIN_LAUNDER: check_builtin_misc_generic(table, input, output, values); break;
                 default:
                     if (cbuiltin_bits(input->id))
                     {

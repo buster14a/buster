@@ -2,8 +2,47 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original SIMD IR admission controls, included after ir_test.c's fixture helpers.
 
+// A mask's bitcasts (#179): to and from the integer of its bits, and to itself, which is the boundary a mask's typed-stream
+// conversions lower through (ir_typed_convert_mask), but no other: not a narrower or wider integer, a float, a pointer
+// or another mask. The pairs written out, each way, beside the scalar bitcasts the rule kept.
+static void ir_test_simd_bitcasts(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const uint8_t pairs[][3] = {
+        { IR_I8, IR_M8, true }, { IR_M8, IR_I8, true }, { IR_I16, IR_M16, true }, { IR_M16, IR_I16, true },
+        { IR_I32, IR_M32, true }, { IR_M32, IR_I32, true }, { IR_I64, IR_M64, true }, { IR_M64, IR_I64, true },
+        { IR_M8, IR_M8, true }, { IR_M64, IR_M64, true }, { IR_I32, IR_F32, true }, { IR_F64, IR_I64, true },
+        { IR_I16, IR_M8, false }, { IR_M8, IR_I16, false }, { IR_I8, IR_M16, false }, { IR_M32, IR_I64, false },
+        { IR_M16, IR_M8, false }, { IR_M32, IR_M16, false }, { IR_M8, IR_M64, false }, { IR_F32, IR_M32, false },
+        { IR_M32, IR_F32, false }, { IR_F64, IR_M64, false }, { IR_M64, IR_F64, false }, { IR_PTR, IR_M64, false },
+        { IR_M64, IR_PTR, false }, { IR_I1, IR_M8, false }, { IR_I128, IR_M64, false }, { IR_M16, IR_V4I32, false },
+    };
+    for (uint32_t p = 0; p < sizeof(pairs) / sizeof(*pairs); p += 1)
+    {
+        const uint64_t mark = output->length;
+        IrFunction function = { 0 };
+        const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+        if (ir_create(output, &sizes, &function) == IR_OK)
+        {
+            function.result_type = IR_VOID;
+            function.block_offsets[1] = 3;
+            ir_test_instruction(&function, 0, IR_UNDEF, (IrType)pairs[p][0], BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_BITCAST, (IrType)pairs[p][1], 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_pair(test, &function, scratch, NULL, pairs[p][2] != 0,
+                         pairs[p][2] != 0 ? "a mask's bitcast to or from the integer of its bits, or a scalar's of its width, is refused" :
+                                            "a bitcast between a mask and anything but the integer of its bits or itself is accepted");
+        }
+        else
+        {
+            ir_test_expect(test, false, "a bitcast fixture allocates");
+        }
+        arena_pop_to(output, mark);
+    }
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
+    ir_test_simd_bitcasts(test, output, scratch);
     const uint64_t mark = output->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {

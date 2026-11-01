@@ -18,7 +18,7 @@ static void check_test_program_task_stack(CheckTest* test)
     CheckValue leaf = { .type = BUSTER_TYPE_INT, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 7 };
     CheckNodeConversions conversion = { 0 };
     CheckInput input = { .graph = { .ops = &leaf_op, .tokens = &leaf_token, .operand0 = &no_operand, .operand1 = &no_operand, .count = 1 } };
-    CheckStream stream = { .values = &leaf, .conversions = &conversion, .count = 1 };
+    CheckStream stream = { .dense_values = &leaf, .conversions = &conversion, .count = 1 };
     CheckProgram program = { .input = &input, .stream = &stream };
     uint8_t type_classes[256] = { 0 };
     uint8_t type_facts[256] = { 0 };
@@ -226,7 +226,7 @@ static void check_test_program_batch(CheckTest* test)
         graph->operand1 = (uint32_t*)(mappings[2] + lengths[2] - (uint64_t)count * sizes[2]);
         graph->tokens = (uint32_t*)(mappings[3] + lengths[3] - (uint64_t)count * sizes[3]);
         CheckStream stream = {
-            .values = (CheckValue*)(mappings[4] + lengths[4] - (uint64_t)count * sizes[4]),
+            .dense_values = (CheckValue*)(mappings[4] + lengths[4] - (uint64_t)count * sizes[4]),
             .conversions = (CheckNodeConversions*)(mappings[5] + lengths[5] - (uint64_t)count * sizes[5]),
             .count = count,
         };
@@ -241,7 +241,7 @@ static void check_test_program_batch(CheckTest* test)
         // still compares the actual scalar task output; fallback must not hide a stricter eligibility rule.
         for (uint32_t mode = 0; mode < 10; mode += 1)
         {
-            memset(stream.values, 0, (uint64_t)count * sizeof(CheckValue));
+            memset(stream.dense_values, 0, (uint64_t)count * sizeof(CheckValue));
             memset(stream.conversions, 0, (uint64_t)count * sizeof(CheckNodeConversions));
             for (uint32_t n = 0; n < count; n += 1)
             {
@@ -249,15 +249,15 @@ static void check_test_program_batch(CheckTest* test)
                 graph->operand0[n] = BUSTER_CHECK_NONE;
                 graph->operand1[n] = BUSTER_CHECK_NONE;
                 graph->ops[n] = CHECK_OP_VALUE;
-                stream.values[n].type = mode == 1 && n % 3 == 2 ? BUSTER_TYPE_CHAR : BUSTER_TYPE_INT;
-                stream.values[n].category = CHECK_RVALUE;
-                stream.values[n].constant_kind = CHECK_CONSTANT_INTEGER;
-                stream.values[n].integer = UINT64_C(0x12345678ffffffd3) + n;
+                stream.dense_values[n].type = mode == 1 && n % 3 == 2 ? BUSTER_TYPE_CHAR : BUSTER_TYPE_INT;
+                stream.dense_values[n].category = CHECK_RVALUE;
+                stream.dense_values[n].constant_kind = CHECK_CONSTANT_INTEGER;
+                stream.dense_values[n].integer = UINT64_C(0x12345678ffffffd3) + n;
                 if (n == 0)
                 {
-                    stream.values[n].category = CHECK_LVALUE;
-                    stream.values[n].constant_kind = CHECK_CONSTANT_NONE;
-                    stream.values[n].object = 1;
+                    stream.dense_values[n].category = CHECK_LVALUE;
+                    stream.dense_values[n].constant_kind = CHECK_CONSTANT_NONE;
+                    stream.dense_values[n].object = 1;
                 }
                 else if (n % 3 != 2)
                 {
@@ -265,12 +265,12 @@ static void check_test_program_batch(CheckTest* test)
                     graph->ops[n] = unary ? (n % 2 != 0 ? CHECK_OP_NEGATIVE : CHECK_OP_BIT_NOT) : binary[(n / 3) % BUSTER_ARRAY_LENGTH(binary)];
                     graph->operand0[n] = n - (unary ? 1 : 2);
                     graph->operand1[n] = unary ? BUSTER_CHECK_NONE : n - 1;
-                    stream.values[n].constant_kind = CHECK_CONSTANT_NONE;
+                    stream.dense_values[n].constant_kind = CHECK_CONSTANT_NONE;
                     stream.conversions[n].operands[0].type = BUSTER_TYPE_INT;
                     stream.conversions[n].operands[1].type = BUSTER_TYPE_INT;
                     if (mode == 2 && n % 9 == 0)
                     {
-                        stream.values[n].constant_kind = CHECK_CONSTANT_INTEGER;
+                        stream.dense_values[n].constant_kind = CHECK_CONSTANT_INTEGER;
                     }
                     else if (mode == 3 && !unary)
                     {
@@ -289,8 +289,8 @@ static void check_test_program_batch(CheckTest* test)
                     graph->ops[n] = n % 2 != 0 ? CHECK_OP_CAST : CHECK_OP_CONVERT;
                     graph->operand0[n] = mode == 9 && n > 1 && n % 3 == 0 ? n - 2 : n - 1;
                     graph->operand1[n] = BUSTER_CHECK_NONE;
-                    stream.values[n].constant_kind = CHECK_CONSTANT_NONE;
-                    stream.values[n].type = mode == 8 && n % 4 == 1 ? BUSTER_TYPE_BOOL : numeric[n % BUSTER_ARRAY_LENGTH(numeric)];
+                    stream.dense_values[n].constant_kind = CHECK_CONSTANT_NONE;
+                    stream.dense_values[n].type = mode == 8 && n % 4 == 1 ? BUSTER_TYPE_BOOL : numeric[n % BUSTER_ARRAY_LENGTH(numeric)];
                 }
             }
             uint8_t kinds[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
@@ -337,7 +337,7 @@ static void check_test_program_batch(CheckTest* test)
                         bool same_metadata = true;
                         for (uint32_t i = 0; i < count - first; i += 1)
                         {
-                            const uint32_t index = type_index(stream.values[first + i].type);
+                            const uint32_t index = type_index(check_stream_type(&stream, first + i));
                             const uint32_t expected = index < types.table.types.count ? type_templates[index] : UINT8_MAX;
                             same_metadata = same_metadata && (classified[i] & UINT16_MAX) == expected;
                         }
@@ -434,7 +434,7 @@ static void check_test_program_batch(CheckTest* test)
             .declaration_bodies = bodies,
         };
         CheckStream stream = {
-            .values = source_values,
+            .dense_values = source_values,
             .conversions = conversions,
             .count = 2,
         };

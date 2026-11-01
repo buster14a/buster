@@ -110,7 +110,7 @@ static void check_test_special_graph_bounds(CheckTest* test, TypeTable* table, c
                 output.capacity = arena == 0 ? capacity : sizeof(output_bytes) - 16;
                 scratch.capacity = arena == 1 ? capacity : sizeof(scratch_bytes) - 16;
                 const bool accepted = check_graph_run(table, graph, &output, &scratch, &options, &stream);
-                check_test_expect(test, !accepted && stream.status == CHECK_STATUS_RESOURCE && stream.values == NULL &&
+                check_test_expect(test, !accepted && stream.status == CHECK_STATUS_RESOURCE && !check_stream_has_values(&stream) &&
                                        stream.misc == NULL && stream.misc_count == 0 && stream.floating == NULL && stream.floating_count == 0 &&
                                        stream.queries == NULL && stream.query_count == 0 && stream.atomics == NULL && stream.atomic_count == 0 &&
                                        stream.vectors == NULL && stream.vector_count == 0 &&
@@ -314,38 +314,38 @@ static __attribute__((noinline)) void check_test_special_graph(CheckTest* test, 
                                expected.query_count == 4 && expected.atomic_count == 2, "all generic builtin families retain exactly one compact descriptor per call");
         if (checked)
         {
-            check_test_expect(test, expected.values[expect].type == BUSTER_TYPE_LONG && expected.values[expect].fault == CHECK_FAULT_NONE &&
-                                   expected.values[expect].constant_kind == CHECK_CONSTANT_INTEGER && expected.values[expect].integer == 7 &&
-                                   (expected.values[expect].flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+            check_test_expect(test, check_stream_type(&expected, expect) == BUSTER_TYPE_LONG && check_stream_value(&expected, expect).fault == CHECK_FAULT_NONE &&
+                                   check_stream_constant_kind(&expected, expect) == CHECK_CONSTANT_INTEGER && check_stream_value(&expected, expect).integer == 7 &&
+                                   (check_stream_flags(&expected, expect) & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
                                    expected.misc[0].evaluated_operands == 0 && expected.misc[0].constant_evaluated_operands == 1 &&
                                    expected.misc[0].constant_value.type == BUSTER_TYPE_LONG && expected.misc[0].constant_value.integer == 7 &&
                                    expected.misc[0].constant_value.fault == CHECK_FAULT_NONE && expected.argument_conversions[0].type == BUSTER_TYPE_LONG &&
                                    expected.argument_conversions[1].type == BUSTER_TYPE_LONG,
                               "EXPECT of a constant first argument folds to it, neither operand run, as clang's code does, the effectful and faulting second dropped");
-            check_test_expect(test, expected.values[stop].type == BUSTER_TYPE_VOID && expected.misc[1].terminates &&
-                                   expected.values[query].integer == 0 && expected.values[query].fault == CHECK_FAULT_NONE &&
-                                   expected.values[query].flags == BUSTER_CHECK_ICE && expected.queries[0].evaluated_operands == 0 &&
-                                   expected.values[size].integer == 4 && expected.queries[1].known,
+            check_test_expect(test, check_stream_type(&expected, stop) == BUSTER_TYPE_VOID && expected.misc[1].terminates &&
+                                   check_stream_value(&expected, query).integer == 0 && check_stream_value(&expected, query).fault == CHECK_FAULT_NONE &&
+                                   check_stream_flags(&expected, query) == BUSTER_CHECK_ICE && expected.queries[0].evaluated_operands == 0 &&
+                                   check_stream_value(&expected, size).integer == 4 && expected.queries[1].known,
                               "terminal and unevaluated query contracts remain distinct from ordinary runtime argument evaluation");
-            check_test_expect(test, expected.values[deferred].constant_kind == CHECK_CONSTANT_NONE &&
-                                   expected.values[deferred].flags == BUSTER_CHECK_ICE_UNEVALUATED &&
+            check_test_expect(test, check_stream_constant_kind(&expected, deferred) == CHECK_CONSTANT_NONE &&
+                                   check_stream_flags(&expected, deferred) == BUSTER_CHECK_ICE_UNEVALUATED &&
                                    expected.queries[2].runtime_value.constant_kind == CHECK_CONSTANT_INTEGER &&
                                    expected.queries[2].runtime_value.integer == 4 && expected.queries[2].runtime_value.flags == 0 &&
-                                   expected.values[deferred_parent].constant_kind == CHECK_CONSTANT_NONE &&
-                                   expected.values[complex_query].integer == 1 && expected.values[complex_query].flags == BUSTER_CHECK_ICE,
+                                   check_stream_constant_kind(&expected, deferred_parent) == CHECK_CONSTANT_NONE &&
+                                   check_stream_value(&expected, complex_query).integer == 1 && check_stream_flags(&expected, complex_query) == BUSTER_CHECK_ICE,
                               "runtime-only object bounds cannot fold enclosing source expressions while actual complex values prove constant_p");
-            check_test_expect(test, expected.values[rounds].type == BUSTER_TYPE_INT && expected.values[rounds].constant_kind == CHECK_CONSTANT_NONE &&
-                                   (expected.values[rounds].flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
+            check_test_expect(test, check_stream_type(&expected, rounds) == BUSTER_TYPE_INT && check_stream_constant_kind(&expected, rounds) == CHECK_CONSTANT_NONE &&
+                                   (check_stream_flags(&expected, rounds) & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
                                    expected.floating[3].runtime_builtin == CBUILTIN_FLT_ROUNDS && expected.floating[3].evaluated_operands == 0 &&
                                    expected.floating[3].compiler_barrier && expected.floating[3].reads_fp_environment &&
-                                   expected.values[absolute].type == BUSTER_TYPE_DOUBLE && expected.values[absolute].floating == 1,
+                                   check_stream_type(&expected, absolute) == BUSTER_TYPE_DOUBLE && check_stream_value(&expected, absolute).floating == 1,
                               "rounding-mode queries retain environment ordering and extended FP catalog entries reach their typed family");
-            check_test_expect(test, expected.values[nan].constant_kind == CHECK_CONSTANT_FLOATING && isnan(expected.values[nan].floating) &&
+            check_test_expect(test, check_stream_constant_kind(&expected, nan) == CHECK_CONSTANT_FLOATING && isnan(check_stream_value(&expected, nan).floating) &&
                                    expected.floating[0].folded && !expected.floating[0].reads_memory &&
-                                   expected.values[classify].integer == 7 && expected.values[classify].fault == CHECK_FAULT_NONE &&
+                                   check_stream_value(&expected, classify).integer == 7 && check_stream_value(&expected, classify).fault == CHECK_FAULT_NONE &&
                                    expected.floating[1].evaluated_operands == 36 && expected.floating[1].definite_operands == 36 &&
                                    expected.floating[1].selected_selector == 2 && expected.floating[1].evaluation == CHECK_BUILTIN_FLOAT_EVALUATION_FOLDED_SELECTOR &&
-                                   expected.values[runtime].constant_kind == CHECK_CONSTANT_NONE && expected.floating[2].evaluated_operands == 63 &&
+                                   check_stream_constant_kind(&expected, runtime) == CHECK_CONSTANT_NONE && expected.floating[2].evaluated_operands == 63 &&
                                    expected.floating[2].definite_operands == 48 && expected.floating[2].evaluation == CHECK_BUILTIN_FLOAT_EVALUATION_FPCLASSIFY_RUNTIME,
                               "NAN witnesses and six-operand fpclassify preserve exact selected/conditional evaluation metadata");
             check_test_expect(test, expected.atomics[0].node == store && expected.atomics[0].store_value.integer == 255 &&

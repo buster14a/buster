@@ -212,12 +212,18 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
             }
         }
         uint32_t* ids = arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint32_t), 64);
+        uint8_t* source = arena_push_array(reader->arena, BUSTER_BUILTIN_INTRINSIC_COUNT, 1, 64);
         CheckInputIntrinsicDeclaration* declaration_records = arena_push_array(reader->arena, declarations, sizeof(CheckInputIntrinsicDeclaration), 8);
         CheckInputIntrinsicCall* call_records = calls != 0 ? arena_push_array(reader->arena, calls, sizeof(CheckInputIntrinsicCall), 8) : 0;
         valid = cache != 0 && ids != 0 && declaration_records != 0 && (calls == 0 || call_records != 0);
         if (valid)
         {
             memset(ids, 0, ((uint64_t)parser->tokens.count + 1) * sizeof(uint32_t));
+            if (source != NULL)
+            {
+                memset(source, 0, BUSTER_BUILTIN_INTRINSIC_COUNT);
+            }
+            reader->intrinsic_source = source;
             reader->intrinsic_names = cache;
             output->intrinsic_ids = ids;
             output->intrinsic_declarations = declaration_records;
@@ -270,14 +276,54 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
     const bool operand = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_IDENTIFIER &&
                          parser->tree.roles[keyword] == PARSE_ROLE_OPERAND && (output->deferred_tokens == 0 || !output->deferred_tokens[keyword]);
     const uint32_t name = operand ? parser->tokens.names[keyword] : 0;
-    if (operand && reader->intrinsic_names != 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0)
+    // An x86 builtin of the intrinsic catalogue's rows and leaves (#148, cbuiltin_source_intrinsic) stays the builtin under
+    // a declaration of it with external linkage, as clang keeps it: the names <xmmintrin.h>, <emmintrin.h> and
+    // <prfchwintrin.h> declare (_mm_sfence, _m_prefetch), and a block-scope declaration's. A definition with internal
+    // linkage (static) is the program's function, and a local object of the name hides it. Each row's verdict is
+    // remembered (CheckInputReader.intrinsic_source, the top level's reader's alone: a deferred lane has none and works
+    // it out each time), so that a declared call site costs a lookup of its row alone. A unit without an intrinsic's
+    // name (reader->intrinsic_names null, nearly every unit) reads no binding at all; in one with them, every operand's
+    // binding is read, as before, and a bound name of no catalogue row (its cache entry 0) needs nothing more.
+    const bool intrinsics = operand && reader->intrinsic_names != 0;
+    const uint32_t bound = intrinsics ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+    const uint32_t entry = bound != 0 ? reader->intrinsic_names[name] : 0;
+    const bool declared = entry != 0 && reader->bindings.kind[bound - 1] == C_BINDING_FUNCTION &&
+                          reader->linkage[reader->bindings.declaration[bound - 1]] == 2;
+    const uint32_t hinted = declared ? entry : 0;
+    const BuiltinIntrinsicInfo* header = NULL;
+    if (hinted != 0)
+    {
+        const InternSpan span = reader->pp->table->spans[name];
+        const uint8_t* spelling = reader->pp->table->records + span.offset;
+        const BuiltinIntrinsicInfo* info = (hinted & UINT32_C(0x80000000)) == 0 ? output->intrinsic_declarations[hinted - 1].info :
+                                           hinted == UINT32_MAX ? builtin_intrinsic_lookup((const char*)spelling, span.length) :
+                                                                  builtin_intrinsic_at(hinted & UINT32_C(0x7fffffff));
+        // A name no row has is no intrinsic's anywhere, which the cache remembers, as the lookup below does.
+        reader->intrinsic_names[name] = info == NULL ? 0 : hinted;
+        const uint32_t row = info != NULL ? (uint32_t)(info - builtin_intrinsic_infos) : 0;
+        uint8_t verdict = info != NULL && reader->intrinsic_source != NULL ? reader->intrinsic_source[row] : 0;
+        if (info != NULL && verdict == 0)
+        {
+            verdict = memchr(info->attributes, 'f', info->attributes_length) == NULL && cbuiltin_source_intrinsic(spelling, span.length) ? 1 : 2;
+            if (reader->intrinsic_source != NULL)
+            {
+                reader->intrinsic_source[row] = verdict;
+            }
+        }
+        header = verdict == 1 ? info : NULL;
+    }
+    if (intrinsics && (bound == 0 || header != NULL))
     {
         const uint32_t cached = reader->intrinsic_names[name];
         const bool fresh = (cached & UINT32_C(0x80000000)) != 0;
         const BuiltinIntrinsicInfo* info = 0;
         if (fresh)
         {
-            if (cached == UINT32_MAX)
+            if (header != NULL)
+            {
+                info = header;
+            }
+            else if (cached == UINT32_MAX)
             {
                 const InternSpan span = reader->pp->table->spans[name];
                 info = builtin_intrinsic_lookup((const char*)reader->pp->table->records + span.offset, span.length);

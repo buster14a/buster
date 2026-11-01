@@ -51,13 +51,13 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
                           "invalid builtin IDs produce one diagnostic and no extra store descriptor");
         if (checked)
         {
-            check_test_expect(test, expected.values[unary].integer == 8 && expected.values[unary].type == BUSTER_TYPE_INT &&
-                                   (expected.values[unary].flags & BUSTER_CHECK_ICE) != 0,
+            check_test_expect(test, check_stream_value(&expected, unary).integer == 8 && check_stream_type(&expected, unary) == BUSTER_TYPE_INT &&
+                                   (check_stream_flags(&expected, unary) & BUSTER_CHECK_ICE) != 0,
                               "graph unary builtin has independently expected result and ICE classification");
-            check_test_expect(test, expected.values[first].integer == 1 && expected.values[second].integer == 1 &&
-                                   expected.values[first].type == BUSTER_TYPE_BOOL &&
-                                   (expected.values[first].flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
-                                   (expected.values[first].flags & BUSTER_CHECK_ICE) == 0,
+            check_test_expect(test, check_stream_value(&expected, first).integer == 1 && check_stream_value(&expected, second).integer == 1 &&
+                                   check_stream_type(&expected, first) == BUSTER_TYPE_BOOL &&
+                                   (check_stream_flags(&expected, first) & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
+                                   (check_stream_flags(&expected, first) & BUSTER_CHECK_ICE) == 0,
                               "folded overflow keeps the boolean and required store effect distinct");
             check_test_expect(test, expected.effects[0].node == first && expected.effects[1].node == second &&
                                    expected.effects[0].value.type == BUSTER_TYPE_SCHAR && expected.effects[0].value.integer == 0 &&
@@ -68,8 +68,8 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
                                    expected.conversions[first].operands[1].type == BUSTER_TYPE_INT &&
                                    expected.conversions[first].store.type == type_element(table, destination),
                               "overflow graph conversions retain original integer shapes and volatile store type");
-            check_test_expect(test, expected.values[selected].integer == 1 && (expected.values[selected].flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
-                                   expected.values[query].integer == 1 && (expected.values[query].flags & BUSTER_CHECK_SIDE_EFFECT) == 0,
+            check_test_expect(test, check_stream_value(&expected, selected).integer == 1 && (check_stream_flags(&expected, selected) & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                   check_stream_value(&expected, query).integer == 1 && (check_stream_flags(&expected, query) & BUSTER_CHECK_SIDE_EFFECT) == 0,
                               "unselected and unevaluated overflow stores stay descriptors without becoming executed effects");
             const uint64_t comparison_mark = output->length;
             for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
@@ -112,8 +112,8 @@ static void check_test_builtin_graph_typed(CheckTest* test, TypeTable* table, Ar
                           "typed overflow accepts ordinary prototype conversions and qualified destination warnings");
         if (checked && expected.effect_count == 3)
         {
-            check_test_expect(test, expected.values[alias].integer == 0 && expected.effects[0].value.integer == 12 &&
-                                   expected.values[overflow].integer == 1 && expected.effects[1].value.integer == UINT64_MAX - 1 &&
+            check_test_expect(test, check_stream_value(&expected, alias).integer == 0 && expected.effects[0].value.integer == 12 &&
+                                   check_stream_value(&expected, overflow).integer == 1 && expected.effects[1].value.integer == UINT64_MAX - 1 &&
                                    expected.effects[0].value.type == BUSTER_TYPE_ULONG && expected.effects[0].runtime_builtin == CBUILTIN_MUL_OVERFLOW &&
                                    expected.effects[0].evaluated_operands == 7 && expected.effects[0].unsupported == 0 &&
                                    expected.conversions[alias].operands[0].type == BUSTER_TYPE_ULONG &&
@@ -176,7 +176,7 @@ static void check_test_builtin_graph_bounds(CheckTest* test, TypeTable* table, A
                     scratch.capacity = arena == 1 ? capacity : sizeof(scratch_bytes) - 16;
                     const bool accepted = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
                     check_test_expect(test, !accepted && stream.status == CHECK_STATUS_RESOURCE && stream.effects == NULL && stream.effect_count == 0 &&
-                                           stream.values == NULL && output.length == 7 && scratch.length == 13 &&
+                                           !check_stream_has_values(&stream) && output.length == 7 && scratch.length == 13 &&
                                            check_test_graph_canary(output_bytes, 0, 7) && check_test_graph_canary(scratch_bytes, 0, 13) &&
                                            check_test_graph_canary(output_bytes, output.capacity, output.capacity + 16) &&
                                            check_test_graph_canary(scratch_bytes, scratch.capacity, scratch.capacity + 16),

@@ -43,9 +43,9 @@ For each, the harness:
    lower, compared as [the lowering guide](c-lowering.md) describes ("Against
    clang -O0's objects").
 
-With `--tier1`, every compile adds the driver's `--tier1 --tier1-report
--fno-asynchronous-unwind-tables` (each function Tier 1's pipeline takes by Tier
-1, the others by Tier 0: [the Tier 1 guide](tier1.md)'s "The C driver's
+With `--tier1`, every compile adds the driver's `--tier1 --tier1-report`
+(each function Tier 1's pipeline takes by Tier 1, the others by Tier 0, with
+both tiers' unwind tables: [the Tier 1 guide](tier1.md)'s "The C driver's
 `--tier1`"). Its vector and scalar paths allocate registers by different
 algorithms, so their executables differ: the scalar path compiles a third time,
 with the IDs in source order, which must give the same bytes as with them in

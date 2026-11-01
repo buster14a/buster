@@ -100,12 +100,18 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         error = TIER1_LIVENESS_INVALID;
     }
     bool parameter_prefix = true;
+    uint32_t block = 0;
     for (uint32_t node = 0; error == TIER1_LIVENESS_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
         const uint32_t type = function->type[node];
         const uint32_t first = plan->effective_use_offsets[node];
         const uint32_t end = plan->effective_use_offsets[node + 1];
+        // The node's block, whose end bounds the values the CFG consumer's nodes may read before their definitions.
+        while (block + 1 < function->block_count && node >= function->block_offsets[block + 1])
+        {
+            block += 1;
+        }
         if (plan->covered[node] > 1 || first > end || end > plan->effective_use_count || (plan->covered[node] && first != end))
         {
             error = TIER1_LIVENESS_INVALID;
@@ -181,8 +187,11 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         for (uint32_t use = first; error == TIER1_LIVENESS_OK && use < end; use += 1)
         {
             const uint32_t value = plan->effective_use_values[use];
-            // The selector's current subset has definitions before uses even across block boundaries.
-            if (value >= node || plan->covered[value] || function->type[value] == IR_VOID)
+            // The straight-line consumer's subset has definitions before uses even across block boundaries. The CFG
+            // consumer's takes a value of a later block too, which the selector's plan has dominating its use: a computed
+            // goto's dispatch block's phis, which the lowering puts last, read in the labels' blocks (#789).
+            const bool later = phis && value >= function->block_offsets[block + 1];
+            if (value >= count || (value >= node && !later) || plan->covered[value] || function->type[value] == IR_VOID)
             {
                 error = TIER1_LIVENESS_INVALID;
             }

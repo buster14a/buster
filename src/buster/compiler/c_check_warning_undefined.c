@@ -141,6 +141,15 @@ static void check_warning_undefined_use(CheckInputReader* reader, CheckWarningUn
     }
 }
 
+// The tokens from `first` (of the next 64 below `count`) that may declare a function of internal linkage: those whose
+// declaration kind and linkage bytes say so (check_input_scan_*), or every token on the scalar path, its twin. The
+// callers test each one in full.
+static uint64_t check_warning_undefined_declaring(const CheckInput* input, uint32_t first, uint32_t count, bool scalar)
+{
+    return scalar ? check_input_scan_all(first, count) :
+                    check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_equal(input->linkage, first, count, 1);
+}
+
 static bool check_warning_undefined_internal(CheckWarningBuffer* output, const CheckInput* input, const Parser* parser,
                                              const TypeTable* types, const CheckStream* stream, Arena* scratch)
 {
@@ -161,36 +170,56 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
                               parser->tokens.names != NULL && parser->tree.roles != NULL && parser->tree.parents != NULL);
         valid = valid && (input->vla_count == 0 || input->vlas != NULL) &&
                 (input->warning_events.count == 0 || input->warning_events.events != NULL);
+        const uint32_t* declarations = input->declarations;
+        const uint8_t* declaration_kinds = input->declaration_kinds;
+        const uint8_t* linkage = input->linkage;
+        const uint32_t* objects = input->objects;
+        const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
         uint32_t room = 0;
-        for (uint32_t token = 0; valid && token < count; token += 1)
+        for (uint32_t first = 0; valid && first < count; first += 64)
         {
-            room += input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_FUNCTION &&
-                    input->linkage[token] == 1 && input->objects[token] == token + 1 && !check_warning_undefined_supplied(input, token);
+            for (uint64_t bits = check_warning_undefined_declaring(input, first, count, scalar); bits != 0; bits &= bits - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
+                room += declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && linkage[token] == 1 &&
+                        objects[token] == token + 1 && !check_warning_undefined_supplied(input, token);
+            }
         }
         CheckWarningUndefinedFunction* functions = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningUndefinedFunction, room) : NULL;
         uint64_t* keys = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room) : NULL;
         uint64_t* sorting = keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room) : NULL;
         valid = valid && (room == 0 || (functions != NULL && sorting != NULL));
         uint32_t written = 0;
-        for (uint32_t token = 0; valid && room != 0 && token < count; token += 1)
+        for (uint32_t first = 0; valid && room != 0 && first < count; first += 64)
         {
-            if (input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_FUNCTION && input->linkage[token] == 1)
+            for (uint64_t bits = check_warning_undefined_declaring(input, first, count, scalar); valid && bits != 0; bits &= bits - 1)
             {
-                const uint32_t object = input->objects[token];
-                if (object == token + 1 && !check_warning_undefined_supplied(input, token))
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
+                if (declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && linkage[token] == 1)
                 {
-                    valid = written < room;
-                    if (valid)
+                    const uint32_t object = objects[token];
+                    if (object == token + 1 && !check_warning_undefined_supplied(input, token))
                     {
-                        functions[written++] = (CheckWarningUndefinedFunction){ .object = object, .use = BUSTER_CHECK_NONE, .order = UINT64_MAX };
+                        valid = written < room;
+                        if (valid)
+                        {
+                            functions[written++] = (CheckWarningUndefinedFunction){ .object = object, .use = BUSTER_CHECK_NONE, .order = UINT64_MAX };
+                        }
+                    }
+                    const uint32_t index = check_warning_undefined_find(functions, written, object);
+                    if (index != BUSTER_CHECK_NONE)
+                    {
+                        functions[index].supplied |= check_warning_undefined_supplied(input, token);
                     }
                 }
-                const uint32_t index = check_warning_undefined_find(functions, written, object);
-                if (index != BUSTER_CHECK_NONE)
-                {
-                    functions[index].supplied |= check_warning_undefined_supplied(input, token);
-                }
             }
+        }
+        // Only a function nothing supplies takes a use: where a later definition supplies each one, as in most units,
+        // the uses' scan has nothing to find.
+        uint32_t pending = 0;
+        for (uint32_t i = 0; valid && i < written; i += 1)
+        {
+            pending += !functions[i].supplied;
         }
         uint64_t reference_room = (uint64_t)stream->overload_count + stream->overload_address_count;
         for (uint32_t i = 0; valid && room != 0 && i < input->warning_events.count; i += 1)
@@ -281,30 +310,38 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
             .warning_query_arena = arena,
             .warning_bound_open = BUSTER_CHECK_NONE,
         };
-        for (uint32_t token = 0; valid && room != 0 && token < count; token += 1)
+        const uint8_t* kinds = parser->tokens.kinds;
+        const uint8_t* roles = parser->tree.roles;
+        for (uint32_t first = 0; valid && pending != 0 && first < count; first += 64)
         {
-            const uint32_t declaration = input->declarations[token];
-            if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
-                declaration < count && declaration != token && input->declaration_kinds[declaration] == C_BINDING_FUNCTION)
+            const uint64_t lanes = scalar ? check_input_scan_all(first, count) :
+                                   check_input_scan_equal(kinds, first, count, PARSE_KIND_IDENTIFIER) & check_input_scan_equal(roles, first, count, PARSE_ROLE_OPERAND);
+            for (uint64_t bits = lanes; valid && bits != 0; bits &= bits - 1)
             {
-                const CheckWarningUndefinedReference reference = check_warning_undefined_reference(references, ordered_references, reference_count, token);
-                const uint32_t object = reference.selected ? reference.object : input->objects[declaration];
-                const uint32_t index = check_warning_undefined_find(functions, written, object);
-                const uint64_t order = reference.selected ? reference.order : (uint64_t)token << 32 | UINT32_MAX;
-                if (index != BUSTER_CHECK_NONE && !reference.suppressed && !functions[index].supplied && order < functions[index].order)
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
+                const uint32_t declaration = declarations[token];
+                if (kinds[token] == PARSE_KIND_IDENTIFIER && roles[token] == PARSE_ROLE_OPERAND && declaration < count && declaration != token &&
+                    declaration_kinds[declaration] == C_BINDING_FUNCTION)
                 {
-                    uint32_t bound = reference.bound;
-                    for (uint32_t vla = 0; vla < input->vla_count; vla += 1)
+                    const CheckWarningUndefinedReference reference = check_warning_undefined_reference(references, ordered_references, reference_count, token);
+                    const uint32_t object = reference.selected ? reference.object : objects[declaration];
+                    const uint32_t index = check_warning_undefined_find(functions, written, object);
+                    const uint64_t order = reference.selected ? reference.order : (uint64_t)token << 32 | UINT32_MAX;
+                    if (index != BUSTER_CHECK_NONE && !reference.suppressed && !functions[index].supplied && order < functions[index].order)
                     {
-                        const CheckInputVla* entry = input->vlas + vla;
-                        if (entry->bound_begin <= token && token < entry->bound_end &&
-                            (bound == BUSTER_CHECK_NONE || entry->bound_begin > bound))
+                        uint32_t bound = reference.bound;
+                        for (uint32_t vla = 0; vla < input->vla_count; vla += 1)
                         {
-                            bound = entry->bound_begin;
+                            const CheckInputVla* entry = input->vlas + vla;
+                            if (entry->bound_begin <= token && token < entry->bound_end &&
+                                (bound == BUSTER_CHECK_NONE || entry->bound_begin > bound))
+                            {
+                                bound = entry->bound_begin;
+                            }
                         }
+                        check_warning_undefined_use(&reader, functions + index, token, bound, order);
+                        valid = !staged.resource;
                     }
-                    check_warning_undefined_use(&reader, functions + index, token, bound, order);
-                    valid = !staged.resource;
                 }
             }
         }

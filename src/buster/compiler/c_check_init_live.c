@@ -341,28 +341,45 @@ static CheckInitStatus check_initializer_live_writes(const TypeTable* types, con
             aggregates = aggregates || (part->kind == CHECK_INIT_VALUE && aggregate);
         }
     }
+    // A stable pass over a digit that every point shares keeps their order, and so does every pass when the points are
+    // in order already, as a single write's two ends are. So only the digits in which some offset differs from the
+    // first point's are sorted, and none for points in order: the offsets in one object usually differ in their low two
+    // bytes alone, and most initializers are one write. Each pass zeroes its 1 KiB of counts with wide vector stores and
+    // reads them back with 4-byte loads, which can't take those stores' data and wait for them to reach the cache (#873),
+    // so a pass skipped saves that wait as well as its 256 counts' prefix sum.
+    uint64_t varying = 0;
+    bool unordered = false;
+    for (uint32_t i = 1; status == CHECK_INIT_OK && i < edges; i += 1)
+    {
+        varying |= points[i].offset ^ points[0].offset;
+        unordered |= points[i].offset < points[i - 1].offset;
+    }
+    const uint64_t sorted_digits = unordered ? varying : 0;
     for (uint32_t shift = 0; status == CHECK_INIT_OK && edges > 1 && shift < 64; shift += 8)
     {
-        uint32_t sizes[256] = { 0 };
-        for (uint32_t i = 0; i < edges; i += 1)
+        if (((sorted_digits >> shift) & 255) != 0)
         {
-            sizes[(points[i].offset >> shift) & 255] += 1;
+            uint32_t sizes[256] = { 0 };
+            for (uint32_t i = 0; i < edges; i += 1)
+            {
+                sizes[(points[i].offset >> shift) & 255] += 1;
+            }
+            uint32_t total = 0;
+            for (uint32_t b = 0; b < 256; b += 1)
+            {
+                const uint32_t size = sizes[b];
+                sizes[b] = total;
+                total += size;
+            }
+            for (uint32_t i = 0; i < edges; i += 1)
+            {
+                const uint32_t bucket = (points[i].offset >> shift) & 255;
+                temporary[sizes[bucket]++] = points[i];
+            }
+            CheckInitReference* swap = points;
+            points = temporary;
+            temporary = swap;
         }
-        uint32_t total = 0;
-        for (uint32_t b = 0; b < 256; b += 1)
-        {
-            const uint32_t size = sizes[b];
-            sizes[b] = total;
-            total += size;
-        }
-        for (uint32_t i = 0; i < edges; i += 1)
-        {
-            const uint32_t bucket = (points[i].offset >> shift) & 255;
-            temporary[sizes[bucket]++] = points[i];
-        }
-        CheckInitReference* swap = points;
-        points = temporary;
-        temporary = swap;
     }
     uint32_t unique = 0;
     for (uint32_t i = 0; status == CHECK_INIT_OK && i < edges; i += 1)
