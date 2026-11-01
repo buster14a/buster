@@ -5628,9 +5628,9 @@ static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_
 // Whether the walk in source order tests at `token` the columns a write marks with `reason` (BUSTER_CHECK_RESOLVE_*), or
 // the token's syntax for BUSTER_CHECK_RESOLVE_SYNTAX: at every token on the scalar path, and on the vector path where a
 // mark gives the reason, read when the walk tests the columns, after its earlier steps at the token, which may mark it.
-static bool check_input_resolve_tests(const CheckInputReader* reader, uint32_t token, uint8_t reason)
+static bool check_input_resolve_tests(uint8_t mark, bool scalar, uint8_t reason)
 {
-    return reader->parser->options.scalar || (reader->visits[token] & reason) != 0;
+    return scalar || (mark & reason) != 0;
 }
 
 // Whether the walk in source order arrives at `token` where it acts for a reason that no mark gives the token
@@ -5667,6 +5667,7 @@ static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t 
 static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
+    const bool scalar = parser->options.scalar;
     uint32_t visits = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
@@ -5682,8 +5683,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         reader->position = i;
         type_changes_at(reader->types, i);
+        // Every test below precedes the declaration step, the only step that marks the token's own visit; so the mark is
+        // read once and tested for each reason (#889).
+        uint8_t mark = reader->visits[i];
         // A lane's opening and the token after its closing are the top level's, which finished their initializers.
-        const bool finishes = !(reader->lane && (i == begin || i == end)) && check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_FINISH);
+        const bool finishes = !(reader->lane && (i == begin || i == end)) && check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_FINISH);
         for (uint32_t declaration = finishes ? reader->initializer_finish_heads[i] : BUSTER_CHECK_NONE; declaration != BUSTER_CHECK_NONE;
              declaration = reader->initializer_finish_next[declaration])
         {
@@ -5696,7 +5700,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             break;
         }
-        const bool scopes = check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_SCOPE);
+        const bool scopes = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SCOPE);
         while (scopes && reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
         {
             reader->scope_count -= 1;
@@ -5735,11 +5739,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             i = parser->tree.parents[i];
             continue;
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
         {
             break;
         }
-        CheckInputSpecifierJob* job = check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) ? reader->specifier_finishes[i] : 0;
+        CheckInputSpecifierJob* job = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) ? reader->specifier_finishes[i] : 0;
         if (job != 0 && !job->ready)
         {
             CheckValue value = { 0 };
@@ -5764,6 +5768,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             if (job->result != 0)
             {
                 check_input_declaration(reader, job->first);
+                // The declaration step can mark this token's own visit, so the tests after it must read the mark again.
+                mark = reader->visits[i];
             }
             else if (reader->output->report_count == 0 && !reader->output->resource)
             {
@@ -5775,7 +5781,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const uint32_t parent = parser->tree.parents[i];
         const uint8_t syntax = reader->syntax[i];
         // The tests of the token's syntax, of a token its syntax marks on the vector path.
-        const bool syntactic = check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_SYNTAX);
+        const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
             // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes.
@@ -5822,20 +5828,20 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
             }
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
         {
             check_input_selection_type(reader, i);
         }
-        const bool activations = !(reader->lane && i == begin) && check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_ACTIVATE);
+        const bool activations = !(reader->lane && i == begin) && check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_ACTIVATE);
         for (uint32_t token = activations ? reader->activate[i] : BUSTER_CHECK_NONE; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
         {
             check_input_bind(reader, token, i);
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
         {
             check_input_vararg_type(reader, i);
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
         {
             check_input_builtin_type(reader, i);
         }
@@ -5843,7 +5849,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             check_input_statement_attributes(reader, i);
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 && reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 && reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
             if (reader->output->initializer_ends[declaration] > reader->resolve_limit)
@@ -5864,7 +5870,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
              (kind == PARSE_KIND_EXTENSION && i + 1 < parser->tokens.count && (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER ||
               parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)))) ||
-            (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
+            (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
         {
             if (kind == PARSE_KIND_LABEL && !reader->ignored[i])
             {
