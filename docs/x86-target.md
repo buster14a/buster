@@ -418,8 +418,10 @@ scan that finds it can skip the rest, which a label a skipped statement holds,
 a declaration at the body's own scope the kept statements may use, a case
 range the list's order puts first, or a kept statement's own break means it
 can't; then the whole body's code goes, as a switch without a constant's. It
-still differs for a `case` inside a nested `if` or compound, which clang's
-scan doesn't reach, and for `goto` into a label inside one.
+still differs for a `case` inside a nested `if`: clang's scan doesn't reach
+the case, so clang emits the whole body, the enclosing `if`'s condition
+included, where the check starts at the case and misses that enclosing code;
+and for `goto` into a label inside one.
 
 Clang's errors are unrecoverable. It emits the functions it must emit where the
 unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
