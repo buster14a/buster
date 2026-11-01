@@ -486,8 +486,45 @@ each build's object the same bytes by both paths:
   reader's, so only the fresh output's empty columns showed there at first.
 - **The stream's columns** take 18 MB more off the end of the compile, where
   the peak then is. The reader's peak is now within 4 MB of the end's.
-- **The 9700X's numbers** come from the `compile_time` step of the PR's run
-  (#518's measurement).
+On the 9700X, the `compile_time` step of the PR's run (#518's measurement:
+`measure-compile`, 11 rotated runs, and `perf stat -r 11`, pinned to CPU 2) at
+`f243b507` merged into main, against the same step of three runs of the same
+morning, PRs whose changes don't reach the default `-c`'s checker or its
+lowering (#1040's, #177's and #179's heads, on main 18 to 24 minutes later
+than this PR's merge; their medians' median):
+
+| | same-day runs | #628 and #529 | change |
+| --- | ---: | ---: | ---: |
+| wall time | 134.485 ms | 132.079 ms | −1.8% |
+| peak RSS (`wait4`) | 400,108 KB | 381,072 KB | −19,036 KB (−4.8%) |
+| task-clock (perf) | 133.49 ms | 131.30 ms | −1.6% |
+| cycles, kernel | 109.9 M | 103.2 M | −6.1% |
+| cycles, user | 630.4 M | 624.8 M | −0.9% |
+| instructions, user | 1,399.4 M | 1,444.0 M | +44.6 M (+3.2%) |
+| page faults | 1,997 | 3,114 | +1,117 |
+| `clear_page_erms`' share of the samples | 14.56% | 13.00% | |
+| check-input | 58.820 ms | 57.277 ms | −1.54 ms |
+| check-input's peak added | 241,324 KB | 221,392 KB | −19,932 KB |
+| check-expressions | 13.681 ms | 14.054 ms | +0.37 ms |
+| check-program | 13.896 ms | 14.160 ms | +0.26 ms |
+| lower | 14.157 ms | 13.556 ms | −0.60 ms |
+
+- **The memory.** The peak falls by the stream's and the binding table's
+  share, and the kernel's cycles by 6%. The page faults grow by the binding
+  table's base pages: 4 KB faults where it took 2 MB ones.
+- **The instructions.** 44.6 M more, 3.2%, are the accessors'. A value read
+  through `check_stream_value` is built from the columns, or copied from its
+  row, where it was one copy. `check_stream_type` and its kin test for a
+  hand-built stream's `dense_values` first. The check and the program pass
+  take 0.37 and 0.26 ms longer. The lowering, which waited on the stream's
+  96-byte records, takes 0.60 ms less, and so does every stage that clears
+  fewer pages. Making the hot readers read the columns directly, and the
+  graph run's stores cheaper, is what is left of this change's cost.
+- **The other runs' code.** The three runs built other PRs' heads on a
+  slightly later main (link-foreign, docs, tests and #1010's x86 builtins,
+  which `sqlite3.c` doesn't call). Their three medians agree within 1.2 ms of
+  wall time and 0.2 M instructions. The comparison is no A/B of one build,
+  but its differences are larger than that spread.
 
 ## The checker's graph and program passes (#530)
 
