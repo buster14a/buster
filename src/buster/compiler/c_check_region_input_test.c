@@ -38,8 +38,8 @@ static void check_test_region_proof(CheckTest* test, const char* source, const c
             }
             snprintf(description, sizeof(description), "%s: independent Clang source proof is retained separately from runtime", name);
             const uint32_t node = stream.query_count == 1 ? stream.queries[0].node : BUSTER_CHECK_NONE;
-            check_test_expect(test, described && node < stream.count && stream.values[node].constant_kind == CHECK_CONSTANT_INTEGER &&
-                                   stream.values[node].integer == (unsigned)constant, description);
+            check_test_expect(test, described && node < stream.count && check_stream_constant_kind(&stream, node) == CHECK_CONSTANT_INTEGER &&
+                                   check_stream_value(&stream, node).integer == (unsigned)constant, description);
         }
         check_test_expect(test, scratch.length == 0, "region source production and proof replay restore scratch lifetime");
         check_test_types_close(&types);

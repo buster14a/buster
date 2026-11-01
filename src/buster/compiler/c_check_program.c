@@ -625,7 +625,7 @@ static bool check_program_query_known(const CheckProgram* program, uint32_t node
 static bool check_program_runtime_effects(const CheckProgram* program, uint32_t node)
 {
     const CheckStream* stream = program->stream;
-    bool effects = (stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
+    bool effects = (check_stream_flags(stream, node) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
     if (program->input->graph.ops[node] == CHECK_OP_BUILTIN_QUERY)
     {
         const uint32_t selected = check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), node);
@@ -642,7 +642,8 @@ static bool check_program_runtime_effects(const CheckProgram* program, uint32_t 
 static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
-    const CheckValue* value = program->stream->values + condition;
+    const CheckValue checked_value = check_stream_value(program->stream, condition);
+    const CheckValue* value = &checked_value;
     const bool environment = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
     bool runtime = false;
     bool available = true;
@@ -740,7 +741,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
         const uint32_t condition = input->token_nodes[owner];
         uint32_t width = 0;
         bool sign = false;
-        if (condition >= program->stream->count || !check_action_integer_type(program->types, program->stream->values[condition].type, &width, &sign))
+        if (condition >= program->stream->count || !check_action_integer_type(program->types, check_stream_type(program->stream, condition), &width, &sign))
         {
             check_program_constraint(program, owner);
         }
@@ -752,7 +753,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
         const uint32_t condition = owner < tokens ? input->token_nodes[owner] : BUSTER_CHECK_NONE;
         uint32_t width = 0;
         bool sign = false;
-        if (condition >= program->stream->count || !check_action_integer_type(program->types, program->stream->values[condition].type, &width, &sign))
+        if (condition >= program->stream->count || !check_action_integer_type(program->types, check_stream_type(program->stream, condition), &width, &sign))
         {
             check_program_constraint(program, owner < tokens ? owner : token);
         }
@@ -762,7 +763,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
             CheckProgramCase* item = program->cases + index;
             *item = (CheckProgramCase)
             {
-                .type = program->stream->values[condition].type,
+                .type = check_stream_type(program->stream, condition),
                 .token = token,
                 .owner = owner,
                 .target = BUSTER_CHECK_NONE,
@@ -1199,7 +1200,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             // condition's node is its truth (CHECK_OP_CONDITION); clang folds the expression's, of an integer type.
             const CheckGraph* graph = &input->graph;
             const uint32_t expression = graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
-            const CheckValue* value = writer->program->stream->values + expression;
+            const CheckValue checked_value = check_stream_value(writer->program->stream, expression);
+            const CheckValue* value = &checked_value;
             uint32_t width = 0;
             bool sign = false;
             bool truth = false;
@@ -1259,7 +1261,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             writer->stops[token] = end;
             uint32_t width = 0;
             bool sign = false;
-            if (!check_action_integer_type(writer->program->types, writer->program->stream->values[condition].type, &width, &sign))
+            if (!check_action_integer_type(writer->program->types, check_stream_type(writer->program->stream, condition), &width, &sign))
             {
                 check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
             }
@@ -1916,9 +1918,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         source = graph->operand0[source];
                     }
                     unsigned __int128 value = 0;
-                    const bool known = check_program_case_value(program, entry->node, program->stream->values[entry->node].type, &value);
+                    const bool known = check_program_case_value(program, entry->node, check_stream_type(program->stream, entry->node), &value);
                     const bool enumeration = source < graph->count &&
-                        type_kind(program->types, type_strip_aligned(program->types, program->stream->values[source].type)) == BUSTER_TYPE_KIND_ENUM;
+                        type_kind(program->types, type_strip_aligned(program->types, check_stream_type(program->stream, source))) == BUSTER_TYPE_KIND_ENUM;
                     warning_safe &= !enumeration || known;
                 }
                 else if (entry->kind == CHECK_CONTROL_CASE)
@@ -2083,7 +2085,7 @@ static uint32_t check_program_reference_initializer(CheckProgram* program, const
         const uint32_t expression = write->node;
         if (write->kind == CHECK_INIT_VALUE && expression < graph->count)
         {
-            if (program->stream->values[expression].overload_head != 0)
+            if (check_stream_overload_head(program->stream, expression) != 0)
             {
                 const CheckValue value = write->value;
                 if (value.overload_head != 0 || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.object >= program->object_count)

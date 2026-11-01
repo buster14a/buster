@@ -320,6 +320,42 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             }
             mismatches += check_input_scan_pointers((const void* const*)pointers, first, count) != present;
         }
+        // The walk's next-mark scan (check_input_scan_nonzero_from, check_input_resolve_next): from the 64-token line that
+        // holds each token, with the tokens below it and from the stop on not read, against the next nonzero role.
+        for (uint32_t first = 0; first < count; first += 1)
+        {
+            const uint32_t line = first & ~63u;
+            uint64_t nonzero = 0;
+            for (uint32_t i = first; i < count && i < line + 64; i += 1)
+            {
+                nonzero |= (uint64_t)(roles[i] != 0) << (i - line);
+            }
+            mismatches += check_input_scan_nonzero_from(roles, line, first, count) != nonzero;
+        }
+        {
+            Parser walked = { 0 };
+            CheckInputReader reader = { .parser = &walked, .visits = roles };
+            const uint32_t limits[] = { 0, count / 3, count / 2 + 1, count, UINT32_MAX };
+            for (uint32_t l = 0; count != 0 && l < BUSTER_ARRAY_LENGTH(limits); l += 1)
+            {
+                reader.resolve_limit = limits[l];
+                const uint32_t ends[] = { count - 1, (count - 1) / 2 };
+                for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(ends); e += 1)
+                {
+                    for (uint32_t token = 0; token <= ends[e]; token += 1)
+                    {
+                        const uint32_t stop = reader.resolve_limit > token && reader.resolve_limit < ends[e] ? reader.resolve_limit : ends[e];
+                        uint32_t expected_next = token + 1;
+                        while (expected_next < stop && roles[expected_next] == 0)
+                        {
+                            expected_next += 1;
+                        }
+                        expected_next = expected_next < stop ? expected_next : token + 1 < stop ? stop : token + 1;
+                        mismatches += check_input_resolve_next(&reader, token, ends[e]) != expected_next;
+                    }
+                }
+            }
+        }
         // count_tokens on a parser of these columns, by both paths, against the test's own counts.
         Parser parser = { 0 };
         parser.tokens.count = count;

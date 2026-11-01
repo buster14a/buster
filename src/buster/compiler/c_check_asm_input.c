@@ -1039,7 +1039,7 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
     CheckValue value = { 0 };
     if (valid)
     {
-        const CheckValue original = stream->values[source->node];
+        const CheckValue original = check_stream_value(stream, source->node);
         CheckAction action =
         {
             .node = source->node,
@@ -1088,7 +1088,7 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;
             if (valid)
             {
-                const CheckValue target = stream->values[assembly->operands[source->match].node];
+                const CheckValue target = check_stream_value(stream, assembly->operands[source->match].node);
                 const uint8_t a_kind = check_action_kind(types, value.type);
                 const uint8_t b_kind = check_action_kind(types, target.type);
                 const bool a_float = a_kind == BUSTER_TYPE_KIND_FLOATING;
@@ -1136,7 +1136,7 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         valid = !input->resource && stream->status == CHECK_STATUS_OK && stream->count == input->graph.count &&
                 (input->report_count == 0 || (input->diagnostic_graph && input->reports != NULL)) &&
                 (stream->report_count == 0 || stream->reports != NULL) && (input->asm_count == 0 || input->asm_statements != NULL) &&
-                (stream->count == 0 || (stream->values != NULL && stream->diagnostics != NULL && input->graph.tokens != NULL &&
+                (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != NULL && input->graph.tokens != NULL &&
                  input->graph.ops != NULL && input->graph.operand0 != NULL && input->graph.operand1 != NULL && input->graph.operand2 != NULL));
     }
     if (!valid)
@@ -1168,7 +1168,7 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         const uint32_t local = check_input_diagnostic_limit(input, graph->tokens[node]);
         const uint32_t limit = local < cutoff ? local : cutoff;
         bool checked = graph->tokens[node] < limit && (graph->source_positions == NULL || graph->source_positions[node] <= limit) &&
-                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, stream->values[node].type);
+                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, check_stream_type(stream, node));
         const uint32_t operands[] =
         {
             graph->operand0[node],

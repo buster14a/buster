@@ -290,7 +290,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                 (input->token_count == 0 || (input->initializer_begins != 0 && input->initializer_ends != 0 && input->declared_types != 0 &&
                  input->static_objects != 0 && input->token_nodes != 0)) && (input->report_count == 0 || input->reports != 0) &&
                 (stream->report_count == 0 || stream->reports != 0) && (stream->count == 0 ||
-                 (stream->values != 0 && stream->diagnostics != 0 && input->graph.ops != 0 && input->graph.tokens != 0 &&
+                 (check_stream_has_values(stream) && stream->diagnostics != 0 && input->graph.ops != 0 && input->graph.tokens != 0 &&
                   input->graph.operand0 != 0 && input->graph.operand1 != 0 && input->graph.operand2 != 0));
     }
     if (!valid)
@@ -324,7 +324,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         const uint32_t local = check_input_diagnostic_limit(input, graph->tokens[node]);
         const uint32_t limit = local < cutoff ? local : cutoff;
         bool checked = graph->tokens[node] < limit && (graph->source_positions == 0 || graph->source_positions[node] <= limit) &&
-                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, stream->values[node].type);
+                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, check_stream_type(stream, node));
         const uint32_t operands[] = {
             graph->operand0[node],
             graph->operand1[node],
