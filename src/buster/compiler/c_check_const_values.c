@@ -223,9 +223,10 @@ static bool check_const_append(CheckConstBuffer* buffer, CheckConstObject header
     {
         const uint64_t mark = buffer->arena->length;
         CheckConstBuffer next = *buffer;
-        // The capacities that the storage calls grow are locals of their own, so that nothing takes `next`'s address
-        // and it stays a value in registers. In memory, the counts stored into it at the end were reread right after
-        // by the wide loads of its copy into `*buffer`, which can't take a narrower store's data (#873).
+        // The capacities that the storage calls grow are locals of their own, so that nothing takes `next`'s address:
+        // its fields are the compiler's to place, in registers or spill slots of their own, and its copy into `*buffer`
+        // is a store per field. With `next` in memory, that copy's wide loads reread the narrower stores of its counts
+        // right after them, which they can't take their data from (#873).
         uint32_t object_capacity = next.capacity;
         uint32_t part_capacity = next.part_capacity;
         uint32_t union_capacity = next.union_capacity;

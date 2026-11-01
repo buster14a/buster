@@ -3438,7 +3438,7 @@ they do per token where little of it was per declaration or expression:
   (+3.9% of `sqlite3.c`'s instructions) accumulates over that range's later
   checker features (#927, #966, #968 and #1002 among them), outside this
   change.
-- **Store-to-load round trips in the receipts and the liveness walk (#873).**
+- **Store-to-load round trips in the receipts and the liveness walks (#873).**
   Samples of `ls_bad_status2.stli_other` on the 9700X and the 7940HS placed
   loads that can't take an older store's data in both. `check_const_append`
   wrote each trie node's new child into a stack copy of the node with a 4-byte
@@ -3446,22 +3446,29 @@ they do per token where little of it was per declaration or expression:
   copied its object and its buffer out with wide loads right after narrower
   stores into them. `check_initializer_live_writes`'s radix sort zeroed its
   1 KiB of counts with vector stores and read them back with 4-byte loads, in
-  each of its eight passes. Now each new node is its old node's two children as
-  one 64-bit word, the object is copied before its places are written into the
-  array, and the capacities that the storage calls grow are locals, so that the
-  buffer stays in registers. The sort runs a pass only over a digit in which
-  some offset differs from the first point's, and none when the points are in
-  order already, as a single write's two ends are. Both are exact: the frozen
-  `sqlite3.c`'s `-c` objects (both paths, `-g`, `--lower-all`) and diagnostics,
-  1,337 musl sources' objects and c-testsuite's 220 programs' are main's, byte
-  for byte. On that `sqlite3.c`'s `-c`, the 4,231 liveness walks (4,023 of
-  them a single write) run 158 of the 33,848 passes that main ran, and the
-  2,006 appends' trie loop no longer touches the stack. Callgrind on a baseline
-  (`BUSTER_HOST_ARCH=x86-64`) build counts 38.3M fewer instructions of 5,964M
-  (−0.64%): the walk's 43.9M became 5.3M, and the appends' 4.01M became 4.29M,
-  a few more instructions per depth for no stack round trip. Neither count is
-  the 9700X's: its A/B of `stli_other`, cycles and the checker stages' time is
-  still to be run.
+  each of its eight passes, and so did `check_initializer_live`'s sort of the
+  address candidates. Now each new node is its old node's two children as one
+  64-bit word, so that the trie loop's depths reread no node from the stack
+  (its last depth reads two spilled values, stored long before). The object is
+  copied before its places are written into the array. The capacities that the
+  storage calls grow are locals, so that nothing takes the buffer's address and
+  its copy into `*buffer` is a store per field. Both sorts run a pass only over
+  a digit in which some offset differs from the first one's, and none when the
+  offsets are in order already, as a single write's two ends and a table's
+  pointers in source order are. All of it is exact: the frozen `sqlite3.c`'s
+  `-c` objects (both paths, `-g`, `--lower-all`) and diagnostics, 1,337 musl
+  sources' objects and c-testsuite's 220 programs' are main's, byte for byte.
+  On that `sqlite3.c`'s `-c`, the 4,231 liveness walks (4,023 of them a single
+  write) run 158 of the 33,848 passes that main ran, and the 104 sorts of
+  address candidates none of their 832. Callgrind on a baseline
+  (`BUSTER_HOST_ARCH=x86-64`) build counts 39.7M fewer instructions of 5,964M
+  (−0.66%): the walk's 43.9M became 5.3M, the address sorts' 3.7M 2.4M, and the
+  appends' 4.01M 4.29M, a few more instructions per depth for no stack round
+  trip. On the 7940HS, `perf stat -r 5` of the native build before the address
+  sorts' change counted 2.25% fewer instructions and 9.62% fewer `stli_other`
+  ([buster14a/buster#1037's review](https://github.com/buster14a/buster/pull/1037#pullrequestreview-5727977655)).
+  Neither is the 9700X's: its A/B of `stli_other`, cycles and the checker
+  stages' time is still to be run.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a

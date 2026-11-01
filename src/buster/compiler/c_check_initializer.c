@@ -2832,29 +2832,44 @@ static CheckInitStatus check_initializer_live(const TypeTable* types, const Chec
             }
         }
     }
+    // As in check_initializer_live_writes (#873): a stable pass over a digit that every candidate shares keeps their
+    // order, and so does every pass over candidates in order already, as a table's pointers in source order are. So
+    // only the digits in which some offset differs from the first candidate's are sorted, and none for candidates in
+    // order, which saves each skipped pass's 1 KiB of counts, zeroed and read back, and their prefix sum.
+    uint64_t varying = 0;
+    bool unordered = false;
+    for (uint32_t i = 1; status == CHECK_INIT_OK && i < candidates; i += 1)
+    {
+        varying |= references[i].offset ^ references[0].offset;
+        unordered |= references[i].offset < references[i - 1].offset;
+    }
+    const uint64_t sorted_digits = unordered ? varying : 0;
     for (uint32_t shift = 0; status == CHECK_INIT_OK && candidates > 1 && shift < 64; shift += 8)
     {
-        uint32_t counts[256] = { 0 };
-        for (uint32_t i = 0; i < candidates; i += 1)
+        if (((sorted_digits >> shift) & 255) != 0)
         {
-            counts[(references[i].offset >> shift) & 255] += 1;
+            uint32_t counts[256] = { 0 };
+            for (uint32_t i = 0; i < candidates; i += 1)
+            {
+                counts[(references[i].offset >> shift) & 255] += 1;
+            }
+            uint32_t total = 0;
+            for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+            {
+                const uint32_t size = counts[bucket];
+                counts[bucket] = total;
+                total += size;
+            }
+            for (uint32_t i = 0; i < candidates; i += 1)
+            {
+                const uint32_t bucket = (uint32_t)((references[i].offset >> shift) & 255);
+                temporary[counts[bucket]] = references[i];
+                counts[bucket] += 1;
+            }
+            CheckInitReference* swap = references;
+            references = temporary;
+            temporary = swap;
         }
-        uint32_t total = 0;
-        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
-        {
-            const uint32_t size = counts[bucket];
-            counts[bucket] = total;
-            total += size;
-        }
-        for (uint32_t i = 0; i < candidates; i += 1)
-        {
-            const uint32_t bucket = (uint32_t)((references[i].offset >> shift) & 255);
-            temporary[counts[bucket]] = references[i];
-            counts[bucket] += 1;
-        }
-        CheckInitReference* swap = references;
-        references = temporary;
-        temporary = swap;
     }
     uint32_t unique = 0;
     for (uint32_t i = 0; status == CHECK_INIT_OK && i < candidates; i += 1)
