@@ -136,8 +136,9 @@ CI step is needed.
 
 For each pair, the test reads both files, requires that they differ (a pair that
 tests no transformation fails), and requires each file to be exactly one
-function that both parser paths accept and agree on column for column
-(`ir_parse` and `ir_parse_scalar`). It then runs the pass on the parsed before
+function that both parser paths accept, consume the same bytes of and agree on
+column for column (`ir_parse` and `ir_parse_scalar`), and whose canonical print
+is the file's bytes. It then runs the pass on the parsed before
 function by both optimizer twins, requires the vector twin's non-zero
 transformation counter, prints the vector result and requires its bytes to equal
 the after file's, parses that text again and requires it to be the after file's
@@ -186,7 +187,7 @@ and CFG cleanup compacts blocks), while a parsed file's tables hold exactly what
 its text names. So the canonical bytes, not a whole-struct comparison, are the
 structural contract with an after file; the reparsed text is compared with the
 parsed after file as well, which checks the same structure through two parses of
-two texts.
+the same bytes.
 
 `./build/compiler test-ir-optimize --print-text` prints each before file's
 vector result instead of running the checks, for maintaining the pairs: a review

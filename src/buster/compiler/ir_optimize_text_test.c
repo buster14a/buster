@@ -4,9 +4,10 @@
 // #175's first #139 pass tests in the IR's text form. Each fixture is a hand-written before/after pair under
 // tests/ir/optimize: the before text is parsed by both parser paths, the pass runs by both optimizer twins, the
 // vector result must be the after text byte for byte, the printed result is parsed again, and both sides execute
-// with the same returns, statuses and stores. `test-ir-optimize --print-text` prints the pairs' results for a
-// reviewed regeneration. Included after ir_optimize_test.c, whose independent executor and structural comparison
-// it shares; run_ir_optimize_tests calls ir_optimize_text_tests.
+// with the same returns, statuses and stores (SROA, whose slot renumbering moves a store to another address in the
+// executor's trace, compares the returns and statuses alone). `test-ir-optimize --print-text` prints the pairs'
+// results for a reviewed regeneration. Included after ir_optimize_test.c, whose independent executor and structural
+// comparison it shares; run_ir_optimize_tests calls ir_optimize_text_tests.
 
 typedef enum IrOptimizeTextPass
 {
@@ -78,18 +79,20 @@ static bool ir_optimize_text_read(const char* path, Arena* source, String8* text
     return ok;
 }
 
-// One fixture file holds exactly one function and then whitespace only. Both parser paths must accept it and agree
-// column for column. On failure both arenas are as they were, so the caller can report and continue.
+// One fixture file holds exactly one function and then whitespace only. Both parser paths must accept it, consume
+// the same function and agree column for column. On failure both arenas are as they were, so the caller can report
+// and continue.
 static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* twin, Arena* scratch, IrFunction* function, IrFunction* twin_function)
 {
     const uint64_t output_mark = output->length;
     const uint64_t twin_mark = twin->length;
     const IrParseResult vector = ir_parse(text, output, scratch, function);
     const IrParseResult scalar = ir_parse_scalar(text, twin, scratch, twin_function);
-    bool ok = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed != 0 && vector.consumed <= text.length &&
+    bool ok = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == scalar.consumed && vector.consumed != 0 && vector.consumed <= text.length &&
               ir_optimize_test_equal(function, twin_function);
     if (ok)
     {
+        // Both paths ended at the same byte, so the vector path's read of the rest is the scalar path's too.
         const String8 rest = {
             .pointer = text.pointer + vector.consumed,
             .length = text.length - vector.consumed,
@@ -237,6 +240,11 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             ir_optimize_text_expect(test, before_printed != 0 && ir_optimize_text_same_bytes(before_printed, before_length, before_text), fixture->name,
                                     "the before text is not the canonical print of its function");
             free(before_printed);
+            size_t after_length = 0;
+            char* after_printed = ir_optimize_text_print(&expected, scratch, &after_length);
+            ir_optimize_text_expect(test, after_printed != 0 && ir_optimize_text_same_bytes(after_printed, after_length, after_text), fixture->name,
+                                    "the after text is not the canonical print of its function");
+            free(after_printed);
             IrFunction vector = { 0 };
             uint64_t vector_change = 0;
             const IrCheck vector_check = ir_optimize_text_transform(fixture, &before, output, scratch, false, &vector, &vector_change);
