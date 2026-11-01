@@ -258,8 +258,11 @@ The typed stream's `COPY` is the same representation transfer without a scalar
 value: it carries the source's definedness, or defines the destination when the
 source has no tracked map, accepts identical or disjoint ranges only, refuses
 partial overlap, and leaves both bytes and metadata unchanged when either range
-fails its bound or permission check. Later typed reads retain undefined-byte
-diagnostics; `memset` defines its written bytes. This is the oracle's checking policy, with the language-level questions
+fails its bound or permission check. Typed object locals (`local_classes ==
+VOID` with `local_sizes`, the C producer's struct-assignment path) are still
+refused by `interpreter_typed_function_valid`, so this covers value locals and
+global bindings only; the object-local path remains part of #176. Later typed
+reads retain undefined-byte diagnostics; `memset` defines its written bytes. This is the oracle's checking policy, with the language-level questions
 about indeterminate values and padding discussed separately in
 [WG14 DR451](https://open-std.org/jtc1/sc22/wg14/www/docs/dr_451.htm).
 

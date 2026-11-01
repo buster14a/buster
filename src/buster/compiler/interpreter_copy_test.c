@@ -461,7 +461,7 @@ static void interpreter_test_copy_guarded(InterpreterTestTally* tally)
     if (protected)
     {
         uint8_t* source = mapping + page - 16;
-        uint8_t* destination = mapping + 2 * page;
+        uint8_t* destination = mapping + 3 * page - 16;
         uint8_t source_defined[16];
         uint8_t destination_defined[16];
         for (uint32_t i = 0; i < 16; i += 1)
