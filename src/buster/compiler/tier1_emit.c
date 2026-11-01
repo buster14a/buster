@@ -56,6 +56,25 @@ typedef enum Tier1EmitError
     TIER1_EMIT_LIMIT,
 } Tier1EmitError;
 
+// Optional cold failure detail. It is independent of the transactional result, so the original nested cause
+// survives rollback without publishing any code/arena pointers. A successful call resets it to NONE.
+typedef enum Tier1EmitCause
+{
+    TIER1_EMIT_CAUSE_NONE,
+    TIER1_EMIT_CAUSE_IR,
+    TIER1_EMIT_CAUSE_LIVENESS,
+    TIER1_EMIT_CAUSE_ALLOCATION,
+    TIER1_EMIT_CAUSE_CFG_ALLOCATION,
+    TIER1_EMIT_CAUSE_FRAME,
+} Tier1EmitCause;
+
+typedef struct Tier1EmitDiagnostic Tier1EmitDiagnostic;
+struct Tier1EmitDiagnostic
+{
+    Tier1EmitCause cause;
+    uint32_t error;
+};
+
 // The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_DIRECT and _GOT, which
 // c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot.
 #define BUSTER_TIER1_ACCESS_DIRECT 0
@@ -73,7 +92,16 @@ struct Tier1EmitOptions
     // reaches every symbol directly.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
+    Tier1EmitDiagnostic* diagnostic;
 };
+
+static void tier1_emit_diagnose(const Tier1EmitOptions* options, Tier1EmitCause cause, uint32_t error)
+{
+    if (error != 0 && options->diagnostic != NULL)
+    {
+        *options->diagnostic = (Tier1EmitDiagnostic){ .cause = cause, .error = error };
+    }
+}
 
 typedef struct Tier1EmitPrepared Tier1EmitPrepared;
 struct Tier1EmitPrepared
@@ -952,6 +980,10 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     const uint64_t output_mark = arguments ? output->length : 0;
     const uint64_t scratch_mark = arguments ? scratch->length : 0;
     Tier1EmitResult emitted = {0};
+    if (options != NULL && options->diagnostic != NULL)
+    {
+        *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
+    }
     if (error_node != 0)
     {
         *error_node = BUSTER_IR_NONE;
@@ -977,6 +1009,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     if (error == TIER1_EMIT_OK && chain)
     {
         const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, BUSTER_VECTOR_PATH(options->vector), &emitted.liveness);
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, live);
         error = live == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : live == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : live == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : live == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     }
     if (error == TIER1_EMIT_OK && chain)
@@ -986,6 +1019,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     if (error == TIER1_EMIT_OK && chain)
     {
         const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_ALLOCATION, allocated);
         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
     }
     if (error == TIER1_EMIT_OK && chain)
@@ -1031,7 +1065,8 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         if (error == TIER1_EMIT_OK)
         {
             const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted.frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted.frame);
-            error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_FRAME;
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
+            error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
         }
     }
     if (error == TIER1_EMIT_OK && chain)

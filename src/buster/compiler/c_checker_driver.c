@@ -1458,7 +1458,11 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
 static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp, const CheckProgramCode* code)
 {
     char message[256];
-    if (code->status == CHECK_PROGRAM_RESOURCE)
+    if (code->tier1_failure.category != CHECK_TIER1_UNATTEMPTED)
+    {
+        check_tier1_diagnostic(message, sizeof(message), &code->tier1_failure);
+    }
+    else if (code->status == CHECK_PROGRAM_RESOURCE)
     {
         snprintf(message, sizeof(message), "code output capacity exhausted%s%s", code->reason != NULL ? ": " : "", code->reason != NULL ? code->reason : "");
     }
@@ -2332,6 +2336,7 @@ struct CheckDriverCommand
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize and --tier1-no-lifetimes.
     bool tier1;
+    bool tier1_strict;
     bool tier1_no_rematerialize;
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
@@ -3212,6 +3217,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes.tier1 = true;
         }
+        else if (strcmp(arguments[i], "--tier1-strict") == 0)
+        {
+            lanes.tier1_strict = true;
+        }
         else if (strcmp(arguments[i], "--tier1-report") == 0)
         {
             tier1_report = true;
@@ -3361,6 +3370,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .output = output,
         .libraries = &libraries,
         .tier1 = lanes.tier1,
+        .tier1_strict = lanes.tier1_strict,
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
         .tier1_report = &lanes.tier1_report,
@@ -3385,7 +3395,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
     {
@@ -3400,9 +3410,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
-    else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || lanes.tier1_no_lifetimes) && !lanes.tier1)
+    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || lanes.tier1_no_lifetimes) && !lanes.tier1)
     {
-        fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
+        fprintf(stderr, "error: %s needs --tier1\n", lanes.tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : "--tier1-no-lifetimes");
     }
     else if (lanes.tier1 && source_rows)

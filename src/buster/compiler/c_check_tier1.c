@@ -12,6 +12,80 @@
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
 
+static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Cause cause, uint32_t error, uint32_t instruction, uint32_t detail)
+{
+    CheckTier1Category category = CHECK_TIER1_INTERNAL;
+    switch (cause)
+    {
+        case CHECK_TIER1_CAUSE_ADMISSION:
+            category = error == BUSTER_CHECK_TIER1_NAKED ? CHECK_TIER1_UNSUPPORTED : category;
+            break;
+        case CHECK_TIER1_CAUSE_IR:
+            category = error == IR_ERROR_UNSUPPORTED ? CHECK_TIER1_UNSUPPORTED : error == IR_ERROR_MEMORY || error == IR_ERROR_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_DOMINATORS:
+            category = error == DOMINATOR_NO_MEMORY || error == DOMINATOR_MATRIX_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_SELECTION:
+            category = error == TIER1_SELECT_ERROR_UNSUPPORTED || error == TIER1_SELECT_ERROR_TARGET ? CHECK_TIER1_UNSUPPORTED :
+                       error == TIER1_SELECT_ERROR_MEMORY || error == TIER1_SELECT_ERROR_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_EMISSION:
+            category = error == TIER1_EMIT_UNSUPPORTED || error == TIER1_EMIT_TARGET ? CHECK_TIER1_UNSUPPORTED :
+                       error == TIER1_EMIT_MEMORY || error == TIER1_EMIT_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_ARENA:
+            category = error == BUSTER_CHECK_TIER1_ARENA_RESERVE || error == BUSTER_CHECK_TIER1_ARENA_OUTPUT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_LIVENESS:
+            category = error == TIER1_LIVENESS_UNSUPPORTED ? CHECK_TIER1_UNSUPPORTED :
+                       error == TIER1_LIVENESS_MEMORY || error == TIER1_LIVENESS_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_ALLOCATION:
+            category = error == TIER1_ALLOCATION_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_CFG_ALLOCATION:
+            category = error == TIER1_CFG_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_FRAME:
+            category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        default:
+            break;
+    }
+    const CheckTier1Outcome outcome = {
+        .stage = stage,
+        .category = category,
+        .cause = cause,
+        .error = error,
+        .instruction = instruction,
+        .detail = detail,
+        .operation = IR_OP_COUNT,
+    };
+    return check_tier1_policy(outcome, false);
+}
+
+static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause cause, uint32_t error, uint32_t instruction, uint32_t detail, const CheckTier1Fault* fault)
+{
+    if (error == 0 && fault != NULL && fault->stage == stage)
+    {
+        cause = fault->cause;
+        error = fault->error;
+        instruction = fault->instruction;
+        detail = fault->detail;
+    }
+    const CheckTier1Outcome success = { .category = CHECK_TIER1_SUCCESS, .instruction = BUSTER_IR_NONE, .operation = IR_OP_COUNT };
+    return error == 0 ? success : check_tier1_failure(stage, cause, error, instruction, detail);
+}
+
+static uint32_t check_tier1_operation(CheckTier1Outcome outcome)
+{
+    // This is only the legacy bounded histogram. The outcome itself never truncates an error or a location.
+    return outcome.cause != CHECK_TIER1_CAUSE_SELECTION ? BUSTER_CHECK_TIER1_OPERATIONS :
+           outcome.error == TIER1_SELECT_ERROR_UNSUPPORTED ? outcome.operation :
+           outcome.error < BUSTER_CHECK_TIER1_OPERATIONS - IR_OP_COUNT ? IR_OP_COUNT + outcome.error : BUSTER_CHECK_TIER1_OPERATIONS;
+}
+
 static void check_tier1_lane_release(CheckTier1Lane* lane)
 {
     for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
@@ -104,12 +178,14 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
     return describable;
 }
 
-static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
+static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
+                                           bool rematerialize, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault)
 {
-    *operation = 0;
+    *code = (Tier0Code){ 0 };
     *counts = (CheckTier1Counts){ 0 };
-    CheckTier1Stage stage = check_tier1_lane_prepare(lane, target) ? CHECK_TIER1_COMPILED : CHECK_TIER1_RESOURCE;
+    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
+                                                check_tier1_lane_prepare(lane, target) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
+    CheckTier1Stage stage = outcome.stage;
     Arena* scratch = &lane->scratch;
     const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
     IrFunction lowered = { 0 };
@@ -117,27 +193,39 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     {
         const IrCheck check = scalar ? ir_lower_typed_target_scalar(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered) :
                                        ir_lower_typed_target(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered);
-        stage = check.error == IR_OK ? stage : CHECK_TIER1_LOWERING;
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.dominance_checked = check.dominance_checked;
+        stage = outcome.stage;
     }
     IrFunction promoted = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
         const IrCheck check = scalar ? ssa_ir_promote_scalar(&lowered, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(&lowered, &lane->steps[1], scratch, &promoted);
-        stage = check.error == IR_OK ? stage : CHECK_TIER1_PROMOTION;
+        outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.dominance_checked = check.dominance_checked;
+        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
     }
     IrOptimizeResult optimized = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.scalar = scalar;
-        stage = ir_optimize(&promoted, &lane->steps[2], scratch, options, &optimized).error == IR_OK ? stage : CHECK_TIER1_OPTIMIZATION;
+        const IrCheck check = ir_optimize(&promoted, &lane->steps[2], scratch, options, &optimized);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.dominance_checked = check.dominance_checked;
+        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
     }
     const IrFunction* ir = &optimized.function;
     IrCfg cfg = { 0 };
     Dominators dominators = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
-        stage = ir_build_cfg(ir, &lane->steps[3], scratch, &cfg) == IR_OK ? stage : CHECK_TIER1_ANALYSIS;
+        const IrError error = ir_build_cfg(ir, &lane->steps[3], scratch, &cfg);
+        outcome = check_tier1_step(CHECK_TIER1_ANALYSIS, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0,
+                                   fault != NULL && fault->cause == CHECK_TIER1_CAUSE_IR ? fault : NULL);
+        stage = outcome.stage;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
@@ -153,7 +241,10 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         DominatorOptions options = dominators_options();
         options.outputs = 0;
         options.path = scalar ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
-        stage = dominators_analyze(&lane->steps[3], scratch, &graph, options, &dominators) == DOMINATOR_OK ? stage : CHECK_TIER1_ANALYSIS;
+        const DominatorStatus error = dominators_analyze(&lane->steps[3], scratch, &graph, options, &dominators);
+        outcome = check_tier1_step(CHECK_TIER1_ANALYSIS, CHECK_TIER1_CAUSE_DOMINATORS, error, BUSTER_IR_NONE, 0,
+                                   fault != NULL && fault->cause == CHECK_TIER1_CAUSE_DOMINATORS ? fault : NULL);
+        stage = outcome.stage;
     }
     Tier1SelectPlan plan = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
@@ -168,13 +259,16 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         // verify it again (#141).
         const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[4], scratch, !scalar, &plan, &node);
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
-        *operation = selected == TIER1_SELECT_OK ? 0 : selected == TIER1_SELECT_ERROR_UNSUPPORTED ? refused : IR_OP_COUNT + (uint32_t)selected;
-        stage = selected == TIER1_SELECT_OK ? stage : CHECK_TIER1_SELECTION;
+        outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
+        outcome.operation = refused;
+        stage = outcome.stage;
     }
     Tier1EmitResult emitted = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
+        Tier1EmitDiagnostic diagnostic = { 0 };
         const Tier1EmitOptions options = {
+            .diagnostic = &diagnostic,
             .register_mask = tier1_liveness_register_mask(),
             .vector = !scalar,
             .rematerialize = rematerialize,
@@ -183,8 +277,20 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         };
         uint32_t node = BUSTER_IR_NONE;
         const Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[5], scratch, &emitted, &node);
-        *operation = (uint32_t)error;
-        stage = error == TIER1_EMIT_OK ? stage : CHECK_TIER1_EMISSION;
+        static const CheckTier1Cause causes[] = {
+            CHECK_TIER1_CAUSE_EMISSION,
+            CHECK_TIER1_CAUSE_IR,
+            CHECK_TIER1_CAUSE_LIVENESS,
+            CHECK_TIER1_CAUSE_ALLOCATION,
+            CHECK_TIER1_CAUSE_CFG_ALLOCATION,
+            CHECK_TIER1_CAUSE_FRAME,
+        };
+        const bool nested = error != TIER1_EMIT_OK && diagnostic.cause != TIER1_EMIT_CAUSE_NONE;
+        outcome = check_tier1_step(CHECK_TIER1_EMISSION, nested ? causes[diagnostic.cause] : CHECK_TIER1_CAUSE_EMISSION,
+                                   nested ? diagnostic.error : (uint32_t)error, node, 0, fault);
+        outcome.emission_error = error != TIER1_EMIT_OK ? (uint32_t)error : outcome.cause == CHECK_TIER1_CAUSE_EMISSION ? outcome.error : 0;
+        outcome.operation = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
+        stage = outcome.stage;
     }
     // The code in `output`, as Tier 0's is: its records, branch columns and references.
     const uint64_t mark = output->length;
@@ -199,7 +305,8 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || tails == 0))
     {
         arena_pop_to(output, mark);
-        stage = CHECK_TIER1_RESOURCE;
+        outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
+        stage = outcome.stage;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
@@ -249,33 +356,41 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         const bool published = check_tier1_frame(&emitted, selected->count, tails, code);
         counts->open_frames = code->frame_open && (code->frame_saved != 0 || code->frame_pointer || code->frame_size != 0);
         counts->return_tails = code->tail_count;
-        if (!published)
+        outcome = check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
+                                   published ? 0 : BUSTER_CHECK_TIER1_FRAME_PUBLICATION, BUSTER_IR_NONE, 0, fault);
+        if (outcome.category != CHECK_TIER1_SUCCESS)
         {
             arena_pop_to(output, mark);
             *code = (Tier0Code){ 0 };
             *counts = (CheckTier1Counts){ 0 };
-            *operation = TIER1_EMIT_FRAME;
-            stage = CHECK_TIER1_EMISSION;
+            stage = outcome.stage;
         }
     }
-    return stage;
+    if (outcome.category != CHECK_TIER1_SUCCESS)
+    {
+        arena_pop_to(output, mark);
+        *code = (Tier0Code){ 0 };
+        *counts = (CheckTier1Counts){ 0 };
+        for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+        {
+            arena_pop_to(&lane->steps[k], 0);
+        }
+        arena_pop_to(&lane->scratch, 0);
+        if (outcome.stage == CHECK_TIER1_RESOURCE)
+        {
+            check_tier1_lane_release(lane);
+        }
+    }
+    return outcome;
 }
 
-static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource" };
-
-static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome)
+static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, CheckTier1Outcome outcome)
 {
-    const uint32_t stage = outcome & 0xff;
-    const uint32_t operation = outcome >> 8;
-    const char* refused = stage == CHECK_TIER1_SELECTION && operation < IR_OP_COUNT ? ir_op_names[operation] : stage == CHECK_TIER1_SELECTION && operation == IR_OP_COUNT ? "function" : "";
-    if (refused[0] != 0)
-    {
-        fprintf(stream, "tier1-refused\t%.*s\t%s\t%s\n", (int)length, (const char*)name, check_tier1_stage_names[stage], refused);
-    }
-    else
-    {
-        fprintf(stream, "tier1-refused\t%.*s\t%s\terror%" PRIu32 "\n", (int)length, (const char*)name, check_tier1_stage_names[stage], stage == CHECK_TIER1_SELECTION ? operation - IR_OP_COUNT : operation);
-    }
+    const char* operation = outcome.stage == CHECK_TIER1_SELECTION && outcome.operation < IR_OP_COUNT ? ir_op_names[outcome.operation] : "none";
+    fprintf(stream, "tier1-refused\t%.*s\t%s\tcategory=%s\tcause=%s\terror=%u\tinstruction=%u\tdetail=%u\toperation=%s\temission_error=%u\tdominance_checked=%u\tfallback=%s\n",
+            (int)length, (const char*)name, check_tier1_stage_names[outcome.stage], check_tier1_category_names[outcome.category],
+            check_tier1_cause_names[outcome.cause], outcome.error, outcome.instruction, outcome.detail, operation, outcome.emission_error,
+            outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden");
 }
 
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report)
@@ -286,6 +401,9 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     {
         fprintf(stream, "\t%s=%" PRIu32, stages[s], report->stages[s]);
     }
+    fprintf(stream, "\trequested=%u\tadmitted=%u\tcompiled=%u\tunsupported=%u\tresource_failures=%u\tresource_retries=0\tinternal_failures=%u\tfallbacks=%u",
+            report->requested, report->admitted, report->categories[CHECK_TIER1_SUCCESS], report->categories[CHECK_TIER1_UNSUPPORTED],
+            report->categories[CHECK_TIER1_RESOURCE_FAILURE], report->categories[CHECK_TIER1_INTERNAL], report->fallbacks);
     for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_OPERATIONS; k += 1)
     {
         if (report->operations[k] != 0 && k < IR_OP_COUNT)

@@ -1496,9 +1496,10 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .board_lane = (uint32_t)(lane - run->lanes),
             .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
             .tier1 = command->tier1,
+            .tier1_strict = command->tier1_strict,
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
-            .tier1_refusals = command->tier1_refusals,
+            .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
         };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
@@ -1520,6 +1521,13 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             CheckTier1Report* report = command->tier1_report;
             const CheckTier1Report* unit_report = &lane->functions.tier1_report;
             __atomic_fetch_add(&report->functions, unit_report->functions, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->requested, unit_report->requested, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->admitted, unit_report->admitted, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->fallbacks, unit_report->fallbacks, __ATOMIC_RELAXED);
+            for (uint32_t k = 1; k < CHECK_TIER1_CATEGORY_COUNT; k += 1)
+            {
+                __atomic_fetch_add(&report->categories[k], unit_report->categories[k], __ATOMIC_RELAXED);
+            }
             __atomic_fetch_add(&report->records, unit_report->records, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->spill_stores, unit_report->spill_stores, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->spill_loads, unit_report->spill_loads, __ATOMIC_RELAXED);
