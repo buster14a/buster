@@ -561,7 +561,9 @@ static void check_test_asm_capacity(CheckTest* test)
         check_test_expect(test, assembly->is_volatile && assembly->memory_clobber && assembly->output_count == 1 && assembly->input_count == 1 &&
                               (assembly->operands[0].flags & (CHECK_ASM_READ | CHECK_ASM_WRITE | CHECK_ASM_MEMORY)) ==
                               (CHECK_ASM_READ | CHECK_ASM_WRITE | CHECK_ASM_MEMORY), "asm read/write memory and qualifier effects are retained");
+        assert(arena_commit(&output, output.capacity));
         memset(output.base, 0xa5, output.capacity);
+        assert(arena_commit(&scratch, scratch.capacity));
         memset(scratch.base, 0x5a, scratch.capacity);
         output.length = 17;
         scratch.length = 19;

@@ -58,7 +58,9 @@ static void check_test_repair_faults(CheckTest* test, const Parser* parser, Prep
     check_test_expect(test, initialized, "repair fault storage initializes");
     if (initialized)
     {
+        assert(arena_commit(&output, output.capacity));
         memset(output.base, 0xa5, output.capacity);
+        assert(arena_commit(&scratch, scratch.capacity));
         memset(scratch.base, 0x5a, scratch.capacity);
         output.length = 33;
         scratch.length = 19;

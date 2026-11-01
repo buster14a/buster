@@ -1910,7 +1910,7 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
     }
     else
     {
-        fprintf(stderr, "fatal error: can't reserve memory for the libraries\n");
+        arena_report_failure(stderr, "the libraries", UINT64_C(1) << 36);
     }
 }
 
@@ -1983,7 +1983,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         else if (!valid)
         {
-            fprintf(stderr, "fatal error: can't reserve linker memory\n");
+            arena_report_failure(stderr, "linking", UINT64_C(1) << 36);
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
         // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
@@ -2367,7 +2367,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                  parse_initialize(parser, &parser_options, options->language);
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
-        fprintf(errors, "fatal error: can't reserve checker memory\n");
+        arena_report_failure(errors, "checking", UINT64_C(1) << 36);
     }
     else
     {
@@ -3001,6 +3001,7 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
 static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
 {
+    arena_failure = (ArenaFailure){ 0 };
     WorkerBudget worker_budget;
     // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
     // option: a compile without it reads neither the clocks nor its resource use. A value that spells the option (`-o
@@ -3347,9 +3348,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
     }
-    else if (!arguments_ready)
+    else if (!arguments_ready || (!parsed && arena_failure.bytes != 0))
     {
-        fprintf(stderr, "fatal error: can't allocate checker argument storage\n");
+        arena_report_failure(stderr, "checker arguments", (uint64_t)(count + 1) * sizeof(char*));
     }
     else if (unsupported_codegen != NULL)
     {

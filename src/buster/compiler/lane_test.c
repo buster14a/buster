@@ -535,7 +535,12 @@ static bool lane_test_arenas(void)
     lane_test_expect(&tally, large.base != 0 && large.capacity == BUSTER_LANE_TEST_LARGE_ARENA, "a 64 GB arena couldn't be reserved");
     if (large.base != 0)
     {
-        large.base[0] = 1;
+        uint8_t* first = arena_push(&large, 1, 1);
+        lane_test_expect(&tally, first != 0, "a large arena could not commit its first page");
+        if (first != 0)
+        {
+            first[0] = 1;
+        }
         lane_test_expect(&tally, lane_test_resident(large.base), "a touched page isn't committed");
         lane_test_expect(&tally, !lane_test_resident(large.base + BUSTER_ARENA_SMALL_BYTES - BUSTER_ARENA_PAGE_BYTES), "the first touch committed more than its page");
         lane_test_expect(&tally, !lane_test_resident(large.base + (BUSTER_LANE_TEST_LARGE_ARENA / 2)), "an untouched page is committed");

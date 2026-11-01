@@ -314,6 +314,33 @@ jobs:
           git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
           git -C build/c-testsuite checkout -q FETCH_HEAD
 
+      - name: Check constrained arenas, command diagnostics, and Callgrind
+        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none'
+        run: |
+          clang -std=c17 -march=x86-64 -O2 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function tests/arena/resources.c -o "$RUNNER_TEMP/memory-resources" -pthread
+          mkdir -p "$RUNNER_TEMP/memory-limited" "$RUNNER_TEMP/memory-valgrind" "$RUNNER_TEMP/memory-strict"
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-limited"
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-valgrind" --valgrind
+          # Only this disposable hosted VM changes policy; restore all three knobs before the ordinary test suite.
+          old_mode=$(cat /proc/sys/vm/overcommit_memory)
+          old_kbytes=$(cat /proc/sys/vm/overcommit_kbytes)
+          old_ratio=$(cat /proc/sys/vm/overcommit_ratio)
+          trap 'sudo sysctl -q -w vm.overcommit_memory="$old_mode"; if [ "$old_kbytes" = 0 ]; then sudo sysctl -q -w vm.overcommit_ratio="$old_ratio"; else sudo sysctl -q -w vm.overcommit_kbytes="$old_kbytes"; fi' EXIT
+          # A fixed CommitLimit admits overcommit_kbytes on its own; subtracting SwapTotal left the headroom at the
+          # mercy of the runner's swapfile size, so the last commands' commits could find almost none.
+          budget=$(awk '/^Committed_AS:/ {used=$2} END {printf "%.0f\n", used + 4*1024*1024}' /proc/meminfo)
+          sudo sysctl -q -w vm.overcommit_kbytes="$budget" vm.overcommit_memory=2
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-strict" --strict
+
+      - name: Preserve memory admission diagnostics
+        if: ${{ always() && matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memory-admission-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memory-*/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run correctness tests within the hosted CPU budget
         run: |
           timeout=600

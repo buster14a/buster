@@ -448,7 +448,7 @@ static bool check_deferred_test_memory(void)
             if (valid)
             {
                 first[0] = (uint8_t)(i + 1);
-                list[i]->base[list[i]->capacity - 1] = (uint8_t)(i + 1);
+                valid = list[i]->committed < list[i]->capacity;
             }
             offset += capacities[i];
         }
@@ -457,7 +457,7 @@ static bool check_deferred_test_memory(void)
         valid = valid && check_deferred_lane_arenas(arenas) && arenas->mapping == mappings[l];
         for (uint32_t i = 0; valid && i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
         {
-            valid = list[i]->length == 0 && list[i]->base[0] == i + 1 && list[i]->base[list[i]->capacity - 1] == i + 1;
+            valid = list[i]->length == 0 && list[i]->base[0] == i + 1 && list[i]->committed < list[i]->capacity;
         }
     }
     check_deferred_arena(&state.memory.arena, UINT64_C(1) << 36);
@@ -543,6 +543,7 @@ static bool check_deferred_test_sparse_pages(void)
                     valid = arena.base != 0 && arena.capacity == bytes && arena.length == 0;
                     // Reserving must not eagerly clear or commit the columns on the calling thread.
                     valid = valid && !check_deferred_test_resident(arena.base, 1) && !check_deferred_test_resident(arena.base + bytes - 1, 1);
+                    valid = valid && arena_commit(&arena, bytes);
                     const uint64_t offsets[] =
                     {
                         0,

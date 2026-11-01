@@ -373,7 +373,9 @@ static void check_data_test_objects(CheckTest* test, TypeTable* types, const cha
     bool ready = initialized;
     if (ready)
     {
+        assert(arena_commit(&test_link.bytes, test_link.bytes.capacity));
         memset(test_link.bytes.base, 0xa5, test_link.bytes.capacity);
+        assert(arena_commit(&test_link.scratch, test_link.scratch.capacity));
         memset(test_link.scratch.base, 0x5a, test_link.scratch.capacity);
         map[EXTERNAL_OBJECT] = check_data_test_symbol(&test_link.link, "data_external", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
         ready = map[EXTERNAL_OBJECT] != 0;
@@ -1704,6 +1706,7 @@ static void check_data_test_symbolic_zero(CheckTest* test, TypeTable* types)
                 parts[1].value.integer = 1;
                 parts[2] = parts[0];
             }
+            assert(arena_commit(&fixture.scratch, fixture.scratch.capacity));
             memset(fixture.scratch.base, 0x5a, fixture.scratch.capacity);
             CheckDataStatus expected = CHECK_DATA_OK;
             if (variant == 12 || variant == 13)
