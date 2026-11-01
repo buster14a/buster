@@ -250,8 +250,8 @@ struct CheckTestTier1Build
 // `name` by Tier 1 (no refusal line names it).
 static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, CheckTestTier1Build* build)
 {
-    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "-fno-asynchronous-unwind-tables", "--verify" };
-    uint32_t count = 6;
+    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
+    uint32_t count = 5;
     if (!rematerialize)
     {
         arguments[count++] = "--tier1-no-rematerialize";

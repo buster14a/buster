@@ -6,8 +6,9 @@
 // code and CFG cleanup), its CFG and dominators analyzed, selected (tier1_select.c) and emitted (tier1_emit.c, whose
 // CFG consumer allocates a general CFG's values over it, tier1_cfg.c), each step with --scalar by its scalar twin. The
 // emission's check_program_emit_tier1 calls it for each body and gives Tier 0 the bodies a step refuses, so that a
-// program of both tiers' functions is one System V program. What Tier 1's code leaves out (unwind tables, -g's rows) the
-// driver refuses with the option. Include after tier1_emit.c and c_check_program_emit.c.
+// program of both tiers' functions is one System V program. Tier 1's code publishes its frame as Tier 0's does
+// (check_tier1_frame, #177), so that the emission writes its unwind tables as it writes Tier 0's. What Tier 1's code
+// leaves out (-g's rows) the driver refuses with the option. Include after tier1_emit.c and c_check_program_emit.c.
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
 
@@ -53,6 +54,45 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
         lane->targeted = true;
     }
     return valid;
+}
+
+// Tier 1's frame as Tier 0 publishes its own (Tier0Code.frame_*, which unwind_tier0_frame_tails reads, #177): the
+// callee-saved registers it pushes, by their bits in Tier 0's order (unwind_tier0_saved_registers), its subtraction,
+// its frame pointer, its realignment and its base. Its early returns' rets are the code's tails, each right after its
+// epilogue; and where the code's last record isn't its last return's ret (a loop's latch, a call that doesn't return,
+// a trap), the frame is open and every return is a tail. A frameless function needs neither: its rules are the CIE's
+// throughout. A probe's loop (BUSTER_TIER1_FRAME_PROBE_STACK, which the driver doesn't ask for) moves rsp a page at a
+// time, which the protocol doesn't describe: returns false for it.
+static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* tails, Tier0Code* code)
+{
+    const Tier1Frame* frame = &emitted->frame;
+    bool describable = true;
+    for (uint32_t i = 0; i < frame->prologue_count; i += 1)
+    {
+        describable &= frame->prologue[i].kind != TIER1_FRAME_PROBE_ALLOCATE && frame->prologue[i].kind != TIER1_FRAME_PROBE_ALIGN;
+    }
+    uint32_t saved = 0;
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); r += 1)
+    {
+        saved |= ((frame->saved_registers >> unwind_tier0_saved_registers[r]) & 1u) << r;
+    }
+    describable &= (frame->saved_registers & ~BUSTER_ABI_CALLEE_SAVED) == 0;
+    const bool frameless = saved == 0 && !frame->frame_pointer && frame->stack_adjust_bytes == 0;
+    const bool closed = count != 0 && emitted->exit_count != 0 && emitted->exits[emitted->exit_count - 1] == count - 1;
+    const uint32_t tail_count = frameless ? 0 : closed ? emitted->exit_count - 1 : emitted->exit_count;
+    for (uint32_t k = 0; k < tail_count; k += 1)
+    {
+        tails[k] = emitted->exits[k];
+    }
+    code->frame_saved = saved;
+    code->frame_size = frame->stack_adjust_bytes;
+    code->frame_pointer = frame->frame_pointer;
+    code->frame_alignment_log2 = frame->realigned ? (uint8_t)__builtin_ctz(frame->alignment) : 0;
+    code->frame_base = frame->realigned && frame->base_register == BUSTER_TIER1_FRAME_REALIGN_BASE;
+    code->frame_open = !closed;
+    code->tail_records = tail_count != 0 ? tails : 0;
+    code->tail_count = tail_count;
+    return describable;
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
@@ -144,7 +184,8 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     uint32_t* branches = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     uint32_t* targets = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0))
+    uint32_t* tails = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.exit_count + 1) : 0;
+    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || tails == 0))
     {
         arena_pop_to(output, mark);
         stage = CHECK_TIER1_RESOURCE;
@@ -187,6 +228,14 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .reference_count = emitted.reference_count,
             .error = TIER0_OK,
         };
+        if (!check_tier1_frame(&emitted, selected->count, tails, code))
+        {
+            arena_pop_to(output, mark);
+            *code = (Tier0Code){ 0 };
+            *counts = (CheckTier1Counts){ 0 };
+            *operation = TIER1_EMIT_FRAME;
+            stage = CHECK_TIER1_EMISSION;
+        }
     }
     return stage;
 }

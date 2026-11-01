@@ -1053,6 +1053,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     code->branches = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     code->targets = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
+    emitted->exits = ok ? ir_allocate(output, (uint64_t)returns + 1, 4, &ok) : 0;
+    emitted->exit_count = 0;
     transitions.offsets = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 2, 4, &ok) : 0;
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.values = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
@@ -1420,6 +1422,15 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 if (error == TIER1_EMIT_OK)
                 {
                     tier1_select_requests_add(&requests, &selected_records, record_first, buffer.records);
+                }
+                if (error == TIER1_EMIT_OK && returns_here && emitted->exit_count < returns)
+                {
+                    emitted->exits[emitted->exit_count] = buffer.count - 1;
+                    emitted->exit_count += 1;
+                }
+                else if (error == TIER1_EMIT_OK && returns_here)
+                {
+                    error = TIER1_EMIT_INVALID;
                 }
             }
             // A definition left out writes no register, so nothing saves one for it around a call or a fixed sequence.

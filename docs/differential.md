@@ -34,14 +34,13 @@ working native C toolchain and runtime. A real Buster campaign also requires:
   external runtime/header installations for reproducibility.
 
 The driver compiles by Tier 0 by default (`--tier0-default`), and by Tier 1
-with `--tier1`, which needs `-fno-asynchronous-unwind-tables` (Tier 1's frames
-have no unwind tables yet: [the Tier 1 guide](tier1.md)'s "The C driver's
-`--tier1`"), each its own `--tier1-arg`. A campaign looks like this (each
+with `--tier1` ([the Tier 1 guide](tier1.md)'s "The C driver's `--tier1`"),
+each of its options its own `--tier1-arg`. A campaign looks like this (each
 environment variable is set to the actual executable, directory or revision):
 
 ```sh
 ./build/compiler test-differential \
-  --buster "$BUSTER" --tier0-default --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables \
+  --buster "$BUSTER" --tier0-default --tier1-arg --tier1 \
   --csmith "$CSMITH" --csmith-include "$CSMITH_INCLUDE" --yarpgen "$YARPGEN" \
   --clang clang --generator both --seed 138 --count 10 \
   --revision "$BUSTER_REVISION" --generator-revision "$GENERATOR_REVISIONS" \

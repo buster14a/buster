@@ -298,7 +298,14 @@ designs and the compilers already built this way.
   (#179)" have the contract and what is pending.
 
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
-  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  #177, whose steps are Tier 0's frame protocol (callee-saved registers pushed,
+  one subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
+  realignment and its R15 base after the subtraction), which the C driver's
+  unwind tables describe from Tier 1's published frame (`check_tier1_frame`,
+  early returns as tails, an open frame where the code doesn't end in its last
+  epilogue: the frame guide's "Unwind tables"; `test-check-debug --cross-check`
+  unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every instruction).
+  `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
   `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
   variadic saves and guarded page probes. [The frame guide](docs/tier1-frame.md)
@@ -450,8 +457,8 @@ designs and the compilers already built this way.
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
-  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, with
-  `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` and
+  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
+  unwind tables alike, #177's `check_tier1_frame`; without `-g`; `--tier1-report` and
   `--tier1-refusals` say which step refused the others, and
   `--tier1-no-rematerialize` compiles them without rematerialization: [the Tier 1
   guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
@@ -845,7 +852,10 @@ designs and the compilers already built this way.
   and gdb's backtrace at every instruction of each function, whose steps must
   reach every instruction of gdb's disassembly of it; and a `SIGILL` handler's
   `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
-  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret).
+  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret);
+  and a `--tier1 --verify` fixture's Tier 1 frames (#177: spill slots alone,
+  pushes, two returns, an open frame, a realigned one), walked by `backtrace()`
+  by each path and linked by GNU ld and lld, and by gdb at every instruction.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -867,11 +877,13 @@ designs and the compilers already built this way.
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
   refuses, and realigned frames', whose `and rsp` and base's `mov` it checks;
   `unwind_tier0_frame_tails` with a function's tail calls' teardowns, #147,
-  each remembered and restored around its jump);
+  each remembered and restored around its jump, and Tier 1's early returns'
+  as such teardowns before their rets, #177);
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
-  batch. `check_program_emit` writes the C driver's unwind tables so, one
-  EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  batch, and for Tier 1's open frames (`UnwindFunction.open`, #177) no epilogue
+  at the end, each return a tail. `check_program_emit` writes the C driver's
+  unwind tables so, one EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
   frame against the analyzer and actual Tier 0 code, a frame pointer's and
   realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges

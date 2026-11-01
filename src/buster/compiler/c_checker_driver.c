@@ -3389,10 +3389,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: --tier1 doesn't support -g: Tier 1's code has no source rows yet\n");
     }
-    else if (lanes.tier1 && unwind_tables && (emit_object || link))
-    {
-        fprintf(stderr, "error: --tier1 needs -fno-asynchronous-unwind-tables: Tier 1's frames have no unwind tables yet\n");
-    }
     else
     {
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).

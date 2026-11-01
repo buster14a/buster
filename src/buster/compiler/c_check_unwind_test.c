@@ -36,6 +36,15 @@
 // - A second fixture (#523) whose SIGILL handler counts the frames from __builtin_trap()'s helper, a ud2 alone with an
 //   FDE of no transitions: by each path, the same bytes, and its object linked by cc through GNU ld, the unwinder walks
 //   from the handler through the helper to main; without unwind tables, it still traps into the handler.
+// - A third (#177) compiled by --tier1 with --verify, every function but main by Tier 1 (none named by
+//   --tier1-refusals), whose frames are Tier 0's protocol with Tier 1's shapes: a frame of spill slots alone (`kept`),
+//   one with callee-saved registers' pushes too (`crowded`), two returns each after its own epilogue (`early`, the
+//   first one's teardown remembered and restored), a loop whose latch's jump is the code's last record, so that its
+//   frame is open and its one return a teardown of its own (`spin`), and a realigned frame (`aligned`). By each path
+//   (whose frames' slots may be colored apart, so not the same bytes), and its object linked by cc through GNU ld and
+//   lld, the unwinder walks through every function to main; without unwind tables it stops at the first, and the program prints 1 1 1 1 -1 1 1. And gdb, without -g (which
+//   --tier1 refuses), at every instruction of each of the six from its first to its ret, both of early's returns and
+//   spin's iterations among them: each backtrace's frames are the function and main.
 
 static const char check_unwind_test_text[] =
     "#include <execinfo.h>\n"
@@ -233,6 +242,98 @@ static const char check_unwind_test_trap_text[] =
     "        trap();\n"
     "    }\n"
     "    return 2;\n"
+    "}\n";
+
+// The Tier 1 fixture (#177, see the file's comment): main, which calls printf, is Tier 0's; the others Tier 1's.
+static const char check_unwind_test_tier1_text[] =
+    "#include <execinfo.h>\n"
+    "#include <stdio.h>\n"
+    "\n"
+    "int depth(void)\n"
+    "{\n"
+    "    void* frames[64];\n"
+    "    return backtrace(frames, 64);\n"
+    "}\n"
+    "\n"
+    "long kept(long x)\n"
+    "{\n"
+    "    long a = x * 3 + 1;\n"
+    "    long b = x * 5 + 2;\n"
+    "    long c = x * 7 + 3;\n"
+    "    long d = x * 11 + 4;\n"
+    "    long frames = depth();\n"
+    "    return a + b + c + d - 26 * x - 10 + frames;\n"
+    "}\n"
+    "\n"
+    "long crowded(long x)\n"
+    "{\n"
+    "    long a = x + 1;\n"
+    "    long b = x + 2;\n"
+    "    long c = x + 3;\n"
+    "    long d = x + 4;\n"
+    "    long e = x + 5;\n"
+    "    long f = x + 6;\n"
+    "    long g = x + 7;\n"
+    "    long h = x + 8;\n"
+    "    long i = x + 9;\n"
+    "    long j = x + 10;\n"
+    "    long k = x + 11;\n"
+    "    long l = x + 12;\n"
+    "    long m = x + 13;\n"
+    "    long n = x + 14;\n"
+    "    long frames = depth();\n"
+    "    long sum = a + b + c + d + e + f + g + h + i + j + k + l + m + n;\n"
+    "    return sum - 14 * x - 105 + frames;\n"
+    "}\n"
+    "\n"
+    "long early(long x)\n"
+    "{\n"
+    "    long a = x * 3 + 1;\n"
+    "    long b = x * 5 + 2;\n"
+    "    if (x < 0)\n"
+    "    {\n"
+    "        long frames = depth();\n"
+    "        return a + b - 8 * x - 3 - frames;\n"
+    "    }\n"
+    "    long frames = depth();\n"
+    "    return a + b - 8 * x - 3 + frames;\n"
+    "}\n"
+    "\n"
+    "long spin(long n)\n"
+    "{\n"
+    "    long total = 0;\n"
+    "    long rounds = 0;\n"
+    "    for (;;)\n"
+    "    {\n"
+    "        total += depth();\n"
+    "        rounds += 1;\n"
+    "        if (rounds == n)\n"
+    "        {\n"
+    "            return total / rounds;\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "int aligned(int x)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { x, x + 1, x + 2, x + 3 };\n"
+    "    return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
+    "}\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    int baseline = depth();\n"
+    "    long held = kept(5);\n"
+    "    long crowd = crowded(-3);\n"
+    "    long positive = early(4);\n"
+    "    long negative = early(-4);\n"
+    "    long spun = spin(3);\n"
+    "    int realigned = aligned(7);\n"
+    "    printf(\"%d %ld %ld %ld %ld %ld %d\\n\", baseline, held, crowd, positive, negative, spun, realigned);\n"
+    "    return baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && positive == baseline + 1 && negative == -(baseline + 1) &&\n"
+    "                   spun == baseline + 1 && realigned == baseline + 1 ?\n"
+    "               0 :\n"
+    "               1;\n"
     "}\n";
 
 // An option set of the driver's: whether its output has unwind tables; whether the fixture's executables and objects
@@ -634,6 +735,129 @@ static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* direc
     }
 }
 
+// The Tier 1 fixture by --tier1 --tier1-refusals --verify (and --scalar with `scalar`), into an executable or with
+// `object` an object, with unwind tables or without (`tables`); its refusals go to `output`.err.
+static bool check_unwind_test_tier1_compile(const char* source, const char* output, bool tables, bool object, bool scalar)
+{
+    char errors[PATH_MAX + 8];
+    snprintf(errors, sizeof(errors), "%s.err", output);
+    char* arguments[12] = { (char*)"/proc/self/exe", (char*)"--tier1", (char*)"--tier1-refusals", (char*)"--verify" };
+    uint32_t count = 4;
+    arguments[count] = tables ? 0 : (char*)"-fno-asynchronous-unwind-tables";
+    count += tables ? 0 : 1;
+    arguments[count] = object ? (char*)"-c" : 0;
+    count += object ? 1 : 0;
+    arguments[count] = scalar ? (char*)"--scalar" : 0;
+    count += scalar ? 1 : 0;
+    arguments[count] = (char*)"-o";
+    arguments[count + 1] = (char*)output;
+    arguments[count + 2] = (char*)source;
+    arguments[count + 3] = 0;
+    return object_test_run(arguments, "/dev/null", errors) == 0;
+}
+
+// Whether the Tier 1 fixture's program runs as its unwind tables (or their absence) make it: with them, it returns 0
+// having printed depths that walk through main; without them, it returns 1 having printed 1 1 1 1 -1 1 1.
+static bool check_unwind_test_tier1_run(const char* program, bool tables, Arena* arena)
+{
+    char report[PATH_MAX + 8];
+    snprintf(report, sizeof(report), "%s.out", program);
+    char* run[] = { (char*)program, 0 };
+    const int status = object_test_run(run, report, "/dev/null");
+    const String8 printed = foreign_test_read(arena, report);
+    int baseline = 0;
+    long held = 0;
+    long crowd = 0;
+    long positive = 0;
+    long negative = 0;
+    long spun = 0;
+    int realigned = 0;
+    const bool read = printed.pointer != 0 &&
+                      sscanf(printed.pointer, "%d %ld %ld %ld %ld %ld %d", &baseline, &held, &crowd, &positive, &negative, &spun, &realigned) == 7;
+    const bool walked = status == 0 && baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && positive == baseline + 1 && negative == -(baseline + 1) &&
+                        spun == baseline + 1 && realigned == baseline + 1;
+    const bool stopped = status == 1 && baseline == 1 && held == 1 && crowd == 1 && positive == 1 && negative == -1 && spun == 1 && realigned == 1;
+    return read && (tables ? walked : stopped);
+}
+
+// The Tier 1 fixture (check_unwind_test_tier1_text, #177; see the file's comment).
+static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    static const char* const names[] = { "depth", "kept", "crowded", "early", "spin", "aligned" };
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_tier1.c", directory);
+    const bool written = foreign_test_write(source, check_unwind_test_tier1_text, sizeof(check_unwind_test_tier1_text) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 unwind fixture", source);
+    char outputs[2][PATH_MAX + 32];
+    String8 files[2] = { 0 };
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_tier1%s", directory, path == 0 ? "" : ".scalar");
+        const bool made = check_unwind_test_tier1_compile(source, outputs[path], true, false, path != 0);
+        check_debug_test_expect(tally, made, "the driver links the Tier 1 unwind fixture by --tier1", outputs[path]);
+        files[path] = made ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
+        // Every function but main by Tier 1: --tier1-refusals names no other.
+        char errors[PATH_MAX + 40];
+        snprintf(errors, sizeof(errors), "%s.err", outputs[path]);
+        const String8 refusals = made ? foreign_test_read(arena, errors) : (String8){ 0 };
+        bool tier1 = refusals.pointer != 0;
+        for (uint32_t k = 0; tier1 && k < BUSTER_ARRAY_LENGTH(names); k += 1)
+        {
+            char line[64];
+            snprintf(line, sizeof(line), "tier1-refused\t%s\t", names[k]);
+            tier1 = strstr(refusals.pointer, line) == 0;
+        }
+        check_debug_test_expect(tally, tier1, "Tier 1 compiles every function of the fixture but main", errors);
+    }
+    // Tier 1's paths may color its frames' slots apart (tier1_frame.c), so their executables needn't be the same bytes:
+    // each must walk.
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        check_debug_test_expect(tally, files[path].pointer != 0 && check_unwind_test_tier1_run(outputs[path], true, arena),
+                                path == 0 ? "the unwinder walks through every Tier 1 frame of the program" : "the unwinder walks through every Tier 1 frame of --scalar's program",
+                                outputs[path]);
+    }
+    char none[PATH_MAX + 32];
+    snprintf(none, sizeof(none), "%s/dbg_tier1.none", directory);
+    const bool bare = written && check_unwind_test_tier1_compile(source, none, false, false, false);
+    check_debug_test_expect(tally, bare && check_unwind_test_tier1_run(none, false, arena),
+                            "without unwind tables, the unwinder stops at the Tier 1 fixture's first function", none);
+    // The object, linked by cc through GNU ld and lld.
+    char object[PATH_MAX + 32];
+    snprintf(object, sizeof(object), "%s/dbg_tier1.o", directory);
+    const bool made = written && check_unwind_test_tier1_compile(source, object, true, true, false);
+    check_debug_test_expect(tally, made, "the driver writes the Tier 1 fixture's object", object);
+    for (uint32_t linker = 0; made && linker < 2; linker += 1)
+    {
+        char program[PATH_MAX + 48];
+        char errors[PATH_MAX + 56];
+        snprintf(program, sizeof(program), "%s.%s", object, linker == 0 ? "bfd" : "lld");
+        snprintf(errors, sizeof(errors), "%s.err", program);
+        char* arguments[] = { (char*)"cc", linker == 0 ? (char*)"-fuse-ld=bfd" : (char*)"-fuse-ld=lld", (char*)"-o", program, object, 0 };
+        const bool linked = object_test_run(arguments, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, linked, linker == 0 ? "cc links the Tier 1 fixture's object through GNU ld" : "cc links the Tier 1 fixture's object through lld",
+                                errors);
+        check_debug_test_expect(tally, linked && check_unwind_test_tier1_run(program, true, arena), "the linked Tier 1 program's unwinder walks through every frame", program);
+    }
+    // gdb at every instruction of each Tier 1 function: early's two calls take both of its returns, and spin's one call
+    // its loop's iterations and its return; depth's first caller is main.
+    static const char* const depth[] = { "depth", "main" };
+    static const char* const kept[] = { "kept", "main" };
+    static const char* const crowded[] = { "crowded", "main" };
+    static const char* const early[] = { "early", "main" };
+    static const char* const spin[] = { "spin", "main" };
+    static const char* const aligned[] = { "aligned", "main" };
+    if (files[0].pointer != 0)
+    {
+        check_unwind_test_gdb(tally, outputs[0], files[0], depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], kept, BUSTER_ARRAY_LENGTH(kept), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], crowded, BUSTER_ARRAY_LENGTH(crowded), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], early, BUSTER_ARRAY_LENGTH(early), 2, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], spin, BUSTER_ARRAY_LENGTH(spin), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], aligned, BUSTER_ARRAY_LENGTH(aligned), 1, arena);
+    }
+}
+
 // The fixture's executables and objects, the options' rule, and gdb on its -g executable (see the file's comment).
 static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
@@ -747,4 +971,5 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
         check_unwind_test_gdb(tally, debug_program, file, based, BUSTER_ARRAY_LENGTH(based), 1, arena);
     }
     check_unwind_test_trap(tally, directory, arena);
+    check_unwind_test_tier1(tally, directory, arena);
 }
