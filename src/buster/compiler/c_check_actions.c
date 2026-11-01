@@ -587,8 +587,69 @@ static uint16_t check_action_half_round(CheckHalf format, bool negative, unsigne
     return (uint16_t)bits;
 }
 
-// A floating value's bits in a format: its sign with the format's quiet NaN for a NaN (as check_data_float_bytes gives a
-// float's: CheckValue keeps no payload), its infinity, or its value rounded.
+// NaNs (#148). The checker's long double holds a NaN of float, double, long double and the half-precision formats as the
+// x87's own loads place one, and as __builtin_nan, __builtin_nans and the arithmetic leave it: the sign, the all-ones
+// exponent, the integer bit and the format's fraction at the significand's top (a float's 23 bits from bit 62, a
+// double's 52, a _Float16's 10, a long double's 63), so that bit 62 is every format's quiet bit and a signaling NaN keeps
+// its bits until a conversion to another format quiets it (check_action_convert_nan). A NaN's bits in a format of
+// `fraction` fraction bits and `exponent` exponent bits are its fraction's top bits; a fraction that narrowing would
+// empty is quiet, as APFloat's conversion leaves a NaN. For the formats of 64 bits or fewer (float, double, _Float16 and
+// __bf16: fraction + exponent below 64); a long double's NaN is its significand as it is, and a __float128's
+// check_action_quad_bits'.
+static uint64_t check_action_nan_bits(long double value, uint32_t fraction, uint32_t exponent)
+{
+    uint64_t significand = 0;
+    memcpy(&significand, &value, sizeof(significand));
+    uint64_t bits = (significand & UINT64_C(0x7fffffffffffffff)) >> (63 - fraction);
+    bits = bits != 0 ? bits : UINT64_C(1) << (fraction - 1);
+    const uint64_t sign = signbit(value) != 0 ? UINT64_C(1) << (fraction + exponent) : 0;
+    return sign | (((UINT64_C(1) << exponent) - 1) << fraction) | bits;
+}
+
+// A __float128 NaN's place in the long double, whose 63 fraction bits can't hold the format's 112 (check_builtin_float
+// _special): bit 62 its quiet bit, bit 61 its fraction's bit 110 (a signaling NaN without a payload's), and bits 0 to 60
+// its fraction's low bits, which hold __builtin_nanf128's and __builtin_nansf128's payloads (a larger one is refused).
+// A value's 16 bytes as a __float128: a NaN's from that place, any other's converted exactly.
+static void check_action_quad_bits(long double value, uint64_t halves[2])
+{
+    if (isnan(value))
+    {
+        uint64_t significand = 0;
+        memcpy(&significand, &value, sizeof(significand));
+        const uint64_t sign = signbit(value) != 0 ? UINT64_C(1) << 63 : 0;
+        halves[0] = significand & ((UINT64_C(1) << 61) - 1);
+        halves[1] = sign | (UINT64_C(0x7fff) << 48) | (((significand >> 61) & 3) << 46);
+    }
+    else
+    {
+        const __float128 quad = (__float128)value;
+        memcpy(halves, &quad, 2 * sizeof(uint64_t));
+    }
+}
+
+// A floating constant converted from `from` to `to`, before its rounding: a NaN converted to another format is quiet, as
+// APFloat's conversion makes it, and to its own format keeps its bits (a signaling NaN of __builtin_nans's stays one). A
+// __float128 NaN's fraction first takes the others' place (check_action_quad_bits): its top 63 bits at the
+// significand's, as a narrowing keeps them.
+static long double check_action_convert_nan(TypeId from, TypeId to, long double value)
+{
+    long double result = value;
+    if (isnan(value) && from != to)
+    {
+        uint64_t significand = 0;
+        memcpy(&significand, &result, sizeof(significand));
+        if (from == BUSTER_TYPE_FLOAT128)
+        {
+            significand = (significand & UINT64_C(0xe000000000000000)) | ((significand & ((UINT64_C(1) << 61) - 1)) >> 49);
+        }
+        significand |= UINT64_C(1) << 62;
+        memcpy(&result, &significand, sizeof(significand));
+    }
+    return result;
+}
+
+// A floating value's bits in a half-precision format: its sign with its NaN's bits (check_action_nan_bits, its payload
+// kept) for a NaN, its infinity, or its value rounded.
 static uint16_t check_action_half_bits(CheckHalf format, long double value)
 {
     const bool negative = signbit(value) != 0;
@@ -596,7 +657,7 @@ static uint16_t check_action_half_bits(CheckHalf format, long double value)
     uint16_t bits = (uint16_t)sign;
     if (isnan(value))
     {
-        bits = (uint16_t)(sign | (format == CHECK_HALF_IEEE ? 0x7e00u : 0x7fc0u));
+        bits = (uint16_t)(format == CHECK_HALF_IEEE ? check_action_nan_bits(value, 10, 5) : check_action_nan_bits(value, 7, 8));
     }
     else if (isinf(value))
     {
@@ -626,12 +687,13 @@ static long double check_action_half_value(CheckHalf format, uint16_t bits)
 
 static long double check_action_round_float(TypeId type, long double value)
 {
+    // A NaN's rounding is its bits' (check_action_nan_bits): the x87's rounding would quiet a signaling one.
     long double result = value;
-    if (type == BUSTER_TYPE_FLOAT)
+    if (type == BUSTER_TYPE_FLOAT && !isnan(value))
     {
         result = (float)value;
     }
-    else if (type == BUSTER_TYPE_DOUBLE)
+    else if (type == BUSTER_TYPE_DOUBLE && !isnan(value))
     {
         result = (double)value;
     }
@@ -664,7 +726,8 @@ static __attribute__((noinline)) bool check_action_convert_half(const TypeTable*
     }
     else if (floating)
     {
-        value->floating = check_action_round_float(base, value->floating);
+        const long double converted = check_action_convert_nan(type_unqualified(type_strip_aligned(table, value->type)), base, value->floating);
+        value->floating = check_action_round_float(base, converted);
     }
     return integer || floating;
 }
@@ -745,6 +808,12 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
             value->constant_kind = CHECK_CONSTANT_NONE;
         }
     }
+    else if (target_kind == BUSTER_TYPE_KIND_FLOATING && value->constant_kind == CHECK_CONSTANT_FLOATING &&
+             type_unqualified(type_strip_aligned(table, source)) == BUSTER_TYPE_FLOAT128 &&
+             type_unqualified(type_strip_aligned(table, destination)) == BUSTER_TYPE_FLOAT128)
+    {
+        // A __float128 constant (a constant builtin's, check_action_quad_bits) to its own type, which changes nothing.
+    }
     else if (target_kind == BUSTER_TYPE_KIND_FLOATING && (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING))
     {
         if (!check_action_float_supported(table, destination) || (value->constant_kind == CHECK_CONSTANT_INTEGER && !source_integer))
@@ -780,7 +849,9 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
                 }
                 number = negative ? -number : number;
             }
-            value->floating = check_action_round_float(type_unqualified(type_strip_aligned(table, destination)), number);
+            const TypeId to = type_unqualified(type_strip_aligned(table, destination));
+            number = check_action_convert_nan(type_unqualified(type_strip_aligned(table, source)), to, number);
+            value->floating = check_action_round_float(to, number);
             value->constant_kind = CHECK_CONSTANT_FLOATING;
         }
     }
@@ -1284,7 +1355,17 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
             default: supported = false; break; \
         } \
     } while (0)
-    if (a->type == BUSTER_TYPE_FLOAT)
+    // A unary + or - of a NaN, or of a __float128 constant (an infinity, a NaN or a zero: check_action_quad_bits), is its
+    // sign alone, as APFloat's changeSign makes it: converting a NaN to its format first would quiet a signaling one.
+    const bool sign = (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE) && (isnan(a->floating) || a->type == BUSTER_TYPE_FLOAT128);
+    if (sign)
+    {
+        uint8_t bytes[16] = { 0 };
+        memcpy(bytes, &a->floating, 10);
+        bytes[9] ^= op == CHECK_OP_NEGATIVE ? 0x80u : 0;
+        memcpy(&number, bytes, sizeof(number));
+    }
+    else if (a->type == BUSTER_TYPE_FLOAT)
     {
         BUSTER_CHECK_REAL_OPERATION(float);
     }
