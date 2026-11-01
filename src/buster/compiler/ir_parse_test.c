@@ -253,7 +253,7 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function () -> void {\nb0:\n%0 = const.m8 0x100\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = const.v8i32 0x1\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = vconst.m64 0x1\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = const.m64 0x1\n%1 = bitcast.i64 %0\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = const.m64 0x1\n%1 = bitcast.f64 %0\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = add.i64 %0 %0\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = ret.void\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = call.void @1() fixed=() variadic=2\n%1 = ret.void\n}\n", IR_PARSE_LIMIT },
