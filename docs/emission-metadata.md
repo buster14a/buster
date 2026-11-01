@@ -2,11 +2,18 @@
 
 ## Status and scope
 
-`src/buster/compiler/emission_metadata.c` is a standalone, tier-neutral protocol
-for source and frame events and their resolution against final record layout.
+`src/buster/compiler/emission_metadata.c` is a tier-neutral protocol for source
+and frame events and their resolution against final record layout.
 It is an implementation prerequisite, **not the completed emitted-function
 redesign**. The C driver, `Tier0Code`, the Tier 1 frame adapter, the fixed-frame
 unwind writer and the driver's Tier 1 `-g` restriction are unchanged.
+
+The protocol has a normal in-tree command, `./build/compiler
+test-emission-metadata [--seed N]`. `build.sh` compiles
+`src/buster/compiler/emission_metadata_test.c` as a translation unit that
+includes the module, and `tools/ci/correctness.tests` runs the command. The
+production driver still does not consume the protocol; the test command is its
+only current consumer, and the module is not in a compiler hot path.
 
 The module neither produces machine code nor proves that a supplied unwind rule
 matches that code. Its checker establishes bounded, ordered, canonical metadata
@@ -99,9 +106,11 @@ no input sentinel or output slack is required.
 
 Any invalid-input or insufficient-capacity result preserves both destinations
 and the result descriptor. A planning failure preserves its plan descriptor.
-`EmissionCheck` reports the failing part and first index; an unbalanced final
-frame state reports `frame_count`. The scalar and vector layout checkers return
-the same result, including the first malformed record.
+`EmissionCheck` reports the failing part and first index; success is
+`EMISSION_NONE` with index zero, descriptor and destination errors also report
+index zero, and an unbalanced final frame state reports `frame_count`. The
+scalar and vector layout checkers return the same result, including the first
+malformed record.
 
 The module does not allocate. The tests therefore establish capacity-failure
 atomicity, not whole-driver arena-exhaustion rollback. A future adapter must
@@ -112,9 +121,10 @@ marks on every failure.
 
 Layout validation has a contiguous 16-record AVX-512 path and an exact scalar
 path. Masked loads cover only the valid tail; a shifted end vector checks each
-record against its predecessor, including across batch boundaries. Include the
-module after `host_isa.h` in a compiler translation unit. The standalone vector
-test enables `BUSTER_HOST_VECTOR` explicitly.
+record against its predecessor, including across batch boundaries. The module is
+included by `emission_metadata_test.c` after `host_isa.h`; a production consumer
+must include it the same way. The standalone wrapper's vector command enables
+`BUSTER_HOST_VECTOR` through `BUSTER_EMISSION_METADATA_TEST_VECTOR`.
 
 Sparse event resolution and frame-state protocol checking currently use scalar
 code. There is no locked-9700X measurement demonstrating whether further
@@ -125,40 +135,51 @@ proof that the complete path is free.
 
 ## Reproducible correctness checks
 
-Run from the repository root. The vector commands require an AVX-512F-capable
-host. These commands are correctness tests, not performance measurements.
+Run from the repository root. The normal command is:
+
+```sh
+./build/compiler test-emission-metadata [--seed N]
+```
+
+`build.sh` builds it and `tools/ci/correctness.tests` runs it. The standalone
+commands below compile the same tests without the compiler, which is useful for
+bisecting a protocol change; the vector ones require an AVX-512F-capable host.
+These are correctness tests, not performance measurements.
 
 Baseline:
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-scalar && /tmp/buster-emission-scalar
+clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-scalar && /tmp/buster-emission-scalar
 ```
 
 Vector and scalar-twin comparisons:
 
 ```sh
-clang -std=c17 -O2 -g -mavx512f -DBUSTER_HOST_VECTOR=1 -Wall -Wextra -Werror -Wno-unused-function -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-vector && /tmp/buster-emission-vector
+clang -std=c17 -O2 -g -mavx512f -DBUSTER_EMISSION_METADATA_TEST_VECTOR -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-vector && /tmp/buster-emission-vector
 ```
 
 Address and undefined-behavior sanitizers, baseline:
 
 ```sh
-clang -std=c17 -O1 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-scalar-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-scalar-sanitize
+clang -std=c17 -O1 -g -march=x86-64 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-scalar-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-scalar-sanitize
 ```
 
 The same sanitizers with the vector checker enabled:
 
 ```sh
-clang -std=c17 -O1 -g -mavx512f -DBUSTER_HOST_VECTOR=1 -Wall -Wextra -Werror -Wno-unused-function -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-vector-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-vector-sanitize
+clang -std=c17 -O1 -g -mavx512f -DBUSTER_EMISSION_METADATA_TEST_VECTOR -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-vector-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-vector-sanitize
 ```
 
-Each run performs 2,447,306 assertions. Coverage includes empty/null inputs,
-leading/internal/trailing padding, zero-width records, changed branch widths,
-generated origins, end boundaries, frame-rule vocabulary and nested state
-stacks, signed and unsigned limit values, invalid metadata and capacity rollback.
-Guard pages test exact input/output lengths and every layout count from zero
-through 65. Seeded property tests compare 4,096 layouts against independently
-calculated offsets and compare both implementation paths.
+Each run prints its check and failure counts; the correctness inventory records
+them. Coverage includes empty/null inputs, leading/internal/trailing padding,
+zero-width records, changed branch widths, generated origins, end boundaries,
+frame-rule vocabulary and nested state stacks, signed and unsigned limit values,
+invalid metadata, capacity rollback and a destination with spare capacity whose
+tail must stay untouched. Guard pages test exact input/output lengths and every
+layout count from zero through 65; the malformed-record rules are compared across
+SIMD batch boundaries, not only at the first record. Seeded property tests
+compare 4,096 layouts against independently calculated offsets and compare both
+implementation paths.
 
 The fixtures describing frame pointers, early-return state and repeated probe
 allocation changes are protocol fixtures. They do not execute generated code,
@@ -183,5 +204,5 @@ The following remain necessary before #1056 is complete:
   raw evidence and measurement harnesses belong in `buster-performance`, not in
   this repository.
 
-Neither the full compiler build nor these acceptance requirements are replaced
-by the standalone protocol test.
+The full compiler build compiles the test translation unit, but no production
+producer consumes the protocol yet; these acceptance requirements remain.
