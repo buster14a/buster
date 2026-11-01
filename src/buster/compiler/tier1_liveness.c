@@ -166,7 +166,8 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         }
         else if (!phis && !plan->covered[node] && (plan->patterns[node].rule == TIER1_RULE_DIVIDE || plan->patterns[node].rule == TIER1_RULE_SHIFT))
         {
-            // The fixed registers' sequence is the CFG consumer's.
+            // A division's or shift's by a register is the CFG consumer's (tier1_emit_cfg_chain); a division by a constant's
+            // reciprocal takes its fixed registers in either consumer.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
         else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0 ||

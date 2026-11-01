@@ -59,7 +59,35 @@ patterns are:
   2^k − 1 where the dividend is negative, from its sign in the scratch register
   (`mov`, `sar`, `shr`), added by a `lea`, then an arithmetic shift, or for the
   remainder a mask and the bias subtracted. A divisor of 1 is a copy (a zero
-  remainder). Other divisors remain `TIER1_RULE_DIVIDE`.
+  remainder).
+- Division and remainder by any other constant but those `div` and `idiv` keep
+  (zero, and for a signed one −1, which raise C's undefined division by zero and
+  `INT_MIN / -1` as the hardware does, and −2^k and the sign bit): a
+  multiplication by the divisor's reciprocal and shifts
+  (`TIER1_RULE_DIVIDE_RECIPROCAL`), after Granlund and Montgomery's "Division by
+  Invariant Integers using Multiplication" (PLDI 1994), whose CHOOSE_MULTIPLIER
+  gives the multiplier and its shift (`tier1_select_reciprocal`). For N-bit words:
+  - unsigned, the high N bits of the dividend times the multiplier, shifted right.
+    Where the multiplier needs N + 1 bits, an even divisor's dividend is shifted
+    right by the divisor's zero bits first, which leaves its odd part's multiplier
+    N bits, and an odd one's quotient is `(((n − t) >> 1) + t) >> (s − 1)`, t the
+    high product of its low N bits;
+  - signed, by the divisor's magnitude, the signed high product, plus the dividend
+    where the multiplier is 2^(N−1) or more, shifted right arithmetically, plus its
+    own sign bit, which makes the floor C's rounding toward zero; negated for a
+    negative divisor;
+  - a remainder, the dividend less the quotient times the divisor (its magnitude
+    for a signed one, whose quotient then stays unnegated).
+
+  The high product is `mul`'s or `imul`'s `rdx`, so the rule takes x86's fixed
+  registers as `TIER1_RULE_DIVIDE` does: `tier1_select_fixed` writes its records
+  (at most `BUSTER_TIER1_SELECT_FIXED_RECORDS`, 13: a remainder whose multiplier
+  needs the add sequence, whose divisor is past an imm32 and whose dividend is in
+  `rax` or `rdx`), reading the dividend before writing `rax` or `rdx`, through the
+  scratch register where it is read after the multiplication, and the destination
+  last; each consumer saves the other values that live past the node in `rax` and
+  `rdx` around them (`tier1_emit_fixed`). Every other division stays
+  `TIER1_RULE_DIVIDE`.
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
@@ -175,13 +203,20 @@ The scalar twin uses a switch to rank maximal-munch patterns by coverage and
 rule priority. It deliberately does not call the vector minimum-cost chooser.
 For example, it can prefer a power-of-two multiply's shift while the costed
 cover prefers the single-record immediate `imul`. Tests compare executed
-results and require the vector cover's cost to be no higher.
+results and require the vector cover's cost to be no higher. A division by a
+register ranks below every rule for a constant divisor, which covers the constant
+even where the constant has other uses and so doesn't count among the folds: both
+paths take a constant divisor's rule wherever there is one, as the costed cover,
+whose `TIER1_RULE_DIVIDE` costs 8 against the others' 1, 2, 5 and 7, always did.
 
 The current cost is a **structural upper bound on record count**, including
 possible copies and operand-overlap repairs. It is not a measured latency,
 throughput, encoded-byte count, or guarantee about final runtime. Allocation
 can remove copies from either path. The measured Zen 5 model is not complete
-enough to replace this bound for every operand case.
+enough to replace this bound for every operand case. One rule departs from it: a
+division by a constant's reciprocal costs 7, below `div`'s 8, though its records
+(up to 13) may outnumber `div`'s, since `div`'s and `idiv`'s latency, which no
+count of records sees, is the larger.
 
 Candidate generation, depth construction, top-down covering and metadata
 emission still use scalar loops. This is a working bounded bottom-up selector,
@@ -271,6 +306,15 @@ the typed lowerer's parameter preheader and terminal suffix. Every other
 function, with general joins, nonempty backedges and phis, goes through the CFG
 consumer, `tier1_emit_cfg.c` (#140), which allocates over the CFG
 (`tier1_cfg.c`) and moves values along its edges.
+
+A division by a constant's reciprocal takes `rax` and `rdx` in either consumer,
+through one helper (`tier1_emit_fixed`): `tier1_select_fixed`'s records, with the
+other values that live past the node in those registers stored in call-save rows
+before them and loaded after. The straight-line consumer gives the registers rows
+(`tier1_emit_prepare`) and finds those values by their intervals' ends, as it
+finds a call's; the CFG consumer by its intervals at the node's definition phase.
+A division and a shift by a register keep their functions on the CFG consumer, as
+before the helper (`tier1_emit_cfg_chain`).
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
@@ -388,6 +432,22 @@ a returning helper whose sink must remain a loop. Empty input is accepted.
 The separate pipeline tests cover upstream typed-stream lowering and SSA
 promotion; neither test suite is the pending full C-program differential corpus.
 
+Divisions by constants' reciprocals are tested at both levels. `test-tier1-select`
+plans each of the four divisions at both widths by 52 divisors (small ones, C
+programs' usual ones, the ends of 32 and 64 bits, negative ones, and those `div`,
+`idiv` and the power rules keep), by both paths, which must pick the reciprocal
+exactly where `tier1_select_reciprocal_divisor` does; runs each reciprocal's
+records natively from four dividend registers (`rax` and `rdx` among them) into
+five destinations (the dividend's own among them) on the dividend's edges, against
+its interpreter; checks that the longest sequence fills the room exactly; and that
+a divisor whose constant has two uses still takes its rule by both paths.
+`test-tier1-emit` (`tier1_divide_test.c`) runs whole functions through
+`tier1_emit_function` by both consumers: a straight-line one whose dividend and a
+parameter that lives past both divisions arrive in `rdx`, and a loop's digit sum,
+by both paths, with constants rematerialized and not, and with every register and
+a few, against C's own division; both consumers must save values around the
+sequences.
+
 `benchmark-tier1-select [--steps N] [--functions N] [--only scalar|vector]
 [--after-scalar MS]` freezes original synthetic IR with a deterministic seed.
 Its chain, wide-frontier and live-pressure shapes report selection separately
@@ -423,9 +483,8 @@ cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 
-Issue #141 remains open. Full pattern-state generation, reciprocal-division
-selection, the remaining scalar/ABI/spill consumers, and whole-C integration
-are outstanding. The native fixtures are real generated code but are not
+Issue #141 remains open. Full pattern-state generation, the remaining
+scalar/ABI/spill consumers, and whole-C integration are outstanding. The native fixtures are real generated code but are not
 `c-testsuite`, Csmith/YARPGen, the full corpora, SQLite or `speedtest1`. The
 required 9700X comparisons against Tier 0 and Clang `-O2`, runtime and size,
 selection core cycles per IR instruction, and complete #142 campaigns still

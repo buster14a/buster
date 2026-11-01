@@ -20,6 +20,10 @@
 #define BUSTER_TIER1_SELECT_LANES 16
 #define BUSTER_TIER1_SELECT_SCRATCH X86_REGISTER_R11
 #define BUSTER_TIER1_SELECT_RECORDS_PER_NODE 6
+// The most records a rule that takes x86's fixed registers writes (tier1_select_fixed), before its consumer's saves: a
+// remainder by a constant's reciprocal whose multiplier takes the add sequence, whose divisor is past an imm32 and whose
+// dividend is in rax or rdx has 13.
+#define BUSTER_TIER1_SELECT_FIXED_RECORDS 13
 #define BUSTER_TIER1_SELECT_CALL_ARGUMENTS 6
 
 typedef enum Tier1SelectError
@@ -83,6 +87,10 @@ typedef enum Tier1SelectRule
     // its sign, shifted right, or for the remainder masked and the bias taken back. An unsigned one is a shift or a mask
     // (TIER1_RULE_IMMEDIATE).
     TIER1_RULE_DIVIDE_POWER,
+    // A division or remainder of values[0] by the constant `immediate` (the width's bits; tier1_select_reciprocal_divisor
+    // says which), `scale`'s bits as TIER1_RULE_DIVIDE's `immediate`'s: a multiplication by the divisor's reciprocal and
+    // shifts (Tier1SelectReciprocal), mul's or imul's rdx:rax, which the consumers save around it as TIER1_RULE_DIVIDE's.
+    TIER1_RULE_DIVIDE_RECIPROCAL,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -234,6 +242,97 @@ static uint32_t tier1_select_log2(uint64_t value)
     return value != 0 && (value & (value - 1)) == 0 ? (uint32_t)__builtin_ctzll(value) : UINT32_MAX;
 }
 
+// A division by a constant as a multiplication by its reciprocal (Granlund and Montgomery, "Division by Invariant
+// Integers using Multiplication", PLDI 1994), for N-bit words, N the width's bits:
+// - unsigned: the quotient is the high N bits of the dividend, shifted right by `pre_shift`, times `multiplier`, shifted
+//   right by `post_shift`. Where the multiplier needs N + 1 bits (`add`), `multiplier` is its low N bits and t that high
+//   product: the quotient is (((n - t) >> 1) + t) >> (post_shift - 1), in which n - t can't borrow nor the sum carry.
+// - signed, by the divisor's magnitude: the signed high product of the dividend and `multiplier`, plus the dividend where
+//   the multiplier is 2^(N - 1) or more (`add`: `multiplier` is then negative as an N-bit number), shifted right
+//   arithmetically by `post_shift`, plus one where that is negative, which makes the floor C's rounding toward zero; and
+//   negated for a negative divisor.
+typedef struct Tier1SelectReciprocal Tier1SelectReciprocal;
+struct Tier1SelectReciprocal
+{
+    uint64_t multiplier;
+    uint8_t pre_shift;
+    uint8_t post_shift;
+    bool add;
+};
+
+// floor((2^power + addend) / divisor), for `power` at most 128 (2^128 as the largest 128-bit number plus one), `addend`
+// below 2^127 and a nonzero divisor.
+static unsigned __int128 tier1_select_quotient_power(uint32_t power, unsigned __int128 addend, uint64_t divisor)
+{
+    const unsigned __int128 all = ~(unsigned __int128)0;
+    return power < 128 ? (((unsigned __int128)1 << power) + addend) / divisor : all / divisor + (all % divisor + 1 + addend) / divisor;
+}
+
+// Granlund and Montgomery's CHOOSE_MULTIPLIER (their Figure 6.2) for a divisor of at least 3 that isn't a power of two, an
+// N-bit word and dividends of `precision` bits: the multiplier, below 2^(N + 1) (and below 2^N for a precision below N),
+// and its shift.
+static unsigned __int128 tier1_select_multiplier(uint64_t divisor, uint32_t bits, uint32_t precision, uint8_t* post_shift)
+{
+    const uint32_t log = 64 - (uint32_t)__builtin_clzll(divisor - 1);
+    unsigned __int128 low = tier1_select_quotient_power(bits + log, 0, divisor);
+    unsigned __int128 high = tier1_select_quotient_power(bits + log, (unsigned __int128)1 << (bits + log - precision), divisor);
+    uint32_t shift = log;
+    while ((low >> 1) < (high >> 1) && shift > 0)
+    {
+        low >>= 1;
+        high >>= 1;
+        shift -= 1;
+    }
+    *post_shift = (uint8_t)shift;
+    return high;
+}
+
+// The magnitude of a signed divisor whose two's complement is the width's bits of `divisor`.
+static uint64_t tier1_select_magnitude(uint64_t divisor, uint32_t width)
+{
+    const uint64_t sign = UINT64_C(1) << (width * 8 - 1);
+    const uint64_t extended = ((divisor & (sign | (sign - 1))) ^ sign) - sign;
+    return (int64_t)extended < 0 ? 0 - extended : extended;
+}
+
+// Whether a constant divisor (the width's bits) takes TIER1_RULE_DIVIDE_RECIPROCAL: an unsigned one but zero and the powers
+// of two (a shift or a mask), and a signed one of magnitude 3 or more but ±2^k and the sign bit. Zero and -1 stay with div
+// and idiv, which raise C's undefined division by zero and INT_MIN / -1 as the hardware does, and 1 is a copy.
+static bool tier1_select_reciprocal_divisor(uint64_t divisor, uint32_t width, bool is_signed)
+{
+    const uint64_t magnitude = is_signed ? tier1_select_magnitude(divisor, width) : divisor;
+    return magnitude >= 3 && tier1_select_log2(magnitude) == UINT32_MAX;
+}
+
+// A divisor's reciprocal (tier1_select_reciprocal_divisor's), its width's bits for an unsigned one.
+static Tier1SelectReciprocal tier1_select_reciprocal(uint64_t divisor, uint32_t width, bool is_signed)
+{
+    const uint32_t bits = width * 8;
+    const unsigned __int128 word = (unsigned __int128)1 << bits;
+    Tier1SelectReciprocal result = {0};
+    unsigned __int128 multiplier = 0;
+    if (is_signed)
+    {
+        multiplier = tier1_select_multiplier(tier1_select_magnitude(divisor, width), bits, bits - 1, &result.post_shift);
+        result.add = multiplier >= word >> 1;
+    }
+    else
+    {
+        multiplier = tier1_select_multiplier(divisor, bits, bits, &result.post_shift);
+        // An even divisor whose multiplier needs N + 1 bits: the dividend shifted right by the divisor's zero bits, whose
+        // odd part's multiplier then fits N bits (their Figure 6.2's retry).
+        const uint32_t zeros = (uint32_t)__builtin_ctzll(divisor);
+        if (multiplier >= word && zeros != 0)
+        {
+            multiplier = tier1_select_multiplier(divisor >> zeros, bits, bits - zeros, &result.post_shift);
+            result.pre_shift = (uint8_t)zeros;
+        }
+        result.add = multiplier >= word;
+    }
+    result.multiplier = (uint64_t)(multiplier & (word - 1));
+    return result;
+}
+
 static const uint16_t tier1_select_condition_branches[10] =
 {
     X86_FORM_JE_REL8,
@@ -330,6 +429,40 @@ static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
 static bool tier1_select_commutative(X86Operation operation)
 {
     return operation == X86_OPERATION_ADD || operation == X86_OPERATION_AND || operation == X86_OPERATION_OR || operation == X86_OPERATION_XOR || operation == X86_OPERATION_IMUL;
+}
+
+// imul destination, source, value: its sign-extended imm8 form where the value fits one, else imm32's.
+static X86Instruction tier1_select_multiply_immediate(uint32_t width, uint8_t destination, uint8_t source, uint64_t value)
+{
+    const bool small = (uint64_t)(int64_t)(int8_t)value == value || (width == 4 && (uint32_t)(int32_t)(int8_t)value == (uint32_t)value);
+    const uint16_t form = width == 8 ? (small ? X86_FORM_IMUL_R64_RM64_IMM8 : X86_FORM_IMUL_R64_RM64_IMM32) : (small ? X86_FORM_IMUL_R32_RM32_IMM8 : X86_FORM_IMUL_R32_RM32_IMM32);
+    X86Instruction record = tier1_select_register_record(form, destination, source);
+    record.immediate = small ? (int8_t)value : (int32_t)value;
+    return record;
+}
+
+// mov reg, value at `width`: mov r32, imm32 (which zero-extends), mov r64, simm32 or movabs, the shortest that holds it, as
+// rematerialization chooses (without the zero idiom, which these sequences' constants never need).
+static X86Instruction tier1_select_constant_move(uint32_t width, uint8_t reg, uint64_t value)
+{
+    const bool zero_extends = width == 4 || value <= UINT32_MAX;
+    const bool sign_extends = (uint64_t)(int64_t)(int32_t)value == value;
+    const X86Instruction result =
+    {
+        .displacement = zero_extends || sign_extends ? 0 : (int32_t)(value >> 32),
+        .immediate = (int32_t)value,
+        .rm = reg,
+        .form = zero_extends ? X86_FORM_MOV_R32_IMM32 : sign_extends ? X86_FORM_MOV_RM64_IMM32 : X86_FORM_MOV_R64_IMM64,
+    };
+    return result;
+}
+
+// shr reg, count (sar for X86_OPERATION_SAR) at `width`.
+static X86Instruction tier1_select_shift(X86Operation operation, uint32_t width, uint8_t reg, uint32_t count)
+{
+    const uint16_t form = operation == X86_OPERATION_SAR ? (width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8) : (width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8);
+    const X86Instruction result = { .immediate = (int32_t)count, .rm = reg, .form = form };
+    return result;
 }
 
 static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
@@ -433,11 +566,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         if (holes->operation == X86_OPERATION_IMUL && holes->rule == TIER1_RULE_IMMEDIATE)
         {
-            const bool small = (uint64_t)(int64_t)(int8_t)holes->immediate == holes->immediate || (width == 4 && (uint32_t)(int32_t)(int8_t)holes->immediate == (uint32_t)holes->immediate);
-            const uint16_t form = width == 8 ? (small ? X86_FORM_IMUL_R64_RM64_IMM8 : X86_FORM_IMUL_R64_RM64_IMM32) : (small ? X86_FORM_IMUL_R32_RM32_IMM8 : X86_FORM_IMUL_R32_RM32_IMM32);
-            X86Instruction record = tier1_select_register_record(form, destination, holes->left);
-            record.immediate = small ? (int8_t)holes->immediate : (int32_t)holes->immediate;
-            tier1_select_append(&result, record);
+            tier1_select_append(&result, tier1_select_multiply_immediate(width, destination, holes->left, holes->immediate));
         }
         else
         {
@@ -585,6 +714,157 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     return result;
+}
+
+// The fixed registers a rule's records write (tier1_select_fixed), which its consumer saves around them where other values
+// live past the node in them: rax and rdx for a division, rcx for a shift by a register, and none for any other rule.
+static uint32_t tier1_select_fixed_registers(uint32_t rule)
+{
+    const uint32_t divide = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX);
+    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX : 0;
+}
+
+// TIER1_RULE_DIVIDE_RECIPROCAL's records (Tier1SelectReciprocal), the high product in rdx: the multiplier in rax, or in rdx
+// where rax holds the dividend, times the dividend's register, or for a pre-shift the multiplier in rdx times the shifted
+// dividend in rax. A dividend in rax or rdx that is read after the multiplication (`add`'s sequences and a remainder's)
+// is copied into the scratch register first. A remainder is the dividend less the quotient times the divisor (its
+// magnitude for a signed one, whose quotient is then left unnegated). The result moves into the destination last.
+static uint32_t tier1_select_reciprocal_records(const Tier1SelectHoles* holes, X86Instruction* records)
+{
+    const uint32_t width = holes->width;
+    const bool is_signed = (holes->scale & 1) != 0;
+    const bool remainder = (holes->scale & 2) != 0;
+    const Tier1SelectReciprocal reciprocal = tier1_select_reciprocal(holes->immediate, width, is_signed);
+    const uint8_t rax = X86_REGISTER_RAX;
+    const uint8_t rdx = X86_REGISTER_RDX;
+    const bool kept = remainder || reciprocal.add;
+    const uint8_t dividend = kept && (holes->left == rax || holes->left == rdx) ? BUSTER_TIER1_SELECT_SCRATCH : holes->left;
+    uint32_t count = 0;
+    if (dividend != holes->left)
+    {
+        records[count++] = tier1_select_move(width, dividend, holes->left);
+    }
+    const uint16_t multiply = is_signed ? (width == 8 ? X86_FORM_IMUL_RM64 : X86_FORM_IMUL_RM32) : (width == 8 ? X86_FORM_MUL_RM64 : X86_FORM_MUL_RM32);
+    if (reciprocal.pre_shift != 0)
+    {
+        if (dividend != rax)
+        {
+            records[count++] = tier1_select_move(width, rax, dividend);
+        }
+        records[count++] = tier1_select_shift(X86_OPERATION_SHR, width, rax, reciprocal.pre_shift);
+        records[count++] = tier1_select_constant_move(width, rdx, reciprocal.multiplier);
+        records[count++] = (X86Instruction){ .rm = rdx, .form = multiply };
+    }
+    else
+    {
+        records[count++] = tier1_select_constant_move(width, dividend == rax ? rdx : rax, reciprocal.multiplier);
+        records[count++] = (X86Instruction){ .rm = dividend == rax ? rdx : dividend, .form = multiply };
+    }
+    uint8_t quotient = rdx;
+    if (!is_signed && reciprocal.add)
+    {
+        records[count++] = tier1_select_move(width, rax, dividend);
+        records[count++] = tier1_select_register_record(tier1_select_binary_form(X86_OPERATION_SUB, width), rax, rdx);
+        records[count++] = tier1_select_shift(X86_OPERATION_SHR, width, rax, 1);
+        records[count++] = tier1_select_register_record(tier1_select_binary_form(X86_OPERATION_ADD, width), rax, rdx);
+        if (reciprocal.post_shift > 1)
+        {
+            records[count++] = tier1_select_shift(X86_OPERATION_SHR, width, rax, reciprocal.post_shift - 1u);
+        }
+        quotient = rax;
+    }
+    else if (!is_signed && reciprocal.post_shift != 0)
+    {
+        records[count++] = tier1_select_shift(X86_OPERATION_SHR, width, rdx, reciprocal.post_shift);
+    }
+    else if (is_signed)
+    {
+        if (reciprocal.add)
+        {
+            records[count++] = tier1_select_register_record(tier1_select_binary_form(X86_OPERATION_ADD, width), rdx, dividend);
+        }
+        if (reciprocal.post_shift != 0)
+        {
+            records[count++] = tier1_select_shift(X86_OPERATION_SAR, width, rdx, reciprocal.post_shift);
+        }
+        records[count++] = tier1_select_move(width, rax, rdx);
+        records[count++] = tier1_select_shift(X86_OPERATION_SHR, width, rax, width * 8 - 1);
+        records[count++] = tier1_select_register_record(tier1_select_binary_form(X86_OPERATION_ADD, width), rdx, rax);
+        const bool negative = ((holes->immediate >> (width * 8 - 1)) & 1) != 0;
+        if (negative && !remainder)
+        {
+            records[count++] = (X86Instruction){ .rm = rdx, .form = width == 8 ? X86_FORM_NEG_RM64 : X86_FORM_NEG_RM32 };
+        }
+    }
+    if (remainder)
+    {
+        const uint64_t divisor = is_signed ? tier1_select_magnitude(holes->immediate, width) : holes->immediate;
+        const uint8_t other = quotient == rax ? rdx : rax;
+        if (tier1_select_immediate_fits(width, divisor))
+        {
+            records[count++] = tier1_select_multiply_immediate(width, quotient, quotient, divisor);
+        }
+        else
+        {
+            records[count++] = tier1_select_constant_move(width, other, divisor);
+            records[count++] = tier1_select_register_record(tier1_select_binary_form(X86_OPERATION_IMUL, width), quotient, other);
+        }
+        records[count++] = (X86Instruction){ .rm = quotient, .form = width == 8 ? X86_FORM_NEG_RM64 : X86_FORM_NEG_RM32 };
+        records[count++] = tier1_select_register_record(tier1_select_binary_form(X86_OPERATION_ADD, width), quotient, dividend);
+    }
+    if (holes->destination != quotient)
+    {
+        records[count++] = tier1_select_move(width, holes->destination, quotient);
+    }
+    return count;
+}
+
+// The records of a rule that takes x86's fixed registers (tier1_select_fixed_registers), into `records`, which has room
+// for BUSTER_TIER1_SELECT_FIXED_RECORDS; none for any other rule. They read every operand before writing a fixed
+// register, through the scratch register where they must, and write the destination last; their consumers save the other
+// values that live past the node in those registers around them, in their call-save rows (tier1_emit_fixed). A division
+// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register, the dividend in rax, its sign or
+// zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in the scratch register, the
+// count in cl. A division by a constant's reciprocal: tier1_select_reciprocal_records.
+static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction* records)
+{
+    const uint32_t width = holes->width;
+    const uint8_t scratch = BUSTER_TIER1_SELECT_SCRATCH;
+    uint32_t count = 0;
+    if (holes->rule == TIER1_RULE_DIVIDE)
+    {
+        const bool signed_divide = (holes->immediate & 1) != 0;
+        const uint8_t result = (holes->immediate & 2) != 0 ? X86_REGISTER_RDX : X86_REGISTER_RAX;
+        records[count++] = tier1_select_move(8, scratch, holes->right);
+        if (holes->left != X86_REGISTER_RAX)
+        {
+            records[count++] = tier1_select_move(8, X86_REGISTER_RAX, holes->left);
+        }
+        records[count++] = signed_divide ? (X86Instruction){ .form = width == 8 ? X86_FORM_CQO : X86_FORM_CDQ } : tier1_select_register_record(X86_FORM_XOR_R32_RM32, X86_REGISTER_RDX, X86_REGISTER_RDX);
+        records[count++] = (X86Instruction){ .rm = scratch, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
+        if (holes->destination != result)
+        {
+            records[count++] = tier1_select_move(width, holes->destination, result);
+        }
+    }
+    else if (holes->rule == TIER1_RULE_SHIFT)
+    {
+        const uint16_t form = holes->operation == X86_OPERATION_SHL ? (width == 8 ? X86_FORM_SHL_RM64_CL : X86_FORM_SHL_RM32_CL) :
+                              holes->operation == X86_OPERATION_SHR ? (width == 8 ? X86_FORM_SHR_RM64_CL : X86_FORM_SHR_RM32_CL) :
+                                                                      (width == 8 ? X86_FORM_SAR_RM64_CL : X86_FORM_SAR_RM32_CL);
+        records[count++] = tier1_select_move(8, scratch, holes->left);
+        if (holes->right != X86_REGISTER_RCX)
+        {
+            records[count++] = tier1_select_move(4, X86_REGISTER_RCX, holes->right);
+        }
+        records[count++] = (X86Instruction){ .rm = scratch, .form = form };
+        records[count++] = tier1_select_move(width, holes->destination, scratch);
+    }
+    else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
+    {
+        count = tier1_select_reciprocal_records(holes, records);
+    }
+    return count;
 }
 
 #define BUSTER_TIER1_SELECT_MAX_INSTRUCTIONS (1u << 20)
@@ -1406,6 +1686,17 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             folded.intrinsic_cost = 5;
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
+        // By any other constant but those div and idiv keep (tier1_select_reciprocal_divisor): its reciprocal. Its cost is
+        // below TIER1_RULE_DIVIDE's though its records may outnumber div's: div's latency, which a count of records
+        // doesn't see, is the larger (docs/tier1-selection.md has the 9700X's numbers).
+        else if (constant && tier1_select_reciprocal_divisor(divisor, width, is_signed))
+        {
+            folded.rule = TIER1_RULE_DIVIDE_RECIPROCAL;
+            folded.immediate = divisor;
+            folded.scale = (uint8_t)base.immediate;
+            folded.intrinsic_cost = 7;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (op == IR_ADDRESS)
     {
@@ -1556,7 +1847,9 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
 
 // The scalar oracle is maximal munch: most covered nodes first. A switch fixes ties independently of the vector
 // minimum-cost selection. Both share legality, not the choice of cheapest cover. In particular munch chooses a
-// power-of-two multiply's shift before its three-operand immediate IMUL; the costed cover may choose the latter.
+// power-of-two multiply's shift before its three-operand immediate IMUL; the costed cover may choose the latter. A
+// division by a register ranks below every rule for a constant divisor, which covers its constant even where the
+// constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
 static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
 {
     uint32_t chosen = 0;
@@ -1567,6 +1860,9 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
         uint32_t rank = 0;
         switch (pattern->rule)
         {
+        case TIER1_RULE_DIVIDE:
+            rank = 0;
+            break;
         case TIER1_RULE_MULTIPLY_SHIFT:
             rank = 9;
             break;
@@ -2014,13 +2310,12 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
         error = TIER1_SELECT_ERROR_LIMIT;
     }
     // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
-    // edge moves a phi needs. Reject the complete plan before allocating records, even if earlier value locations are
-    // spilled.
+    // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
+    // plan before allocating records, even if earlier value locations are spilled.
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
-            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_DIVIDE ||
-            plan->patterns[node].rule == TIER1_RULE_SHIFT)
+            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

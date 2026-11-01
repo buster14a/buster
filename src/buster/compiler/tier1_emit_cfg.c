@@ -25,8 +25,8 @@
 // locations are tier1_cfg's: registers, the values' spill slots and the general class's temporary slot, a frame row
 // after the call saves'. A spill slot's frame lifetime is its value's intervals' hull, a phi's widened to its
 // predecessors' ends, where its edges write it; two slots share a frame row only where their values are never live at
-// once. Fixed ranges and splits don't arise: calls save live registers in rows of their own, as in the straight-line
-// consumer, and its values are general registers' alone.
+// once. Fixed ranges and splits don't arise: calls and the fixed registers' sequences save live registers in rows of their
+// own, as in the straight-line consumer, and its values are general registers' alone.
 //
 // Borrowed inputs are immutable; the arenas are disjoint. tier1_emit_function restores both arenas' lengths on failure
 // and leaves the result unchanged.
@@ -53,8 +53,9 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         chain = final ? terminal : function->op[last] == IR_BR && function->a[last] == block + 1;
     }
     // A phi needs edge moves, a frame object's address the frame's layout of it, a symbol's its reference, a narrow
-    // parameter or one after other instructions the entry's definitions, and a division or a shift by a register its
-    // fixed registers' sequence: the CFG consumer's.
+    // parameter or one after other instructions the entry's definitions: the CFG consumer's. A division and a shift by a
+    // register stay the CFG consumer's too, which keeps their functions' code as it was before both consumers saved
+    // fixed registers (tier1_emit_fixed); a division by a constant's reciprocal takes them in either consumer.
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -141,8 +142,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         symbols += function->op[node] == IR_SYMBOL_ADDR;
         // A division's rax and rdx, and a shift's rcx, may need call-save rows for the values it doesn't take.
         const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : plan->patterns[node].rule;
-        fixed_saves |= rule == TIER1_RULE_DIVIDE ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX : 0;
-        emitted->fixed_count += rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_SHIFT;
+        fixed_saves |= tier1_select_fixed_registers(rule);
+        emitted->fixed_count += tier1_select_fixed_registers(rule) != 0;
         if (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT)
         {
             prepared->call_count += 1;
@@ -538,61 +539,21 @@ static bool tier1_emit_cfg_object(const Tier1EmitResult* emitted, uint32_t objec
     return found;
 }
 
-// A division or remainder, or a shift by a register (TIER1_RULE_DIVIDE, TIER1_RULE_SHIFT): x86's fixed registers, rax
-// and rdx or cl, taken after the operands are read, the divisor or the shifted value through the scratch register; any
-// other value live past the node in those registers saved around it in its call-save row (tier1_emit_cfg_problem gives
-// it one).
-static Tier1EmitError tier1_emit_cfg_fixed(Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, const Tier1SelectPattern* pattern, uint32_t node, uint32_t use,
-                                           const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+// A node whose rule takes x86's fixed registers (tier1_select_fixed: a division or a shift by a register, a division by a
+// constant's reciprocal), with any other value live past it in those registers, by its interval at the node's definition
+// phase, saved around it in its call-save row (tier1_emit_cfg_problem gives it one; tier1_emit_fixed).
+static Tier1EmitError tier1_emit_cfg_fixed(Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
 {
-    const bool divide = pattern->rule == TIER1_RULE_DIVIDE;
-    const uint32_t width = pattern->width;
-    const uint32_t fixed = divide ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) : 1u << X86_REGISTER_RCX;
-    const uint8_t destination = holes->destination;
-    const uint8_t scratch = BUSTER_TIER1_SELECT_SCRATCH;
+    const uint32_t fixed = tier1_select_fixed_registers(holes->rule);
     uint32_t saved = 0;
     for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
         const uint32_t owner = transitions->owners[reg];
         const bool live = ((fixed >> reg) & 1) != 0 && owner != BUSTER_IR_NONE && owner != node && transitions->registers[owner] == reg &&
                           tier1_cfg_interval_at(&emitted->cfg, emitted->node_values[owner], use + 1) != BUSTER_TIER1_CFG_NONE;
-        saved |= live && reg != destination ? 1u << reg : 0;
+        saved |= live && reg != holes->destination ? 1u << reg : 0;
     }
-    bool appended = (saved & ~emitted->prepared.call_save_mask) == 0;
-    for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-    {
-        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, false));
-        emitted->call_stores += (saved >> reg) & 1;
-    }
-    if (divide)
-    {
-        const bool signed_divide = (pattern->immediate & 1) != 0;
-        const uint8_t result = (pattern->immediate & 2) != 0 ? X86_REGISTER_RDX : X86_REGISTER_RAX;
-        appended = appended && tier1_emit_append(buffer, tier1_emit_move(holes->right, scratch, 8));
-        appended = appended && (holes->left == X86_REGISTER_RAX || tier1_emit_append(buffer, tier1_emit_move(holes->left, X86_REGISTER_RAX, 8)));
-        const X86Instruction extend = signed_divide ? (X86Instruction){ .form = width == 8 ? X86_FORM_CQO : X86_FORM_CDQ } :
-                                                      (X86Instruction){ .form = X86_FORM_XOR_R32_RM32, .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RDX };
-        appended = appended && tier1_emit_append(buffer, extend);
-        const uint16_t form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32);
-        appended = appended && tier1_emit_append(buffer, (X86Instruction){ .form = form, .rm = scratch });
-        appended = appended && (destination == result || tier1_emit_append(buffer, tier1_emit_move(result, destination, width)));
-    }
-    else
-    {
-        const uint16_t form = pattern->operation == X86_OPERATION_SHL ? (width == 8 ? X86_FORM_SHL_RM64_CL : X86_FORM_SHL_RM32_CL) :
-                              pattern->operation == X86_OPERATION_SHR ? (width == 8 ? X86_FORM_SHR_RM64_CL : X86_FORM_SHR_RM32_CL) :
-                                                                        (width == 8 ? X86_FORM_SAR_RM64_CL : X86_FORM_SAR_RM32_CL);
-        appended = appended && tier1_emit_append(buffer, tier1_emit_move(holes->left, scratch, 8));
-        appended = appended && (holes->right == X86_REGISTER_RCX || tier1_emit_append(buffer, tier1_emit_move(holes->right, X86_REGISTER_RCX, 4)));
-        appended = appended && tier1_emit_append(buffer, (X86Instruction){ .form = form, .rm = scratch });
-        appended = appended && tier1_emit_append(buffer, tier1_emit_move(scratch, destination, width));
-    }
-    for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-    {
-        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, true));
-        emitted->call_loads += (saved >> reg) & 1;
-    }
-    return appended ? TIER1_EMIT_OK : (saved & ~emitted->prepared.call_save_mask) != 0 ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_MEMORY;
+    return tier1_emit_fixed(emitted, saved, holes, buffer);
 }
 
 // The entry's moves: each parameter free at its definition (Tier1CfgInput.definition_registers 0 for it, every
@@ -792,7 +753,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count +
-                              (uint64_t)emitted->fixed_count * 6;
+                              (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -1056,9 +1017,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     }
                 }
             }
-            else if (error == TIER1_EMIT_OK && selected && (plan->patterns[node].rule == TIER1_RULE_DIVIDE || plan->patterns[node].rule == TIER1_RULE_SHIFT))
+            else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
             {
-                error = tier1_emit_cfg_fixed(emitted, &transitions, &plan->patterns[node], node, use, &holes, &buffer);
+                error = tier1_emit_cfg_fixed(emitted, &transitions, node, use, &holes, &buffer);
             }
             else if (error == TIER1_EMIT_OK && selected)
             {
