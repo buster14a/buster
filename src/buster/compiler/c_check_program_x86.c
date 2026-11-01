@@ -952,7 +952,9 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             const bool fcmp = rule->fixed == CHECK_X86_PREDICATE_FCMP;
             bool swap = false;
             const uint64_t value = fcmp ? check_x86_lower_float_predicate(immediate, strict, &swap) : immediate & (lanes_in - 1);
-            row->records[0] = check_x86_lower_record(rule->form, v0, swap ? v1 : v0, swap ? v0 : v1);
+            // A form without vvvv (SHA1RNDS4's) has its reg a and the destination, as BINARY's.
+            const bool two = x86_form_description(rule->form)->vvvv == BUSTER_X86_OPERAND_NONE;
+            row->records[0] = check_x86_lower_record(rule->form, v0, two ? 0 : swap ? v1 : v0, swap ? v0 : v1);
             row->records[0].immediate = (int32_t)value;
             row->record_count = 1;
             row->operand_count = 2;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 549 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 558 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -583,6 +583,15 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_scattersiv8di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 413 },
     { "__builtin_ia32_scattersiv8sf", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 407 },
     { "__builtin_ia32_scattersiv8si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 408 },
+    { "__builtin_ia32_roundps", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 679 },
+    { "__builtin_ia32_roundpd", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 680 },
+    { "__builtin_ia32_roundps256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 681 },
+    { "__builtin_ia32_roundpd256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 682 },
+    { "__builtin_ia32_roundss", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 702 },
+    { "__builtin_ia32_roundsd", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 703 },
+    { "__builtin_ia32_sha1rnds4", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 614 },
+    { "__builtin_ia32_vcvtps2ph", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 760 },
+    { "__builtin_ia32_vcvtps2ph256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 762 },
 };
 
 static bool check_builtin_x86_test_expect(CheckBuiltinX86Test* test, bool condition, const char* description, uint32_t item)
@@ -647,7 +656,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 549, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 558, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];

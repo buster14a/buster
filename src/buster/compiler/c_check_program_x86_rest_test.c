@@ -463,6 +463,38 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             0,
             false,
         },
+        {
+            // SSE4.1's roundings at every mode, packed and of b's first element into a; its dot products under masks of
+            // some, all and no elements; AES's key assist and SHA's four rounds at their selectors; and F16C's
+            // conversions to halves at every rounding control and the current mode's, of values with halves and ties.
+            "x86-rest-sse-immediates",
+            "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\n"
+            "#define M16(F,...) F(0,__VA_ARGS__)F(1,__VA_ARGS__)F(2,__VA_ARGS__)F(3,__VA_ARGS__)F(4,__VA_ARGS__)F(5,__VA_ARGS__)F(6,__VA_ARGS__)"
+            "F(7,__VA_ARGS__)F(8,__VA_ARGS__)F(9,__VA_ARGS__)F(10,__VA_ARGS__)F(11,__VA_ARGS__)F(12,__VA_ARGS__)F(13,__VA_ARGS__)F(14,__VA_ARGS__)"
+            "F(15,__VA_ARGS__)\n"
+            "#define A1(i,N,a) __builtin_ia32_##N(a,i),\n"
+            "#define A2(i,N,a,b) __builtin_ia32_##N(a,b,i),\n"
+            "#define U(N,T,a) {T r[]={M16(A1,N,a)};FOLD(r);}\n"
+            "#define B(N,T,a,b) {T r[]={M16(A2,N,a,b)};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf a4,b4;v8sf a8,b8;v2df p2,q2;v4df p4;v2di k2;v4si s4,t4;\n"
+            "for(int i=0;i<8;i++){float f=(float)(n*3+i*5-17)*0.25f+(i&1?0.5f:-0.75f);a8[i]=f;b8[i]=(float)(i-n)/3.0f;if(i<4){a4[i]=f*1.5f;b4[i]=-f;"
+            "p4[i]=(double)f*2.5+0.5;}if(i<2){p2[i]=(double)f-0.5;q2[i]=(double)(n+i)/7.0;}}\n"
+            "fill(&k2,16,n);fill(&s4,16,n+1);fill(&t4,16,n+2);\n"
+            "U(roundps,v4sf,a4)U(roundpd,v2df,p2)U(roundps256,v8sf,a8)U(roundpd256,v4df,p4)B(roundss,v4sf,b4,a4)B(roundsd,v2df,q2,p2)\n"
+            "{v4sf r[]={__builtin_ia32_dpps(a4,b4,0xff),__builtin_ia32_dpps(a4,b4,0x31),__builtin_ia32_dpps(a4,b4,0xe5),__builtin_ia32_dpps(a4,b4,0x0f),"
+            "__builtin_ia32_dpps(a4,b4,0xf0)};FOLD(r);}"
+            "{v8sf r[]={__builtin_ia32_dpps256(a8,b8,0xff),__builtin_ia32_dpps256(a8,b8,0x7a),__builtin_ia32_dpps256(a8,b8,0x13)};FOLD(r);}"
+            "{v2df r[]={__builtin_ia32_dppd(p2,q2,0x33),__builtin_ia32_dppd(p2,q2,0x31),__builtin_ia32_dppd(p2,q2,0x12),__builtin_ia32_dppd(p2,q2,0xff),"
+            "__builtin_ia32_dppd(p2,q2,0x03)};FOLD(r);}\n"
+            "{v2di r[]={__builtin_ia32_aeskeygenassist128(k2,0),__builtin_ia32_aeskeygenassist128(k2,1),__builtin_ia32_aeskeygenassist128(k2,0x1b),"
+            "__builtin_ia32_aeskeygenassist128(k2,0x80),__builtin_ia32_aeskeygenassist128(k2,0xff)};FOLD(r);}"
+            "{v4si r[]={__builtin_ia32_sha1rnds4(s4,t4,0),__builtin_ia32_sha1rnds4(s4,t4,1),__builtin_ia32_sha1rnds4(s4,t4,2),"
+            "__builtin_ia32_sha1rnds4(s4,t4,3),__builtin_ia32_sha1rnds4(s4,t4,7)};FOLD(r);}\n"
+            "U(vcvtps2ph,v8hi,a4)U(vcvtps2ph256,v8hi,a8)\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

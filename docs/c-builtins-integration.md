@@ -578,8 +578,9 @@ place it: the format's fraction at the significand's top, so that bit 62 is
 every format's quiet bit (`check_action_nan_bits`). A `__float128`'s 112
 fraction bits don't fit, so its NaN keeps its quiet bit at 62, its fraction's
 bit 110 (a signaling NaN without a payload's) at 61 and its payload's low 61
-bits below (`check_action_quad_bits`). A payload past 61 bits is refused by
-name. The value keeps its bits until a conversion to another format quiets it,
+bits below (`check_action_quad_bits`). A payload past 61 bits is refused:
+in a static initializer as an initializer that is not a constant expression,
+and in a function as an unsupported floating builtin. The value keeps its bits until a conversion to another format quiets it,
 as APFloat's does (`check_action_convert_nan`, which first re-encodes a
 `__float128` NaN as a narrowing reads it), so a conversion to the value's own
 format, the rounding of a NaN, and a unary `+` or `-` (a sign change alone, as
@@ -1115,11 +1116,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 549 audited SemaX86 constraint facts for 521
+`c_check_builtin_x86.c` adds 558 audited SemaX86 constraint facts for 530
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
 rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 276 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -1275,6 +1276,14 @@ the existing families or of new ones:
   VEX's VPGATHER with the mask in vvvv, which the instruction zeroes). Each
   takes clang's scale check (1, 2, 4 or 8). `x86_semantics.c` gained the effects
   of the float gathers and scatters, VPGATHERQD's and VPSCATTERDQ's.
+- SSE4.1's roundings by an immediate (`roundps`, `roundpd`, their 256-bit
+  forms, and `roundss` and `roundsd` of b's first element into a: 0 to 15), its
+  dot products (`dpps`, `dpps256`, `dppd`), AES's key assist
+  (`aeskeygenassist128`), SHA's four rounds (`sha1rnds4`, 0 to 3, a legacy form
+  without vvvv, as BINARY's SHA forms are) and F16C's conversions to halves
+  (`vcvtps2ph`, `vcvtps2ph256`, 0 to 255), each the immediate's whole byte, by
+  VEX forms that require AVX. `x86_semantics.c` gained their VEX forms'
+  effects, and Tier 0's legacy list SHA1RNDS4.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's
