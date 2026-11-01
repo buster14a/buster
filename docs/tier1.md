@@ -126,6 +126,42 @@ objects"):
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
 ```
 
+`--tier1-gvn` runs #866's congruence solver on the lowered IR, before
+promotion, so that promotion's phi placement decides what its merged values
+need. It is a measurement option, off by default, and the measurement says to
+keep it off: its class representatives lengthen live ranges that Tier 1's
+allocation pays for in moves and spills.
+
+The figures are from two hosts, `BUSTER_DEBUG_INFO=0`, Clang 23, one pinned
+CPU: a Ryzen 9 7940HS (Zen 4) and the approved Ryzen 7 9700X (Zen 5) under its
+shared lock. The source is a local `sqlite3.c` of 2,604 functions (2,155 of them
+Tier 1's), not the frozen file [the value-numbering guide](ir-value-numbering.md)
+measures at 2,602, so the counts aren't comparable across records. On the
+7940HS the object's text grows from 1,283,627 to 1,439,515 bytes (+12.1%) and
+five compiles' median wall time from 525 to 698 ms in one pair of runs and 751
+to 910 ms in another (+33.0% and +21.2%; that host is shared, so its time is a
+range). On the 9700X, at the code head `fe3f3c79` — this head with `main` merged
+again, whose wider selection takes 2,171 of the 2,604 functions rather than
+2,155 — the text
+grows from 1,440,195 to 1,613,155 bytes (+12.0%) and the median of four clean
+compiles from 363 ms to 487 ms (+34.2%), the first run's figure discarded
+because it includes the wait for the CI job that held the lock. The two hosts'
+byte totals differ because their trees are different commits; the relative
+change agrees (12.0% against 12.1%), which is what the guide claims.
+
+On c-testsuite's 430 functions Tier 1 still compiles the same
+350, with the objects 1.2% smaller (347,912 to 343,624 bytes) but 13.9% more
+instructions (9,136 to 10,402), 25 spill stores and 25 reloads where it had
+none, and 146 edge moves where it had 113; no program fails to compile either
+way. Running it after `ir_optimize` instead is worse still (text +15.8%,
+instructions +40%, 2.5 times the spill traffic), and the pipeline's cleanup
+after it does not recover the regression (205,229 against 205,269
+instructions, 0.02%), so the cost is the merge rather than dead values. Tier 1
+therefore doesn't route C source through GVN until a variant accounts for
+allocation cost. [The measurement record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
+has the commands, the host and the raw logs; [the value-numbering
+guide](ir-value-numbering.md) has the rest of the figures.
+
 Tier 1's functions have unwind tables as Tier 0's do, by default and under the
 same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables"):
 their frames are Tier 0's frame protocol (callee-saved registers pushed, one
