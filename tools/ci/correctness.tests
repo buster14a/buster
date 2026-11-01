@@ -378,6 +378,8 @@ musl="$corpus/libc/musl"
 ./build/compiler test-parser-bindings --clang -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 == Test the x86-64 encoder
 ./build/compiler test-x86-encoder
+== Test the backend's baked tables
+./build/compiler test-baked-tables
 == Test zlib decompression of debug sections against gzip's streams
 ./build/compiler test-inflate
 == Test token refinement

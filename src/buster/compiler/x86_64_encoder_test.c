@@ -1423,7 +1423,7 @@ static bool x86_check_templates(void)
            "override, which have no room for it\n",
            (unsigned)X86_FORM_COUNT, (unsigned)BUSTER_X86_LEGACY_MODE_FORMS, result && unexpected_64 == 0 ? "all fit" : "SOME DON'T FIT", with_override);
     // The FS and GS templates x86_encoder_initialize derives from each form's own (x86_template_with_segment), and every
-    // marked copy, entry by entry against build_mode_template's.
+    // marked copy, entry by entry against build_mode_template's: in a baked executable, the table it starts with.
     uint32_t derived_differ = 0;
     for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
     {
@@ -1435,17 +1435,7 @@ static bool x86_check_templates(void)
         derived_differ += !built || memcmp(&expected, &x86_templates[form], sizeof(expected)) != 0 ||
                           memcmp(&expected, &x86_templates[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) != 0;
     }
-    // x86_templates_prepare's huge pages: one or more, each in the table's storage, which starts on a page.
-    uintptr_t pages[3];
-    const uint32_t huge_pages = x86_templates_huge_pages(x86_templates, pages);
-    bool aligned = (uintptr_t)(x86_templates - BUSTER_X86_TEMPLATE_PADDING) % BUSTER_X86_TEMPLATE_ALIGNMENT == 0 && huge_pages >= 1;
-    for (uint32_t p = 0; p < huge_pages; p += 1)
-    {
-        aligned = aligned && pages[p] % BUSTER_X86_TEMPLATE_HUGE_PAGE == 0 && pages[p] >= (uintptr_t)x86_template_storage &&
-                  pages[p] + BUSTER_X86_TEMPLATE_HUGE_PAGE <= (uintptr_t)(x86_template_storage + BUSTER_ARRAY_LENGTH(x86_template_storage));
-    }
-    printf("templates against the builder: %u entries and their marked copies, %u differ; %u huge pages, %s\n", (unsigned)BUSTER_X86_FORM_TEMPLATES, derived_differ,
-           huge_pages, aligned ? "all in the table's storage" : "NOT ALL IN THE TABLE'S STORAGE");
+    printf("templates against the builder: %u entries and their marked copies, %u differ\n", (unsigned)BUSTER_X86_FORM_TEMPLATES, derived_differ);
     if (!result)
     {
         for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
@@ -1487,7 +1477,7 @@ static bool x86_check_templates(void)
     printf("templates for APX: %s, %u forms with REX2's positions, and their FS and GS copies but %u without room for its payload, and %u with a segment "
            "override, which have no room for it\n",
            apx && unexpected_apx == 0 && unexpected_room_apx == 0 ? "all fit" : "SOME DON'T FIT", rex2_forms, without_room, with_override);
-    result = result && unexpected_64 == 0 && derived_differ == 0 && aligned && address32 && unexpected == 0 && apx && unexpected_apx == 0 && unexpected_room_apx == 0;
+    result = result && unexpected_64 == 0 && derived_differ == 0 && address32 && unexpected == 0 && apx && unexpected_apx == 0 && unexpected_room_apx == 0;
     // In 32-bit and 16-bit modes: every form that exists there fits, with a position for the decorations' segment
     // override exactly in those that take one (x86_form_takes_override) without FS or GS, and some have 16 positions,
     // one of them for BUSTER_X86_MODE_ADDRESS_SIZE's 67 (see build_template).

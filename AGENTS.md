@@ -657,6 +657,19 @@ designs and the compilers already built this way.
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
   process.
+  Each executable it links then writes itself with the backend's tables built
+  (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
+  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize` and
+  `unwind_initialize` write is in a section of its own (`buster_baked`:
+  `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
+  module's statics, baked in the checker's unit, the C driver's), so a compile
+  starts with them built; the file's build ID is recomputed over the baked
+  bytes. A new table those initializers write goes there too: the bake fails
+  the build when they write anything outside it, including when its own
+  tracking arrays fill. PIEs (the sanitizers' builds) and
+  `BUSTER_BAKE=0` build them when they run; `test-baked-tables` checks either
+  kind and fails, rather than skips, when the section is missing (the
+  compile-time guide's "Baked tables").
   `./build.sh shifts DIRECTORY SOURCE SHIFT...` also links the same objects
   into `DIRECTORY/compiler-SHIFT` for each SHIFT, with that many bytes of
   padding in `.text` before SOURCE's code, for `time-runs` to compare builds
@@ -1516,6 +1529,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-preprocessor-fuzz --std c23
 ./build/compiler benchmark-preprocessor-fuzz
 ./build/compiler test-x86-encoder
+./build/compiler test-baked-tables
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-branch-sizing --cross-check
 ./build/compiler benchmark-branch-sizing

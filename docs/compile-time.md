@@ -1186,7 +1186,61 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
   against 3.5 to 4.3 times before. What remains of `backend-setup` (2.1 to
   2.5 ms on the VM, 0.52 ms on the 9700X) is mostly the encoder's build and its
   pages' clearing, Tier 0's build, and semantics and unwind.
-- **Not done.** Building the tables ahead of time, into a snapshot or
-  read-only data, would take their build and clearing out of a compile. That
-  needs an identity and staleness scheme like the runtime snapshot's. It
-  remains #590's open direction.
+- **Since.** The tables are baked into the executable ("Baked tables",
+  below), which took their build and clearing out of a compile and replaced
+  this section's huge pages, margins and `x86_encoder_initialized` in `.data`.
+
+### Baked tables (#590)
+
+build.sh has each executable it links write itself with the backend's tables
+built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
+and their marked copies, the x86 semantics' tables, and the checker unit's
+copies of Tier 0's tables, the Zen 5 cost model's tables and the unwind
+templates, with their initialized flags, all in a section of their own
+(`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
+with them built, at their fixed addresses, and reads the pages it touches from
+the page cache, shared with every other process.
+
+- **Why baked, not a snapshot.** A snapshot in the cache directory, as the C
+  runtime has, would need the executable's identity, staleness checks, a
+  rebuild on a first run and, to keep the encoder's constant address, a fixed
+  mapping over `.bss`. Baked tables are part of the file that builds them: no
+  identity to check, nothing to go stale, and the first run has them.
+- **Checked.** The bake refuses, and fails the build, if the initializers wrote
+  any byte of the image's writable memory outside the section (but the GOT,
+  which the loader fills as functions are first called), or if its writable
+  ranges or GOT sections outgrow the arrays it tracks them in. Its first run
+  found Tier 0's window and vector tables and the Zen 5 cost model's tables,
+  which a list made by hand had missed. `test-baked-tables` makes the same
+  check in any executable, a sanitizer build's PIE too, and in a baked one that
+  a fresh build gives the file's bytes and build ID; a missing section fails it
+  instead of skipping it.
+- **The build ID.** The linker's GNU build ID is over the pre-bake file, so
+  `bake-tables` recomputes it over the baked bytes, with the note's descriptor
+  zeroed. The ID stays stable for a given build and never names bytes other
+  than the file's.
+- **Where it isn't.** PIEs (the sanitizers' builds, whose tables would hold
+  their load address if any had a pointer), executables linked without
+  build.sh and builds with `BUSTER_BAKE=0` build the tables when they run, as
+  before. So do the benchmarks' units.
+
+Objects are the same bytes, baked or built: `hello.c` and c-testsuite's 220
+programs, each compiled with `-c` by both builds and compared. On a 2.1 GHz
+Xeon VM with transparent huge pages `madvise`, against `main` at `7c779480`,
+both linked by wild 0.10.0:
+
+| input | `main` | baked | tcc |
+| --- | ---: | ---: | ---: |
+| `hello.c`, `measure-compile --runs 31`, three rounds | 9.90, 10.27, 11.70 ms | 8.39, 7.20, 8.83 ms | |
+| `hello.c`'s `backend-setup`, and its faults and peak added | 2.63 ms, 535, 4.6 MB | 0.014 ms, 1, 0 | |
+| `hello.c`'s minor faults, whole process | 1,182 | 660 | |
+| `hello.c`'s peak RSS (`wait4`) | 30.0 MB | 24.8 MB | |
+| c-testsuite's 220, best of 3 each, mean | 7.74 ms | 5.22 ms | 1.94 ms |
+| `sqlite3.c`, `measure-compile --runs 11`, two rounds | 331.9, 304.9 ms | 308.2, 300.0 ms | |
+
+- **Small files.** c-testsuite's programs take 2.7 times tcc's time, against
+  4.0 times before.
+- **`sqlite3.c`.** Unchanged within the VM's noise: base pages from the page
+  cache cost its encoding no more than the huge pages did.
+- **The file.** The executable grows by the section, 5.1 MB, which the page
+  cache shares between processes.

@@ -76,6 +76,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "host_isa.h"
+#include "baked.h"
 
 // OS-dependent includes
 #include <sys/mman.h>
@@ -1447,8 +1448,8 @@ struct Tier0Template
 #define BUSTER_TIER0_ENTRY_ABSORBED 0xffff
 #define BUSTER_TIER0_ENTRY_DEFERRED 0xfffe
 
-static Tier0Template tier0_templates[BUSTER_TIER0_TEMPLATE_CAPACITY];
-static uint32_t tier0_template_count;
+static BUSTER_BAKED_UNIT Tier0Template tier0_templates[BUSTER_TIER0_TEMPLATE_CAPACITY];
+static BUSTER_BAKED_UNIT uint32_t tier0_template_count;
 
 // What the passes after selection read of a template, in 32 bytes (the templates themselves are 270): its length, its
 // branch record (0xff: none) and whether it goes to the function's end, its symbolic record (0xff: none) with its fixup's
@@ -1489,7 +1490,7 @@ struct Tier0TemplateInfo
 };
 _Static_assert(sizeof(Tier0TemplateInfo) == 40, "a template's summary");
 
-static Tier0TemplateInfo tier0_template_infos[BUSTER_TIER0_TEMPLATE_CAPACITY];
+static BUSTER_BAKED_UNIT Tier0TemplateInfo tier0_template_infos[BUSTER_TIER0_TEMPLATE_CAPACITY];
 
 // Each template's four records compiled into one cache line, for the vector expansion: a byte the template fixes is
 // that byte, and a hole's is its index in the hole block (below 32), which vpermb reads from its low bits; the
@@ -1500,7 +1501,7 @@ struct Tier0Compiled
     _Alignas(64) uint8_t bytes[64];
 };
 
-static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
+static BUSTER_BAKED_UNIT Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
 
 // The vector path's per-entry word: everything the passes after fusion read of an entry's template, in 64 bits, so that
 // selection gathers it, 8 entries at a time, and measuring and emission read it from the entries' column rather than a
@@ -1546,20 +1547,20 @@ static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
     (~(BUSTER_TIER0_WORD_TEMPLATE | BUSTER_TIER0_WORD_HOME_DEPENDENT | BUSTER_TIER0_WORD_HOME_UNIFORM | 0xffull << BUSTER_TIER0_WORD_DEPTH_SHIFT | BUSTER_TIER0_WORD_CLOBBERS_RDX))
 #define BUSTER_TIER0_SLOT_WORDS (BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT * BUSTER_TIER0_VARIANTS)
 
-static uint64_t tier0_slot_words[BUSTER_TIER0_SLOT_WORDS];
-static uint64_t tier0_template_words[BUSTER_TIER0_TEMPLATE_CAPACITY];
+static BUSTER_BAKED_UNIT uint64_t tier0_slot_words[BUSTER_TIER0_SLOT_WORDS];
+static BUSTER_BAKED_UNIT uint64_t tier0_template_words[BUSTER_TIER0_TEMPLATE_CAPACITY];
 // Per form, what x86_choice_instruction does with it as a chosen form: its immediate's bytes, and whether it takes no
 // operands (the accumulator's and push's forms) or its destination twice (a zero idiom, test r, r).
 #define BUSTER_TIER0_SHAPE_BYTES 0x0f
 #define BUSTER_TIER0_SHAPE_CLEAR 0x10
 #define BUSTER_TIER0_SHAPE_TWICE 0x20
-static uint8_t tier0_choice_shapes[X86_FORM_COUNT];
+static BUSTER_BAKED_UNIT uint8_t tier0_choice_shapes[X86_FORM_COUNT];
 // Per template: its compiled records' hole mask, for emission.
-static uint64_t tier0_masks[BUSTER_TIER0_TEMPLATE_CAPACITY];
-static uint16_t tier0_slot_bases[BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT];
-static uint16_t tier0_slots[BUSTER_TIER0_SLOT_CAPACITY];
-static uint32_t tier0_slot_count;
-static bool tier0_initialized;
+static BUSTER_BAKED_UNIT uint64_t tier0_masks[BUSTER_TIER0_TEMPLATE_CAPACITY];
+static BUSTER_BAKED_UNIT uint16_t tier0_slot_bases[BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT];
+static BUSTER_BAKED_UNIT uint16_t tier0_slots[BUSTER_TIER0_SLOT_CAPACITY];
+static BUSTER_BAKED_UNIT uint32_t tier0_slot_count;
+static BUSTER_BAKED_UNIT bool tier0_initialized;
 
 // The template the builder is making, its key, and whether everything fit.
 typedef struct Tier0Builder Tier0Builder;
@@ -1569,7 +1570,7 @@ struct Tier0Builder
     bool valid;
 };
 
-static Tier0Builder tier0_builder;
+static BUSTER_BAKED_UNIT Tier0Builder tier0_builder;
 
 static void tier0_build_windows(void);
 static bool tier0_build_vector_tables(void);
@@ -3039,7 +3040,7 @@ static void tier0_define_templates(void)
 // choice leaves to its caller, #181): where the Zen 5 model's observations of inc and dec (x86_zen5.c's cases), at 32 and
 // 64 bits, Tier 0's widths, cost no more than add's and sub's with an imm8 in latency, throughput and retired macro-ops,
 // each known. tier0_initialize sets it.
-static uint16_t tier0_inc_dec;
+static BUSTER_BAKED_UNIT uint16_t tier0_inc_dec;
 
 static bool tier0_inc_dec_costs_no_more(void)
 {
@@ -4586,8 +4587,8 @@ _Static_assert(offsetof(Tier0Holes, registers) == BUSTER_TIER0_HOLE_REGISTERS, "
 // The registers around each depth, for the hole blocks: entry d holds the integer stack's registers at d - 2, d - 1 and
 // d, and the floating stack's, as R2, R1, R0, X2, X1 and X0 (0 where the table has none, which no template uses).
 #define BUSTER_TIER0_WINDOWS 32
-static uint32_t tier0_integer_window[BUSTER_TIER0_WINDOWS] __attribute__((aligned(64)));
-static uint32_t tier0_floating_window[BUSTER_TIER0_WINDOWS] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint32_t tier0_integer_window[BUSTER_TIER0_WINDOWS] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint32_t tier0_floating_window[BUSTER_TIER0_WINDOWS] __attribute__((aligned(64)));
 
 static void tier0_build_windows(void)
 {
@@ -10828,16 +10829,16 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
 #define BUSTER_TIER0_KIND_CONTROL 0x40
 #define BUSTER_TIER0_ROWS 16
 
-static uint8_t tier0_vector_shapes[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_kind_flags[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_rows[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_stacks[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_wide[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_integer[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_properties[BUSTER_TIER0_ROWS * BUSTER_TYPED_CLASS_LIMIT] __attribute__((aligned(64)));
-static uint8_t tier0_vector_convert_home[BUSTER_TYPED_CLASS_LIMIT * BUSTER_TYPED_CLASS_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_shapes[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_kind_flags[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_rows[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_stacks[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_wide[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_integer[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_properties[BUSTER_TIER0_ROWS * BUSTER_TYPED_CLASS_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_convert_home[BUSTER_TYPED_CLASS_LIMIT * BUSTER_TYPED_CLASS_LIMIT] __attribute__((aligned(64)));
 // Per access, the kind each kind is keyed by for a symbol of that access (tier0_kind_by_access), for vpermb.
-static uint8_t tier0_vector_accesses[BUSTER_TIER0_ACCESSES][BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t tier0_vector_accesses[BUSTER_TIER0_ACCESSES][BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
 
 // A (kind, class)'s properties, from its slots.
 static uint8_t tier0_properties_of(uint32_t kind, uint32_t class)

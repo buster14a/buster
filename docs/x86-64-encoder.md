@@ -296,43 +296,41 @@ marked copy with `build_mode_template`'s. Each entry's marked copy is written in
 the same per-entry pass that writes its halves the other way around, rather
 than by one 1.6 MB copy afterwards.
 
-Before building a table, `x86_templates_prepare` commits the ranges the build
-writes (`MADV_POPULATE_WRITE`), one call per range, both ends rounded out to
-pages. For `x86_encode`'s table, which every compile builds, it first asks for
-transparent huge pages (`MADV_HUGEPAGE`). Each template's marked copy is
-exactly 2 MB after it (`BUSTER_X86_FORM_FIXUP` is 2 MB of entries), so the
-entries the build writes, which are all the ranges count and commit (not the
-padding beside them), fall in two or three 2 MB pages, depending on where the
-link places the table.
-- **Which pages.** `x86_templates_huge_pages` picks those the table fills at
-  least 750 KB of: as much as a huge page's clearing costs in base pages on the
-  9700X (`lane.c`'s arenas). Asking for a third huge page that the table fills
-  less cost 0.06 to 0.2 ms more, on a Xeon VM, than leaving its bytes to base
-  pages.
-- **Where.** A huge page's margin on either side keeps those pages in the
-  table's own storage. The storage isn't aligned to a huge page, because wild
-  0.10, which links CI's builds, refuses alignments past 64 KB. Only the copy
-  in `main.c`'s units (`BUSTER_UNIT`), the one a compile builds, has the
-  margins; the benchmarks' units keep theirs without them.
-  `x86_encoder_initialized` is in `.data`, as `lane.c`'s `LaneProcess` is: in
-  `.bss` it followed the margin into a 2 MB region of its own, which an
-  `always` kernel cleared whole for that one byte.
-- **The other tables.** Tests, the disassembler and the other modes' entry
-  points build the other modes' tables. Those keep their size, without margins
-  or huge pages, because the benchmarks' units have copies of them all.
-- **Faults.** Where huge pages come, that is a fault per huge page, and the
-  rest base pages committed in one call per range. Where none come (`never`,
-  or none free), all are base pages committed so. The kernel still counts
-  each such page as a minor fault, but none is taken one at a time.
-- **Why.** On a kernel whose transparent huge pages are only `madvise`d
-  (Ubuntu's, Debian's and Fedora's default), `.bss`'s 3.2 MB had faulted in 788
-  base pages, half of a small file's compile. The 9700X's kernel uses
-  `always`, which already gave `.bss` huge pages, so it hid the cost.
-- **Measured.** On a 2.1 GHz Xeon VM with `madvise`, a process's first
-  `x86_encoder_initialize` fell from a median of 1.8–2.6 ms with 788 faults to
-  0.9–1.0 ms. Its work without faults fell from 0.94 to 0.53 ms. The whole
-  change's figures, the 9700X's among them, are in `docs/compile-time.md`'s
-  "The backend's tables when a function is emitted (#590)".
+`x86_encode`'s table is baked (#590): build.sh has the linked executable
+write itself with the table built (`bake-tables`, `baked.c`), in a section of
+its own (`buster_baked`, `baked.h`) with `x86_encoder_initialized` true, so a
+compile's process starts with it and reads the pages it touches from the page
+cache, shared with every other process, rather than building 25,062 templates
+and their marked copies and clearing 3.2 MB of pages.
+- **What's baked.** The section holds everything the backend's initializers
+  write: this table, the x86 semantics' tables, and the checker unit's copies
+  of Tier 0's, the Zen 5 cost model's and the unwind templates (the C driver's:
+  another unit's copies would only add their bytes to the file). It is writable
+  data with file bytes, 5.1 MB, at the same fixed addresses, so the encoder's
+  loop still reads `x86_templates` as a constant address.
+- **Checked.** The bake zeroes the section, runs the five initializers, and
+  refuses (failing the build) if they wrote any byte of the image's writable
+  memory outside the section, but the GOT, which the loader fills as functions
+  are first called. Its first run found Tier 0's window and vector tables and
+  the Zen 5 cost model's tables that a list made by hand had missed.
+  `test-baked-tables` makes the same check in any executable, and in a baked
+  one that a fresh build gives the file's bytes and build ID; a missing section
+  fails it. `test-x86-encoder` compares every entry of the table it starts with
+  against `build_mode_template`'s.
+- **Where it isn't.** A PIE (the sanitizers' builds) isn't baked, since a
+  table's pointer would hold its load address, and neither is an executable
+  linked without build.sh, or with `BUSTER_BAKE=0`: their initializers build
+  the tables when they run, as before. So do the benchmarks' units and the
+  other modes' tables (32-bit addresses, APX, 32- and 16-bit modes), which no
+  compile reads.
+- **Before a build,** `x86_templates_prepare` commits the ranges it writes
+  (`MADV_POPULATE_WRITE`), one call per range, both ends rounded out to pages,
+  rather than a fault per page.
+- **Why not huge pages.** #1027 gave the table huge pages where it filled
+  750 KB of one, with 2 MB margins in `.bss`. A baked table needs neither: a
+  compile faults in only the pages its forms touch, through the page cache's
+  fault-around. On a Xeon VM with `madvise`, `hello.c`'s `backend-setup` fell
+  from 2.63 ms to 0.014 ms (`docs/compile-time.md`, "Baked tables").
 
 ### VEX and EVEX
 
@@ -558,8 +556,8 @@ lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
 marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
 mask's popcount; the zeroed copy's padding isn't marked. A marked form's
 template is a copy at its own index: `x86_encoder_initialize` writes each of
-the 25,062 templates again at `BUSTER_X86_FORM_FIXUP` and up, in the table's
-second huge page (see "Templates and the canonical slot"),
+the 25,062 templates again at `BUSTER_X86_FORM_FIXUP` and up, exactly 2 MB
+after it (see "Templates and the canonical slot"),
 so Phase I looks a form up as the record has it, and the loop without offsets
 and fixup ends is the same code as before. Taking the flag off each form with
 an AND instead cost the compiler mix 2.4% (15 interleaved rounds, after #35's
