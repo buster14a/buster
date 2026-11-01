@@ -7564,7 +7564,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_CLASSIFY_TYPE, "__builtin_classify_type", false, true, true },
         { CBUILTIN_EH_RETURN_DATA_REGNO, "__builtin_eh_return_data_regno", false, true, true },
         { CBUILTIN_DWARF_CFA, "__builtin_dwarf_cfa", false, true, false },
-        { CBUILTIN_LAUNDER, "__builtin_launder", false, true, false },
+        { CBUILTIN_LAUNDER, "__builtin_launder", false, true, true },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

@@ -427,7 +427,7 @@
     X(CLASSIFY_TYPE, 0x3f0u, "__builtin_classify_type", BUSTER_CBUILTIN_CONSTANT) \
     X(EH_RETURN_DATA_REGNO, 0x3f1u, "__builtin_eh_return_data_regno", BUSTER_CBUILTIN_CONSTANT) \
     X(DWARF_CFA, 0x3f2u, "__builtin_dwarf_cfa", BUSTER_CBUILTIN_SOURCE) \
-    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_SOURCE)
+    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_CONSTANT)
 
 typedef enum CBuiltinId
 {

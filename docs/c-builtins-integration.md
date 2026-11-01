@@ -1096,7 +1096,8 @@ evaluator (`check_builtin_misc_generic`):
   function a frame pointer as `__builtin_frame_address` does;
 - `launder(p)` is p, of its type, which must be a pointer to a complete object
   type: not `void`'s, not a function's, and not an incomplete struct's. An
-  address constant stays one (`int* p = __builtin_launder(&g);` at file scope).
+  address constant stays one (`int* p = __builtin_launder(&g);` at file scope),
+  so `__has_constexpr_builtin` answers 1 for it, as clang's does.
 
 Eleven others are leaves, per-unit helpers of clang -O0's instructions
 (`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
@@ -1121,6 +1122,15 @@ constant expression (the prototype's `I`). A non-constant one is refused at the
 argument, as the x86 builtins' are; clang's message ("argument to ... must be
 a constant integer", at the call) is pending for both. `__builtin_verbose_trap`,
 whose two arguments clang requires to be string literals, is pending too.
+
+Two costs are accepted for now:
+- A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
+  clang's code makes the constant size's stores itself. Lowering them through
+  the misc builtins' straight-line copy and fill recipes
+  (`cbuiltin_misc_lower_copy_small`) is a follow-up.
+- `__has_constexpr_builtin` answers 0 for `__builtin_assume_separate_storage`,
+  which clang answers 1 for. A leaf has no catalogue row for the query to read,
+  and since the builtin returns `void`, no C constant expression can call it.
 
 `test-checker --program-align` checks source fixtures of their classes,
 registers, types and refusals by both paths against clang, and runs programs
