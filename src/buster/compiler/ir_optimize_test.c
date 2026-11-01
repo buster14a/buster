@@ -353,6 +353,8 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                     }
                 } break;
                 case IR_STACK_ADDR: value = (uint64_t)a * 64 + 1; break;
+                // A slot's lifetime marker reads and writes nothing (#177).
+                case IR_LIFETIME: break;
                 case IR_SYMBOL_ADDR: value = (uint64_t)a << 32; break;
                 case IR_ADDRESS: value = values[a] + (b == BUSTER_IR_NONE ? 0 : values[b] * f->addresses[f->c[i]].scale) + f->addresses[f->c[i]].offset; break;
                 case IR_LOAD:

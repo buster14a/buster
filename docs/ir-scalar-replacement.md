@@ -51,6 +51,11 @@ definitions replaced with direct typed `STACK_ADDR`s. Shared dead-code
 removal removes obsolete address chains while retaining loads, stores,
 faulting operations, calls and control flow. Unused original slots are
 compacted, so the later promoter does not retain a dead aggregate allocation.
+A slot's `lifetime` markers (#177, [the IR guide](ir.md)'s "Slot lifetimes")
+refer to it as its addresses do: a split slot's markers go to its first field,
+which no access reaches outside the slot's lifetime, its other fields living
+throughout the function, so the split slot itself goes; an unsplit slot keeps
+its markers, and a slot that only markers refer to stays, renumbered with them.
 The field stage itself leaves all memory operations present. The upstream
 SSA promoter owns their elimination, incoming-value selection and phi
 construction. CFG, uses and dominance are rebuilt or consumed only within

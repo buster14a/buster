@@ -327,7 +327,8 @@ static IrError ssa_ir_layout(SsaIrWork* work)
         {
             const uint32_t block = work->cfg.instruction_blocks[i];
             const bool access = work->kinds[i] == BUSTER_SSA_READ || work->kinds[i] == BUSTER_SSA_WRITE;
-            const bool address = f->op[i] == IR_STACK_ADDR && ssa->promoted[f->a[i]] != 0;
+            // A promoted slot's address and its lifetime markers go with it.
+            const bool address = (f->op[i] == IR_STACK_ADDR || f->op[i] == IR_LIFETIME) && ssa->promoted[f->a[i]] != 0;
             if (ssa->reachable[block] != 0 && !access && !address)
             {
                 work->keep[i] = 1;
@@ -513,7 +514,7 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
                     {
                         f->c[instruction] = ssa_ir_value(work, input->c[i]);
                     }
-                    if (op == IR_STACK_ADDR)
+                    if (op == IR_STACK_ADDR || op == IR_LIFETIME)
                     {
                         f->a[instruction] = work->slots[input->a[i]];
                     }

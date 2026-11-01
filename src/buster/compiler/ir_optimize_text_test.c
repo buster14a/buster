@@ -39,6 +39,7 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "gvn-congruence", .pass = IR_OPTIMIZE_TEXT_GVN, .effects = true },
     { .name = "licm-hoist", .pass = IR_OPTIMIZE_TEXT_LICM, .effects = true },
     { .name = "sroa-private-fields", .pass = IR_OPTIMIZE_TEXT_SROA, .effects = false },
+    { .name = "sroa-lifetimes", .pass = IR_OPTIMIZE_TEXT_SROA, .effects = false },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
