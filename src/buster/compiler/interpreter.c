@@ -305,39 +305,53 @@ static InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, 
     return result;
 }
 
-// COPY transports an object representation, not scalar values: checking a source must not diagnose its padding,
-// and checking a destination must not define it before the source map is copied (in particular for self-copy).
-// Like the native copy bridge, unchecked memory admits unknown ranges but cannot escape a known allocation.
-static bool interpreter_typed_copy_range(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write, uint8_t** defined)
+// Object-representation transfers share one bounds and permission policy: a range must fit one registered
+// allocation, and unchecked memory admits only ranges that no allocation overlaps, so a tail cannot escape a known
+// object. The native copy bridge and the typed copy below both read this rule and must stay on it.
+static bool interpreter_memory_range(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write, InterpreterMemory** memory_out, uint64_t* offset_out)
 {
-    *defined = 0;
-    bool result = address != 0 && bytes != 0 && bytes <= UINT64_MAX - address;
-    if (result)
+    *memory_out = 0;
+    *offset_out = 0;
+    bool result = bytes == 0;
+    if (bytes != 0 && address != 0 && bytes <= UINT64_MAX - address)
     {
-        const uint32_t count = runtime->memory_count;
-        const InterpreterMemory* memories = runtime->memories;
-        const uint64_t end = address + bytes;
         bool known = false;
         bool found = false;
-        // The registry and its byte maps are not changed until both ranges have passed this scan.
-        for (uint32_t i = 0; i < count && !found; i += 1)
+        const uint64_t end = address + bytes;
+        for (uint32_t i = 0; i < runtime->memory_count && !found; i += 1)
         {
-            const InterpreterMemory* memory = &memories[i];
+            InterpreterMemory* memory = &runtime->memories[i];
             const uint64_t base = (uint64_t)(uintptr_t)memory->bytes;
-            const uint64_t size = memory->size;
             const uint64_t offset = address - base;
-            known |= (address >= base && offset <= size) || (address < base + size && base < end);
-            if (address >= base && offset <= size && bytes <= size - offset)
+            const uint64_t memory_end = base + memory->size;
+            known |= (address >= base && offset <= memory->size) || (address < memory_end && base < end);
+            if (address >= base && offset <= memory->size && bytes <= memory->size - offset)
             {
+                *memory_out = memory;
+                *offset_out = offset;
                 found = true;
                 result = !write || memory->writable;
-                *defined = result && memory->defined != 0 ? memory->defined + offset : 0;
             }
         }
         if (!found)
         {
             result = !known && !runtime->check_memory;
         }
+    }
+    return result;
+}
+
+// COPY transports an object representation, not scalar values: checking a source must not diagnose its padding,
+// and checking a destination must not define it before the source map is copied (in particular for self-copy).
+static bool interpreter_typed_copy_range(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write, uint8_t** defined)
+{
+    *defined = 0;
+    InterpreterMemory* memory = 0;
+    uint64_t offset = 0;
+    const bool result = interpreter_memory_range(runtime, address, bytes, write, &memory, &offset);
+    if (result && memory != 0 && memory->defined != 0)
+    {
+        *defined = memory->defined + offset;
     }
     return result;
 }

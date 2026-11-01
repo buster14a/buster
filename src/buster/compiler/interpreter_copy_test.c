@@ -2,8 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Typed COPY's execution, representation-byte and malformed-stream regressions (#176). Included by
-// interpreter_test.c: the public interpreter must consume both pointers, preserve lower stack values, carry
-// definedness without reading padding as a scalar, and leave both bytes and metadata unchanged on refusal.
+// interpreter_test.c after tier0_test.c, whose Tier0TestTally, tier0_test_build and tier0_test_run supply the native
+// oracle: the public interpreter must consume both pointers, preserve lower stack values, carry definedness without
+// reading padding as a scalar, and leave both bytes and metadata unchanged on refusal.
 
 static void interpreter_test_copy_ranges(InterpreterTestTally* tally)
 {
@@ -122,6 +123,9 @@ static void interpreter_test_copy_ranges(InterpreterTestTally* tally)
 
 static void interpreter_test_copy_dispatch(InterpreterTestTally* tally, Arena* scratch)
 {
+    // Typed frame objects (local_classes == VOID with local_sizes, the producer's struct-assignment path) are still
+    // refused by interpreter_typed_function_valid, so these fixtures use global bindings and value locals. Add a
+    // native object-local COPY fixture when #176 lands typed local objects.
     const uint64_t mark = scratch->length;
     const uint64_t capacity = (uint64_t)BUSTER_TIER0_MAX_COPY_BYTES + 2;
     uint8_t* source = arena_push(scratch, capacity, 1);
@@ -195,17 +199,14 @@ static void interpreter_test_copy_dispatch(InterpreterTestTally* tally, Arena* s
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
         {
             const uint32_t size = sizes[i];
-            if (size <= BUSTER_TIER0_MAX_COPY_BYTES)
-            {
-                memset(destination, 0xa5, capacity);
-                values[3] = size;
-                const uint64_t start = scratch->length;
-                InterpreterResult result;
-                const bool ran = interpreter_typed_run(&program, symbol, 0, 0, scratch, 0, &result);
-                interpreter_test_expect(tally, ran && result.status == INTERPRETER_OK && result.value.low == 77 &&
-                                        scratch->length == start && memcmp(destination + 1, source + 1, size) == 0 &&
-                                        destination[0] == 0xa5 && destination[size + 1] == 0xa5, "typed COPY consumes exactly two pointers and preserves lower values and guards");
-            }
+            memset(destination, 0xa5, capacity);
+            values[3] = size;
+            const uint64_t start = scratch->length;
+            InterpreterResult result;
+            const bool ran = interpreter_typed_run(&program, symbol, 0, 0, scratch, 0, &result);
+            interpreter_test_expect(tally, ran && result.status == INTERPRETER_OK && result.value.low == 77 &&
+                                    scratch->length == start && memcmp(destination + 1, source + 1, size) == 0 &&
+                                    destination[0] == 0xa5 && destination[size + 1] == 0xa5, "typed COPY consumes exactly two pointers and preserves lower values and guards");
         }
         const uint64_t invalid_sizes[] = {
             0,
@@ -449,9 +450,71 @@ static void interpreter_test_copy_native(InterpreterTestTally* tally, Arena* scr
     arena_release(&arena);
 }
 
+static void interpreter_test_copy_guarded(InterpreterTestTally* tally)
+{
+    // A registered allocation that ends exactly at a PROT_NONE page makes every over-read or over-write of a refused
+    // range fault, not just return a wrong status. The unchecked case starts no allocation at all.
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool protected = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0 && mprotect(mapping + 3 * page, page, PROT_NONE) == 0;
+    interpreter_test_expect(tally, protected, "COPY guard-page allocation");
+    if (protected)
+    {
+        uint8_t* source = mapping + page - 16;
+        uint8_t* destination = mapping + 2 * page;
+        uint8_t source_defined[16];
+        uint8_t destination_defined[16];
+        for (uint32_t i = 0; i < 16; i += 1)
+        {
+            source[i] = (uint8_t)(3 + i);
+            source_defined[i] = (uint8_t)(i & 1);
+            destination_defined[i] = 1;
+        }
+        InterpreterMemory memories[] = {
+            {
+                .bytes = source,
+                .size = 16,
+                .defined = source_defined,
+            },
+            {
+                .bytes = destination,
+                .size = 16,
+                .defined = destination_defined,
+                .writable = true,
+            },
+        };
+        InterpreterRuntime runtime = {
+            .memories = memories,
+            .memory_count = BUSTER_ARRAY_LENGTH(memories),
+            .memory_capacity = BUSTER_ARRAY_LENGTH(memories),
+            .check_memory = true,
+            .check_undefined = true,
+        };
+        const uint64_t from = (uint64_t)(uintptr_t)source;
+        const uint64_t to = (uint64_t)(uintptr_t)destination;
+        InterpreterStatus status = interpreter_typed_copy(&runtime, to, from, 16);
+        interpreter_test_expect(tally, status == INTERPRETER_OK && memcmp(destination, source, 16) == 0 &&
+                                memcmp(destination_defined, source_defined, 16) == 0, "COPY reaches both guard-page edges exactly");
+        interpreter_test_expect(tally, interpreter_typed_copy(&runtime, to, from + 8, 8) == INTERPRETER_OK &&
+                                interpreter_typed_copy(&runtime, to + 8, from, 8) == INTERPRETER_OK, "COPY admits ranges ending at either guard page");
+        interpreter_test_expect(tally, interpreter_typed_copy(&runtime, to, from + 8, 9) == INTERPRETER_MEMORY, "COPY refuses a source past the guard page without reading it");
+        interpreter_test_expect(tally, interpreter_typed_copy(&runtime, to + 8, from, 9) == INTERPRETER_MEMORY, "COPY refuses a destination past the guard page without writing it");
+        runtime.check_memory = false;
+        runtime.memory_count = 0;
+        memset(destination, 0, 16);
+        status = interpreter_typed_copy(&runtime, to, from, 16);
+        interpreter_test_expect(tally, status == INTERPRETER_OK && memcmp(destination, source, 16) == 0, "unchecked COPY accepts unregistered buffers at guard-page edges");
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 4);
+    }
+}
+
 static void interpreter_test_copy(InterpreterTestTally* tally, Arena* scratch)
 {
     interpreter_test_copy_ranges(tally);
+    interpreter_test_copy_guarded(tally);
     interpreter_test_copy_dispatch(tally, scratch);
     interpreter_test_copy_defined(tally, scratch);
     interpreter_test_copy_native(tally, scratch);

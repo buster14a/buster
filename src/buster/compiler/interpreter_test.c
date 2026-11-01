@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Handwritten execution and failure oracles for #176. Include after interpreter.c and interpreter_native.c.
+// Handwritten execution and failure oracles for #176. Include after interpreter.c, interpreter_native.c and tier0_test.c.
 // Native-code comparison uses the same production engine from tier0_test.c; these cases exercise its independent
 // arithmetic boundaries, recursive frames, allocation lifetimes, undefined reads, exact input tails and budgets.
+// interpreter_copy_test.c below also reuses that engine's Tier0TestTally, tier0_test_build and tier0_test_run.
 
 typedef struct InterpreterTestTally InterpreterTestTally;
 struct InterpreterTestTally
