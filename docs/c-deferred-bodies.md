@@ -1187,7 +1187,7 @@ clearing, and the control's (the same tree with the fault-in's body empty) took 
 `h16x77.c`, 12 of `h16x154.c` and 11 of `sqlite3.c`, none on the other four. On those racing units the
 fix's processes took 12.8% to 35.5% fewer of the kernel's cycles, with the same user instructions to
 0.02%. The record is
-[deferred-merge-874](https://github.com/buster14a/buster-performance/tree/41fc81b90/docs/measurements/deferred-merge-874-2026-11-01).
+[deferred-merge-874](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/deferred-merge-874-2026-11-01).
 
 By each tree's rule on A2's 43 units, five rounds (campaign B9), no unit's cold reading is more than 2%
 slower with the fix: the medians run from 19.1% faster to 1.4% slower, and the 31 units the rule gives
