@@ -185,7 +185,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     }
     if (status == CHECK_DATA_OK && object->initializer != BUSTER_CHECK_NONE)
     {
-        if (stream == 0 || object->initializer >= stream->count || stream->values == 0 || stream->diagnostics == 0)
+        if (stream == 0 || object->initializer >= stream->count || !check_stream_has_values(stream) || stream->diagnostics == 0)
         {
             status = CHECK_DATA_INVALID;
         }
@@ -195,7 +195,8 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         }
         else
         {
-            const CheckValue* value = &stream->values[object->initializer];
+            const CheckValue checked_value = check_stream_value(stream, object->initializer);
+            const CheckValue* value = &checked_value;
             const bool valid_type = type_is_valid(types, value->type);
             const TypeId value_type = valid_type ? type_unqualified(type_strip_aligned(types, value->type)) : 0;
             TypeAnswer compatible = value_type == base ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
@@ -861,7 +862,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
             CheckValue value = part->value;
             const CheckStream scalar_stream = {
-                .values = &value,
+                .dense_values = &value,
                 .diagnostics = &diagnostic,
                 .count = 1,
             };

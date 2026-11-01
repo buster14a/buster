@@ -12,7 +12,7 @@ static bool check_test_graph_cleared(const CheckGraph* graph)
 
 static bool check_test_graph_failed_stream(const CheckStream* stream)
 {
-    return stream->values == 0 && stream->conversions == 0 && stream->argument_conversions == 0 && stream->diagnostics == 0 && stream->reports == 0 && stream->count == 0 && stream->report_count == 0 && stream->status == CHECK_STATUS_RESOURCE && stream->failed_node == BUSTER_CHECK_NONE && stream->statistics.nodes == 0 && stream->statistics.levels == 0 && stream->statistics.batches == 0 && stream->statistics.scalar_nodes == 0 && stream->statistics.vector_nodes == 0 && stream->statistics.output_bytes == 0 && stream->statistics.scratch_bytes == 0;
+    return !check_stream_has_values(stream) && stream->conversions == 0 && stream->argument_conversions == 0 && stream->diagnostics == 0 && stream->reports == 0 && stream->count == 0 && stream->report_count == 0 && stream->status == CHECK_STATUS_RESOURCE && stream->failed_node == BUSTER_CHECK_NONE && stream->statistics.nodes == 0 && stream->statistics.levels == 0 && stream->statistics.batches == 0 && stream->statistics.scalar_nodes == 0 && stream->statistics.vector_nodes == 0 && stream->statistics.output_bytes == 0 && stream->statistics.scratch_bytes == 0;
 }
 
 static bool check_test_graph_canary(const uint8_t* bytes, uint64_t begin, uint64_t end)
@@ -91,7 +91,7 @@ static void check_test_graph_partial_allocations(CheckTest* test, TypeTable* tab
             memset(scratch_bytes, 0xa5, sizeof(scratch_bytes));
             CheckStream stream;
             const bool complete = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
-            check_test_expect(test, complete && stream.report_count == 0 && stream.values[sum].integer == 8 && stream.argument_conversions[0].type == BUSTER_TYPE_INT && stream.argument_conversions[1].type == BUSTER_TYPE_LONG, "partial-allocation fixture has independently expected results");
+            check_test_expect(test, complete && stream.report_count == 0 && check_stream_value(&stream, sum).integer == 8 && stream.argument_conversions[0].type == BUSTER_TYPE_INT && stream.argument_conversions[1].type == BUSTER_TYPE_LONG, "partial-allocation fixture has independently expected results");
             const uint64_t output_required = output.length;
             const uint64_t scratch_required = 13 + stream.statistics.scratch_bytes;
             const uint32_t type_count = table->types.count;
@@ -156,7 +156,7 @@ static void check_test_graph_argument_guards(CheckTest* test, TypeTable* table, 
         const CheckOptions options = { 0 };
         CheckStream stream;
         const bool valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
-        check_test_expect(test, valid && stream.report_count == 0 && stream.values[call].type == BUSTER_TYPE_INT, "guarded old-style call checks its exact argument tail");
+        check_test_expect(test, valid && stream.report_count == 0 && check_stream_type(&stream, call) == BUSTER_TYPE_INT, "guarded old-style call checks its exact argument tail");
         for (uint32_t i = 0; valid && i < count; i += 1)
         {
             check_test_expect(test, stream.argument_conversions[i].type == BUSTER_TYPE_INT && (stream.argument_conversions[i].flags & BUSTER_CHECK_CONVERT_PROMOTION) != 0, "old-style call promotes each unsigned-char argument to int");
@@ -252,11 +252,11 @@ static void check_test_graph_barriers(CheckTest* test, Arena* storage, Arena* ou
                     const TypeId short_pointer = (TypeId)(first_derived + 1) << BUSTER_TYPE_INDEX_SHIFT;
                     const TypeId function_pointer = (TypeId)(first_derived + 2) << BUSTER_TYPE_INDEX_SHIFT;
                     const TypeId qualified_pointer = (TypeId)(first_derived + 3) << BUSTER_TYPE_INDEX_SHIFT;
-                    check_test_expect(test, stream->values[address].type == int_pointer && type_element(table, int_pointer) == BUSTER_TYPE_INT, "address creates the first source-order derived type");
-                    check_test_expect(test, stream->values[decay].type == short_pointer && stream->conversions[decay].operands[0].type == short_pointer && type_element(table, short_pointer) == BUSTER_TYPE_SHORT, "array decay creates the next source-order derived type");
-                    check_test_expect(test, stream->values[call].type == BUSTER_TYPE_INT && stream->conversions[call].operands[0].type == function_pointer && type_element(table, function_pointer) == function, "callee decay retains source-order type identity");
-                    check_test_expect(test, stream->values[conditional].type == qualified_pointer && type_element(table, qualified_pointer) == (BUSTER_TYPE_LONG | BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE), "conditional pointer composite follows earlier type creation");
-                    check_test_expect(test, stream->values[query].integer == 6 && stream->values[sum].integer == 7 && table->types.count == first_derived + 4, "builtin region after barriers reads completed dependencies without new types");
+                    check_test_expect(test, check_stream_type(stream, address) == int_pointer && type_element(table, int_pointer) == BUSTER_TYPE_INT, "address creates the first source-order derived type");
+                    check_test_expect(test, check_stream_type(stream, decay) == short_pointer && stream->conversions[decay].operands[0].type == short_pointer && type_element(table, short_pointer) == BUSTER_TYPE_SHORT, "array decay creates the next source-order derived type");
+                    check_test_expect(test, check_stream_type(stream, call) == BUSTER_TYPE_INT && stream->conversions[call].operands[0].type == function_pointer && type_element(table, function_pointer) == function, "callee decay retains source-order type identity");
+                    check_test_expect(test, check_stream_type(stream, conditional) == qualified_pointer && type_element(table, qualified_pointer) == (BUSTER_TYPE_LONG | BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE), "conditional pointer composite follows earlier type creation");
+                    check_test_expect(test, check_stream_value(stream, query).integer == 6 && check_stream_value(stream, sum).integer == 7 && table->types.count == first_derived + 4, "builtin region after barriers reads completed dependencies without new types");
                 }
             }
             check_test_expect(test, check_test_stream_equal(&streams[0], &streams[1], 0), "fresh-table graph barriers preserve every typed result and conversion");
@@ -387,15 +387,16 @@ static void check_test_graph_updates(CheckTest* test, TypeTable* table, Arena* s
         for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(nodes); i += 1)
         {
             const uint32_t node = nodes[i];
-            const CheckValue* value = &stream.values[node];
+            const CheckValue checked_value = check_stream_value(&stream, node);
+            const CheckValue* value = &checked_value;
             const CheckNodeConversions* conversions = &stream.conversions[node];
             check_test_expect(test, value->type == BUSTER_TYPE_UCHAR && value->category == CHECK_RVALUE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 && value->constant_kind == CHECK_CONSTANT_NONE && (value->flags & BUSTER_CHECK_ICE) == 0, "update expression is an unqualified nonconstant value with a side effect");
             check_test_expect(test, conversions->operands[0].type == BUSTER_TYPE_INT && (conversions->operands[0].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0 && conversions->store.type == BUSTER_TYPE_UCHAR && (conversions->store.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0, "update retains distinct promoted LHS read and narrow store conversions");
         }
         if (valid)
         {
-            check_test_expect(test, stream.values[mixed].type == BUSTER_TYPE_UCHAR && stream.conversions[mixed].operands[0].type == BUSTER_TYPE_DOUBLE && stream.conversions[mixed].operands[1].type == BUSTER_TYPE_DOUBLE && stream.conversions[mixed].store.type == BUSTER_TYPE_UCHAR, "mixed compound assignment retains floating arithmetic and integer storage types");
-            check_test_expect(test, stream.values[pointer_update].type == pointer && stream.conversions[pointer_update].store.type == pointer && stream.values[query].integer == 8 && (stream.values[query].flags & BUSTER_CHECK_SIDE_EFFECT) == 0, "pointer update stays typed across its barrier and unevaluated sizeof suppresses its effect");
+            check_test_expect(test, check_stream_type(&stream, mixed) == BUSTER_TYPE_UCHAR && stream.conversions[mixed].operands[0].type == BUSTER_TYPE_DOUBLE && stream.conversions[mixed].operands[1].type == BUSTER_TYPE_DOUBLE && stream.conversions[mixed].store.type == BUSTER_TYPE_UCHAR, "mixed compound assignment retains floating arithmetic and integer storage types");
+            check_test_expect(test, check_stream_type(&stream, pointer_update) == pointer && stream.conversions[pointer_update].store.type == pointer && check_stream_value(&stream, query).integer == 8 && (check_stream_flags(&stream, query) & BUSTER_CHECK_SIDE_EFFECT) == 0, "pointer update stays typed across its barrier and unevaluated sizeof suppresses its effect");
             check_test_expect(test, stream.conversions[left].store.type == 0 && stream.conversions[right].store.type == 0 && stream.conversions[query].store.type == 0, "ordinary nodes do not retain stale store conversions");
         }
         arena_pop_to(output, output_mark);

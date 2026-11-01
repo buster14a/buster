@@ -32,11 +32,39 @@ static uint32_t ir_typed_vector_bytes(const Tier0Function* input, uint32_t entry
     return bytes;
 }
 
+// A MASK entry's bytes (#179), as tier0_validate follows them from depth to depth (tier0_stack_mask): its value's (a
+// conversion's, a load's, a store's, the logic's), its object's or its row's result's; DUP, DISCARD and JUMP_VALUE have
+// none of their own and keep their operand's.
+static uint32_t ir_typed_mask_bytes(const Tier0Function* input, uint32_t entry)
+{
+    const uint64_t value = input->values[entry];
+    uint32_t bytes = 0;
+    switch (input->kinds[entry])
+    {
+        case BUSTER_TYPED_LOCAL:
+        case BUSTER_TYPED_STORE_LOCAL:
+        case BUSTER_TYPED_SET_LOCAL: bytes = input->local_sizes[value]; break;
+        case BUSTER_TYPED_X86: bytes = input->operations[value].result_bytes; break;
+        case BUSTER_TYPED_CONVERT:
+        case BUSTER_TYPED_LOAD:
+        case BUSTER_TYPED_STORE:
+        case BUSTER_TYPED_SET:
+        case BUSTER_TYPED_AND:
+        case BUSTER_TYPED_OR:
+        case BUSTER_TYPED_XOR:
+        case BUSTER_TYPED_NOT: bytes = (uint32_t)value; break;
+        default: break;
+    }
+    return bytes;
+}
+
+// An entry's class on the replay's stack: a VECTOR's or a MASK's by its bytes, as tier0_validate's stack has them
+// (BUSTER_TIER0_STACK_VECTOR, tier0_stack_mask); any other's its class.
 static uint8_t ir_typed_stack_class(const Tier0Function* input, uint32_t entry)
 {
     const uint8_t class = input->classes[entry];
-    const uint32_t bytes = class == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, entry) : 0;
-    return bytes != 0 ? BUSTER_TIER0_STACK_VECTOR(bytes) : class;
+    const uint32_t bytes = class == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, entry) : class == BUSTER_TYPED_CLASS_MASK ? ir_typed_mask_bytes(input, entry) : 0;
+    return bytes == 0 ? class : class == BUSTER_TYPED_CLASS_VECTOR ? (uint8_t)BUSTER_TIER0_STACK_VECTOR(bytes) : (uint8_t)tier0_stack_mask(bytes);
 }
 
 typedef struct IrTypedPlan IrTypedPlan;
@@ -358,9 +386,10 @@ static const uint8_t ir_typed_types[16] = {
 // out the memory classes (I128 signed, F80 floating), which it compiles apart.
 static IrType ir_typed_stack_type(uint8_t class)
 {
-    const IrType type = class >= BUSTER_TYPED_CLASS_LIMIT ?
-                            class == BUSTER_TIER0_STACK_VECTOR(16) ? IR_V4I32 : class == BUSTER_TIER0_STACK_VECTOR(32) ? IR_V8I32 : IR_V16I32 :
-                            (IrType)ir_typed_types[class];
+    // A mask's (#179) m8 to m64 by its bytes, 1 to 8 (tier0_stack_mask's order).
+    const IrType type = tier0_stack_is_mask(class)            ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
+                        class >= BUSTER_TYPED_CLASS_LIMIT     ? class == BUSTER_TIER0_STACK_VECTOR(16) ? IR_V4I32 : class == BUSTER_TIER0_STACK_VECTOR(32) ? IR_V8I32 : IR_V16I32 :
+                                                                (IrType)ir_typed_types[class];
     return type;
 }
 
@@ -561,18 +590,183 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     return value;
 }
 
+// A mask's bits as an integer of at least 32 bits, which Tier 1's arithmetic takes (an m8's or m16's zero-extended past
+// its bitcast), and back: the mask of `mask`'s width of that integer's low bits.
+static __attribute__((always_inline)) inline uint32_t ir_typed_mask_integer(IrTypedSink* sink, uint32_t value, IrType mask)
+{
+    const IrType bits = mask == IR_M8 ? IR_I8 : mask == IR_M16 ? IR_I16 : mask == IR_M32 ? IR_I32 : IR_I64;
+    uint32_t integer = ir_typed_emit(sink, IR_BITCAST, bits, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    if (bits == IR_I8 || bits == IR_I16)
+    {
+        integer = ir_typed_emit(sink, IR_ZEXT, IR_I32, integer, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    return integer;
+}
+
+static __attribute__((always_inline)) inline uint32_t ir_typed_integer_mask(IrTypedSink* sink, uint32_t integer, IrType mask)
+{
+    const IrType bits = mask == IR_M8 ? IR_I8 : mask == IR_M16 ? IR_I16 : mask == IR_M32 ? IR_I32 : IR_I64;
+    if (bits == IR_I8 || bits == IR_I16)
+    {
+        integer = ir_typed_emit(sink, IR_TRUNC, bits, integer, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    return ir_typed_emit(sink, IR_BITCAST, mask, integer, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+}
+
+// A row of opmask instructions alone (#179, ir_simd_typed_mask_row) as IR: each step over its masks' registers, the
+// operands' values first in theirs, at the masks' width. and, or, xor and not are the masks' own; xnor and andn their
+// compositions; add, the shifts and unpack the masks' bits as an integer (ir_typed_mask_integer: no arithmetic is a
+// mask's), whose low bits are the instruction's; a shift by the masks' bits or more the zero mask, as kshiftl and kshiftr
+// give. A move copies the value. A flags test's row (ir_simd_typed_mask_test) is its one step's int. Returns the
+// result's value.
+static __attribute__((always_inline)) inline uint32_t ir_typed_mask_row(IrTypedSink* sink, const IrSimdTypedOperation* operation, const uint32_t* operands)
+{
+    const IrType mask = operation->mask_bytes == 1 ? IR_M8 : operation->mask_bytes == 2 ? IR_M16 : operation->mask_bytes == 4 ? IR_M32 : IR_M64;
+    const IrType wide = mask == IR_M64 ? IR_I64 : IR_I32;
+    const uint32_t width = 8u * operation->mask_bytes;
+    uint32_t registers[BUSTER_IR_SIMD_MASK_REGISTERS];
+    for (uint32_t r = 0; r < BUSTER_IR_SIMD_MASK_REGISTERS; r += 1)
+    {
+        registers[r] = r < operation->operand_count ? operands[r] : BUSTER_IR_NONE;
+    }
+    for (uint32_t k = 0; k < operation->mask_step_count; k += 1)
+    {
+        const IrSimdTypedMaskStep* step = &operation->mask_steps[k];
+        const uint32_t left = registers[step->left];
+        const uint32_t right = registers[step->right];
+        uint32_t value = left;
+        switch (step->kind)
+        {
+            case IR_SIMD_MASK_AND: value = ir_typed_emit(sink, IR_AND, mask, left, right, BUSTER_IR_NONE, 0); break;
+            case IR_SIMD_MASK_OR: value = ir_typed_emit(sink, IR_OR, mask, left, right, BUSTER_IR_NONE, 0); break;
+            case IR_SIMD_MASK_XOR: value = ir_typed_emit(sink, IR_XOR, mask, left, right, BUSTER_IR_NONE, 0); break;
+            case IR_SIMD_MASK_XNOR:
+            {
+                const uint32_t either = ir_typed_emit(sink, IR_XOR, mask, left, right, BUSTER_IR_NONE, 0);
+                value = ir_typed_emit(sink, IR_NOT, mask, either, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            } break;
+            case IR_SIMD_MASK_ANDN:
+            {
+                const uint32_t complement = ir_typed_emit(sink, IR_NOT, mask, left, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                value = ir_typed_emit(sink, IR_AND, mask, complement, right, BUSTER_IR_NONE, 0);
+            } break;
+            case IR_SIMD_MASK_NOT: value = ir_typed_emit(sink, IR_NOT, mask, left, BUSTER_IR_NONE, BUSTER_IR_NONE, 0); break;
+            case IR_SIMD_MASK_MOVE: break;
+            case IR_SIMD_MASK_TEST:
+            case IR_SIMD_MASK_ORTEST:
+            {
+                // The mask that is 0 exactly where the flag is set (ktest's left & right or ~left & right, kortest's
+                // left | right or its complement), its bits' integer compared with 0, and that int.
+                const bool carry = step->count != 0;
+                uint32_t tested = BUSTER_IR_NONE;
+                if (step->kind == IR_SIMD_MASK_TEST)
+                {
+                    const uint32_t first = carry ? ir_typed_emit(sink, IR_NOT, mask, left, BUSTER_IR_NONE, BUSTER_IR_NONE, 0) : left;
+                    tested = ir_typed_emit(sink, IR_AND, mask, first, right, BUSTER_IR_NONE, 0);
+                }
+                else
+                {
+                    const uint32_t either = ir_typed_emit(sink, IR_OR, mask, left, right, BUSTER_IR_NONE, 0);
+                    tested = carry ? ir_typed_emit(sink, IR_NOT, mask, either, BUSTER_IR_NONE, BUSTER_IR_NONE, 0) : either;
+                }
+                const uint32_t integer = ir_typed_mask_integer(sink, tested, mask);
+                const uint32_t zero = ir_typed_constant(sink, wide, 0);
+                const uint32_t flag = ir_typed_emit(sink, IR_ICMP, IR_I1, integer, zero, IR_EQ, 0);
+                value = ir_typed_emit(sink, IR_ZEXT, IR_I32, flag, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            } break;
+            case IR_SIMD_MASK_SHIFT_LEFT:
+            case IR_SIMD_MASK_SHIFT_RIGHT:
+                if (step->count >= width)
+                {
+                    value = ir_typed_constant(sink, mask, 0);
+                }
+                else
+                {
+                    // The widened integer's bits past the mask's are zero, so a right shift brings none in.
+                    const uint32_t integer = ir_typed_mask_integer(sink, left, mask);
+                    const uint32_t count = ir_typed_constant(sink, wide, step->count);
+                    const uint32_t shifted = ir_typed_emit(sink, step->kind == IR_SIMD_MASK_SHIFT_LEFT ? IR_SHL : IR_LSHR, wide, integer, count, BUSTER_IR_NONE, 0);
+                    value = ir_typed_integer_mask(sink, shifted, mask);
+                }
+                break;
+            default:
+            {
+                // add, and unpack: left's low half above right's.
+                const uint32_t a = ir_typed_mask_integer(sink, left, mask);
+                const uint32_t b = ir_typed_mask_integer(sink, right, mask);
+                uint32_t integer = BUSTER_IR_NONE;
+                if (step->kind == IR_SIMD_MASK_ADD)
+                {
+                    integer = ir_typed_emit(sink, IR_ADD, wide, a, b, BUSTER_IR_NONE, 0);
+                }
+                else
+                {
+                    const uint32_t half = width / 2;
+                    const uint32_t low = ir_typed_constant(sink, wide, (UINT64_C(1) << half) - 1);
+                    const uint32_t high_half = ir_typed_emit(sink, IR_AND, wide, a, low, BUSTER_IR_NONE, 0);
+                    const uint32_t low_half = ir_typed_emit(sink, IR_AND, wide, b, low, BUSTER_IR_NONE, 0);
+                    const uint32_t shift = ir_typed_constant(sink, wide, half);
+                    const uint32_t raised = ir_typed_emit(sink, IR_SHL, wide, high_half, shift, BUSTER_IR_NONE, 0);
+                    integer = ir_typed_emit(sink, IR_OR, wide, raised, low_half, BUSTER_IR_NONE, 0);
+                }
+                value = ir_typed_integer_mask(sink, integer, mask);
+            } break;
+        }
+        registers[step->destination] = value;
+    }
+    return registers[operation->mask_result];
+}
+
+// A stack class's natural alignment's log2: a mask's its bytes' (#179), a vector's its own, any other its class's bytes'.
 static uint8_t ir_typed_alignment(uint8_t class)
 {
-    const uint32_t bytes = class >= BUSTER_TYPED_CLASS_LIMIT ? (class - BUSTER_TYPED_CLASS_LIMIT) * 4 : tier0_class_bytes(class);
-    return class >= BUSTER_TYPED_CLASS_LIMIT ? (bytes == 64 ? 6 : bytes == 32 ? 5 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
+    const bool mask = tier0_stack_is_mask(class);
+    const bool vector = class >= BUSTER_TYPED_CLASS_LIMIT && !mask;
+    const uint32_t bytes = vector ? (class - BUSTER_TYPED_CLASS_LIMIT) * 4u : mask ? 0 : tier0_class_bytes(class);
+    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
+}
+
+// A conversion between an integer class and a mask's stack class (#179), as Tier 0's CONVERT is: to a mask, the integer
+// truncated, or extended by its signedness, to the mask's bits and their bitcast; from one, the bitcast to an integer of
+// its bits and that unsigned integer's truncation or zero extension.
+static __attribute__((always_inline)) inline uint32_t ir_typed_convert_mask(IrTypedSink* sink, uint32_t value, uint8_t from_class, uint8_t to_class)
+{
+    const bool to_mask = tier0_stack_is_mask(to_class);
+    const IrType mask = ir_typed_stack_type(to_mask ? to_class : from_class);
+    const IrType bits = mask == IR_M8 ? IR_I8 : mask == IR_M16 ? IR_I16 : mask == IR_M32 ? IR_I32 : IR_I64;
+    const IrType other = (IrType)ir_typed_types[to_mask ? from_class : to_class];
+    uint32_t result = value;
+    if (to_mask)
+    {
+        if (other != bits)
+        {
+            const IrOp op = ir_type_bits[other] > ir_type_bits[bits] ? IR_TRUNC : ir_typed_signed(from_class) ? IR_SEXT : IR_ZEXT;
+            result = ir_typed_emit(sink, op, bits, result, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        result = ir_typed_emit(sink, IR_BITCAST, mask, result, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    else
+    {
+        result = ir_typed_emit(sink, IR_BITCAST, bits, result, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        if (other != bits)
+        {
+            result = ir_typed_emit(sink, ir_type_bits[other] > ir_type_bits[bits] ? IR_ZEXT : IR_TRUNC, other, result, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+    }
+    return result;
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSink* sink, uint32_t value, uint8_t from_class, uint8_t to_class)
 {
-    const IrType from = (IrType)ir_typed_types[from_class];
-    const IrType to = (IrType)ir_typed_types[to_class];
+    const bool masks = tier0_stack_is_mask(from_class) || tier0_stack_is_mask(to_class);
+    const IrType from = masks ? IR_VOID : (IrType)ir_typed_types[from_class];
+    const IrType to = masks ? IR_VOID : (IrType)ir_typed_types[to_class];
     IrOp op = IR_INVALID;
-    if (from != to)
+    if (masks)
+    {
+        value = ir_typed_convert_mask(sink, value, from_class, to_class);
+    }
+    else if (from != to)
     {
         if (ir_integer(from) && ir_integer(to))
         {
@@ -832,12 +1026,6 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_STRUCTURE;
             check.instruction = typed.node;
         }
-        else if (input->masks)
-        {
-            // Tier 0's masks (#179), whose conversions to and from integers the IR's m8 to m64 have no operation for
-            // (ir_simd's contract): the caller's Tier 0 compiles the function.
-            check.error = IR_ERROR_UNSUPPORTED;
-        }
     }
     IrSimdTypedOperation* operations = 0;
     for (uint32_t i = 0; check.error == IR_OK && i < input->count; i += 1)
@@ -869,7 +1057,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             {
                 operations = BUSTER_ARENA_PUSH_ARRAY(scratch, IrSimdTypedOperation, input->operation_count);
             }
-            const IrSimdTypedStatus status = operations != 0 ? ir_simd_typed_operation(input->operations + value, target_features, operations + value) : IR_SIMD_TYPED_INVALID;
+            const IrSimdTypedStatus status = operations != 0 ? ir_simd_typed_row(input->operations + value, target_features, operations + value) : IR_SIMD_TYPED_INVALID;
             if (operations == 0 || status != IR_SIMD_TYPED_OK)
             {
                 check.error = operations == 0 ? IR_ERROR_MEMORY : IR_ERROR_UNSUPPORTED;
@@ -891,6 +1079,19 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
                 check.instruction = i;
             }
             else if (!inherited && (target_features & required) != required)
+            {
+                check.error = IR_ERROR_UNSUPPORTED;
+                check.detail = IR_SIMD_TYPED_TARGET;
+                check.instruction = i;
+            }
+        }
+        else if (input->classes[i] == BUSTER_TYPED_CLASS_MASK)
+        {
+            // A mask's (#179) m8 to m64, whose kmov, loads, stores and logic Tier 1 selects at its width: AVX-512F, and DQ
+            // for a byte's, BW for a doubleword's and a quadword's. DUP, DISCARD and JUMP_VALUE keep their operand's.
+            const uint32_t bytes = ir_typed_mask_bytes(input, i);
+            const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+            if (bytes != 0 && (target_features & required) != required)
             {
                 check.error = IR_ERROR_UNSUPPORTED;
                 check.detail = IR_SIMD_TYPED_TARGET;
@@ -931,9 +1132,10 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         ir_typed_classify(input, ops, types, BUSTER_VECTOR_PATH(vector));
         if (input->vectors)
         {
+            // A vector's and a mask's (#179) IR types are their widths', which the class doesn't carry.
             for (uint32_t i = 0; i < input->count; i += 1)
             {
-                if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
+                if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR || input->classes[i] == BUSTER_TYPED_CLASS_MASK)
                 {
                     const uint8_t class = ir_typed_stack_class(input, i);
                     types[i] = class >= BUSTER_TYPED_CLASS_LIMIT ? ir_typed_stack_type(class) : IR_VOID;

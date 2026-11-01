@@ -475,14 +475,17 @@ and counted.
 function `-c` compiles as `test-ir-source` does, lowers and promotes it, adapts
 it, allocates it by both paths and checks both with `tier1_cfg_verify`; any
 refusal but the model's, a rejection or paths that disagree fail it. With
-`--simd`, a function the SSA promoter refuses for its vectors or masks (as
+`--simd`, a function the SSA promoter refuses for its vectors (as
 `test-ir-source --simd` requires it to) is allocated as lowered, all its locals
-in slots, which is SSA too: #732's `vcmp` results reach the opmask class from
-real C, and the run fails unless some do. On `tests/ir/vector-i32.c` with
-`-march=x86-64-v4`, its three functions' 3 masks allocate on both paths and pass
-the checker. The correctness list runs it there, and without `--simd` on
-c-testsuite's subset, the frozen `sqlite3.c` and musl's units, whose every
-function allocates and passes the checker on both paths:
+in slots, which is SSA too, and one whose only SIMD values are masks, which the
+promoter takes (#179), is promoted and allocated as any other: #732's `vcmp`
+results reach the opmask class from real C, and the run fails unless some do. On
+`tests/ir/vector-i32.c` with `-march=x86-64-v4`, its three functions' 3 masks
+allocate on both paths and pass the checker, and on `tests/ir/mask-builtins.c`
+its four functions of the `_k*` builtins, promoted, allocate their 76 masks on
+both paths and pass it. The correctness list runs it on both, and without
+`--simd` on c-testsuite's subset, the frozen `sqlite3.c` and musl's units, whose
+every function allocates and passes the checker on both paths:
 
 | Corpus | Functions | Left out | IR instructions | Intervals | Left to the scan | Spilled values | Stores | Reloads | Moves | Split edges |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

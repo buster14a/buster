@@ -117,7 +117,7 @@ static __attribute__((noinline)) void check_test_x86_graph(CheckTest* test, Type
                           "exact x86 calls retain all argument conversions and compact constraint results");
         for (uint32_t i = 0; checked && i < graph.x86_count; i += 1)
         {
-            check_test_expect(test, scalar.values[nodes[i]].type == expected[i] && scalar.x86[i].status == CHECK_BUILTIN_X86_OK &&
+            check_test_expect(test, check_stream_type(&scalar, nodes[i]) == expected[i] && scalar.x86[i].status == CHECK_BUILTIN_X86_OK &&
                                    scalar.x86[i].node == nodes[i] && scalar.x86[i].info == calls[i].info && scalar.x86[i].range_event_count == 0,
                               "x86 semantic result keeps exact type, metadata identity and clean immediate status");
         }

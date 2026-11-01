@@ -47,7 +47,7 @@ static bool check_lower_fortify_constant(const CheckLowerWriter* writer, uint32_
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const uint32_t operand = graph->argument_nodes[graph->argument_offsets[node] + argument];
-    CheckValue value = stream->values[operand];
+    CheckValue value = check_stream_value(stream, operand);
     bool allowed = true;
     if (graph->ops[operand] == CHECK_OP_BUILTIN_QUERY)
     {
@@ -76,7 +76,8 @@ static bool check_lower_fortify_string(const CheckLowerWriter* writer, uint32_t 
 {
     const CheckInput* input = writer->program->input;
     const uint32_t source = input->graph.argument_nodes[input->graph.argument_offsets[node] + 1];
-    const CheckValue* value = writer->program->stream->values + source;
+    const CheckValue checked_value = check_stream_value(writer->program->stream, source);
+    const CheckValue* value = &checked_value;
     const bool address = value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 && value->object <= input->token_count &&
                          value->offset >= 0 && value->fault == CHECK_FAULT_NONE &&
                          (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
