@@ -790,7 +790,7 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
                 {
                     int32_t first = 0;
                     int32_t second = 0;
-                    const bool found = tier1_emit_cfg_object(&emitted, 0, &first) && tier1_emit_cfg_object(&emitted, 1, &second);
+                    const bool found = tier1_emit_cfg_object(&function, &emitted, 0, &first) && tier1_emit_cfg_object(&function, &emitted, 1, &second);
                     const bool apart = shape == 0 || shape == 3;
                     tier1_emit_test_expect(test, found && (apart ? first == second : first != second && (first - second >= 64 || second - first >= 64)),
                                            shape == 3 ? "an object only markers refer to shares its row by its markers" :
