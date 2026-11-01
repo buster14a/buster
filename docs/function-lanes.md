@@ -381,7 +381,14 @@ never run again, each fail the test.
 `./build/compiler benchmark-check-lanes [--passes N] [--lanes LIST] [--cpus
 LIST] [preprocessor options] file...` (`c_check_lanes_benchmark.c`) times the
 emission of a file's checked program on each lane count and by the rule, with
-the steps apart (`CheckProgramLanes.timing`).
+the steps apart (`CheckProgramLanes.timing`). The program is the one `-c`
+compiles for the target its options give (`-march` and the `-m` flags, and the
+predefines a function's `target` attribute resolves against); before #1045 it
+was always the baseline x86-64 profile's. `test-checker` runs it on a unit of
+512-bit vectors (`c_check_lanes_benchmark_test.c`), measured with
+`-march=znver5` and refused for the baseline profile, as `-c` refuses it, and
+on a baseline unit whose function's `target("avx2")` attribute takes a 32-byte
+vector, measured only with the predefines.
 
 ### The 9700X
 
@@ -389,7 +396,10 @@ On the 9700X under its lock, lane 0 on CPU 2 and the others on one CPU of
 each other core (`--cpus 2,0,1,3,4,5,6,7`), medians of 11 runs. Clang 23.1.1
 built the compiler with `build.sh`. The frozen `sqlite3.c` uses the CI step's
 options (2,602 functions, 554,386 tokens in their bodies, the largest 28,522).
-Times are in milliseconds.
+Times are in milliseconds. These predate #1045: the benchmark emitted baseline
+x86-64 code, though the step passes `-march=znver5`; from #1045's commit on, the
+step's numbers time znver5 code, as `-c` compiles it, and aren't comparable with
+earlier ones.
 
 | Lanes | Emission | Speedup | Preparation | Lanes' part | Merge |
 | ---: | ---: | ---: | ---: | ---: | ---: |
