@@ -83,6 +83,9 @@
 #include <string.h>
 #include "host_isa.h"
 
+// OS-dependent includes
+#include <sys/mman.h>
+
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #define BUSTER_INLINE static inline __attribute__((always_inline))
 #define BUSTER_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -5568,31 +5571,52 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // The templates, with BUSTER_X86_TEMPLATE_PADDING unused entries on either side: the vectorized encoder loads 16 bytes
 // of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them. A
 // marked form's are a copy at BUSTER_X86_FORM_FIXUP and up, so that the vectorized encoder looks the form up as the
-// record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
-// stay unmapped.
+// record has it: taking the flag off each form cost the loop 2.4% on Zen 5.
 #define BUSTER_X86_TEMPLATE_PADDING 1
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(64)));
+// Each table is two transparent huge pages, each aligned to one: the forms' templates (1.6 MB) in the first and their
+// marked copies (BUSTER_X86_FORM_FIXUP is 2 MB of entries) in the second. A table is written whole when it is built, so
+// x86_templates_prepare asks for those huge pages before it is, and commits the pages it writes in one call each where
+// none come (#590): a kernel whose transparent huge pages are only `madvise`d (Ubuntu's, Debian's and Fedora's) gave
+// .bss's 3.2 MB of them 788 base pages' faults, half of a small file's compile.
+#define BUSTER_X86_TEMPLATE_HUGE_PAGE (2u << 20)
+#define BUSTER_X86_TEMPLATE_STORAGE (2 * BUSTER_X86_TEMPLATE_HUGE_PAGE / sizeof(X86TemplateEntry))
+_Static_assert(BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry) == BUSTER_X86_TEMPLATE_HUGE_PAGE, "the marked copies start at the second huge page");
+_Static_assert(BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING <= BUSTER_X86_TEMPLATE_STORAGE,
+               "a table and its padding fit in its two huge pages");
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
 static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
 BUSTER_X86_SHARED bool x86_encoder_initialized;
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(64)));
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
 static X86TemplateEntry* const x86_templates_address32 = x86_template_storage_address32 + BUSTER_X86_TEMPLATE_PADDING;
 BUSTER_X86_SHARED bool x86_encoder_initialized_address32;
 // The same for APX (x86_encode_apx): the templates of the legacy forms of maps 0 and 1 have REX2's positions.
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_apx[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(64)));
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_apx[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
 static X86TemplateEntry* const x86_templates_apx = x86_template_storage_apx + BUSTER_X86_TEMPLATE_PADDING;
 BUSTER_X86_SHARED bool x86_encoder_initialized_apx;
 // The same for 32-bit and 16-bit modes (x86_encode_mode32 and x86_encode_mode16): the mode's prefixes, a position for
 // the decorations' segment override and one for BUSTER_X86_MODE_ADDRESS_SIZE's 67, and no REX (see build_template).
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(64)));
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_32[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
 static X86TemplateEntry* const x86_templates_32 = x86_template_storage_32 + BUSTER_X86_TEMPLATE_PADDING;
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_16[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(64)));
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_16[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
 static X86TemplateEntry* const x86_templates_16 = x86_template_storage_16 + BUSTER_X86_TEMPLATE_PADDING;
+
+// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name.
+#define BUSTER_X86_MADV_POPULATE_WRITE 23
+
+// Before a table's first build, asks for its two huge pages (MADV_HUGEPAGE), and commits the bytes the build writes, the
+// templates and their marked copies, in one call each (MADV_POPULATE_WRITE): where huge pages come, two faults; where
+// they don't (`never`, or none free), base pages without a fault each, which took a kernel without transparent huge
+// pages from 1.39 to 0.88 ms for the table on a Xeon VM. Either call failing (an older kernel) leaves the pages to their
+// faults, as before. `templates` is the table (its storage plus the padding).
+static void x86_templates_prepare(X86TemplateEntry* templates)
+{
+    X86TemplateEntry* const storage = templates - BUSTER_X86_TEMPLATE_PADDING;
+    const size_t written = (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry);
+    madvise(storage, BUSTER_X86_TEMPLATE_STORAGE * sizeof(X86TemplateEntry), MADV_HUGEPAGE);
+    madvise(storage, written, BUSTER_X86_MADV_POPULATE_WRITE);
+    madvise(storage + BUSTER_X86_FORM_FIXUP, written, BUSTER_X86_MADV_POPULATE_WRITE);
+}
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general
 // registers, VEX's vector registers and control registers, 31 for EVEX's, 7 for opmasks, x87, MMX, debug, segment and
@@ -5708,6 +5732,15 @@ BUSTER_INLINE void template_append(X86Template* template, uint32_t* position, ui
     *position += 1;
 }
 
+// What build_template counted of a template: its positions, and the position after the form's own bytes (its opcode's
+// last byte, or a ModRM digit after it), which x86_template_with_segment's fit takes.
+typedef struct X86TemplateShape X86TemplateShape;
+struct X86TemplateShape
+{
+    uint32_t positions;
+    uint32_t static_end;
+};
+
 // Builds the template of a form with a segment override (x86_form_segment's) or none, for the mode's entry point: for
 // 32-bit addresses, with a 67 for a memory operand, and for APX, with REX2's positions in a legacy form of maps 0 and 1
 // (and otherwise x86_encode's template, whose general registers and base can't be 16 to 31). In 16- and 32-bit modes,
@@ -5719,8 +5752,8 @@ BUSTER_INLINE void template_append(X86Template* template, uint32_t* position, ui
 // 16- and 32-bit modes, 16 with a position for BUSTER_X86_MODE_ADDRESS_SIZE's 67, which compute_fields drops from an
 // instruction that would have them all, as it's invalid), its own bytes (a segment override's, a 67, the prefixes, REX
 // or the VEX or EVEX prefix, REX2's payload with W, the opcode and a ModRM digit) don't fit before the checks, or the
-// form table's row is one the encoders can't encode.
-static bool build_template(const X86FormDescription* form, uint32_t segment, X86EncoderMode encoder, X86Template* template)
+// form table's row is one the encoders can't encode. `shape` gets what it counted, for x86_template_with_segment.
+static bool build_template_shaped(const X86FormDescription* form, uint32_t segment, X86EncoderMode encoder, X86Template* template, X86TemplateShape* shape)
 {
     const bool address32 = encoder == X86_ENCODER_MODE_ADDRESS32;
     const bool legacy = x86_mode_is_legacy(encoder);
@@ -5942,9 +5975,17 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     // come before the checks. A VSIB operand is memory, in a VEX or EVEX form.
     const bool static_displacement_conflict = (flags & BUSTER_X86_TEMPLATE_STATIC_DISPLACEMENT) && memory;
     const bool vsib_valid = !vsib || (memory && form->family != BUSTER_X86_FAMILY_LEGACY);
+    shape->positions = position;
+    shape->static_end = last_static;
     return valid && position <= (legacy && address_size_position ? sizeof(template->layout) : BUSTER_X86_MAX_INSTRUCTION_BYTES) &&
            static_length <= BUSTER_X86_TEMPLATE_STATIC_LENGTH && !static_displacement_conflict && last_static <= BUSTER_X86_TEMPLATE_STATIC_POSITIONS &&
            vsib_valid && !(override_position && lock_control);
+}
+
+static bool build_template(const X86FormDescription* form, uint32_t segment, X86EncoderMode encoder, X86Template* template)
+{
+    X86TemplateShape shape;
+    return build_template_shaped(form, segment, encoder, template, &shape);
 }
 
 // Builds the mode's template of a form (with its segment override, or none) into `template`. A form that doesn't exist
@@ -5980,46 +6021,86 @@ static bool build_mode_template(uint32_t form, X86EncoderMode encoder, X86Templa
     return result;
 }
 
+// A 64-bit mode form's template with a segment override (`segment`, FS's 1 or GS's 2), from its template without one and
+// that template's shape, as build_mode_template makes it: in 64-bit mode an override changes nothing in a form without
+// a memory operand, and in one with it puts the override's static byte after FWAIT's 9B (or first), every later
+// position one further and the static length one longer, with the same checks. That fits where build_template's would
+// (within an instruction's 15 bytes, the static length's field and the template's static positions), and otherwise
+// the template is the plain one taking no memory operand (x86_form_lacks_room). Rebuilding each form twice more took
+// half of x86_encoder_initialize (#590); test-x86-encoder and test-x86-target-selection compare every entry with
+// build_mode_template's.
+static void x86_template_with_segment(const X86FormDescription* form, const X86Template* plain, X86TemplateShape shape, uint32_t segment, X86Template* template)
+{
+    *template = *plain;
+    if (form->rm & BUSTER_X86_OPERAND_MEMORY)
+    {
+        uint32_t flags;
+        memcpy(&flags, &plain->bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
+        const bool fits = shape.positions < BUSTER_X86_MAX_INSTRUCTION_BYTES && (flags & BUSTER_X86_TEMPLATE_STATIC_LENGTH) < BUSTER_X86_TEMPLATE_STATIC_LENGTH &&
+                          shape.static_end < BUSTER_X86_TEMPLATE_STATIC_POSITIONS;
+        if (fits)
+        {
+            const uint32_t at = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY && (form->prefixes & 0xff) == 0x9b;
+            for (uint32_t position = at + 1; position < sizeof(template->layout); position += 1)
+            {
+                template->layout[position] = plain->layout[position - 1];
+            }
+            for (uint32_t position = at + 1; position < BUSTER_X86_TEMPLATE_STATIC_POSITIONS; position += 1)
+            {
+                template->bytes[position] = plain->bytes[position - 1];
+            }
+            template->layout[at] = BUSTER_X86_LAYOUT_STATIC;
+            template->bytes[at] = (uint8_t)(0x63 + segment);
+            flags += 1;
+        }
+        flags |= fits ? 0 : BUSTER_X86_TEMPLATE_NO_MEMORY;
+        memcpy(&template->bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], &flags, sizeof(flags));
+    }
+}
+
 // Builds every form's template for the mode in `templates`, with its halves again the other way around, and the marked
-// forms' copies of them.
+// forms' copies of them. In 64-bit mode, a form's templates with FS and GS come from its own
+// (x86_template_with_segment), and a form that doesn't fit has all three from build_mode_template, as the table is
+// broken.
 static bool build_mode_templates(X86EncoderMode encoder, X86TemplateEntry* templates)
 {
     bool result = true;
-    const uint32_t built_forms = encoder == X86_ENCODER_MODE_64 ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_TEMPLATES;
-    for (uint32_t form = 0; form < built_forms; form += 1)
-    {
-        result = build_mode_template(form, encoder, &templates[form].template) && result;
-        memcpy(templates[form].layout, templates[form].template.layout, sizeof(templates[form].layout));
-        memcpy(templates[form].bytes, templates[form].template.bytes, sizeof(templates[form].bytes));
-    }
+    x86_templates_prepare(templates);
     if (encoder == X86_ENCODER_MODE_64)
     {
-        // FS and GS have the same layouts and fallback decisions; only the optional segment byte differs.
-        memcpy(templates + BUSTER_X86_FORM_GS, templates + BUSTER_X86_FORM_FS, X86_FORM_COUNT * sizeof(*templates));
         for (uint32_t row = 0; row < X86_FORM_COUNT; row += 1)
         {
             const X86FormDescription* form = &x86_form_descriptions[row];
-            X86TemplateEntry* entry = &templates[BUSTER_X86_FORM_GS + row];
-            uint32_t flags;
-            memcpy(&flags, &entry->template.bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
-            if ((form->rm & BUSTER_X86_OPERAND_MEMORY) && !(flags & BUSTER_X86_TEMPLATE_NO_MEMORY))
+            X86TemplateShape shape;
+            if (build_template_shaped(form, 0, X86_ENCODER_MODE_64, &templates[row].template, &shape))
             {
-                const uint32_t prefix = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY && (form->prefixes & 0xff) == 0x9b;
-                if (entry->template.bytes[prefix] == 0x64 && entry->bytes[prefix] == 0x64)
+                x86_template_with_segment(form, &templates[row].template, shape, 1, &templates[BUSTER_X86_FORM_FS + row].template);
+                x86_template_with_segment(form, &templates[row].template, shape, 2, &templates[BUSTER_X86_FORM_GS + row].template);
+            }
+            else
+            {
+                result = false;
+                for (uint32_t segment = 0; segment < 3; segment += 1)
                 {
-                    entry->template.bytes[prefix] = 0x65;
-                    entry->bytes[prefix] = 0x65;
-                }
-                else
-                {
-                    result = build_mode_template(BUSTER_X86_FORM_GS + row, encoder, &entry->template) && result;
-                    memcpy(entry->layout, entry->template.layout, sizeof(entry->layout));
-                    memcpy(entry->bytes, entry->template.bytes, sizeof(entry->bytes));
+                    build_mode_template(segment * X86_FORM_COUNT + row, encoder, &templates[segment * X86_FORM_COUNT + row].template);
                 }
             }
         }
     }
-    memcpy(&templates[BUSTER_X86_FORM_FIXUP], &templates[0], BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry));
+    else
+    {
+        for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+        {
+            result = build_mode_template(form, encoder, &templates[form].template) && result;
+        }
+    }
+    // Each entry's marked copy as it is completed, while it is in the caches.
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    {
+        memcpy(templates[form].layout, templates[form].template.layout, sizeof(templates[form].layout));
+        memcpy(templates[form].bytes, templates[form].template.bytes, sizeof(templates[form].bytes));
+        templates[BUSTER_X86_FORM_FIXUP + form] = templates[form];
+    }
     return result;
 }
 

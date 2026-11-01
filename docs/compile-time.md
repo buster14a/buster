@@ -862,3 +862,72 @@ compares `bc1b4861` with `8b815992`, including the host's default page policy,
 an exec-inherited per-process THP-disable control and body-bearing units.
 That control did not change the host to `madvise`. These timings predate the
 later encoder changes; validation of the current source is recorded separately.
+
+### The backend's tables when a function is emitted (#590)
+
+A unit with a selected function still builds the backend's tables in every
+process. On a 2.1 GHz Xeon VM (4 vCPUs, kernel 6.18, transparent huge pages
+`madvise`, as Ubuntu, Debian and Fedora ship them), `hello.c`'s
+`backend-setup` was 3.4 to 4.5 ms of a 10 to 14 ms compile. It took 1,132 base
+pages' faults:
+- 788 in the encoder's template table;
+- 257 in Tier 0's tables;
+- 41 in the operand semantics' tables;
+- 38 in the unwind templates.
+
+Without faults, the encoder's own build was about 0.9 ms. Of that, 0.41 ms was
+the forms' templates, 0.40 ms was building their FS and GS templates again,
+and the rest was a 1.6 MB copy for the marked forms. The 9700X hid most of
+this: its kernel's `always` gives `.bss` huge pages without being asked.
+
+What changed:
+- **The encoder's FS and GS templates come from each form's own.** In 64-bit
+  mode an override only inserts its byte, so `x86_template_with_segment` makes
+  both from the form's template and the counts its build kept, and refuses
+  where the build would. Every entry is compared with the builder's
+  ([the encoder's design](x86-64-encoder.md), "Templates and the canonical
+  slot"). Each entry's marked copy is written as the entry is completed.
+- **Each template table is two 2 MB huge pages, aligned to them.** Before the
+  build, the encoder asks for them and commits the ranges it writes
+  (`MADV_HUGEPAGE`, then `MADV_POPULATE_WRITE`). That is two faults where huge
+  pages come, and base pages committed in one call each where they don't.
+  `.bss` grows by up to 2 MB of alignment per table, which is address space,
+  not memory.
+- **Tier 0 commits its tables' pages in one call per array**
+  (`tier0_prepare_tables`). One structure of them, in a huge page of its own,
+  ran 2.2 times as many instructions, because LLVM no longer knew the tables
+  apart ([Tier 0](tier0.md)).
+- **The semantics and unwind tables are left as they are.** Their 79 faults
+  cost less than a huge page's clearing would.
+
+Objects are the same bytes: the 220 programs of c-testsuite's subset,
+`hello.c`, and the compiler's own `main.c` (39 MB), all compiled with `-c` by
+both builds. The encoder's loops are unchanged. Measured on the same VM against
+`91cfe9e0`, with tcc 0.9.27 (Ubuntu's) as the reference:
+
+| input | THP | `91cfe9e0` | this change | tcc |
+| --- | --- | ---: | ---: | ---: |
+| `hello.c`, `measure-compile --runs 31`, two rounds | `madvise` | 14.2, 14.5 ms | 12.6, 11.9 ms | 3.4 to 3.9 ms |
+| `hello.c`'s `backend-setup` | `madvise` | 4.5, 4.2 ms (1,132 faults) | 2.4, 2.8 ms (354) | |
+| `hello.c`, `measure-compile --runs 31`, two rounds | disabled | 14.0, 14.4 ms | 11.6, 12.8 ms | |
+| `hello.c`'s `backend-setup` | disabled | 4.1, 4.4 ms | 2.7, 2.8 ms | |
+| c-testsuite's 220, best of 3 each, mean | `madvise` | 10.31 ms | 8.16 ms | 2.25 ms |
+| c-testsuite's 220, best of 3 each, mean | disabled | 10.51 ms | 9.06 ms | 2.24 ms |
+| `main.c -c`, median of 7 | `madvise` | 8.2 s | 8.1 s | |
+
+- **The THP column.** "Disabled" is a process's `PR_SET_THP_DISABLE`, which
+  its children inherit; it stands in for a kernel with `never`. That kernel
+  counts `MADV_POPULATE_WRITE`'s pages as minor faults: 1,136 of them there,
+  with none taken one at a time.
+- **Peak RSS.** With huge pages, peak RSS grows by 1.2 MB (26.8 to 28.0 MB):
+  the kernel clears a table's two pages whole.
+- **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 is several
+  times the median.
+- **Where it stands against tcc.** A small file still takes 3.1 to 3.6 times
+  tcc's time, against 4.1 to 4.6 times before. What remains of
+  `backend-setup` (2.4 to 2.8 ms here) is mostly the encoder's build and its
+  pages' clearing, Tier 0's build, and semantics and unwind.
+- **Not done.** Building the tables ahead of time, into a snapshot or
+  read-only data, would take their build and clearing out of a compile. That
+  needs an identity and staleness scheme like the runtime snapshot's. It
+  remains #590's open direction.

@@ -885,8 +885,13 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,951 templates from the encoder's forms and compiles each into one cache line. A byte the
-template fixes is that byte; a hole's is its index in the hole block. Expansion is copy and patch:
+`tier0_initialize` builds 1,962 templates from the encoder's forms and compiles each into one cache line. A byte the
+template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1 MB, are separate static
+arrays, whose pages it commits first with one `MADV_POPULATE_WRITE` call each (`tier0_prepare_tables`, #590): a kernel
+whose transparent huge pages are only `madvise`d gave them 257 base pages' faults in every compile. Grouping them in
+one structure, in a huge page of its own, took `tier0_initialize` from 82 to 184 million instructions in 60 builds
+(callgrind, baseline x86-64), as LLVM can't tell that one object's members don't overlap.
+Expansion is copy and patch:
 
 1. one load of the line;
 2. one `vpermb` from the hole block;
