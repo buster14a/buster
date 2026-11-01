@@ -16,6 +16,7 @@
 // each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
 
 #include "worker_budget.c"
+#include "c_check_tier1_outcome.c"
 
 // What an executable's link binds against (the direct path, #157): the C runtime, which bind_begin joins between the
 // program's symbols and its atoms, its arrays from `arena` and its atoms' bytes copied into the emission's byte arena.
@@ -54,6 +55,7 @@ struct CheckProgramCode
     uint32_t retained_count;
     CheckProgramStatus status;
     Tier0Error backend_error;
+    CheckTier1Outcome tier1_failure;
     uint32_t token;
     uint32_t backend_node;
     // CheckProgramLowered.reason, or the attribute or construct the emission refused.
@@ -247,7 +249,8 @@ struct CheckEmitBoard
 #define BUSTER_CHECK_EMIT_ROUND_BODIES 1u
 
 // The C driver's --tier1 (c_check_tier1.c, #138's piece for #140): each body Tier 1's pipeline takes compiled by it,
-// every other by Tier 0. A lane's arenas for the pipeline: each step's output and the steps' scratch, reserved at the
+// explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
+// output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
 #define BUSTER_CHECK_TIER1_STEPS 7
 typedef struct CheckTier1Lane CheckTier1Lane;
@@ -263,23 +266,6 @@ struct CheckTier1Lane
     bool gvn_reserved;
     bool targeted;
 };
-
-// What became of a body under --tier1: Tier 1's code, or the step that refused it, whose body Tier 0 compiled. A
-// selection's refusal also names the IR operation it refused, or the function (IR_OP_COUNT) where it refused no
-// operation, or its error past that (CheckTier1Report.operations); an emission's, its error (.emission).
-typedef enum CheckTier1Stage
-{
-    CHECK_TIER1_COMPILED,
-    CHECK_TIER1_NAKED,
-    CHECK_TIER1_LOWERING,
-    CHECK_TIER1_PROMOTION,
-    CHECK_TIER1_OPTIMIZATION,
-    CHECK_TIER1_ANALYSIS,
-    CHECK_TIER1_SELECTION,
-    CHECK_TIER1_EMISSION,
-    CHECK_TIER1_RESOURCE,
-    CHECK_TIER1_STAGE_COUNT,
-} CheckTier1Stage;
 
 // What Tier 1's code of a body holds: its records, and the allocation's traffic, its spills' stores and reloads, the
 // saves and restores around its calls and fixed registers' sequences, its recomputed values (constants and addresses,
@@ -311,6 +297,10 @@ typedef struct CheckTier1Report CheckTier1Report;
 struct CheckTier1Report
 {
     uint32_t functions;
+    uint32_t requested;
+    uint32_t admitted;
+    uint32_t categories[CHECK_TIER1_CATEGORY_COUNT];
+    uint32_t fallbacks;
     uint32_t stages[CHECK_TIER1_STAGE_COUNT];
     uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
     uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
@@ -398,6 +388,8 @@ struct CheckProgramLanes
     // --tier1-no-lifetimes, the checked program gives its objects no lifetimes, and Tier 1's frame shares no object's slot
     // (#177's comparison, c_check_program_lifetime.c).
     bool tier1;
+    bool tier1_strict;
+    const CheckTier1Fault* tier1_fault;
     // --tier1-gvn runs #866's congruence solver on the lowered IR, before promotion: a measurement option, off by
     // default, because the class representatives it merges lengthen live ranges that Tier 1's allocation pays for.
     bool tier1_gvn;
@@ -413,18 +405,19 @@ static bool check_tier1_ready = false;
 
 // Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
-// branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns the body's stage:
-// CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
-// `output` as it was.
-static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
+// branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns
+// an explicit success, unsupported, resource or internal outcome. A failed attempt leaves output unchanged and
+// clears code/counts, retaining its cause and location by value.
+static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
+                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
+static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
 // Prints a line on `stream` for a function Tier 1 refused: its name, `length` bytes at `name`, and its outcome's step and
 // IR operation or error.
-static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome);
+static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, CheckTier1Outcome outcome);
 
 // CLOCK_MONOTONIC, for CheckProgramLanes.timing.
 static uint64_t check_program_lanes_now(void)
@@ -468,7 +461,7 @@ struct CheckEmitBody
     const char* reason;
 };
 
-// A part's steps (CheckLowerPart, the lowering's), and its first body whose Tier 0 code failed and its first whose code
+// A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
 // failed after Tier 0, its end for none.
 typedef struct CheckEmitPart CheckEmitPart;
 struct CheckEmitPart
@@ -526,9 +519,8 @@ struct CheckEmitRun
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
-    // With --tier1, what became of each body: its CheckTier1Stage, and a refused selection's IR operation in bits 8 up;
-    // and Tier 1's code's counts, for the bodies it compiled.
-    uint32_t* tier1_outcomes;
+    // With --tier1, each body's complete outcome and its published code's counts (zero on refusal).
+    CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
     uint64_t* costs;
     uint64_t* boundaries;
@@ -689,20 +681,22 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
 }
 
 // Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
-// the code in its lane's scratch as Tier 0's is: true if the pipeline took it, and its outcome either way. A naked
+// the code in its lane's scratch as Tier 0's is, with an explicit outcome and disposition. A naked
 // function's code is its templates'. Out of line, so that the plain emission carries none of it.
-static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, bool naked)
+static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, bool naked)
 {
     const CheckProgram* program = run->program;
     const Tier0Function* function = &run->lowered->functions[b];
     const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
     const X86Target* target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? &program->target : &program->targets[body_target - 1];
-    uint32_t operation = 0;
-    const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
-                                          check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                              !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
-    run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
-    return stage == CHECK_TIER1_COMPILED;
+    const CheckTier1Fault* fault = run->lanes->tier1_fault;
+    fault = fault != NULL && fault->body == b + 1 ? fault : NULL;
+    CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
+                                        check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
+                                                            !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
+    outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
+    run->tier1_outcomes[b] = outcome;
+    return outcome;
 }
 
 // A part of the bodies on lane `lane`: their lowering (check_lower_part), then each one's Tier 0 code, the lane's
@@ -731,13 +725,15 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's.
         const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
         // With --tier1, Tier 1's code where its pipeline takes the body (check_program_emit_tier1).
-        const bool tier1 = lane->tier1 != NULL && check_program_emit_tier1(run, lane, b, naked != 0);
-        if (!tier1)
+        const CheckTier1Outcome outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
+        const bool tier1 = outcome.category == CHECK_TIER1_SUCCESS;
+        const bool forbidden = outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
+        if (!tier1 && !forbidden)
         {
             run->codes[b] = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
         }
         check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
-        if (run->codes[b].error != TIER0_OK)
+        if (forbidden || run->codes[b].error != TIER0_OK)
         {
             part->tier0_failed = b;
         }
@@ -1473,12 +1469,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     run.costs = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
     // --tier1's outcomes, and its tables, once: the cost model's (x86_zen5.c), which its selection reads.
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
-    run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
+    run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
     if (run.tier1_outcomes != 0)
     {
-        // A body a failure before it left unreached has none (an outcome past the stages).
-        memset(run.tier1_outcomes, 0xff, (uint64_t)count * sizeof(uint32_t));
+        // A body a failure before it left unreached has no outcome, never success.
+        memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
     }
     if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
     {
@@ -1569,12 +1565,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
                 const CheckEmitPart* part = run.parts + p;
-                const bool tier0 = part->tier0_failed != part->lower.end && run.codes[part->tier0_failed].error == TIER0_ERROR_MEMORY;
+                const uint32_t failed_body = part->tier0_failed;
+                const bool blocked = failed_body != part->lower.end && run.tier1_outcomes != NULL && run.tier1_outcomes[failed_body].fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
+                const bool tier0 = failed_body != part->lower.end && !blocked && run.codes[failed_body].error == TIER0_ERROR_MEMORY;
                 const bool code = part->code_failed != part->lower.end && run.bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE;
                 again = part->lower.status == CHECK_PROGRAM_RESOURCE ? CHECK_PROGRAM_AGAIN_LOWERING :
                         tier0 ? CHECK_PROGRAM_AGAIN_TIER0 :
                         code ? CHECK_PROGRAM_AGAIN_CODE :
                                CHECK_PROGRAM_AGAIN_NONE;
+            }
+            for (uint32_t b = 0; again != CHECK_PROGRAM_AGAIN_NONE && run.tier1_outcomes != NULL && b < count; b += 1)
+            {
+                if (run.tier1_outcomes[b].fallback == CHECK_TIER1_FALLBACK_FORBIDDEN)
+                {
+                    again = CHECK_PROGRAM_AGAIN_NONE;
+                }
             }
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
         }
@@ -1589,6 +1594,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             arena_pop_to(scratch, scratch_before);
             arena_pop_to(columns, columns_before);
             memset(run.lane_states, 0, sizeof(CheckEmitLane));
+            if (run.tier1_outcomes != NULL)
+            {
+                memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
+            }
             run.stage_clock = stage_clock;
             check_program_emit_alone(&run);
         }
@@ -1608,30 +1617,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->again = again;
         lanes->prepare_ns = lanes_begin - started;
         lanes->lanes_ns = lanes_end - lanes_begin;
-    }
-    for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && b < count; b += 1)
-    {
-        const uint32_t outcome = run.tier1_outcomes[b];
-        const uint32_t stage = outcome & 0xff;
-        lanes->tier1_report.functions += stage < CHECK_TIER1_STAGE_COUNT;
-        lanes->tier1_report.stages[stage < CHECK_TIER1_STAGE_COUNT ? stage : 0] += stage < CHECK_TIER1_STAGE_COUNT;
-        lanes->tier1_report.operations[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_SELECTION;
-        lanes->tier1_report.emission[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_EMISSION;
-        const CheckTier1Counts* counts = &run.tier1_counts[b];
-        const bool compiled = stage == CHECK_TIER1_COMPILED;
-        lanes->tier1_report.records += compiled ? counts->records : 0;
-        lanes->tier1_report.spill_stores += compiled ? counts->spill_stores : 0;
-        lanes->tier1_report.spill_loads += compiled ? counts->spill_loads : 0;
-        lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
-        lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
-        lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
-        lanes->tier1_report.dropped_definitions += compiled ? counts->dropped_definitions : 0;
-        lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
-        lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
-        lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
-        lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
-        lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
-        lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.
@@ -1890,13 +1875,23 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     if (valid && failed != count)
     {
-        const Tier0Code* code = run.codes + failed;
-        result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
-                         code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
-        result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
-                         code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
-        result->backend_error = code->error;
-        result->backend_node = code->node;
+        const CheckTier1Outcome outcome = run.tier1_outcomes != NULL ? run.tier1_outcomes[failed] : (CheckTier1Outcome){ 0 };
+        if (outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN)
+        {
+            result->tier1_failure = outcome;
+            result->status = outcome.category == CHECK_TIER1_RESOURCE_FAILURE ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
+            result->backend_node = outcome.instruction;
+        }
+        else
+        {
+            const Tier0Code* code = run.codes + failed;
+            result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
+                             code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+            result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
+                             code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
+            result->backend_error = code->error;
+            result->backend_node = code->node;
+        }
         result->token = program->bodies[failed].declaration;
         valid = false;
     }
@@ -2514,16 +2509,60 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
+    // Report only source order's prefix through the winning Tier 1 failure, not the speculative work later parts
+    // happened to finish. A failure of an earlier compiler phase publishes no Tier 1 success counters. This is
+    // independent of lane completion order, and a rejected body's counts are always zero.
+    const uint32_t report_end = valid ? count : result->tier1_failure.category != CHECK_TIER1_UNATTEMPTED ? failed + 1 : 0;
+    if (lanes != NULL && lanes->tier1)
+    {
+        lanes->tier1_report.requested += count;
+    }
+    for (uint32_t b = 0; run.tier1_outcomes != 0 && b < report_end; b += 1)
+    {
+        const CheckTier1Outcome outcome = run.tier1_outcomes[b];
+        const uint32_t stage = outcome.stage;
+        const bool attempted = outcome.category != CHECK_TIER1_UNATTEMPTED;
+        lanes->tier1_report.functions += attempted;
+        lanes->tier1_report.admitted += attempted && stage != CHECK_TIER1_NAKED;
+        lanes->tier1_report.categories[outcome.category] += attempted;
+        lanes->tier1_report.fallbacks += outcome.fallback == CHECK_TIER1_FALLBACK_TIER0;
+        lanes->tier1_report.stages[stage] += attempted;
+        const uint32_t operation = check_tier1_operation(outcome);
+        if (stage == CHECK_TIER1_SELECTION && operation < BUSTER_CHECK_TIER1_OPERATIONS)
+        {
+            lanes->tier1_report.operations[operation] += 1;
+        }
+        if (stage == CHECK_TIER1_EMISSION && outcome.emission_error != 0 && outcome.emission_error < BUSTER_CHECK_TIER1_OPERATIONS)
+        {
+            lanes->tier1_report.emission[outcome.emission_error] += 1;
+        }
+        const CheckTier1Counts* counts = &run.tier1_counts[b];
+        const bool compiled = outcome.category == CHECK_TIER1_SUCCESS;
+        lanes->tier1_report.records += compiled ? counts->records : 0;
+        lanes->tier1_report.spill_stores += compiled ? counts->spill_stores : 0;
+        lanes->tier1_report.spill_loads += compiled ? counts->spill_loads : 0;
+        lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
+        lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
+        lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
+        lanes->tier1_report.dropped_definitions += compiled ? counts->dropped_definitions : 0;
+        lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
+        lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
+        lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
+        lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
+        lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
+        lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
+    }
     if (!valid)
     {
         const CheckProgramStatus status = result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
         const uint32_t token = result->token;
         const Tier0Error backend = result->backend_error;
+        const CheckTier1Outcome tier1_failure = result->tier1_failure;
         const uint32_t backend_node = result->backend_node;
         const char* reason = result->reason;
         arena_pop_to(output, mark);
         arena_pop_to(bytes, byte_mark);
-        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason };
+        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason, .tier1_failure = tier1_failure };
         if (rows != NULL)
         {
             *rows = (CheckProgramRows){ 0 };
@@ -2540,7 +2579,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         const SymbolId symbol = program->object_symbols[program->bodies[b].object];
         const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
-        if ((run.tier1_outcomes[b] & 0xff) != CHECK_TIER1_COMPILED && (run.tier1_outcomes[b] & 0xff) < CHECK_TIER1_STAGE_COUNT && name != 0)
+        if (run.tier1_outcomes[b].fallback == CHECK_TIER1_FALLBACK_TIER0 && name != 0)
         {
             check_tier1_print_refusal(lanes->tier1_refusals, result->link.names.bytes[name], result->link.names.length[name], run.tier1_outcomes[b]);
         }

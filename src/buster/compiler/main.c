@@ -599,6 +599,9 @@ int run_backend_benchmark(int argc, char** argv);
 // The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_tier1.c"
+#pragma clang optimize off
+#include "buster/compiler/c_check_tier1_outcome_test.c"
+#pragma clang optimize on
 #pragma clang section text = ""
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
