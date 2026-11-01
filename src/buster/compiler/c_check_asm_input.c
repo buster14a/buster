@@ -213,6 +213,7 @@ static void check_input_asm_mark(CheckInputReader* reader, uint32_t begin, uint3
     {
         reader->ignored[token] = true;
         reader->output->asm_ids[token] = id;
+        check_input_sparse_mark(reader, token, id != 0);
     }
 }
 

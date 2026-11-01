@@ -445,8 +445,10 @@ struct CheckInput
     CBindingStatistics parser_binding_statistics;
     uint32_t parser_binding_event_count;
     // The tokens the scalar path's walks act at that the vector path's would have skipped (#529): the walk in source
-    // order's tokens that no mark made (check_input_visit), and the expressions' walk's that its classes left out
-    // (check_input_expression_class). Always 0 on the vector path; the tests require 0 of the scalar path too.
+    // order's tokens that no mark made (check_input_visit), the expressions' walk's that its classes left out
+    // (check_input_expression_class), and the tokens whose sparse mark the columns contradict (#628,
+    // CheckInputReader.sparse_marks), which the vector path's classes read. Always 0 on the vector path; the tests
+    // require 0 of the scalar path too.
     uint32_t visit_misses;
     // The tokens the walk in source order and the expressions' walk visited: every token of their ranges on the scalar
     // path, and on the vector path those they act at, which the tests require to be fewer.
@@ -852,6 +854,11 @@ struct CheckInputReader
     // (BUSTER_CHECK_RESOLVE_*), then the expressions' walk's classes (BUSTER_CHECK_EXPRESSION_*). Lanes (#113) share it,
     // each writing its own body's.
     uint8_t* visits;
+    // A bit a token, (count + 64) / 64 words: whether one of the sparse columns the expressions' walk tests first has an
+    // entry for it (check_input_expression_sparse), kept by every write of those columns (check_input_sparse_mark). The
+    // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
+    // columns take memory only where they're written (#628, #529). Lanes share it, as they do the columns.
+    uint64_t* sparse_marks;
     uint32_t* parameters;
     uint32_t* parameter_next;
     uint32_t* parameter_seen;
@@ -954,6 +961,38 @@ struct CheckInputReader
     bool lane;
     bool lane_unsupported;
 };
+
+// Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
+// group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
+static bool check_input_expression_sparse(const CheckInputReader* reader, uint32_t token)
+{
+    const CheckInput* input = reader->output;
+    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
+           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
+}
+
+// After a write of one of those columns at `token`: its bit in CheckInputReader.sparse_marks says again whether one has an
+// entry for it. Every write but a selection's makes an entry, which sets the bit; a selection proved without its runtime
+// operand isn't one, and only its write reads the others (a proof's write that replaces another proof's, in
+// c_check_constant.c, leaves the bit as it was, and marks nothing). Lanes write their bodies' bits at once, a word of
+// which two bodies may share: the bits change by atomic operations, which the walk's classes, after the lanes, read
+// plainly.
+static void check_input_sparse_mark(const CheckInputReader* reader, uint32_t token, bool entry)
+{
+    uint64_t* const marks = reader->sparse_marks;
+    if (marks != NULL)
+    {
+        const uint64_t bit = UINT64_C(1) << (token & 63);
+        if (entry || check_input_expression_sparse(reader, token))
+        {
+            __atomic_fetch_or(marks + (token >> 6), bit, __ATOMIC_RELAXED);
+        }
+        else
+        {
+            __atomic_fetch_and(marks + (token >> 6), ~bit, __ATOMIC_RELAXED);
+        }
+    }
+}
 
 // A lazy library declaration belongs to the translation unit, although its ordinary binding event was made at a
 // block's first use. Rebuild that event only when a later semantic use or declaration needs it after a restore.
@@ -6159,14 +6198,6 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
 
 #include "c_check_region_input.c"
 
-// Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
-// group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
-static bool check_input_expression_sparse(const CheckInputReader* reader, uint32_t token)
-{
-    const CheckInput* input = reader->output;
-    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
-           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
-}
 
 // The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
 // check_input_expression_classes' vector path. The walk acts at a token with children, at one a sparse column has an
@@ -6200,16 +6231,16 @@ static uint8_t check_input_expression_class(const CheckInputReader* reader, uint
 }
 
 // The expressions' walk's classes of every token, into CheckInputReader.visits, as check_input_expression_class gives
-// them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests) and 16 tokens'
-// sparse columns and first children at a time; on the scalar path, its twin's, a token at a time. Each token the walk
-// doesn't act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path
-// skips it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
-// reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
-// (CheckInput.visit_misses). Returns the number of tokens the walk acts at.
+// them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests) and their sparse
+// entries in a word of marks (CheckInputReader.sparse_marks, which every write of the sparse columns keeps), and 16
+// tokens' first children at a time; on the scalar path, its twin's, from the sparse columns themselves, a token at a
+// time. Each token the walk doesn't act at gets its first value, NONE, here, which the walk writes when it reaches it,
+// and the walk's vector path skips it. Nothing the walk does writes a column the classes read at a token it hasn't
+// reached: the scalar path, which reaches every token, counts each token it acts at, or tests a sparse column of, that
+// its class left out (CheckInput.visit_misses). Returns the number of tokens the walk acts at.
 static uint32_t check_input_expression_classes(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
-    const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
     const __m512i role_tests_low = _mm512_load_si512(check_input_role_tests);
     const __m512i role_tests_high = _mm512_load_si512(check_input_role_tests + 64);
@@ -6231,27 +6262,17 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t taken = (skipped & _mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_LIST))) |
                                (~skipped & (_mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_EXPRESSION)) |
                                             _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_EXPRESSION))));
+        // The 64 tokens' sparse entries, a word of their marks (CheckInputReader.sparse_marks).
+        const uint64_t sparse = reader->sparse_marks[token >> 6] & lanes;
         uint64_t acts = 0;
-        uint64_t sparse = 0;
         for (uint32_t part = 0; part < length; part += 16)
         {
             const __mmask16 parts = (__mmask16)_bzhi_u32(UINT32_MAX, length - part < 16 ? length - part : 16);
             const uint32_t at = token + part;
-            const __m512i regions = _mm512_maskz_loadu_epi32(parts, input->expression_regions + at);
-            const __m512i constants = _mm512_maskz_loadu_epi32(parts, reader->constant_present + at);
-            const __m512i varargs = _mm512_maskz_loadu_epi32(parts, reader->vararg_calls + at);
-            const __m512i designators = _mm512_maskz_loadu_epi32(parts, reader->designator_tokens + at);
-            const __m512i bounds = _mm512_maskz_loadu_epi32(parts, reader->vla_ends + at);
-            const __m512i statements = input->asm_ids != NULL ? _mm512_maskz_loadu_epi32(parts, input->asm_ids + at) : _mm512_setzero_si512();
-            const __m512i entries = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(regions, constants), _mm512_or_si512(varargs, designators)),
-                                                    _mm512_or_si512(bounds, statements));
-            const __mmask16 selected = _mm512_mask_cmplt_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->selected_tokens + at), _mm512_set1_epi32((int32_t)count));
-            const __mmask16 part_sparse = _mm512_mask_test_epi32_mask(parts, entries, entries) | selected;
             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
-            const __mmask16 part_acts = children | part_sparse | (__mmask16)(taken >> part);
+            const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
             acts |= (uint64_t)part_acts << part;
-            sparse |= (uint64_t)part_sparse << part;
         }
         const __m512i classes = _mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
                                                 _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE)));
@@ -6266,6 +6287,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             reader->first_value[token] = BUSTER_CHECK_NONE;
         }
         result += (reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
+        // The twin reads the columns: a mark that says otherwise is one the vector path's classes would take amiss.
+        const bool marked = reader->sparse_marks != NULL && ((reader->sparse_marks[token >> 6] >> (token & 63)) & 1) != 0;
+        reader->output->visit_misses += reader->sparse_marks != NULL && marked != ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_SPARSE) != 0);
     }
     return result;
 }
@@ -7786,15 +7810,21 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // huge zero page: in base pages each read would fault its page, 9,600 on sqlite3.c. The others are in base pages at
     // the arena's start, where they take only the pages the walk writes, since only the tokens that write them read them:
     // the scope stacks, the enumeration constants' values, the specifiers, tags, sizeof types, designators and the
-    // initializers' finishes that a declaration or an expression writes and reads, and the binding table, whose events
-    // the walk appends and reads no further than the last. In huge pages the few hundred tokens each of those writes on
-    // sqlite3.c, spread over the unit, took every huge page of its column (#628). Where more than one lane reads the
-    // deferred bodies of a large unit, the arena is base pages throughout (check_input_sparse_arena, #764, #847).
+    // initializers' finishes that a declaration or an expression writes and reads; the cached constants, va_arg calls,
+    // designators and variable arrays' bounds, which the expressions' walk tests only where the sparse marks say (the
+    // marks themselves: a bit a token, CheckInputReader.sparse_marks); and the binding table, whose events the walk appends
+    // and reads no further than the last. In huge pages the few hundred tokens each of those writes on sqlite3.c, spread
+    // over the unit, took every huge page of its column (#628). Where more than one lane reads the deferred bodies of a
+    // large unit, the arena is base pages throughout (check_input_sparse_arena, #764, #847).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
     X(scope_openings, uint32_t) \
     X(enum_values, unsigned __int128) \
+    X(constant_present, uint32_t) \
+    X(vararg_calls, uint32_t) \
+    X(designator_tokens, uint32_t) \
+    X(vla_ends, uint32_t) \
     X(declaration_specifiers, uint32_t) \
     X(declaration_deduced, TypeId) \
     X(initializer_finish_next, uint32_t) \
@@ -7818,26 +7848,25 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(static_initializers, uint8_t) \
     X(incomplete_array_types, TypeId) \
     X(designator_valid, uint8_t) \
-    X(designator_tokens, uint32_t) \
     X(selection_type_ends, uint32_t) \
-    X(constant_present, uint32_t) \
     X(builtins, uint16_t) \
     X(builtin_type_ends, uint32_t) \
-    X(vararg_calls, uint32_t) \
     X(vararg_types, uint32_t) \
-    X(vla_ends, uint32_t) \
     X(vla_scope_ends, uint32_t) \
     X(warning_suppressed, uint8_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
     const uint64_t binding_bytes = c_bindings_bytes(pp->table->count, count * 4 + 1);
-    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + binding_bytes + BUSTER_ARENA_PAGE_BYTES - 1) &
-                                  ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t mark_words = ((uint64_t)count + 64) / 64;
+    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + mark_words * sizeof(uint64_t) + 63 + binding_bytes +
+                                   BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
 #undef BUSTER_CHECK_SPARSE_BYTES
     input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
     Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
 #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+    reader.sparse_marks = valid ? arena_push_array(&sparse, mark_words, sizeof(uint64_t), 64) : 0;
+    valid &= reader.sparse_marks != 0;
     // The binding table in the base pages too (#628): each of its nine event columns has room for four events a token, of
     // which the walk writes a prefix (sqlite3.c's 167,456 of 2.86 million) and reads no further, so that in huge pages each
     // column's first touch cleared one or two 2 MB pages for a few hundred kilobytes, 11 of the arena's 34 huge pages.

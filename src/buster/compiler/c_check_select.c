@@ -22,6 +22,7 @@ static bool check_input_builtin_constant_prepare(CheckInputReader* reader, uint3
         reader->cached_constants[index] = value;
         check_input_rare_claim(reader, &reader->constant_present[close]);
         reader->constant_present[close] = index + 1;
+        check_input_sparse_mark(reader, close, true);
         for (uint32_t token = keyword; token <= close; token += 1)
         {
             reader->ignored[token] = true;
@@ -150,6 +151,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     if (valid)
     {
         reader->selected_tokens[close] = chosen;
+        check_input_sparse_mark(reader, close, chosen < reader->parser->tokens.count);
         association = separator + 1;
         while (association < close)
         {
@@ -197,6 +199,7 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
             if (selected)
             {
                 reader->selected_tokens[close] = root;
+                check_input_sparse_mark(reader, close, root < reader->parser->tokens.count);
                 check_input_constant_fold_warning(reader, first, separator, &control, true, first);
                 check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);
             }

@@ -454,11 +454,20 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                 sparse_columns[c][i] = ((draw >> (8 + 4 * c)) & 15) == 0 ? 1 + (draw >> 28) : 0;
             }
         }
+        // The sparse marks the columns' writers keep (CheckInputReader.sparse_marks, #628), by the test's own reading, which
+        // the vector path's classes read in place of the columns.
+        uint64_t marks[(200 + 64) / 64] = { 0 };
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            marks[i >> 6] |= (uint64_t)((check_test_expression_class(&reader, i) & BUSTER_CHECK_EXPRESSION_SPARSE) != 0) << (i & 63);
+        }
+        reader.sparse_marks = marks;
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
             parser.options.scalar = scalar != 0;
             memset(visits, 0xa5, (uint64_t)count + 1);
             memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
+            input.visit_misses = 0;
             const uint32_t acting = check_input_expression_classes(&reader);
             uint32_t expected_acting = 0;
             for (uint32_t i = 0; i < count; i += 1)
@@ -469,16 +478,29 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                 class_differences += check_input_expression_class(&reader, i) != classes;
                 expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
             }
-            class_differences += visits[count] != 0xa5 || acting != expected_acting;
+            class_differences += visits[count] != 0xa5 || acting != expected_acting || input.visit_misses != 0;
+        }
+        // A mark the columns contradict, either way, is a miss the scalar path counts.
+        if (count != 0)
+        {
+            const uint32_t wrong = check_test_random(test) % count;
+            marks[wrong >> 6] ^= UINT64_C(1) << (wrong & 63);
+            parser.options.scalar = true;
+            input.visit_misses = 0;
+            check_input_expression_classes(&reader);
+            class_differences += input.visit_misses != 1;
+            marks[wrong >> 6] ^= UINT64_C(1) << (wrong & 63);
         }
         // The empty representation must agree with an independently read dense zero column, including vector
         // tails at the guard page. No address may be formed from the null asm column, even under a zero mask.
         uint32_t* dense_asms = input.asm_ids;
         uint8_t expected_empty[201];
         memset(dense_asms, 0, (uint64_t)count * sizeof(uint32_t));
+        memset(marks, 0, sizeof(marks));
         for (uint32_t i = 0; i < count; i += 1)
         {
             expected_empty[i] = check_test_expression_class(&reader, i);
+            marks[i >> 6] |= (uint64_t)((expected_empty[i] & BUSTER_CHECK_EXPRESSION_SPARSE) != 0) << (i & 63);
         }
         input.asm_ids = NULL;
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
