@@ -159,7 +159,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
 {
     printf("memory: wait4 peaks include pre-exec memory and waited descendants; executable-only peaks are not measured by wait4\n");
     printf("memory: --time-stages peak growth is approximate post-exec RSS; -1 means unavailable, not zero\n");
-    printf("stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks; do not subtract them from stage elapsed time or rank stages by them\n");
+    printf("stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable; do not subtract them from stage elapsed time or rank stages by them\n");
     const uint32_t compiles = m->reference != NULL ? 3 : 2;
     ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, (uint64_t)m->runs * BUSTER_MEASURE_COMPILES);
     double* rows = BUSTER_ARENA_PUSH_ARRAY(arena, double, (uint64_t)m->runs * BUSTER_MEASURE_ROW);
@@ -245,14 +245,14 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     double high[BUSTER_MEASURE_ROW] = { 0 };
     for (uint32_t i = 0; failures == 0 && i < BUSTER_MEASURE_ROW; i += 1)
     {
-        const bool peak_column = i >= BUSTER_MEASURE_USAGE && (i - BUSTER_MEASURE_USAGE) % 3 == 2;
+        const bool usage_column = i >= BUSTER_MEASURE_USAGE;
         bool unavailable = false;
         for (uint32_t r = 0; r < m->runs; r += 1)
         {
             values[r] = rows[(uint64_t)r * BUSTER_MEASURE_ROW + i];
-            unavailable = unavailable || (peak_column && values[r] < 0);
+            unavailable = unavailable || (usage_column && values[r] < 0);
         }
-        // Do not sort unavailable sentinels into a plausible median of the remaining RSS readings.
+        // Do not sort unavailable sentinels into a plausible median of the remaining system-time, fault or RSS readings.
         median[i] = unavailable ? -1 : measure_compile_median(values, m->runs);
         low[i] = unavailable ? -1 : values[0];
         high[i] = unavailable ? -1 : values[m->runs - 1];
@@ -261,7 +261,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     {
         const double span = median[BUSTER_MEASURE_SPAN];
         double sum = 0;
-        printf("--time-stages' stages, medians of %u runs: ms (range), share of the median span; system ms, minor faults, approximate post-exec peak KiB added (-1 unavailable)\n", m->runs);
+        printf("--time-stages' stages, medians of %u runs: ms (range), share of the median span; low-confidence system ms, minor faults, approximate post-exec peak KiB added (-1 unavailable)\n", m->runs);
         for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
         {
             const double* used = median + BUSTER_MEASURE_USAGE + 3 * s;
