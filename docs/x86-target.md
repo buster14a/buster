@@ -409,11 +409,13 @@ rule — and an operand a constant condition leaves out where a statement
 expression in it holds a label, which its references keep (`0 && ({ l: h(x); })`
 emits). `ContainsLabel` is syntactic, so a label inside a `sizeof` or
 `__alignof__` operand counts too, though that operand's code doesn't emit. A
-statement expression's last expression is emitted even where its earlier
+valued statement expression's last expression is emitted even where its earlier
 statements' code stopped: `EmitCompoundStmtWithoutScope` calls
 `EnsureInsertPoint()` before the value, so `({ stop(); h(x); })` checks `h`
 wherever the statement expression itself is emitted, and the orphan block ends
-the enclosing expression statement, so code after it may not emit. A call
+the enclosing expression statement, so code after it may not emit; a void
+statement expression has no value, so its last statement is an ordinary one
+and a dead statement before it skips it. A call
 through `*` or `&` to a function that doesn't return, and a call of a C library
 function that clang knows doesn't return (`exit`, `abort`, `_Exit`, `_exit`,
 `longjmp` and kin, by the builtins' attributes, which `-ffreestanding`,

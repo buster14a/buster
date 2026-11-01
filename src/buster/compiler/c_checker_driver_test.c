@@ -4388,12 +4388,15 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "int x2(int x) { longjmp(0, 1); return h(x + 1); }\nint e(int x) { return x1(x) + x2(x); }\n" },
         { "a statement expression's value and labels after a dead statement",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void hp(int *p) { *p = 1; }\n"
           "__attribute__((noreturn)) void stop(void);\n"
           "static int a(int x) { int y = ({ stop(); h(x); }); return y; }\n"
           "static int b(int x) { return ({ stop(); h(x + 1); }); }\n"
           "static int c(int x) { ({ stop(); h(x + 2); }); return h(x + 3); }\n"
           "static int d(int x) { int y = ({ stop(); lbl: h(x + 4); }); return y; }\n"
-          "int e(int x) { return a(x) + b(x) + c(x) + d(x); }\n" },
+          "static int v(int x) { ({ stop(); hp(&x); }); return h(x + 5); }\n"
+          "static int w(int x) { ({ hp(&x); }); return h(x + 6); }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + v(x) + w(x); }\n" },
         { "a constant switch's kept statements after a dead statement",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "__attribute__((noreturn)) void stop(void);\n"

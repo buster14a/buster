@@ -54,8 +54,9 @@
 // or switch after a point where its code stops, or the arm of an if or a switch that a constant condition would leave
 // out), and an operand a constant condition leaves out where a statement expression in it holds a label, which
 // check_program_references keeps (a labeled operand is code clang emits, so its references are the body's) — a label
-// inside sizeof or alignof's operand too, as ContainsLabel is syntactic. A statement expression's last expression and
-// labels emit after a statement whose code stops, as EnsureInsertPoint gives the value a block of its own. The
+// inside sizeof or alignof's operand too, as ContainsLabel is syntactic. A valued statement expression's last
+// expression and labels emit after a statement whose code stops, as EnsureInsertPoint gives the value a block of its
+// own; a void one's last statement is ordinary code, which a dead statement before it skips. The
 // library builtins' noreturn merges into the user's declaration whatever its result type, but longjmp's named types
 // must be file-scope typedefs before the declaration in effect at the call. A switch
 // on a constant emits just the case the value takes where its scan can skip the rest — no label a skipped statement
@@ -1646,11 +1647,15 @@ static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckT
     else if (op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < program->input->token_count)
     {
         const uint32_t region = program->input->expression_regions[graph->tokens[node]];
-        if (region != 0 && region <= program->region_count && program->input->regions[region - 1].final_statement != BUSTER_CHECK_NONE)
+        const uint32_t type = check_stream_type(program->stream, node);
+        const bool valued = type != 0 && type_kind(program->types, type_strip_aligned(program->types, type)) != BUSTER_TYPE_KIND_VOID;
+        if (valued && region != 0 && region <= program->region_count && program->input->regions[region - 1].final_statement != BUSTER_CHECK_NONE)
         {
             // EmitCompoundStmtWithoutScope's value: EnsureInsertPoint gives the last expression a block of its own
             // where the block's code stopped, so it and the block's cleanups run (and their calls are checked) however
-            // dead the statements before them are. The region's END control pushes the result and then its cleanups.
+            // dead the statements before them are. The region's END control pushes the result and then its cleanups. A
+            // void statement expression has no value (GetLast is false), so its last statement is an ordinary one,
+            // which the region's own controls already skip where the code before it stopped.
             const CheckProgramRegion* item = program->regions + region - 1;
             const uint32_t end = item->count > item->cleanups ? item->first + item->count - item->cleanups - 1 : BUSTER_CHECK_NONE;
             if (end < walk->body->count && program->controls[walk->body->first + end].kind == CHECK_CONTROL_END)
