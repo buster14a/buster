@@ -186,7 +186,7 @@ static bool check_common_conversion_changes(const TypeTable* types, TypeId sourc
 
 static bool check_common_integer_constant(const CheckStream* stream, uint32_t node)
 {
-    const bool result = node < stream->count && stream->values[node].constant_kind == CHECK_CONSTANT_INTEGER;
+    const bool result = node < stream->count && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_INTEGER;
     return result;
 }
 
@@ -483,7 +483,8 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
         {
             const uint32_t root = op == CHECK_OP_ADDRESS ? check_common_address_root(graph, stream, types, operand, true) :
                                   check_common_address_root(graph, stream, types, operand, false);
-            const CheckValue* value = root < graph->count ? stream->values + root : NULL;
+            CheckValue root_value = root < graph->count ? check_stream_value(stream, root) : (CheckValue){ 0 };
+            const CheckValue* value = root < graph->count ? &root_value : NULL;
             const uint32_t declaration = value != NULL && value->object != 0 ? value->object - 1 : BUSTER_CHECK_NONE;
             const bool local = value != NULL && value->category == CHECK_LVALUE && declaration < input->token_count &&
                                input->declaration_bodies[declaration] < parser->tokens.count && !input->static_objects[declaration] &&
@@ -517,11 +518,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             const uint32_t divisor = graph->operand1[node];
             const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
             const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
-            if (!ice && check_common_integer_constant(stream, divisor) && stream->values[divisor].integer == 0)
+            if (!ice && check_common_integer_constant(stream, divisor) && check_stream_value(stream, divisor).integer == 0)
             {
                 uint32_t width = 0;
                 bool sign = false;
-                if (check_common_integer(types, stream->values[graph->operand0[node]].type, &width, &sign))
+                if (check_common_integer(types, check_stream_type(stream, graph->operand0[node]), &width, &sign))
                 {
                     check_common_report(parser, pp, input, token, CHECK_WARNING_ID_DIVISION_BY_ZERO, false,
                                         op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined", NULL, 0, scratch);
@@ -536,8 +537,9 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
                 check_common_integer_constant(stream, source))
             {
-                const CheckValue* value = stream->values + source;
-                const TypeId target = stream->values[node].type;
+                const CheckValue value_storage = check_stream_value(stream, source);
+                const CheckValue* value = &value_storage;
+                const TypeId target = check_stream_type(stream, node);
                 __int128 converted = 0;
                 if (check_common_conversion_changes(types, value->type, target, value, &converted))
                 {
@@ -566,14 +568,15 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             {
                 const uint32_t left = graph->operand0[node];
                 const uint32_t right = graph->operand1[node];
+                const CheckValue left_value = left < graph->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
+                const CheckValue right_value = right < graph->count ? check_stream_value(stream, right) : (CheckValue){ 0 };
                 const bool volatile_object = left < graph->count &&
-                    (type_qualifiers(type_strip_aligned(types, stream->values[left].type)) & BUSTER_TYPE_VOLATILE) != 0;
-                if (!volatile_object && left < graph->count && right < graph->count && stream->values[left].category == CHECK_LVALUE &&
-                    stream->values[right].category == CHECK_LVALUE && stream->values[left].object != 0 &&
-                    stream->values[left].object == stream->values[right].object &&
-                    stream->values[left].offset == 0 && stream->values[right].offset == 0)
+                    (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
+                if (!volatile_object && left < graph->count && right < graph->count && left_value.category == CHECK_LVALUE &&
+                    right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
+                    left_value.offset == 0 && right_value.offset == 0)
                 {
-                    const String8 type_name = check_driver_warning_type(pp, types, scratch, stream->values[left].type);
+                    const String8 type_name = check_driver_warning_type(pp, types, scratch, left_value.type);
                     if (type_name.length != 0)
                     {
                         const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type '%.*s' to itself",
@@ -590,20 +593,22 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             const uint32_t root = check_common_address_root(graph, stream, types, array, false);
             if (array < graph->count && root < graph->count && check_common_integer_constant(stream, index))
             {
-                TypeId type = type_unqualified(type_strip_aligned(types, stream->values[array].type));
+                const TypeId array_type = check_stream_type(stream, array);
+                TypeId type = type_unqualified(type_strip_aligned(types, array_type));
                 if (type_kind(types, type) == BUSTER_TYPE_KIND_ARRAY)
                 {
                     const uint64_t extent = types->types.extent[type_index(type)];
                     uint32_t width = 0;
                     bool sign = false;
-                    if (check_common_integer(types, stream->values[index].type, &width, &sign))
+                    if (check_common_integer(types, check_stream_type(stream, index), &width, &sign))
                     {
-                        const __int128 value = check_common_integer_value(stream->values + index, width, sign);
+                        const CheckValue index_value = check_stream_value(stream, index);
+                        const __int128 value = check_common_integer_value(&index_value, width, sign);
                         const bool past = value >= 0 && (unsigned __int128)value >= extent;
                         const bool before = value < 0;
                         if (past || before)
                         {
-                            const String8 array_name = check_driver_warning_type(pp, types, scratch, stream->values[array].type);
+                            const String8 array_name = check_driver_warning_type(pp, types, scratch, array_type);
                             char number[48];
                             check_common_number(number, sizeof(number), value);
                             const char* message = past && array_name.length != 0 ?
@@ -611,7 +616,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                                                    (int)array_name.length, array_name.pointer) :
                                 array_name.length != 0 ? check_warning_text(scratch, "array index %s is before the beginning of the array", number) : NULL;
                             CheckCommonNote note = { 0 };
-                            const uint32_t declaration = stream->values[root].object != 0 ? stream->values[root].object - 1 : BUSTER_CHECK_NONE;
+                            const uint32_t root_object = check_stream_object(stream, root);
+                            const uint32_t declaration = root_object != 0 ? root_object - 1 : BUSTER_CHECK_NONE;
                             const uint32_t name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
                             if (declaration < parser->tokens.count && name != 0)
                             {
@@ -638,8 +644,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             bool left_signed = false;
             bool right_signed = false;
             bool integer = left < graph->count && right < graph->count &&
-                           check_common_integer(types, stream->values[left].type, &left_width, &left_signed) &&
-                           check_common_integer(types, stream->values[right].type, &right_width, &right_signed);
+                           check_common_integer(types, check_stream_type(stream, left), &left_width, &left_signed) &&
+                           check_common_integer(types, check_stream_type(stream, right), &right_width, &right_signed);
             bool constant_suppressed = false;
             if (integer && left_signed != right_signed)
             {
@@ -649,12 +655,14 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 const uint32_t unsigned_width = left_signed ? right_width : left_width;
                 if (check_common_integer_constant(stream, signed_operand) && unsigned_width != 0)
                 {
-                    const __int128 constant = check_common_integer_value(stream->values + signed_operand, signed_width, true);
+                    const CheckValue signed_value = check_stream_value(stream, signed_operand);
+                    const __int128 constant = check_common_integer_value(&signed_value, signed_width, true);
                     constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(unsigned_width);
                 }
                 else if ((op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && check_common_integer_constant(stream, unsigned_operand) && signed_width != 0)
                 {
-                    const __int128 constant = check_common_integer_value(stream->values + unsigned_operand, unsigned_width, false);
+                    const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
+                    const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
                     constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(signed_width);
                 }
                 else if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && check_common_integer_constant(stream, unsigned_operand) &&
@@ -662,7 +670,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 {
                     // Clang canonicalizes the signed operand to the left; a zero unsigned constant leaves the result
                     // unchanged for `<` and `>=`, whose truth is already the same for every signed value.
-                    const __int128 constant = check_common_integer_value(stream->values + unsigned_operand, unsigned_width, false);
+                    const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
+                    const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
                     CheckOp normalized = op;
                     if (right_signed)
                     {
@@ -680,8 +689,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             const bool constant_operand = check_common_integer_constant(stream, left) || check_common_integer_constant(stream, right);
             if (integer && (simple || constant_operand) && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
             {
-                const String8 left_name = check_driver_warning_type(pp, types, scratch, stream->values[left].type);
-                const String8 right_name = check_driver_warning_type(pp, types, scratch, stream->values[right].type);
+                const String8 left_name = check_driver_warning_type(pp, types, scratch, check_stream_type(stream, left));
+                const String8 right_name = check_driver_warning_type(pp, types, scratch, check_stream_type(stream, right));
                 if (left_name.length != 0 && right_name.length != 0)
                 {
                     const char* message = check_warning_text(scratch, "comparison of integers of different signs: '%.*s' and '%.*s'",
@@ -787,10 +796,10 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const String8 name = { .pointer = (char*)intern_bytes(pp->table, name_id), .length = intern_length(pp->table, name_id) };
         uint32_t format_index = check_common_format_index(name);
         uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
-        if (format_index == UINT32_MAX && program != NULL && stream->values[callee].object != 0 &&
-            stream->values[callee].object <= program->object_count)
+        const uint32_t callee_object = callee < graph->count ? check_stream_object(stream, callee) : 0;
+        if (format_index == UINT32_MAX && program != NULL && callee_object != 0 && callee_object <= program->object_count)
         {
-            const uint32_t definition = program->object_declarations[stream->values[callee].object];
+            const uint32_t definition = program->object_declarations[callee_object];
             bool found = definition < input->token_count && input->attributes != NULL &&
                          check_common_format_attribute(input->attributes[definition], &format_index, &first_argument);
             const uint32_t canonical = definition < input->token_count && input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
@@ -881,7 +890,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         if (argument < count)
                         {
                             const uint32_t argument_node = graph->argument_nodes[offset + argument];
-                            const TypeId type = argument_node < graph->count ? stream->values[argument_node].type : 0;
+                            const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
                             const bool long_double = length_modifier == 'L';
                             const uint32_t width_limit = length_modifier == 0 || length_modifier == 'h' || length_modifier == 'H' ? 32u : 64u;
                             const bool accepted = conversion_integer ? check_common_format_integer(types, type, conversion == 'c' || conversion == 'C' || length_modifier == 0 || length_modifier == 'h' || length_modifier == 'H' ? 32u : width_limit) :
@@ -983,7 +992,7 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
             }
             selector_node = operand;
         }
-        const TypeId enum_type = selector_node < stream->count ? type_unqualified(type_strip_aligned(types, stream->values[selector_node].type)) : 0;
+        const TypeId enum_type = selector_node < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, selector_node))) : 0;
         if (enum_type == 0 || type_kind(types, enum_type) != BUSTER_TYPE_KIND_ENUM)
         {
             continue;
@@ -1109,12 +1118,13 @@ static void check_common_mark_written(const CheckGraph* graph, const CheckStream
 {
     for (uint32_t steps = 0; node < graph->count && steps < graph->count; steps += 1)
     {
-        const CheckValue* value = stream->values + node;
-        if (value->category == CHECK_LVALUE)
+        const CheckCategory category = check_stream_category(stream, node);
+        const uint32_t object = check_stream_object(stream, node);
+        if (category == CHECK_LVALUE)
         {
-            if (value->object != 0 && value->object - 1 < count)
+            if (object != 0 && object - 1 < count)
             {
-                addressed[value->object - 1] = 1;
+                addressed[object - 1] = 1;
             }
             break;
         }
@@ -1188,8 +1198,9 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
             else if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
             {
                 const uint32_t condition = graph->operand0[node];
+                const CheckValue condition_value = condition < graph->count ? check_stream_value(stream, condition) : (CheckValue){ 0 };
                 bool truth = false;
-                if (condition < graph->count && check_action_truth(types, &stream->values[condition], &truth))
+                if (condition < graph->count && check_action_truth(types, &condition_value, &truth))
                 {
                     mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3u : 5u) :
                            ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1u : 3u;
@@ -1235,7 +1246,7 @@ static void check_common_mark_nonread(const CheckGraph* graph, const CheckStream
         if (op == CHECK_OP_SUBSCRIPT)
         {
             const uint32_t base = graph->operand0[node];
-            const TypeId base_type = base < graph->count ? type_unqualified(type_strip_aligned(types, stream->values[base].type)) : 0;
+            const TypeId base_type = base < graph->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, base))) : 0;
             if (base_type == 0 || !type_kind_is_array(type_kind(types, base_type)))
             {
                 break;
@@ -1259,8 +1270,7 @@ static uint32_t check_common_address_root(const CheckGraph* graph, const CheckSt
     for (uint32_t steps = 0; node < graph->count && steps < graph->count; steps += 1)
     {
         const CheckOp op = graph->ops[node];
-        const CheckValue* value = stream->values + node;
-        if (op == CHECK_OP_VALUE && value->category == CHECK_LVALUE && value->object != 0)
+        if (op == CHECK_OP_VALUE && check_stream_category(stream, node) == CHECK_LVALUE && check_stream_object(stream, node) != 0)
         {
             result = node;
             break;
@@ -1270,7 +1280,7 @@ static uint32_t check_common_address_root(const CheckGraph* graph, const CheckSt
             // Indexing a pointer reaches memory the local pointer may not own; only an array's own elements are
             // part of its stack object.
             const uint32_t base = graph->operand0[node];
-            const TypeId base_type = base < graph->count ? type_unqualified(type_strip_aligned(types, stream->values[base].type)) : 0;
+            const TypeId base_type = base < graph->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, base))) : 0;
             if (base_type == 0 || !type_kind_is_array(type_kind(types, base_type)))
             {
                 break;
@@ -1333,12 +1343,13 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             {
                 check_common_mark_nonread(graph, stream, types, graph->operand0[node], nonread);
                 const uint32_t operand = check_common_address_root(graph, stream, types, graph->operand0[node], true);
-                if (operand < graph->count && stream->values[operand].object != 0 && stream->values[operand].object - 1 < count)
+                const uint32_t operand_object = operand < graph->count ? check_stream_object(stream, operand) : 0;
+                if (operand_object != 0 && operand_object - 1 < count)
                 {
-                    addressed[stream->values[operand].object - 1] = 1;
+                    addressed[operand_object - 1] = 1;
                 }
             }
-            else if (op == CHECK_OP_CAST && type_kind(types, type_unqualified(type_strip_aligned(types, stream->values[node].type))) == BUSTER_TYPE_KIND_VOID)
+            else if (op == CHECK_OP_CAST && type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID)
             {
                 check_common_mark_nonread(graph, stream, types, graph->operand0[node], nonread);
             }
@@ -1383,10 +1394,12 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             const uint32_t target = graph->operand0[node];
             const bool plain_write = op == CHECK_OP_ASSIGN;
             const bool read_write = check_common_write_op(op) && !plain_write;
-            if ((plain_write || read_write) && target < graph->count && stream->values[target].category == CHECK_LVALUE &&
-                stream->values[target].object != 0 && stream->values[target].object - 1 < count)
+            const CheckCategory target_category = target < graph->count ? check_stream_category(stream, target) : CHECK_RVALUE;
+            const uint32_t target_object = target < graph->count ? check_stream_object(stream, target) : 0;
+            if ((plain_write || read_write) && target < graph->count && target_category == CHECK_LVALUE &&
+                target_object != 0 && target_object - 1 < count)
             {
-                const uint32_t object = stream->values[target].object - 1;
+                const uint32_t object = target_object - 1;
                 const uint32_t order = read_write ? node + 1 : node;
                 first_write[object] = order < first_write[object] ? order : first_write[object];
                 const uint32_t token = graph->tokens[node];
@@ -1398,9 +1411,9 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             }
             if (op == CHECK_OP_VALUE && nonread[node] == 0)
             {
-                const CheckValue* value = stream->values + node;
-                const uint32_t declaration = value->object != 0 ? value->object - 1 : BUSTER_CHECK_NONE;
-                if (declaration < count && value->category == CHECK_LVALUE && node < first_read[declaration])
+                const uint32_t object = check_stream_object(stream, node);
+                const uint32_t declaration = object != 0 ? object - 1 : BUSTER_CHECK_NONE;
+                if (declaration < count && check_stream_category(stream, node) == CHECK_LVALUE && node < first_read[declaration])
                 {
                     first_read[declaration] = node;
                 }
