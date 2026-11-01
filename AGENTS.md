@@ -320,7 +320,12 @@ designs and the compilers already built this way.
   them natively against clang -O0's build. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
-  bit builtins' and `expect`'s; `test-checker --program-align` runs them.
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them. The
+  signaling NaNs and the `_Float16` and `__float128` constants (`nans`,
+  `nanf16`, `inff128` and the others) are floating builtins, their NaNs' bits
+  exact in static data and code (`check_action_nan_bits`); `test-checker
+  --program-float-constants` runs them against clang (the guide's "Signaling
+  NaNs and the `_Float16` and `__float128` constants").
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus

@@ -213,6 +213,104 @@ static void check_builtin_float_test_constants(CheckBuiltinFloatTest* test, Type
                                     "runtime NaN call preserves the actual pointer expression's effects and fault");
 }
 
+// The signaling NaNs and the _Float16 and __float128 constants (#148): each one's bytes, as static data writes them
+// (check_data_float_bytes), against the host compiler's own builtin of the same payload, kept in its own type (a long
+// double would quiet a signaling NaN); then a __float128 payload past 61 bits, which the long double can't hold, refused.
+static void check_builtin_float_test_signaling(CheckBuiltinFloatTest* test, TypeTable* table)
+{
+    static const char* const payloads[] = { "", "0", "5", "0x3", "0x7ffffffffffff", "0x8000000000000", "0x2000000000000000", "0x1fffffffffffffff", "0b101" };
+    enum { PAYLOADS = BUSTER_ARRAY_LENGTH(payloads) };
+#define BUSTER_FLOAT_TEST_PAYLOADS(name) \
+    { name(""), name("0"), name("5"), name("0x3"), name("0x7ffffffffffff"), name("0x8000000000000"), name("0x2000000000000000"), \
+      name("0x1fffffffffffffff"), name("0b101") }
+    const double nans[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nans);
+    const float nansf[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nansf);
+    const long double nansl[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nansl);
+    const _Float16 nanf16[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nanf16);
+    const _Float16 nansf16[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nansf16);
+    const __float128 nanf128[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nanf128);
+    const __float128 nansf128[PAYLOADS] = BUSTER_FLOAT_TEST_PAYLOADS(__builtin_nansf128);
+#undef BUSTER_FLOAT_TEST_PAYLOADS
+    const struct
+    {
+        CBuiltinId id;
+        const char* name;
+        TypeId type;
+        const void* oracle;
+        uint32_t size;
+    } rows[] =
+    {
+        { CBUILTIN_NANS, "nans", BUSTER_TYPE_DOUBLE, nans, 8 },
+        { CBUILTIN_NANSF, "nansf", BUSTER_TYPE_FLOAT, nansf, 4 },
+        { CBUILTIN_NANSL, "nansl", BUSTER_TYPE_LONG_DOUBLE, nansl, 10 },
+        { CBUILTIN_NANF16, "nanf16", BUSTER_TYPE_FLOAT16, nanf16, 2 },
+        { CBUILTIN_NANSF16, "nansf16", BUSTER_TYPE_FLOAT16, nansf16, 2 },
+        { CBUILTIN_NANF128, "nanf128", BUSTER_TYPE_FLOAT128, nanf128, 16 },
+        { CBUILTIN_NANSF128, "nansf128", BUSTER_TYPE_FLOAT128, nansf128, 16 },
+    };
+    const uint32_t strides[] = { 8, 4, 16, 2, 2, 16, 16 };
+    CheckValue string = {
+        .type = type_array(table, BUSTER_TYPE_CHAR, 80),
+        .category = CHECK_LVALUE,
+        .flags = BUSTER_CHECK_STATIC_OBJECT,
+        .constant_kind = CHECK_CONSTANT_ADDRESS,
+        .object = 91,
+    };
+    for (uint32_t row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+    {
+        for (uint32_t i = 0; i < PAYLOADS; i += 1)
+        {
+            const CheckBuiltinFloatAction action = {
+                .id = rows[row].id,
+                .arguments = &string,
+                .argument_count = 1,
+                .nan_payload = (const uint8_t*)payloads[i],
+                .nan_payload_length = (uint32_t)strlen(payloads[i]),
+                .nan_payload_known = true,
+            };
+            CheckBuiltinFloatResult result;
+            check_builtin_float_one(table, &action, &result);
+            uint8_t bytes[16] = { 0 };
+            check_data_float_bytes(bytes, rows[row].type, result.action.value.floating);
+            const uint8_t* expected = (const uint8_t*)rows[row].oracle + (uint64_t)i * strides[row];
+            // The __float128 payload past 61 bits (2^61): refused, never approximated.
+            const bool wide = rows[row].type == BUSTER_TYPE_FLOAT128 && i == 6;
+            char description[160];
+            snprintf(description, sizeof(description), "__builtin_%s(\"%s\") is the host compiler's builtin's bits", rows[row].name, payloads[i]);
+            check_builtin_float_test_expect(test, wide ? !result.folded && (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_INVALID_PAYLOAD) != 0 :
+                                                         result.action.diagnostic == CHECK_DIAG_NONE && result.folded && result.action.value.type == rows[row].type &&
+                                                         memcmp(bytes, expected, rows[row].size) == 0,
+                                            description);
+            // The value keeps its bits through a conversion to its own type, and a conversion to another format quiets it.
+            CheckValue same = result.action.value;
+            check_action_convert_plain(table, &same, rows[row].type, 0);
+            uint8_t again[16] = { 0 };
+            check_data_float_bytes(again, rows[row].type, same.floating);
+            CheckValue other = result.action.value;
+            check_action_convert_plain(table, &other, BUSTER_TYPE_DOUBLE, 0);
+            check_builtin_float_test_expect(test, wide || (memcmp(again, bytes, rows[row].size) == 0 && (rows[row].type == BUSTER_TYPE_DOUBLE ||
+                                                           check_builtin_float_quiet(other.floating))),
+                                            "a NaN keeps its bits converted to its own type and is quiet converted to double");
+        }
+    }
+    // The infinities of _Float16 and __float128.
+    const CBuiltinId infinities[] = { CBUILTIN_INFF16, CBUILTIN_HUGE_VALF16, CBUILTIN_INFF128, CBUILTIN_HUGE_VALF128 };
+    const _Float16 half = __builtin_inff16();
+    const __float128 quad = __builtin_inff128();
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(infinities); i += 1)
+    {
+        const CheckBuiltinFloatAction action = { .id = infinities[i] };
+        CheckBuiltinFloatResult result;
+        check_builtin_float_one(table, &action, &result);
+        const TypeId type = i < 2 ? BUSTER_TYPE_FLOAT16 : BUSTER_TYPE_FLOAT128;
+        uint8_t bytes[16] = { 0 };
+        check_data_float_bytes(bytes, type, result.action.value.floating);
+        check_builtin_float_test_expect(test, result.folded && result.action.value.type == type &&
+                                        memcmp(bytes, i < 2 ? (const void*)&half : (const void*)&quad, i < 2 ? 2 : 16) == 0,
+                                        "the _Float16 and __float128 infinities are the host compiler's");
+    }
+}
+
 static void check_builtin_float_test_classification(CheckBuiltinFloatTest* test, TypeTable* table)
 {
     const TypeId formats[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
@@ -1089,6 +1187,7 @@ static int run_check_builtin_float_tests(int argc, char** argv)
         if (initialized)
         {
             check_builtin_float_test_constants(&test, &types.table);
+            check_builtin_float_test_signaling(&test, &types.table);
             check_builtin_float_test_classification(&test, &types.table);
             check_builtin_float_test_absolute(&test, &types.table);
             check_builtin_float_test_constraints(&test, &types.table);

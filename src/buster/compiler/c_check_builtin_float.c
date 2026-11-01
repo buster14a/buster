@@ -163,12 +163,17 @@ static CheckValue check_builtin_float_argument(TypeTable* table, const CheckBuil
     return value;
 }
 
-static bool check_builtin_float_payload(const uint8_t* bytes, uint32_t length, uint64_t* payload)
+// A NaN's payload string, as clang's getAsInteger reads it: decimal, or hexadecimal, binary or octal after its prefix.
+// The payload is reduced modulo 2^62, which every format but __float128 keeps whole (float's 22 bits, double's 51,
+// _Float16's 9 and long double's 62); `wide` says whether the number itself passes 61 bits, which a __float128's place in
+// the long double can't hold (check_action_quad_bits).
+static bool check_builtin_float_payload(const uint8_t* bytes, uint32_t length, uint64_t* payload, bool* wide)
 {
     uint32_t base = 10;
     uint32_t first = 0;
     bool valid = length == 0 || bytes != NULL;
     *payload = 0;
+    *wide = false;
     if (valid && length >= 2 && bytes[0] == '0')
     {
         if (bytes[1] == 'x' || bytes[1] == 'X')
@@ -200,38 +205,42 @@ static bool check_builtin_float_payload(const uint8_t* bytes, uint32_t length, u
                                byte >= 'A' && byte <= 'F' ? byte - 'A' + 10 : UINT32_MAX;
         valid = digit < base;
         // Arbitrarily long valid numbers are reduced modulo 2^62, never rejected for numeric overflow.
-        *payload = (*payload * base + (valid ? digit : 0)) & UINT64_C(0x3fffffffffffffff);
+        const unsigned __int128 next = (unsigned __int128)*payload * base + (valid ? digit : 0);
+        *wide |= next >= (unsigned __int128)1 << 61;
+        *payload = (uint64_t)next & UINT64_C(0x3fffffffffffffff);
     }
     return valid;
 }
 
-static long double check_builtin_float_special(TypeId type, bool nan, uint64_t payload)
+// The constant builtins' values (huge_val, inf, nan and nans of each type): an infinity, or a NaN of the type's format
+// with `payload` as clang's APFloat makeNaN gives it, the payload masked below the quiet bit, the quiet bit set or, for a
+// signaling NaN, clear, and a signaling NaN without a payload given the bit below the quiet one. In the long double as
+// check_action_nan_bits reads it: the format's fraction at the significand's top (a long double's whole), or, for a
+// __float128, as check_action_quad_bits does, whose payload past 61 bits the caller refuses.
+static long double check_builtin_float_special(TypeId type, bool nan, bool signaling, uint64_t payload)
 {
     _Static_assert(sizeof(long double) == 16 && LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384, "the checker host uses x87 extended precision");
+    // The format's fraction bits; a long double's 63, below its integer bit.
+    const uint32_t fraction = type == BUSTER_TYPE_FLOAT ? 23 : type == BUSTER_TYPE_DOUBLE ? 52 : type == BUSTER_TYPE_FLOAT16 ? 10 : 63;
+    const uint64_t quiet = UINT64_C(1) << (fraction - 1);
+    uint64_t significand = UINT64_C(0x8000000000000000);
+    if (nan && type == BUSTER_TYPE_FLOAT128)
+    {
+        const uint64_t low = payload & ((UINT64_C(1) << 61) - 1);
+        significand |= signaling ? (low == 0 ? UINT64_C(1) << 61 : low) : (UINT64_C(1) << 62) | low;
+    }
+    else if (nan)
+    {
+        const uint64_t bits = payload & (quiet - 1);
+        const uint64_t field = signaling ? (bits == 0 ? quiet >> 1 : bits) : quiet | bits;
+        significand |= field << (63 - fraction);
+    }
+    uint8_t bytes[16] = { 0 };
+    const uint16_t exponent = 0x7fff;
+    memcpy(bytes, &significand, sizeof(significand));
+    memcpy(bytes + 8, &exponent, sizeof(exponent));
     long double result = 0;
-    if (type == BUSTER_TYPE_FLOAT)
-    {
-        const uint32_t bits = UINT32_C(0x7f800000) | (nan ? UINT32_C(0x00400000) | ((uint32_t)payload & UINT32_C(0x003fffff)) : 0);
-        float value;
-        memcpy(&value, &bits, sizeof(value));
-        result = value;
-    }
-    else if (type == BUSTER_TYPE_DOUBLE)
-    {
-        const uint64_t bits = UINT64_C(0x7ff0000000000000) | (nan ? UINT64_C(0x0008000000000000) | (payload & UINT64_C(0x0007ffffffffffff)) : 0);
-        double value;
-        memcpy(&value, &bits, sizeof(value));
-        result = value;
-    }
-    else
-    {
-        uint8_t bytes[16] = { 0 };
-        const uint64_t significand = UINT64_C(0x8000000000000000) | (nan ? UINT64_C(0x4000000000000000) | payload : 0);
-        const uint16_t exponent = 0x7fff;
-        memcpy(bytes, &significand, sizeof(significand));
-        memcpy(bytes + 8, &exponent, sizeof(exponent));
-        memcpy(&result, bytes, sizeof(result));
-    }
+    memcpy(&result, bytes, sizeof(result));
     return result;
 }
 
@@ -254,7 +263,9 @@ static uint32_t check_builtin_float_class(TypeId type, long double value)
     }
     else
     {
-        const long double minimum = type == BUSTER_TYPE_FLOAT ? 0x1p-126L : type == BUSTER_TYPE_DOUBLE ? 0x1p-1022L : 0x1p-16382L;
+        const CheckHalf half = check_action_half_format(type);
+        const long double minimum = type == BUSTER_TYPE_FLOAT || half == CHECK_HALF_BRAIN ? 0x1p-126L : type == BUSTER_TYPE_DOUBLE ? 0x1p-1022L :
+                                    half == CHECK_HALF_IEEE ? 0x1p-14L : 0x1p-16382L;
         result = fabsl(number) < minimum ? 3 : 2;
     }
     return result;
@@ -541,13 +552,38 @@ static bool check_builtin_float_prototype(TypeTable* table, const CheckBuiltinFl
     return arithmetic;
 }
 
+// A constant builtin's result type: huge_val's, inf's, nan's and nans's float, double, long double, _Float16 and
+// __float128 forms'.
+static TypeId check_builtin_float_constant_type(uint32_t id)
+{
+    TypeId result = BUSTER_TYPE_DOUBLE;
+    if (id == CBUILTIN_HUGE_VALF || id == CBUILTIN_INFF || id == CBUILTIN_NANF || id == CBUILTIN_NANSF)
+    {
+        result = BUSTER_TYPE_FLOAT;
+    }
+    else if (id == CBUILTIN_HUGE_VALL || id == CBUILTIN_INFL || id == CBUILTIN_NANL || id == CBUILTIN_NANSL)
+    {
+        result = BUSTER_TYPE_LONG_DOUBLE;
+    }
+    else if (id == CBUILTIN_NANF16 || id == CBUILTIN_NANSF16 || id == CBUILTIN_INFF16 || id == CBUILTIN_HUGE_VALF16)
+    {
+        result = BUSTER_TYPE_FLOAT16;
+    }
+    else if (id == CBUILTIN_NANF128 || id == CBUILTIN_NANSF128 || id == CBUILTIN_INFF128 || id == CBUILTIN_HUGE_VALF128)
+    {
+        result = BUSTER_TYPE_FLOAT128;
+    }
+    return result;
+}
+
 static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output)
 {
     *output = (CheckBuiltinFloatResult){
         .selected_selector = BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR,
     };
-    const bool special = input->id >= CBUILTIN_HUGE_VAL && input->id <= CBUILTIN_INFL;
-    const bool nan = input->id >= CBUILTIN_NAN && input->id <= CBUILTIN_NANL;
+    const bool special = (input->id >= CBUILTIN_HUGE_VAL && input->id <= CBUILTIN_INFL) || input->id == CBUILTIN_INFF16 ||
+                         input->id == CBUILTIN_HUGE_VALF16 || input->id == CBUILTIN_INFF128 || input->id == CBUILTIN_HUGE_VALF128;
+    const bool nan = cbuiltin_float_nan(input->id);
     const bool classify = (input->id >= CBUILTIN_ISNAN && input->id <= CBUILTIN_ISINF_SIGN) || cbuiltin_float_class(input->id);
     const bool compare = input->id >= CBUILTIN_ISGREATER && input->id <= CBUILTIN_ISUNORDERED;
     const bool absolute = input->id == CBUILTIN_FABS || input->id == CBUILTIN_FABSF || input->id == CBUILTIN_FABSL;
@@ -581,6 +617,10 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         {
             result_type = BUSTER_TYPE_LONG_DOUBLE;
         }
+        if (special || nan)
+        {
+            result_type = check_builtin_float_constant_type(input->id);
+        }
         // A signbit's result_type is its parameter's.
         output->action.value.type = classify || compare || sign ? BUSTER_TYPE_INT : result_type;
         output->class_mask = check_builtin_float_fixed_mask(input->id);
@@ -594,7 +634,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         if (special)
         {
             output->action.value.constant_kind = CHECK_CONSTANT_FLOATING;
-            output->action.value.floating = check_builtin_float_special(result_type, false, 0);
+            output->action.value.floating = check_builtin_float_special(result_type, false, false, 0);
             output->floating_type = result_type;
             output->folded = true;
         }
@@ -605,6 +645,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
             output->floating_type = result_type;
             output->reads_memory = true;
             uint64_t payload = 0;
+            bool wide = false;
             if (!input->nan_payload_known)
             {
                 output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNKNOWN_PAYLOAD;
@@ -613,14 +654,15 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
             {
                 check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
             }
-            else if (!check_builtin_float_payload(input->nan_payload, input->nan_payload_length, &payload))
+            else if (!check_builtin_float_payload(input->nan_payload, input->nan_payload_length, &payload, &wide) ||
+                     (wide && result_type == BUSTER_TYPE_FLOAT128))
             {
                 output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_INVALID_PAYLOAD;
             }
             else if (output->action.value.fault == CHECK_FAULT_NONE)
             {
                 output->action.value.constant_kind = CHECK_CONSTANT_FLOATING;
-                output->action.value.floating = check_builtin_float_special(result_type, true, payload);
+                output->action.value.floating = check_builtin_float_special(result_type, true, cbuiltin_float_signaling(input->id), payload);
                 output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
                 output->reads_memory = !output->folded;
             }
@@ -700,7 +742,13 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 }
                 output->selectors[i] = values[i];
             }
-            const bool known = supported && !vector && values[fp].constant_kind == CHECK_CONSTANT_FLOATING && values[fp].fault == CHECK_FAULT_NONE;
+            // A half-precision constant is its exact value, and a __float128 one's class is exact where it is an infinity, a
+            // NaN or a zero, the constant builtins' values (check_builtin_float_constant_type) and an __imag__'s: those fold
+            // as clang folds them, though their run time is refused, and no other is approximated through the long double.
+            const long double number = values[fp].floating;
+            const bool quad = type == BUSTER_TYPE_FLOAT128 && (isnan(number) || isinf(number) || number == 0);
+            const bool folds = supported || check_action_half_format(type) != CHECK_HALF_NONE || quad;
+            const bool known = folds && !vector && values[fp].constant_kind == CHECK_CONSTANT_FLOATING && values[fp].fault == CHECK_FAULT_NONE;
             const uint32_t category = known ? check_builtin_float_class(type, values[fp].floating) : BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR;
             if (!selectors)
             {
@@ -710,6 +758,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                     output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
                     output->action.value.integer = check_builtin_float_answer(input->id, type, values[0].floating, output->class_mask);
                     output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                    output->unsupported &= output->folded ? ~BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_FORMAT : ~0u;
                 }
             }
             else

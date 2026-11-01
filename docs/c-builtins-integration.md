@@ -392,7 +392,9 @@ not have that ambiguity.
 ## Floating checking
 
 `c_check_builtin_float.c` retains the declared real format and constructs
-infinities and quiet NaNs exactly for float, double and target x87 long double.
+infinities and NaNs exactly for float, double, target x87 long double,
+`_Float16` and `__float128` ("Signaling NaNs and the `_Float16` and
+`__float128` constants" below).
 NaN payload metadata is the entire decoded narrow string literal after
 parentheses/casts, excluding only the final terminator. Embedded zero bytes
 remain part of that slice and prevent constant folding. Unknown or invalid
@@ -556,6 +558,51 @@ signbits and canonicalize's results; folds; operands evaluated once; and
 vectors of 4 to 64 bytes of floats and doubles, GNU's and clang's extended
 ones, at x86-64-v4. Clang -O3's code differs from -O0's for eight masks of x87
 values, so -O0's builds are the oracle.
+
+### Signaling NaNs and the `_Float16` and `__float128` constants (#148)
+
+`__builtin_nans`, `__builtin_nansf` and `__builtin_nansl` (catalog codes 0x3e4
+to 0x3e6), and the `_Float16` and `__float128` forms of `nan`, `nans`, `inf`
+and `huge_val` (0x3e7 to 0x3ee: `nanf16`, `nansf16`, `inff16`, `huge_valf16`,
+`nanf128`, `nansf128`, `inff128`, `huge_valf128`), are floating builtins of the
+checker's, as `nan` and `inf` are (`cbuiltin_float_constant_extra`,
+`cbuiltin_float_nan`, `cbuiltin_float_signaling`), and `__has_builtin` answers
+them. Their payloads are read as `nan`'s are, and each value is APFloat
+`makeNaN`'s (`check_builtin_float_special`): the payload masked below the quiet
+bit, the quiet bit set or, for a signaling NaN, clear, and a signaling NaN
+without a payload given the bit below the quiet one (`nans("")` is
+`0x7ff4000000000000`, `nansf16("")` `0x7d00`).
+
+The checker's long double holds every format's NaN as the x87's own loads
+place it: the format's fraction at the significand's top, so that bit 62 is
+every format's quiet bit (`check_action_nan_bits`). A `__float128`'s 112
+fraction bits don't fit, so its NaN keeps its quiet bit at 62, its fraction's
+bit 110 (a signaling NaN without a payload's) at 61 and its payload's low 61
+bits below (`check_action_quad_bits`). A payload past 61 bits is refused by
+name. The value keeps its bits until a conversion to another format quiets it,
+as APFloat's does (`check_action_convert_nan`, which first re-encodes a
+`__float128` NaN as a narrowing reads it), so a conversion to the value's own
+format, the rounding of a NaN, and a unary `+` or `-` (a sign change alone, as
+`changeSign` makes it) leave a signaling NaN signaling.
+
+Static data, aggregates' initializers and function code write a NaN's bits from
+that encoding, its payload and quiet bit among them (`check_data_float_bytes`,
+`check_lower_float_bits`). Main wrote the canonical NaN, so `static double d =
+__builtin_nan("5")` lost its payload (`0x7ff8000000000000` where clang writes
+`0x7ff8000000000005`), and so did `nanf` and `nanl` in static data and `nanl`
+in code. The classifications fold of `_Float16` constants, their least normal
+`0x1p-14`, and of `__float128` infinities, NaNs and zeros, the values these
+builtins make, which are exact in the long double. They still refuse a
+run-time `_Float16` or `__float128` argument by name, as before.
+
+`test-check-builtins-float` checks the constructions and refusals, and
+`test-checker --program-float-constants` (`c_check_program_constants_test.c`)
+checks sources by both paths against clang (folds in constant expressions,
+result types, static and aggregate initializers, refusals) and runs programs
+natively against clang -O0's builds: each builtin's bytes in static data, in
+an aggregate's initializer and in code, with payloads, signs, negations and the
+conversions that quiet a signaling NaN, and `nan`'s, `nanf`'s and `nanl`'s
+payloads in static data.
 
 ## Atomic and terminal helper calls
 
