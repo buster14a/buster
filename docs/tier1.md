@@ -117,7 +117,10 @@ definitions of them it left out, its edges' moves, its spill slots, its
 frames' bytes, and its unwind tables' shapes: open frames, returns published as
 tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`). `--tier1-no-rematerialize` compiles Tier 1's functions spilling
 what they would recompute (#178's comparison: [the allocation
-guide](tier1-allocation.md)'s "Rematerialization"):
+guide](tier1-allocation.md)'s "Rematerialization"), and `--tier1-no-lifetimes`
+without their objects' lifetimes, every object a slot of its own (#177's
+comparison: [the frame guide](tier1-frame.md)'s "Slot sharing between
+objects"):
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...

@@ -692,6 +692,11 @@ struct CheckLowerWriter
     uint32_t* label_tables;
     uint32_t* table_jumps;
     uint32_t table_jump_count;
+    // The function's lifetime events (#177, Tier0Function.lifetime_entries and lifetime_locals): each LIFETIME control's,
+    // one per local of its block, at the entry the control comes before, with room for the program's.
+    uint32_t* lifetime_entries;
+    uint32_t* lifetime_locals;
+    uint32_t lifetime_count;
     // The writer's room for the program's label symbols (CheckProgramLowered.label_symbols), which its parts take one after
     // another (check_lower_part): `label_symbol_used` of it kept by the parts before the current one.
     SymbolId* label_symbol_room;
@@ -10462,6 +10467,31 @@ static void check_lower_tail_return(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// A block's objects' lifetimes (CHECK_CONTROL_LIFETIME, #177): an event of each of its locals before the entry that comes
+// next (Tier0Function.lifetime_entries), their start where the control's node is 0 and their end where it is 1.
+static void check_lower_lifetime(CheckLowerWriter* writer, CheckControl control)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const uint32_t end = control.node != 0 ? BUSTER_TIER0_LIFETIME_END : 0;
+    for (uint32_t d = program->lifetime_first != NULL && control.target < input->token_count ? program->lifetime_first[control.target] : BUSTER_CHECK_NONE;
+         d != BUSTER_CHECK_NONE && writer->output->status == CHECK_PROGRAM_OK; d = program->lifetime_next[d])
+    {
+        const uint32_t object = input->objects[d];
+        const uint32_t local = object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
+        if (local < writer->local_count && writer->lifetime_count < program->lifetime_event_count)
+        {
+            writer->lifetime_entries[writer->lifetime_count] = writer->count;
+            writer->lifetime_locals[writer->lifetime_count] = local | end;
+            writer->lifetime_count += 1;
+        }
+        else if (local < writer->local_count)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+}
+
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -10520,6 +10550,10 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_CLEANUP)
     {
         check_lower_cleanup(writer, control);
+    }
+    else if (control.kind == CHECK_CONTROL_LIFETIME)
+    {
+        check_lower_lifetime(writer, control);
     }
     else if (control.kind == CHECK_CONTROL_RESULT)
     {
@@ -11329,6 +11363,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -11456,6 +11492,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->count = 0;
         writer->label_entry_count = 0;
         writer->table_jump_count = 0;
+        writer->lifetime_count = 0;
         writer->table_current = BUSTER_CHECK_NONE;
         writer->table_pending = false;
         writer->depth = 0;
@@ -11957,6 +11994,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         BUSTER_CHECK_LOWER_COPY(label_tables, label_tables, uint32_t, writer->table_jump_count != 0 ? writer->label_entry_count : 0);
         BUSTER_CHECK_LOWER_COPY(table_jumps, table_jumps, uint32_t, writer->table_jump_count);
         function->table_count = writer->table_jump_count;
+        // The lifetime events before an entry: one after the last entry has nothing to come before, and is left out.
+        uint32_t lifetimes = writer->lifetime_count;
+        while (lifetimes != 0 && writer->lifetime_entries[lifetimes - 1] >= writer->count)
+        {
+            lifetimes -= 1;
+        }
+        BUSTER_CHECK_LOWER_COPY(lifetime_entries, lifetime_entries, uint32_t, lifetimes);
+        BUSTER_CHECK_LOWER_COPY(lifetime_locals, lifetime_locals, uint32_t, lifetimes);
+        function->lifetime_count = lifetimes;
 #undef BUSTER_CHECK_LOWER_COPY
         if (sources && status->status == CHECK_PROGRAM_OK)
         {
