@@ -220,9 +220,15 @@ and `F64`, go through the CFG consumer too, in the vector class's registers by
 SSE2's scalar forms: their arithmetic, comparisons, conversions, loads, stores,
 phis, parameters, arguments and results ([the selection guide](tier1-selection.md)'s
 "Floating values" and [the allocation guide](tier1-allocation.md)'s "The vector
-class's floating values"). Still refused: long double, selects of floating
-values, conversions between floating values and unsigned 64-bit integers,
-switches and aggregates by value.
+class's floating values"). So do by-value aggregates' ABI records (#789): a call
+passes each aggregate's bytes where its record says, in registers or in its
+stack slots, and stores an aggregate result into its object; a function stores
+each aggregate parameter's registers into a frame object at its entry, and
+returns an aggregate's parts or copies it through the hidden pointer (the
+selection guide's "By-value aggregates"). Still refused: long double, selects
+of floating values, conversions between floating values and unsigned 64-bit
+integers, switches, and the convention's rarer aggregate shapes (a part in a
+stack slot, a high or low eightbyte alone, a vector's or the x87's register).
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

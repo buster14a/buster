@@ -1593,6 +1593,8 @@ static uint32_t tier1_select_argument_type(const IrFunction* function, const IrC
 #define BUSTER_TIER1_PLACE_GENERAL 0
 #define BUSTER_TIER1_PLACE_VECTOR 1
 #define BUSTER_TIER1_PLACE_STACK 2
+// A by-value aggregate's place (#789): its ABI record says where its bytes go (tier1_select_parts, or its stack slots).
+#define BUSTER_TIER1_PLACE_AGGREGATE 3
 
 typedef struct Tier1SelectPlace Tier1SelectPlace;
 struct Tier1SelectPlace
@@ -1625,31 +1627,176 @@ static Tier1SelectPlace tier1_select_next_place(Tier1SelectPlaces* places, uint3
     return place;
 }
 
-// Parameter `parameter`'s place, by the types of the function's parameters up to it.
-static Tier1SelectPlace tier1_select_parameter_place(const IrFunction* function, uint32_t parameter)
+// Parameter `parameter`'s ABI record (#789), where the function has them (IrFunction.parameter_passed), else 0.
+static const IrPassed* tier1_select_parameter_record(const IrFunction* function, uint32_t parameter)
 {
-    Tier1SelectPlaces places = { 0 };
-    Tier1SelectPlace place = { 0 };
-    for (uint32_t p = 0; p <= parameter && p < function->parameter_count; p += 1)
+    return function->parameter_passed != 0 && parameter < function->parameter_count ? &function->passed[function->parameter_passed - 1 + parameter] : 0;
+}
+
+// A call's argument's ABI record (#789), where the call has them (IrCall.abi), else 0.
+static const IrPassed* tier1_select_argument_record(const IrFunction* function, const IrCall* call, uint32_t argument)
+{
+    return call->abi != 0 ? &function->passed[function->abi_calls[call->abi - 1].passed + argument] : 0;
+}
+
+// Whether parameter `parameter` is a by-value aggregate (#789): its record's bytes aren't 0, and its IR value is a ptr
+// to them, the function's own copy (tier1_emit_cfg.c's frame object, or its stack slots in the incoming area).
+static bool tier1_select_aggregate_parameter(const IrFunction* function, uint32_t parameter)
+{
+    const IrPassed* record = tier1_select_parameter_record(function, parameter);
+    return record != 0 && record->size != 0;
+}
+
+// Whether node `node` is a parameter where the entry puts it, in its incoming register or slot: IR_PARAM, but a by-value
+// aggregate's, whose value is its copy's address, computed at its node as a frame object's is (TIER1_RULE_STACK_ADDRESS).
+static bool tier1_select_entry_parameter(const IrFunction* function, uint32_t node)
+{
+    return function->op[node] == IR_PARAM && !tier1_select_aggregate_parameter(function, function->a[node]);
+}
+
+// The place an ABI record gives a value (#789): a by-value aggregate's own, a register's (a general one's index among
+// the argument registers, an xmm one's number), or a stack slot's (its offset's 8-byte slot).
+static Tier1SelectPlace tier1_select_record_place(const IrPassed* record)
+{
+    const uint8_t reg = record->location.registers[0];
+    uint32_t index = 0;
+    while (index < BUSTER_ABI_INTEGER_ARGUMENTS && abi_integer_arguments[index] != reg)
     {
-        place = tier1_select_next_place(&places, function->parameter_types[p]);
+        index += 1;
     }
+    const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    const uint8_t kind = record->size != 0                                       ? BUSTER_TIER1_PLACE_AGGREGATE
+                         : record->location.kind == BUSTER_ABI_LOCATION_STACK ? BUSTER_TIER1_PLACE_STACK
+                         : vector                                              ? BUSTER_TIER1_PLACE_VECTOR
+                                                                               : BUSTER_TIER1_PLACE_GENERAL;
+    const uint32_t value = kind == BUSTER_TIER1_PLACE_STACK ? record->location.stack_offset / BUSTER_ABI_SLOT_BYTES : kind == BUSTER_TIER1_PLACE_VECTOR ? reg & 0x1fu : kind == BUSTER_TIER1_PLACE_GENERAL ? index : 0;
+    const Tier1SelectPlace place = { .kind = kind, .index = (uint8_t)value };
     return place;
 }
 
-// The stack slots a call's arguments take, past their classes' registers: its outgoing area's 8-byte slots.
-static uint32_t tier1_select_call_stack_slots(const IrFunction* function, const IrCall* call)
+// Parameter `parameter`'s place: its ABI record's, where the function has them, else by the types of the function's
+// parameters up to it.
+static Tier1SelectPlace tier1_select_parameter_place(const IrFunction* function, uint32_t parameter)
+{
+    const IrPassed* record = tier1_select_parameter_record(function, parameter);
+    Tier1SelectPlaces places = { 0 };
+    Tier1SelectPlace place = { 0 };
+    for (uint32_t p = 0; record == 0 && p <= parameter && p < function->parameter_count; p += 1)
+    {
+        place = tier1_select_next_place(&places, function->parameter_types[p]);
+    }
+    return record != 0 ? tier1_select_record_place(record) : place;
+}
+
+// A call's argument's place: its ABI record's, where the call has them, else the next of `places` by its type, as the
+// arguments are walked in order.
+static Tier1SelectPlace tier1_select_argument_place(const IrFunction* function, const IrCall* call, uint32_t argument, Tier1SelectPlaces* places)
+{
+    const IrPassed* record = tier1_select_argument_record(function, call, argument);
+    return record != 0 ? tier1_select_record_place(record) : tier1_select_next_place(places, tier1_select_argument_type(function, call, argument));
+}
+
+// The bytes a call's arguments take in its outgoing area: its records' total where it has them (#789), else the 8-byte
+// slots of those past their classes' registers.
+static uint32_t tier1_select_call_stack_bytes(const IrFunction* function, const IrCall* call)
 {
     Tier1SelectPlaces places = { 0 };
-    for (uint32_t a = 0; a < call->argument_count; a += 1)
+    for (uint32_t a = 0; call->abi == 0 && a < call->argument_count; a += 1)
     {
         tier1_select_next_place(&places, tier1_select_argument_type(function, call, a));
     }
-    return places.stack;
+    return call->abi != 0 ? function->abi_calls[call->abi - 1].call.stack_bytes : BUSTER_ABI_SLOT_BYTES * places.stack;
 }
 
-// This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers and aggregates. The
-// shared verifier checks descriptor bounds and actual argument types before this helper runs.
+// An aggregate's part in a register (#789): its register, an ABI one (a general register's number, or an xmm one's plus
+// BUSTER_ABI_REGISTER_VECTOR), and the bytes it holds from its offset in the aggregate.
+typedef struct Tier1SelectPart Tier1SelectPart;
+struct Tier1SelectPart
+{
+    uint8_t reg;
+    uint8_t offset;
+    uint8_t bytes;
+};
+
+// The general argument registers', and the general result registers', bits.
+#define BUSTER_TIER1_SELECT_ARGUMENT_GENERAL ((1u << BUSTER_ABI_RDI) | (1u << BUSTER_ABI_RSI) | (1u << BUSTER_ABI_RDX) | (1u << BUSTER_ABI_RCX) | (1u << BUSTER_ABI_R8) | (1u << BUSTER_ABI_R9))
+#define BUSTER_TIER1_SELECT_RESULT_GENERAL ((1u << BUSTER_ABI_RAX) | (1u << BUSTER_ABI_RDX))
+// The largest aggregate a call copies whole into its stack slots, and the outgoing area's bytes a stack place's index
+// reaches (#789).
+#define BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE 512u
+#define BUSTER_TIER1_SELECT_MAX_STACK_OFFSET (256u * BUSTER_ABI_SLOT_BYTES)
+// The largest aggregate result a return copies through the hidden pointer, 8 bytes at a time (#789).
+#define BUSTER_TIER1_SELECT_MAX_RESULT_COPY 4096u
+
+// An aggregate of `size` bytes in `registers` (a location's two, or a result's first two) as its parts (#789): eightbyte
+// k in registers[k], 8 bytes or what is left of the aggregate. Returns how many, into `parts`, or 0 for a shape Tier 1
+// doesn't take: no first register, a second one for 8 bytes or less, none past them, more than 16 bytes (a value in one
+// vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
+// and the first `vectors` xmm ones.
+static uint32_t tier1_select_parts(const uint8_t* registers, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
+{
+    uint32_t count = 0;
+    bool valid = size != 0 && size <= 16 && registers[0] != BUSTER_ABI_REGISTER_NONE && (registers[1] != BUSTER_ABI_REGISTER_NONE) == (size > 8);
+    for (uint32_t k = 0; valid && k < 2; k += 1)
+    {
+        const uint8_t reg = registers[k];
+        if (reg != BUSTER_ABI_REGISTER_NONE)
+        {
+            const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+            const uint32_t left = size - 8 * k;
+            valid = vector ? (reg & 0x1fu) < vectors : reg < 16 && ((general >> reg) & 1) != 0;
+            parts[count] = (Tier1SelectPart){ .reg = reg, .offset = (uint8_t)(8 * k), .bytes = (uint8_t)(left < 8 ? left : 8) };
+            count += 1;
+        }
+    }
+    return valid ? count : 0;
+}
+
+// Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
+// register of its class (a general argument register for an integer or a pointer, xmm0 to xmm7 for a floating value) or
+// in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, in registers (tier1_select_parts)
+// or on the stack whole. Not the convention's rarer shapes: a part LLVM put in a stack slot (SPLIT), a value's high or low
+// eightbyte alone (HIGH, LOW), an ignored one.
+static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
+{
+    const AbiLocation location = record->location;
+    const uint8_t reg = location.registers[0];
+    const bool floating = tier1_select_float_width(type) != 0;
+    const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    const bool stacked = location.kind == BUSTER_ABI_LOCATION_STACK && location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && location.stack_offset < BUSTER_TIER1_SELECT_MAX_STACK_OFFSET;
+    Tier1SelectPart parts[2];
+    bool supported = false;
+    if (record->size == 0)
+    {
+        const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                                (floating ? vector && (reg & 0x1fu) < BUSTER_ABI_VECTOR_ARGUMENTS : reg < 16 && ((BUSTER_TIER1_SELECT_ARGUMENT_GENERAL >> reg) & 1) != 0);
+        supported = (floating || type == IR_I32 || type == IR_I64 || type == IR_PTR) && (location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0 && (registered || stacked);
+    }
+    else
+    {
+        const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier1_select_parts(location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) != 0;
+        supported = type == IR_PTR && location.flags == 0 && (registered || (stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
+    }
+    return supported;
+}
+
+// Whether Tier 1 takes a result as the convention returns it (#789): a scalar's (`size` 0) as the IR's result type says,
+// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts (tier1_select_parts), or through the
+// hidden pointer (MEMORY). Not an x87 register's, a high eightbyte's alone, or one LLVM returns through a hidden pointer
+// that clang doesn't count (DEMOTED).
+static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
+{
+    Tier1SelectPart parts[2];
+    const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
+    const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
+                           tier1_select_parts(result.registers, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) != 0;
+    return flags && (size == 0 || registers || result.kind == BUSTER_ABI_RESULT_MEMORY);
+}
+
+static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot);
+
+// This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers. The shared verifier
+// checks descriptor bounds and actual argument types before this helper runs.
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
     // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
@@ -1662,12 +1809,21 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // registers its arguments take (tier1_emit_call). A narrow result is zero-extended after the call, and a floating
         // one (#141) comes in xmm0.
         const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0;
-        supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS &&
-                    (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
+        supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
+        // A call with ABI records (#789) passes each argument where its record says: its aggregates' bytes in registers
+        // or in its stack slots, and its aggregate result's into the frame object its into operand (c) is the address of,
+        // as parts or through the hidden pointer (tier1_emit_call).
+        const IrAbiCall* abi = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+        const uint32_t into = function->c[node];
+        const bool object = into != BUSTER_IR_NONE && into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_select_stack_object(function, function->a[into]);
+        supported &= abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (type == IR_VOID && object)) &&
+                                  abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
-            supported = argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0;
+            const IrPassed* record = tier1_select_argument_record(function, &call, argument);
+            supported = record != 0 ? tier1_select_record_supported(record, argument_type)
+                                    : argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0;
         }
     }
     return supported;
@@ -2270,6 +2426,15 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    // A by-value aggregate parameter (#789): its copy's address, a frame object's past the IR's slots (or its stack slots'
+    // in the incoming area, tier1_emit_cfg.c), as a frame object's is (TIER1_RULE_STACK_ADDRESS).
+    else if (op == IR_PARAM && type == IR_PTR && tier1_select_aggregate_parameter(function, a))
+    {
+        base.rule = TIER1_RULE_STACK_ADDRESS;
+        base.immediate = (uint64_t)function->slot_count + a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_PARAM && (integer || type == IR_PTR || type == IR_I1 || type == IR_I8 || type == IR_I16) && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
     {
         base.rule = TIER1_RULE_LEAF;
@@ -2672,13 +2837,14 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     // A narrow result leaves in its canonical zero-extended 32 bits: a caller extends it by its own type, as clang's and
-    // Tier 0's do, the psABI leaving the bits past its width unspecified.
+    // Tier 0's do, the psABI leaving the bits past its width unspecified. An aggregate result's address (#789) moves
+    // nothing here: the CFG consumer loads its parts, or copies its bytes through the hidden pointer, before the epilogue.
     else if (op == IR_RET && (a == BUSTER_IR_NONE || function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32 ||
                               function->type[a] == IR_I64 || function->type[a] == IR_PTR))
     {
         base.rule = TIER1_RULE_RETURN;
         base.values[0] = a;
-        base.width = a == BUSTER_IR_NONE ? 0 : (uint8_t)tier1_select_width(function->type[a]);
+        base.width = a == BUSTER_IR_NONE || function->result_size != 0 ? 0 : (uint8_t)tier1_select_width(function->type[a]);
         base.intrinsic_cost = a == BUSTER_IR_NONE ? 1 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
@@ -2882,11 +3048,20 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
-    // By-value aggregates' ABI records (#131, #789) aren't selected yet. Labels, br_indirect and a variadic definition's
-    // incoming frame are: the CFG consumer defines the labels' symbols and fills the register save area (tier1_emit_cfg.c).
+    // A function with its own ABI records (#131, #789) takes each parameter where its record says, a by-value aggregate's
+    // address its copy's (tier1_select_aggregate_parameter), and returns its result as its record says: an aggregate's
+    // bytes from the address its ret operand holds, as parts or through the hidden pointer (tier1_emit_cfg.c). Labels,
+    // br_indirect and a variadic definition's incoming frame are selected too: the CFG consumer defines the labels'
+    // symbols and fills the register save area.
     if (error == TIER1_SELECT_OK && function->parameter_passed != 0)
     {
-        error = TIER1_SELECT_ERROR_UNSUPPORTED;
+        bool supported = function->parameter_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_result_supported(function->result_abi, function->result_size) &&
+                         (function->result_size == 0 || function->result_type == IR_PTR) && function->result_size <= BUSTER_TIER1_SELECT_MAX_RESULT_COPY;
+        for (uint32_t p = 0; supported && p < function->parameter_count; p += 1)
+        {
+            supported = tier1_select_record_supported(tier1_select_parameter_record(function, p), function->parameter_types[p]);
+        }
+        error = supported ? error : TIER1_SELECT_ERROR_UNSUPPORTED;
     }
     for (uint32_t block = 0; error == TIER1_SELECT_OK && block < function->block_count; block += 1)
     {
@@ -3256,8 +3431,9 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
     // plan before allocating records, even if earlier value locations are spilled. A memory operand through a frame
     // object needs the frame's layout too, an indirect jump's labels their symbols, a variadic definition its register
-    // save area, and a floating value the vector class's registers (#141): the CFG consumer's.
-    if (error == TIER1_SELECT_OK && (plan->function->label_count != 0 || plan->function->variadic))
+    // save area, a floating value the vector class's registers (#141), and a function's own ABI records its aggregates'
+    // copies and parts (#789): the CFG consumer's.
+    if (error == TIER1_SELECT_OK && (plan->function->label_count != 0 || plan->function->variadic || plan->function->parameter_passed != 0))
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
     }

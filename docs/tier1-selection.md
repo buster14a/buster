@@ -175,8 +175,32 @@ patterns are:
   RSP's reservation, the callee-saved registers the prologue pushed and the
   return address, plus the named arguments' stack bytes
   (`tier1_emit_cfg_incoming`). Every variadic definition that selection
-  accepts goes to the CFG consumer. A function with its own ABI records is
-  still refused whole.
+  accepts goes to the CFG consumer.
+- By-value aggregates (#789): a call or a function with ABI records takes each
+  argument and parameter where its record says (`tier1_select_argument_place`,
+  `tier1_select_parameter_place`): a scalar in its register or stack slot, and
+  an aggregate, whose IR value is a pointer to its bytes, in registers as parts
+  of up to 8 bytes (`tier1_select_parts`: a general or an xmm register per
+  eightbyte) or on the stack whole (up to 512 bytes). A result in registers comes
+  back as parts in rax and rdx or xmm0 and xmm1, and one of the memory class
+  through the hidden pointer (up to 4,096 bytes for a function's own, which its
+  return copies). An aggregate parameter's value is its copy's address, a frame
+  object past the IR's slots that the entry fills from its registers, or its
+  stack slots in the incoming area, selected as a frame object's address
+  (`TIER1_RULE_STACK_ADDRESS`). Refused: a part LLVM puts in a stack slot
+  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part, the x87's
+  registers and a result LLVM demotes to a hidden pointer. Every function and
+  call with records goes to the CFG consumer. Before a call's moves, it copies
+  the call's aggregates from their addresses into their stack slots, or into the
+  red zone's staging slots, whose registers it loads after the moves. An address
+  in a slot, or recomputed, goes through the scratch register, with rax saved
+  below rsp, so its use needn't be required: a call may pass more aggregates than
+  its first allocation gives its uses registers. The consumer stores an
+  aggregate result's parts into the result object, the call's into operand's
+  frame object, byte for byte, and points rdi at it for a hidden pointer. A
+  return loads the parts staged below rsp (the frame stays out of the red zone),
+  or copies the bytes through the hidden pointer that the entry stored, which
+  rax returns.
 - Arguments and parameters past the registers (#141): a call takes up to
   sixteen `I32`, `I64` or pointer arguments, and a function up to sixteen such
   parameters (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`); those past the sixth are in
@@ -734,5 +758,5 @@ heads and at its merge with main, `cc3387f`:
   Buster's.
 
 Full pattern-state generation, the remaining scalar/ABI/spill consumers, and
-whole-C integration (the functions selection refuses whole: switches and
-aggregates by value among them) are outstanding.
+whole-C integration (the functions selection refuses whole: switches among them)
+are outstanding.

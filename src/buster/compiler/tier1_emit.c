@@ -637,7 +637,75 @@ static uint32_t tier1_emit_call_saved(const Tier1EmitResult* result, const Tier1
     return saved;
 }
 
-static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node, const uint32_t* argument_registers, uint32_t saved, uint32_t destination, Tier1EmitBuffer* buffer, Arena* scratch, Tier1EmitResult* result)
+// A call's aggregate result object (#789): the frame object its into operand is the address of, as a base register and a
+// displacement from it, where `valid`.
+typedef struct Tier1EmitInto Tier1EmitInto;
+struct Tier1EmitInto
+{
+    int32_t displacement;
+    uint8_t base;
+    bool valid;
+};
+
+// The store form of `bytes` (1, 2, 4 or 8) from a general register.
+static uint16_t tier1_emit_store_form(uint32_t bytes)
+{
+    return bytes == 8 ? X86_FORM_MOV_RM64_R64 : bytes == 4 ? X86_FORM_MOV_RM32_R32 : bytes == 2 ? X86_FORM_MOV_RM16_R16 : X86_FORM_MOV_RM8_R8;
+}
+
+// `size` bytes copied from `from_base` + `from_displacement` to `to_base` + `to_displacement` through general register
+// `data` (#789): pieces of the largest of 8, 4, 2 and 1 bytes the size holds, one at each multiple of it and, where the
+// size isn't one, the last ending at the end, over the bytes before it. No byte outside either range is read or written;
+// neither base is `data`.
+static bool tier1_emit_copy_bytes(Tier1EmitBuffer* buffer, uint8_t data, uint8_t to_base, int32_t to_displacement, uint8_t from_base, int32_t from_displacement, uint32_t size)
+{
+    const uint32_t piece = size >= 8 ? 8 : size >= 4 ? 4 : size >= 2 ? 2 : 1;
+    const uint16_t load = piece == 8 ? X86_FORM_MOV_R64_RM64 : piece == 4 ? X86_FORM_MOV_R32_RM32 : piece == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+    const uint32_t whole = size / piece;
+    const uint32_t pieces = whole + (size % piece != 0 ? 1u : 0u);
+    bool appended = to_base != data && from_base != data;
+    for (uint32_t k = 0; appended && k < pieces; k += 1)
+    {
+        const int32_t offset = (int32_t)(k < whole ? piece * k : size - piece);
+        const X86Instruction read = { .displacement = from_displacement + offset, .reg = data, .rm = from_base, .mode = BUSTER_X86_MEMORY_BASE, .form = load };
+        const X86Instruction write = { .displacement = to_displacement + offset, .reg = data, .rm = to_base, .mode = BUSTER_X86_MEMORY_BASE, .form = tier1_emit_store_form(piece) };
+        appended = tier1_emit_append(buffer, read) && tier1_emit_append(buffer, write);
+    }
+    return appended;
+}
+
+// The low `bytes` bytes (1 to 8) of general register `reg` stored at `base` + `displacement` (#789): one store for 1, 2,
+// 4 or 8 bytes, else the largest piece of them that is left at a time, each after shifting the register down past the
+// pieces stored, which changes it.
+static bool tier1_emit_store_part(Tier1EmitBuffer* buffer, uint8_t reg, uint32_t bytes, uint8_t base, int32_t displacement)
+{
+    bool appended = bytes != 0 && bytes <= 8;
+    uint32_t done = 0;
+    for (uint32_t step = 0; appended && step < 3 && done < bytes; step += 1)
+    {
+        const uint32_t left = bytes - done;
+        const uint32_t piece = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+        const X86Instruction store = { .displacement = displacement + (int32_t)done, .reg = reg, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = tier1_emit_store_form(piece) };
+        appended = tier1_emit_append(buffer, store);
+        done += piece;
+        const X86Instruction shift = { .form = X86_FORM_SHR_RM64_IMM8, .rm = reg, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)(8 * piece) };
+        appended = appended && (done == bytes || tier1_emit_append(buffer, shift));
+    }
+    return appended && done == bytes;
+}
+
+// The red zone's staging slot `k` below rsp (#789), where an aggregate's part waits between its copy from the aggregate's
+// address and its register's load: 8 bytes each, 14 of them at most (the argument registers'). Slot 15, the zone's last,
+// holds rax while a copy whose address the scratch register holds goes through rax (tier1_emit_cfg_aggregate_copy).
+#define BUSTER_TIER1_EMIT_STAGING_SAVE 15u
+
+static int32_t tier1_emit_staging(uint32_t k)
+{
+    return -8 * (int32_t)(k + 1);
+}
+
+static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node, const uint32_t* argument_registers, uint32_t saved, uint32_t destination, const Tier1EmitInto* into, Tier1EmitBuffer* buffer, Arena* scratch,
+                                      Tier1EmitResult* result)
 {
     const IrFunction* function = plan->function;
     const IrCall* call = &function->calls[function->b[node]];
@@ -664,12 +732,29 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     uint32_t vector_destinations[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t general = 0;
     uint32_t vectors = 0;
+    // A call with ABI records (#789) takes each argument where its record says. A by-value aggregate's parts in registers
+    // wait in the red zone's staging slots (tier1_emit_staging), one after another in the arguments' order, where the CFG
+    // consumer copied them from its address before the moves read and write the argument registers it may be in
+    // (tier1_emit_cfg_aggregate_copy); their registers are loaded from there after the moves. One on the stack whole is
+    // the CFG consumer's too, copied into its slots.
+    const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
+    uint8_t part_registers[BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS];
+    uint32_t part_count = 0;
     Tier1SelectPlaces places = { 0 };
     for (uint32_t argument = 0; argument < call->argument_count; argument += 1)
     {
         const uint32_t type = tier1_select_argument_type(function, call, argument);
-        const Tier1SelectPlace place = tier1_select_next_place(&places, type);
+        const Tier1SelectPlace place = tier1_select_argument_place(function, call, argument, &places);
         const uint32_t location = argument_registers[argument];
+        const IrPassed* record = place.kind == BUSTER_TIER1_PLACE_AGGREGATE ? tier1_select_argument_record(function, call, argument) : 0;
+        Tier1SelectPart parts[2];
+        const uint32_t count = record != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS ? tier1_select_parts(record->location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+        error = record == 0 || record->location.kind == BUSTER_ABI_LOCATION_STACK || (count != 0 && part_count + count <= BUSTER_ARRAY_LENGTH(part_registers)) ? error : TIER1_EMIT_ALLOCATION;
+        for (uint32_t k = 0; error == TIER1_EMIT_OK && k < count; k += 1)
+        {
+            part_registers[part_count] = parts[k].reg;
+            part_count += 1;
+        }
         if (place.kind == BUSTER_TIER1_PLACE_GENERAL)
         {
             error = location < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? error : TIER1_EMIT_ALLOCATION;
@@ -750,11 +835,36 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
             error = TIER1_EMIT_MEMORY;
         }
     }
-    // A variadic call's al: how many vector registers its arguments take, an upper bound the callee's prologue reads.
+    // The aggregates' parts from their staging slots (#789), each its 8 bytes: past an aggregate's end, the register's bytes
+    // are padding, which the callee ignores.
+    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
+    {
+        const bool vector_part = (part_registers[k] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const X86Instruction load = {
+            .displacement = tier1_emit_staging(k),
+            .reg = (uint8_t)(part_registers[k] & 0x1f),
+            .rm = X86_REGISTER_RSP,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = vector_part ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOV_R64_RM64,
+        };
+        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+    }
+    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's address.
+    const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
+    const bool parts_returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
+    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
+    if (error == TIER1_EMIT_OK && hidden)
+    {
+        const X86Instruction address = { .displacement = into->displacement, .reg = X86_REGISTER_RDI, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_LEA_R64_M };
+        error = tier1_emit_append(buffer, address) ? error : TIER1_EMIT_MEMORY;
+    }
+    // A variadic call's al: how many vector registers its arguments take, an upper bound the callee's prologue reads (with
+    // ABI records, its records' count, its aggregates' parts among them).
+    const uint32_t vector_count = abi != 0 ? abi->call.vector_registers : vectors;
     if (error == TIER1_EMIT_OK && call->variadic)
     {
-        const X86Instruction count = vectors == 0 ? (X86Instruction){ .form = X86_FORM_XOR_R32_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }
-                                                  : (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = (int32_t)vectors };
+        const X86Instruction count = vector_count == 0 ? (X86Instruction){ .form = X86_FORM_XOR_R32_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }
+                                                       : (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = (int32_t)vector_count };
         error = tier1_emit_append(buffer, count) ? error : TIER1_EMIT_MEMORY;
     }
     if (error == TIER1_EMIT_OK && indirect)
@@ -779,6 +889,35 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         {
             result->references[result->reference_count++] = reference;
         }
+    }
+    // An aggregate result in registers (#789): each part's bytes into the result object at its offset, exactly (the object
+    // may be no larger than the aggregate), a general register's by tier1_emit_store_part and an xmm one's by movss or movsd,
+    // or through the scratch register for any other size.
+    Tier1SelectPart returned[2];
+    const uint32_t returned_count = parts_returned ? tier1_select_parts(abi->call.result.registers, abi->result_size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, returned) : 0;
+    error = error == TIER1_EMIT_OK && parts_returned && returned_count == 0 ? TIER1_EMIT_ALLOCATION : error;
+    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < returned_count; k += 1)
+    {
+        const Tier1SelectPart part = returned[k];
+        const bool vector_part = (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const uint8_t xmm_part = (uint8_t)(part.reg & 0x1f);
+        const int32_t displacement = into->displacement + part.offset;
+        bool appended = true;
+        if (vector_part && (part.bytes == 4 || part.bytes == 8))
+        {
+            const X86Instruction store = { .displacement = displacement, .reg = xmm_part, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .form = part.bytes == 8 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSS_XM32_X };
+            appended = tier1_emit_append(buffer, store);
+        }
+        else if (vector_part)
+        {
+            const X86Instruction bits = { .form = X86_FORM_MOVQ_RM64_X, .reg = xmm_part, .rm = BUSTER_TIER1_SELECT_SCRATCH, .mode = BUSTER_X86_REGISTER_DIRECT };
+            appended = tier1_emit_append(buffer, bits) && tier1_emit_store_part(buffer, BUSTER_TIER1_SELECT_SCRATCH, part.bytes, into->base, displacement);
+        }
+        else
+        {
+            appended = tier1_emit_store_part(buffer, part.reg, part.bytes, into->base, displacement);
+        }
+        error = appended ? error : TIER1_EMIT_MEMORY;
     }
     // The result into its register, a narrow one zero-extended into its canonical 32-bit storage: the callee leaves the
     // bits past its width unspecified, as clang's code does. A floating one from xmm0 (#141).
@@ -912,7 +1051,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         }
         if (error == TIER1_EMIT_OK && calls)
         {
-            error = tier1_emit_call(plan, node, argument_registers, tier1_emit_call_saved(result, &transitions, node), transitions.registers[node], &buffer, scratch, result);
+            error = tier1_emit_call(plan, node, argument_registers, tier1_emit_call_saved(result, &transitions, node), transitions.registers[node], 0, &buffer, scratch, result);
         }
         else if (error == TIER1_EMIT_OK && terminal_sink && node + 1 == count)
         {

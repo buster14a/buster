@@ -3326,7 +3326,8 @@ static uint64_t tier1_select_test_variadic_oracle(uint32_t shape, const uint64_t
 // The variadic definition's plan (#789), by both paths: the overflow area's address a value of its own, its lea
 // (TIER1_RULE_STACK_ADDRESS), never folded into a memory operand, whose base is the frame's; the same plan without the
 // verification; and the uniform-register consumer, which has no frame to save the argument registers in, refusing it.
-// A function with its own ABI records is still refused whole.
+// With its own ABI records (#789), its parameter's in rdi, it selects; with a record of a shape selection doesn't take, it
+// is refused whole.
 static void tier1_select_test_variadic(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -3360,13 +3361,29 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
         IrFunction recorded;
         if (shape == 0 && tier1_select_test_variadic_function(&input, shape, true, &recorded))
         {
-            // Its own ABI records, which selection doesn't take yet, whatever else it has.
+            // Its own ABI records (#789): its parameter's, in rdi as the convention puts it, which selection takes; then a
+            // record of each shape it doesn't take, each refusing the function whole: a part in a stack slot (SPLIT), a high
+            // eightbyte alone, a register no argument takes, and a result LLVM returns through a hidden pointer that clang
+            // doesn't count (DEMOTED).
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const uint64_t mark = output.length;
-            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED &&
-                                               output.length == mark,
-                                     "a function with its own ABI records is refused whole");
+            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_OK,
+                                     "a function with its own ABI records of shapes selection takes selects");
+            arena_pop_to(&output, 0);
+            const IrPassed taken = recorded.passed[0];
+            for (uint32_t refused = 0; refused < 4; refused += 1)
+            {
+                recorded.passed[0] = taken;
+                recorded.result_abi = (AbiReturn){ 0 };
+                recorded.passed[0].location.kind = refused == 0 ? BUSTER_ABI_LOCATION_SPLIT : taken.location.kind;
+                recorded.passed[0].location.flags = refused == 1 ? BUSTER_ABI_FLAG_HIGH : taken.location.flags;
+                recorded.passed[0].location.registers[0] = refused == 2 ? BUSTER_ABI_R10 : taken.location.registers[0];
+                recorded.result_abi.flags = refused == 3 ? BUSTER_ABI_FLAG_DEMOTED : 0;
+                const uint64_t mark = output.length;
+                tier1_select_test_expect(test, tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED && output.length == mark,
+                                         "a function with an ABI record of a shape selection doesn't take is refused whole");
+            }
+            recorded.passed[0] = taken;
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&input, 0);

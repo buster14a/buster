@@ -643,6 +643,66 @@ static const char check_test_tier1_float_other_source[] =
     "    return f(x, (float)x * 0.5f, (long)x + 3, x + 2.5);\n"
     "}\n";
 
+// The by-value aggregates' fixture (#789): 19 shapes without padding, of 1 to 24 bytes (general and xmm parts of every
+// size, a part of each class in one aggregate, _Float16's odd xmm part, and the memory class's on the stack and through
+// the hidden pointer), each made, hashed and passed back by the other unit (clang -O2's) and twisted and returned by this
+// one (Tier 1's), so that aggregates cross between the compilers both ways as arguments and as results; a call of nine
+// arguments whose aggregates run past the registers, each way; and a variadic call of three aggregates.
+static const char check_test_tier1_records_header[] =
+    "#include <stdio.h>\n"
+    "typedef struct { char c[1]; } S1;\n"
+    "typedef struct { char c[2]; } S2;\n"
+    "typedef struct { char c[3]; } S3;\n"
+    "typedef struct { char c[5]; } S5;\n"
+    "typedef struct { short s[3]; } S6;\n"
+    "typedef struct { char c[7]; } S7;\n"
+    "typedef struct { int a, b; } S8;\n"
+    "typedef struct { char c[9]; } S9;\n"
+    "typedef struct { int i[3]; } S12;\n"
+    "typedef struct { char c[15]; } S15;\n"
+    "typedef struct { long a, b; } S16;\n"
+    "typedef struct { char c[17]; } S17;\n"
+    "typedef struct { float f; } F1;\n"
+    "typedef struct { float a, b, c; } F3;\n"
+    "typedef struct { double a, b; } D2;\n"
+    "typedef struct { double d; int i[2]; } DI;\n"
+    "typedef struct { int i[2]; double d; } ID;\n"
+    "typedef struct { _Float16 h[3]; } H3;\n"
+    "typedef struct { long a, b, c; } Big;\n"
+    "#define SHAPES(X) X(S1) X(S2) X(S3) X(S5) X(S6) X(S7) X(S8) X(S9) X(S12) X(S15) X(S16) X(S17) X(F1) X(F3) X(D2) X(DI) X(ID) X(H3) X(Big)\n"
+    "#define DECLARE(S) S b_make_##S(int seed); long b_hash_##S(S s); long b_back_##S(int seed); S a_twist_##S(S s, int k);\n"
+    "SHAPES(DECLARE)\n"
+    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "long b_call_many(int seed);\n"
+    "long b_vsum(int n, ...);\n";
+
+static const char check_test_tier1_records_other_source[] =
+    "#include \"tier1-records.h\"\n"
+    "#include <stdarg.h>\n"
+    "#define DEFINE(S) \\\n"
+    "S b_make_##S(int seed) { S s; unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(seed * 7 + i * 13 + 1); return s; } \\\n"
+    "long b_hash_##S(S s) { const unsigned char* p = (const unsigned char*)&s; long h = 0; for (unsigned i = 0; i < sizeof s; i += 1) h = h * 31 + p[i]; return h; } \\\n"
+    "long b_back_##S(int seed) { S s = b_make_##S(seed); S t = a_twist_##S(s, seed); return b_hash_##S(t) * 3 + b_hash_##S(s); }\n"
+    "SHAPES(DEFINE)\n"
+    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return a + b * 2 + c * 3 + d * 4 + b_hash_S16(t) + b_hash_Big(x) * 5 + b_hash_DI(y) * 7 + b_hash_S6(z) * 11 + b_hash_S1(w) * 13; }\n"
+    "long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
+    "long b_vsum(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
+
+static const char check_test_tier1_records_source[] =
+    "#include \"tier1-records.h\"\n"
+    "#define TWIST(S) S a_twist_##S(S s, int k) { unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(p[i] + k + i); return s; }\n"
+    "SHAPES(TWIST)\n"
+    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return b_many(a + 1, b, c, d, t, x, y, z, w) + b_hash_S1(w); }\n"
+    "#define PRINT(S) printf(\"%s %ld %ld %ld\\n\", #S, b_hash_##S(b_make_##S(5)), b_hash_##S(a_twist_##S(b_make_##S(9), 3)), b_back_##S(11));\n"
+    "int main(void)\n"
+    "{\n"
+    "    SHAPES(PRINT)\n"
+    "    printf(\"%ld %ld\\n\", b_call_many(4), a_many(1, 2, 3, 4, b_make_S16(1), b_make_Big(2), b_make_DI(3), b_make_S6(4), b_make_S1(5)));\n"
+    "    printf(\"%ld\\n\", b_vsum(3, b_make_S12(1), b_make_S12(2), b_make_S12(3)));\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -1896,6 +1956,74 @@ static void check_test_driver_tier1_float(CheckTest* test, const char* clang, co
     unlink(other);
     unlink(other_object);
     unlink(reference);
+}
+
+// The by-value aggregates' fixture (#789): its unit by --tier1 -c, by each path with and without rematerialization, every
+// function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both prints; and
+// both units by --tier1, every function of both Tier 1's (the other unit's va_arg of an aggregate among them), print it too.
+static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char header[512];
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    char reference[512];
+    char both[512];
+    snprintf(header, sizeof(header), "%s/tier1-records.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-records.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-records-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-records-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-records-clang", directory);
+    snprintf(both, sizeof(both), "%s/tier1-records-both", directory);
+    const bool written = parse_test_write(header, check_test_tier1_records_header, sizeof(check_test_tier1_records_header) - 1) &&
+                         parse_test_write(unit, check_test_tier1_records_source, sizeof(check_test_tier1_records_source) - 1) &&
+                         parse_test_write(other, check_test_tier1_records_other_source, sizeof(check_test_tier1_records_other_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the by-value aggregates' fixture run");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-records-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-records-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the by-value aggregates' unit compiles by --tier1, every function Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[4096] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's aggregates pass to and from clang -O2's code as arguments and results");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    char* both_arguments[] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", "-o", both, unit, other, NULL };
+    text = NULL;
+    const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+    free(text);
+    char actual[4096] = { 0 };
+    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                      "both units of the by-value aggregates' fixture by --tier1, every function Tier 1's, print clang's build's output");
+    unlink(header);
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
+    unlink(reference);
+    unlink(both);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

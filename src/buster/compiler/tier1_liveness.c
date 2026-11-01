@@ -174,7 +174,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             // reciprocal takes its fixed registers in either consumer.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
-        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || (tier1_liveness_parameter_mask(function, function->a[node]) == 0 && !phis) ||
+        else if (tier1_select_entry_parameter(function, node) && (!parameter_prefix || plan->covered[node] || (tier1_liveness_parameter_mask(function, function->a[node]) == 0 && !phis) ||
                                     (type != IR_I32 && type != IR_I64 && type != IR_PTR && !(phis && (type == IR_I1 || type == IR_I8 || type == IR_I16 || tier1_select_float_width(type) != 0)))))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
@@ -301,7 +301,7 @@ static void tier1_liveness_rows(const Tier1SelectPlan* plan, const IrCfg* cfg, c
                 for (uint32_t lane = 0; lane < count; lane += 1)
                 {
                     const uint32_t value = plan->effective_use_values[first + lane];
-                    ids[lane] = cfg->instruction_blocks[value] != block || function->op[value] == IR_PARAM ? dense_ids[value] : BUSTER_IR_NONE;
+                    ids[lane] = cfg->instruction_blocks[value] != block || tier1_select_entry_parameter(function, value) ? dense_ids[value] : BUSTER_IR_NONE;
                 }
                 tier1_liveness_set_row(use, ids, count, BUSTER_VECTOR_PATH(vector));
             }
@@ -311,8 +311,9 @@ static void tier1_liveness_rows(const Tier1SelectPlan* plan, const IrCfg* cfg, c
                 uint32_t ids[16];
                 for (uint32_t lane = 0; lane < count; lane += 1)
                 {
-                    // PARAM emits no definition on an entry backedge: the original incoming value must survive.
-                    ids[lane] = function->op[first + lane] == IR_PARAM ? BUSTER_IR_NONE : dense_ids[first + lane];
+                    // PARAM emits no definition on an entry backedge: the original incoming value must survive. A by-value
+                    // aggregate's (#789) is its copy's address, defined at its node.
+                    ids[lane] = tier1_select_entry_parameter(function, first + lane) ? BUSTER_IR_NONE : dense_ids[first + lane];
                 }
                 tier1_liveness_set_row(def, ids, count, BUSTER_VECTOR_PATH(vector));
             }
@@ -399,7 +400,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
         {
             const uint32_t value = plan->effective_use_values[use];
             cross[value] |= cfg.instruction_blocks[value] != cfg.instruction_blocks[node];
-            cross[value] |= function->op[value] == IR_PARAM && cfg.predecessor_offsets[1] != 0;
+            cross[value] |= tier1_select_entry_parameter(function, value) && cfg.predecessor_offsets[1] != 0;
         }
     }
     uint32_t* starts = 0;
@@ -445,7 +446,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
             if (intervals[node] != BUSTER_IR_NONE)
             {
                 const uint32_t interval = intervals[node];
-                const bool parameter = function->op[node] == IR_PARAM;
+                const bool parameter = tier1_select_entry_parameter(function, node);
                 starts[interval] = parameter ? 0 : node * 2 + 1;
                 ends[interval] = starts[interval] + 1;
                 values[interval] = node;
