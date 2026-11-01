@@ -2442,10 +2442,7 @@ static bool pp_note_directives(Arena* arena, PPFileData* data)
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
 // pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it), then the
-// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table. The name's kind and value
-// and the line's word of the directive BUSTER_PP_DIRECTIVE_AHEAD on are prefetched: in a large file they have left the
-// caches, a window at a time (#451) more than whole.
-#define BUSTER_PP_DIRECTIVE_AHEAD 16
+// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table.
 static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data, const uint64_t* lines)
 {
     (void)vectorized;
@@ -2453,13 +2450,6 @@ static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data
     bool elifdef = false;
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
-        if (d + BUSTER_PP_DIRECTIVE_AHEAD < data->directive_count)
-        {
-            const uint32_t ahead = data->directive_hash[d + BUSTER_PP_DIRECTIVE_AHEAD] + 1;
-            _mm_prefetch((const char*)(data->kinds + ahead), _MM_HINT_T0);
-            _mm_prefetch((const char*)(data->values + ahead), _MM_HINT_T0);
-            _mm_prefetch((const char*)(lines + ahead / 64), _MM_HINT_T0);
-        }
         const uint32_t hash = data->directive_hash[d];
         const uint32_t end = pp_next_line(lines, data->token_count, hash);
         uint8_t kind = PP_DIRECTIVE_NULL;
