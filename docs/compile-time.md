@@ -709,7 +709,7 @@ Every change keeps both paths' objects and diagnostics byte for byte.
   statements, and `region_first` only with regions. Each reader tests the column's presence first, as
   `check_lower_prepare` already did for `vla_identities`. A jump's search for the blocks it leaves
   (`check_control_leave`) is skipped without the variable-length arrays' columns. Each column is 4 bytes a token, 2.9 MB
-  of `sqlite3.c`'s. Six of them were filled whole, 17 MB together; `allocation_next` took address space only.
+  for `sqlite3.c`. Six of them were filled whole, 17 MB together; `allocation_next` took address space only.
 - **The lowering's tables.** `switch_locals` is set to none only at the cases' owners, its only reads. `local_first` is
   set to none only at the bodies' openings, where it is read, and at the locals' bodies, where it is written. Both used
   to be filled at every token. `local_map` keeps its fill: an expression's object may be any object (a global's

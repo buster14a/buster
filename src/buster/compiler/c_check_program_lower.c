@@ -10809,10 +10809,6 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
     }
 }
 
-// What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
-// columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
-// Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
-// caller.
 // Whether `token` declares a body's own object, which its body's locals' list holds (CheckLowerShared.local_first): the
 // list's links and the clearing of its heads before them test the same tokens.
 static bool check_lower_local_declaration(const CheckInput* input, uint32_t token)
@@ -10821,6 +10817,10 @@ static bool check_lower_local_declaration(const CheckInput* input, uint32_t toke
            input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
 }
 
+// What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
+// columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
+// Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
+// caller.
 static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
                                 Arena* output, Arena* scratch)
 {
