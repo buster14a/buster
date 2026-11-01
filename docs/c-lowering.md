@@ -145,7 +145,9 @@ definition. Its flags and edges:
   one marked `used`, `retain`, `constructor` or `destructor`. A C99 inline
   definition without an `extern` declaration in the unit is inline-only, and so
   is a GNU `extern inline` one (with `gnu_inline`): its calls and addresses go to
-  the external symbol.
+  the external symbol. Only the declarations up to a definition give it these
+  and its inline rule: an attribute a later declaration adds is ignored, as
+  clang warns (#888, "Attributes after a definition" in the checker guide).
 - **Edges:** each body's evaluated references (calls, addresses and reads of
   static objects, from the checked expression walk: not `sizeof`, `alignof` or a
   `_Generic` association it doesn't select, and not the operands of `&&`, `||`

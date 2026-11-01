@@ -617,6 +617,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t visibility = 0;
         uint32_t pragma = 0;
         uint32_t packed = 0;
+        uint32_t attribute_warning = 0;
         uint32_t warning = 0;
         uint32_t report = 0;
         uint64_t position = 0;
@@ -638,6 +639,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             {
                 const uint64_t address = input->packed_members[packed].address;
                 next = address < next ? address : next;
+            }
+            if (attribute_warning < input->attribute_warning_count)
+            {
+                const uint64_t at = input->attribute_warnings[attribute_warning].token;
+                next = at < next ? at : next;
             }
             walking = next <= count;
             const uint32_t token = walking ? (uint32_t)next : 0;
@@ -684,6 +690,34 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase, "%s", check_diagnostic_message(warning_flag));
                 }
                 flags &= flags - 1;
+            }
+            // A declaration after an entity's definition that adds an attribute the definition doesn't carry: clang's
+            // warning at the attribute, with the definition as its note. Its own message carries the option, as clang's
+            // promoted one does.
+            while (walking && !pp->fatal && attribute_warning < input->attribute_warning_count &&
+                   input->attribute_warnings[attribute_warning].token <= token)
+            {
+                const CheckInputAttributeWarning* record = input->attribute_warnings + attribute_warning;
+                const CheckWarningSeverity severity = check_diagnostic_severity_default(input, record->token, CHECK_WARNING_IGNORED_ATTRIBUTES, false);
+                if (show_warnings && record->token == token && severity != CHECK_WARNING_IGNORE &&
+                    (repair == NULL || check_repair_warning_token(repair, token)))
+                {
+                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                    const char* message = record->missing_inline ?
+                        (severity >= CHECK_WARNING_ERROR ? "'gnu_inline' attribute requires function to be marked 'inline', attribute ignored [-Werror,-Wignored-attributes]" :
+                         "'gnu_inline' attribute requires function to be marked 'inline', attribute ignored [-Wignored-attributes]") :
+                        (severity >= CHECK_WARNING_ERROR ? "attribute declaration must precede definition [-Werror,-Wignored-attributes]" :
+                         "attribute declaration must precede definition [-Wignored-attributes]");
+                    // The note names the definition's declarator, not an intervening declaration the entity also has.
+                    const PPOutputDiagnosticNote note = {
+                        .token = record->definition < count ? parser->tokens.sources[record->definition] : BUSTER_CHECK_NONE,
+                        .message = "previous definition is here",
+                    };
+                    pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[record->token], parser->tokens.sources[record->token],
+                                                record->missing_inline ? NULL : &note, record->missing_inline ? 0 : 1, "%s", message);
+                }
+                attribute_warning += 1;
             }
             // Addresses are sparse and ordered by the '&' event. A generic selection can put the diagnosed
             // member after another address in its control expression, so its location is not the iteration key.

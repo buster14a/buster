@@ -408,11 +408,75 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
     }
 }
 
+// The attributes a declaration adds after its entity's definition: the checker warns at each one the definition doesn't
+// carry and marks it ignored, and a later declaration's repeat of one the definition carries warns nowhere. Both paths,
+// and the warnings' records, with the definition each one's note names (#888).
+static void check_test_attribute_late(CheckTest* test)
+{
+    static const char source[] =
+        "static int f(void) { return 1; }\n"
+        "static int f(void) __attribute__((used));\n"
+        "static int g(void) __attribute__((used));\n"
+        "static int g(void) { return 2; }\n"
+        "static int g(void) __attribute__((used));\n"
+        "static int h(void) { return 3; }\n"
+        "static int h(void) __attribute__((gnu_inline));\n";
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        InternTable identifiers = { 0 };
+        Preprocessor pp = { 0 };
+        Parser parser = { 0 };
+        CheckTestTypes types = { 0 };
+        Arena storage = arena_reserve(UINT64_C(1) << 22);
+        Arena scratch = arena_reserve(UINT64_C(1) << 22);
+        const PPOptions options = { .language = { .standard = 2023, .gnu = true }, .no_standard_includes = true };
+        const ParseOptions parse_options = { .scalar = path == 0 };
+        bool ready = storage.base != 0 && scratch.base != 0 && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                     parse_initialize(&parser, &parse_options, options.language) && check_test_types_open(&types);
+        ready = ready && pp_run_source(&pp, "attribute-late.c", (const uint8_t*)source, sizeof(source) - 1) && parse_translation_unit(&parser, &pp) &&
+                parser.errors == 0;
+        CheckInput input = { 0 };
+        const bool checked = ready && check_input(&input, &parser, &pp, &types.table, &storage, &scratch);
+        // f's used and h's gnu_inline are new to their definitions; g's second used repeats what its first declaration
+        // gave the definition, and h's message is clang's gnu_inline one, which carries no note.
+        uint32_t ignored = 0;
+        uint32_t kept = 0;
+        for (uint32_t token = 0; checked && token < input.token_count; token += 1)
+        {
+            const CheckInputAttributes* attributes = input.attributes[token];
+            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (check_input_attribute_late_kind(attribute))
+                {
+                    ignored += attribute->ignored ? 1 : 0;
+                    kept += attribute->ignored ? 0 : 1;
+                }
+            }
+        }
+        check_test_expect(test, checked && input.report_count == 0, "late attribute fixture checks");
+        check_test_expect(test, input.attribute_warning_count == 2 && input.attribute_warnings != NULL && !input.attribute_warnings[0].missing_inline &&
+                               input.attribute_warnings[1].missing_inline,
+                          "late attributes warn at each new one, and a gnu_inline without inline with its own message");
+        check_test_expect(test, ignored == 3 && kept == 1, "a late attribute is ignored, and one the definition carries is kept");
+        check_test_expect(test, input.attribute_warnings == NULL || (input.attribute_warnings[0].token < input.attribute_warnings[1].token &&
+                               input.attribute_warnings[0].definition < input.attribute_warnings[1].definition),
+                          "late attributes' warnings and their definitions are in source order");
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&storage);
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
 static __attribute__((noinline)) void check_test_attributes(CheckTest* test, const char* clang)
 {
     check_test_attribute_storage(test);
     check_test_attribute_arguments(test);
     check_test_attribute_abis(test);
+    check_test_attribute_late(test);
     const CheckAttributeFixture fixtures[] =
     {
         {

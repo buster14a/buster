@@ -198,6 +198,11 @@ source order, said with the reason:
   that changes what later declarations see (below): its entity's first
   declaration, one that changes the entity's type, or one unlike the linked
   declaration it replaces;
+- a body reads an attribute another declaration's state decides
+  (`used`, `retain`, `constructor`, `destructor`, `weak`, `gnu_inline` or an
+  unscoped standard `[[noreturn]]`, #888): the serial reader settles the
+  attributes a definition inherits, and a lane's declarations cannot publish
+  to it;
 - a body makes a union of the top level's transparent, which applies to what
   follows it: a file-scope union a block's typedef makes so, or a definition's
   parameter-list union its body defines so;

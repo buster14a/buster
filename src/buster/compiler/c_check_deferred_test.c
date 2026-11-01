@@ -138,6 +138,12 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "void n(void) { __asm__(\"ret\"); }\n", true },
     { "block-scope-declaration-adds-naked", "void n(void);\nint f(void) { __attribute__((naked)) void n(void); return 0; }\n"
       "void n(void) { __asm__(\"ret\"); }\n", false },
+    // A body's attribute the serial reader's definition state decides (#888): the lane leaves the unit to source order
+    // rather than settle what another body's declarations may change.
+    { "block-scope-late-attribute", "static int h(void){return 1;}\nint f(void){int h(void) __attribute__((used)); return h();}\n"
+      "int g(void){return 2;}\n", false },
+    { "block-scope-prior-attribute", "int h(void);\nint f(void){int h(void) __attribute__((used)); return h();}\n"
+      "int h(void){return 1;}\nint g(void){return 2;}\n", false },
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },

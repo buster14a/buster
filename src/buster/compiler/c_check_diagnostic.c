@@ -63,6 +63,29 @@ static bool check_diagnostic_option(String8 option, const char* expected)
     return result;
 }
 
+// The declaration after a definition that adds an ignored attribute at `token`, if it is one: the warnings are in token
+// order, so a search finds it without a token-sized column.
+static const CheckInputAttributeWarning* check_diagnostic_attribute_warning(const CheckInput* input, uint32_t token)
+{
+    const CheckInputAttributeWarning* result = NULL;
+    uint32_t low = 0;
+    uint32_t high = input->attribute_warnings != NULL ? input->attribute_warning_count : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (input->attribute_warnings[middle].token < token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    result = low < input->attribute_warning_count && input->attribute_warnings[low].token == token ? input->attribute_warnings + low : NULL;
+    return result;
+}
+
 static uint32_t check_diagnostic_warning_index(uint32_t warning)
 {
     const uint32_t index = warning != 0 && (warning & (warning - 1)) == 0 ? (uint32_t)__builtin_ctz(warning) : UINT32_MAX;
@@ -157,6 +180,7 @@ static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uin
             warnings |= CHECK_WARNING_IGNORED_ATTRIBUTES;
         }
     }
+    warnings |= check_diagnostic_attribute_warning(input, token) != NULL ? CHECK_WARNING_IGNORED_ATTRIBUTES : 0;
     return warnings;
 }
 

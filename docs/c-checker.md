@@ -701,6 +701,41 @@ call heads remain intact, so declarations in later or sibling scopes cannot
 change an earlier call. Declaration-only scaling is measured separately from
 call-site overload resolution (#612).
 
+### Attributes after a definition (#888)
+
+A declaration after an entity's definition does not add `used`, `retain`,
+`constructor`, `destructor`, `weak`, `gnu_inline` or an unscoped standard
+`[[noreturn]]` to it, as clang's `Sema::checkNewAttributesAfterDef` has it. The
+checker warns at each such attribute, `attribute declaration must precede
+definition [-Wignored-attributes]`, with the definition's declarator as its
+`previous definition is here` note, marks the record `ignored`, and leaves a
+`gnu_inline` whose own declaration isn't `inline` with clang's other message
+and no note. The definition keeps what the declarations up to it gave it: the
+inherited set is built in source order and frozen at the definition, so a later
+declaration that repeats an attribute the definition already carries warns
+nowhere, while one that adds it again after an earlier ignored one warns again,
+as clang does. Selection and emission read the `ignored` flags, so `-c` gives a
+definition the roots and inline rule of its declarations up to it, not of the
+late ones.
+
+`check_input_attribute_late_finish` (`c_check_attribute_late_input.c`) makes
+the pass in two source-order walks over the declaring tokens: the first marks
+the records and counts the warnings, the second fills the published
+`CheckInput.attribute_warnings`, one record per warning, whose attribute token
+is the diagnostic's place and whose definition token is the note's. The pass
+runs in the serial reader only; a deferred lane that reads one of these
+attributes leaves its unit to source-order checking
+(`check_input_attribute_read_item`), so that a body cannot race the top level's
+definition state. `test-checker-driver` compares the diagnostics and `-c`'s
+object symbols with clang's, by both paths.
+
+Clang also warns about some attributes no consumer here reads (`unused`,
+`always_inline`, `noinline`, `section`, `visibility` and an assembler label).
+The assembler label has its own rule (`-c`'s symbol spelling) and `section` and
+`visibility` their own latest-declaration ones; the other three change nothing
+this compiler emits, so they are accepted without a warning. Those are the
+remaining differences from clang's set.
+
 ### Typed output
 
 `CheckStream.count` matches the input graph's count. Operators, source tokens

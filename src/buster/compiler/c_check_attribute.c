@@ -314,6 +314,19 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
 
 static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length);
 
+// The attributes clang drops from a declaration after its entity's definition (Sema::checkNewAttributesAfterDef). Of
+// those a consumer here reads, `used`, `retain`, `constructor` and `destructor` make a definition a root, `weak` changes
+// a symbol's binding, `gnu_inline` its function's inline rule, and an unscoped standard `[[noreturn]]` would reach code
+// generation's target-feature walk. check_input_attribute_late_finish explains the pass that applies them.
+static bool check_input_attribute_late_kind(const CheckInputAttribute* attribute)
+{
+    const bool standard_noreturn = attribute->kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword &&
+                                   attribute->first == attribute->name_token;
+    return attribute->kind == CHECK_ATTRIBUTE_WEAK || attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ||
+           attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_USED ||
+           attribute->kind == CHECK_ATTRIBUTE_RETAIN || attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE || standard_noreturn;
+}
+
 static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t name)
 {
     const InternTable* table = reader->pp->table;
@@ -808,6 +821,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
+            // A lane cannot publish attribute state to later declarations; source-order replay handles this case
+            // (check_input_attribute_late_finish).
+            check_input_lane_refuse(reader, reader->lane && check_input_attribute_late_kind(&attribute),
+                                    "a body declares an attribute with linked state");
             valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
         }
         else if (valid)

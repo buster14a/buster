@@ -126,6 +126,18 @@ struct CheckInputPackedMember
     bool implicit_conversions;
     bool suppressed;
 };
+// An attribute a declaration adds after its entity's definition, which clang ignores with a warning at the attribute and
+// a note at the definition (Sema::checkNewAttributesAfterDef): check_input_attribute_late_finish's, in token order.
+typedef struct CheckInputAttributeWarning CheckInputAttributeWarning;
+struct CheckInputAttributeWarning
+{
+    // The attribute's name token: the warning's place.
+    uint32_t token;
+    // The definition's declarator name token: the note's place.
+    uint32_t definition;
+    // 'gnu_inline' without 'inline' on its own declaration: clang's other message, which carries no note.
+    bool missing_inline;
+};
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
 typedef struct CheckInputSections CheckInputSections;
@@ -221,6 +233,11 @@ struct CheckInput
     // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
+    // The declarations after a definition that add an attribute it doesn't carry, and the definition each one's note
+    // names: check_input_attribute_late_finish's, in token order, and whether it ran.
+    CheckInputAttributeWarning* attribute_warnings;
+    uint32_t attribute_warning_count;
+    bool attribute_warnings_prepared;
     uint8_t* linkage;
     uint8_t* defined;
     uint8_t* tentative;
@@ -5397,6 +5414,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 #include "c_check_packed_input.c"
 #include "c_check_x86_input.c"
 #include "c_check_naked_input.c"
+#include "c_check_attribute_late_input.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
 // (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
@@ -6445,6 +6463,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 {
                     check_input_asm_finish(&reader);
                     check_input_naked_finish(&reader);
+                    check_input_attribute_late_finish(&reader);
                 }
                 if (input->report_count == 0 && !input->resource)
                 {

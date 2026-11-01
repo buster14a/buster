@@ -3330,6 +3330,171 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
     unlink(source);
 }
 
+// Whether `line`'s first `length` bytes hold `needle`.
+static bool check_test_driver_line_finds(const char* line, uint64_t length, const char* needle)
+{
+    const uint64_t wanted = strlen(needle);
+    bool found = false;
+    for (uint64_t i = 0; !found && wanted <= length && i + wanted <= length; i += 1)
+    {
+        found = memcmp(line + i, needle, wanted) == 0;
+    }
+    return found;
+}
+
+// The `file:line:column: kind: text` lines of a compiler's diagnostics, without its source excerpts, its caret lines or
+// its count line: what two compilers of one source must agree on, place and wording alike.
+static bool check_test_driver_diagnostic_lines(const char* text, const char* path, char* out, uint64_t size)
+{
+    const uint64_t prefix = strlen(path);
+    uint64_t written = 0;
+    bool valid = size != 0;
+    out[0] = 0;
+    for (const char* line = text; line != 0 && *line != 0 && valid;)
+    {
+        const char* end = strchr(line, '\n');
+        const uint64_t length = end != 0 ? (uint64_t)(end - line) : strlen(line);
+        const bool diagnostic = length > prefix && memcmp(line, path, prefix) == 0 && line[prefix] == ':' &&
+                                (check_test_driver_line_finds(line, length, ": warning: ") || check_test_driver_line_finds(line, length, ": error: ") ||
+                                 check_test_driver_line_finds(line, length, ": note: "));
+        if (diagnostic)
+        {
+            valid = written + length + 1 < size;
+            if (valid)
+            {
+                memcpy(out + written, line, length);
+                written += length;
+                out[written++] = '\n';
+                out[written] = 0;
+            }
+        }
+        line = end != 0 ? end + 1 : 0;
+    }
+    return valid;
+}
+
+// The typed symbol `name` an object has, defined or not, or 0.
+static const Elf64_Sym* check_test_elf_symbol(const CheckTestElf* elf, const char* name)
+{
+    const Elf64_Sym* result = NULL;
+    for (uint64_t i = 1; result == NULL && i < elf->symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = &elf->symbols[i];
+        const uint8_t type = ELF64_ST_TYPE(symbol->st_info);
+        const char* spelling = check_test_elf_string(elf->symbol_names, elf->symbol_names_size, symbol->st_name);
+        result = (type == STT_FUNC || type == STT_OBJECT || type == STT_TLS) && spelling != NULL && strcmp(spelling, name) == 0 ? symbol : NULL;
+    }
+    return result;
+}
+
+// The functions, objects and thread-locals an object names, but the compiler's own `.L` names: each spelling goes in
+// `names` while there is room, and the return counts them all.
+static uint32_t check_test_elf_typed(const CheckTestElf* elf, const char** names, uint32_t room)
+{
+    uint32_t count = 0;
+    for (uint64_t i = 1; i < elf->symbol_count; i += 1)
+    {
+        const uint8_t type = ELF64_ST_TYPE(elf->symbols[i].st_info);
+        const char* name = check_test_elf_string(elf->symbol_names, elf->symbol_names_size, elf->symbols[i].st_name);
+        if ((type == STT_FUNC || type == STT_OBJECT || type == STT_TLS) && name != NULL && strncmp(name, ".L", 2) != 0)
+        {
+            if (names != NULL && count < room)
+            {
+                names[count] = name;
+            }
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// Whether `ours_path` and `theirs_path` name the same functions, objects and thread-locals (but the compiler's own `.L`
+// names), each with the same binding, type and defined state: a definition that keeps an attribute a later declaration
+// added, or loses one an earlier declaration gave it, shows here. A description of the first difference goes in `error`.
+static bool check_test_driver_same_symbols(const char* ours_path, const char* theirs_path, char* error, uint64_t error_size)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 30);
+    CheckTestElf ours = { 0 };
+    CheckTestElf theirs = { 0 };
+    bool same = arena.base != 0 && check_test_elf_open(&ours, object_test_read_file(&arena, ours_path)) &&
+                check_test_elf_open(&theirs, object_test_read_file(&arena, theirs_path));
+    snprintf(error, error_size, "%s", same ? "" : "an object that doesn't read");
+    const char* names[256];
+    const uint32_t count = same ? check_test_elf_typed(&ours, names, BUSTER_ARRAY_LENGTH(names)) : 0;
+    const uint32_t expected = same ? check_test_elf_typed(&theirs, NULL, 0) : 0;
+    same = same && count == expected && count <= BUSTER_ARRAY_LENGTH(names);
+    if (count != expected || count > BUSTER_ARRAY_LENGTH(names))
+    {
+        snprintf(error, error_size, "%u defined or used names, clang's %u", count, expected);
+    }
+    for (uint32_t i = 0; same && i < count; i += 1)
+    {
+        const Elf64_Sym* mine = check_test_elf_symbol(&ours, names[i]);
+        const Elf64_Sym* clangs = check_test_elf_symbol(&theirs, names[i]);
+        same = mine != NULL && clangs != NULL && ELF64_ST_TYPE(mine->st_info) == ELF64_ST_TYPE(clangs->st_info) &&
+               ELF64_ST_BIND(mine->st_info) == ELF64_ST_BIND(clangs->st_info) &&
+               (mine->st_shndx == SHN_UNDEF) == (clangs->st_shndx == SHN_UNDEF);
+        if (!same)
+        {
+            snprintf(error, error_size, "'%s': ours %s, clang's %s", names[i], mine != NULL ? "present" : "missing", clangs != NULL ? "present" : "missing");
+        }
+    }
+    arena_release(&arena);
+    return same;
+}
+
+// A definition keeps the attributes the declarations up to it gave it; clang warns at each attribute a later declaration
+// adds, notes the definition and ignores it (Sema::checkNewAttributesAfterDef). Both of -c's objects, the roots and the
+// inline rules they come from, and the diagnostics must be clang's, by both checker paths.
+static void check_test_driver_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "static int late_used(void) { return 1; }\n"
+        "static int late_used(void) __attribute__((used));\n"
+        "static int late_constructor(void) { return 2; }\n"
+        "static int late_constructor(void) __attribute__((constructor(200)));\n"
+        "extern inline int late_gnu(int x) { return x; }\n"
+        "inline int late_gnu(int x) __attribute__((gnu_inline));\n"
+        "static int early_used(void) __attribute__((used));\n"
+        "static int early_used(void) { return 3; }\n"
+        "static int early_used(void) __attribute__((used));\n"
+        "int g(void) { return late_gnu(3); }\n";
+    char source[256];
+    char reference[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/late-attributes.c", directory);
+    snprintf(reference, sizeof(reference), "%s/late-attributes-clang.o", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    char expected[1024] = { 0 };
+    char* clang_text = NULL;
+    char* clang_arguments[] = { (char*)clang, "-std=gnu17", "-c", "-o", reference, source, NULL };
+    const int clang_status = written ? check_test_driver_spawn(clang_arguments, &clang_text) : -1;
+    const bool compared = clang_status == 0 && clang_text != NULL && check_test_driver_diagnostic_lines(clang_text, source, expected, sizeof(expected)) &&
+                          expected[0] != 0;
+    check_test_expect(test, compared, "clang's late attribute diagnostics are available");
+    for (uint32_t route = 0; route < 2; route += 1)
+    {
+        const char* name = route == 0 ? "vector" : "scalar";
+        snprintf(object, sizeof(object), "%s/late-attributes-%s.o", directory, name);
+        char* vector_arguments[] = { (char*)executable, "-std=gnu17", "-c", "-o", object, source, NULL };
+        char* scalar_arguments[] = { (char*)executable, "--scalar", "-std=gnu17", "-c", "-o", object, source, NULL };
+        char* ours_text = NULL;
+        char ours[1024] = { 0 };
+        const int status = written ? check_test_driver_spawn(route == 0 ? vector_arguments : scalar_arguments, &ours_text) : -1;
+        const bool read = status == 0 && ours_text != NULL && check_test_driver_diagnostic_lines(ours_text, source, ours, sizeof(ours));
+        check_test_expect(test, read && strcmp(ours, expected) == 0, route == 0 ? "vector late attribute diagnostics are clang's" :
+                                                                                   "scalar late attribute diagnostics are clang's");
+        char error[256];
+        check_test_expect(test, read && check_test_driver_same_symbols(object, reference, error, sizeof(error)),
+                          route == 0 ? "vector late attribute symbols are clang's" : "scalar late attribute symbols are clang's");
+        free(ours_text);
+        unlink(object);
+    }
+    free(clang_text);
+    unlink(reference);
+    unlink(source);
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -3659,6 +3824,54 @@ static int run_checker_driver_tests(int argc, char** argv)
             .source = "int object=1;\nextern int object asm(\"renamed\");\n",
             .warnings = 1,
         },
+        // A definition keeps the attributes of the declarations up to it. Each attribute a later declaration adds warns
+        // at its own name, with the definition as a note, and is ignored (Sema::checkNewAttributesAfterDef).
+        {
+            .name = "late function attributes warn at each attribute",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((used,retain,constructor,destructor));\n",
+            .warnings = 4,
+        },
+        {
+            .name = "a late weak attribute warns and leaves an internal definition alone",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((weak));\n",
+            .warnings = 1,
+        },
+        {
+            .name = "a late unscoped standard noreturn warns",
+            .source = "static int f(void){return 1;}\n[[noreturn]] static int f(void);\n",
+            .warnings = 1,
+        },
+        {
+            .name = "GNU noreturn after a definition warns nowhere",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((noreturn));\n",
+        },
+        {
+            .name = "repeating an attribute the definition carries warns nowhere",
+            .source = "static int f(void) __attribute__((used));\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+        },
+        {
+            .name = "a late attribute already declared after the definition warns again",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((used));\nstatic int f(void) __attribute__((used));\n",
+            .warnings = 2,
+        },
+        {
+            .name = "a tentative definition does not precede the attribute",
+            .source = "int object;\nint object __attribute__((used));\n",
+        },
+        {
+            .name = "late gnu_inline requires inline on its own declaration",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((gnu_inline));\n",
+            .warnings = 1,
+        },
+        {
+            .name = "late function attribute respects promoted warning policy",
+            .source = "#pragma clang diagnostic error \"-Wignored-attributes\"\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+            .rejected = true,
+        },
+        {
+            .name = "late function attribute respects ignored warning policy",
+            .source = "#pragma clang diagnostic ignored \"-Wignored-attributes\"\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+        },
         {
             .name = "late assembler label respects promoted attribute group",
             .source = "#pragma clang diagnostic error \"-Wattributes\"\nint object=1;\nextern int object asm(\"renamed\");\n",
@@ -3785,6 +3998,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
+            check_test_driver_late_attributes(&test, clang, executable, directory);
         }
         rmdir(directory);
     }
