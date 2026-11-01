@@ -60,12 +60,16 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
 // callee-saved registers it pushes, by their bits in Tier 0's order (unwind_tier0_saved_registers), its subtraction,
 // its frame pointer, its realignment and its base. Its early returns' rets are the code's tails, each right after its
 // epilogue; and where the code's last record isn't its last return's ret (a loop's latch, a call that doesn't return,
-// a trap), the frame is open and every return is a tail. A frameless function needs neither: its rules are the CIE's
-// throughout. A probe's loop (BUSTER_TIER1_FRAME_PROBE_STACK, which the driver doesn't ask for) moves rsp a page at a
-// time, which the protocol doesn't describe: returns false for it.
+// a trap), the frame is open and every return is a tail. A frameless function publishes no tails, its rules the CIE's
+// throughout; it is open where its code doesn't end in a ret, which spares the reader's rule that a closed frameless
+// function ends in a ret or a ud2, and its FDE is the closed one either way. A probe's loop
+// (BUSTER_TIER1_FRAME_PROBE_STACK, which the driver doesn't ask for) moves rsp a page at a time, which the protocol
+// doesn't describe; and every exit must be a ret, the last record exactly when the frame is closed. Returns false for
+// a frame it can't publish so, whose function Tier 0 then compiles, rather than fail the emission's reader.
 static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* tails, Tier0Code* code)
 {
     const Tier1Frame* frame = &emitted->frame;
+    const X86Instruction* records = emitted->code.records;
     bool describable = true;
     for (uint32_t i = 0; i < frame->prologue_count; i += 1)
     {
@@ -79,6 +83,11 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
     describable &= (frame->saved_registers & ~BUSTER_ABI_CALLEE_SAVED) == 0;
     const bool frameless = saved == 0 && !frame->frame_pointer && frame->stack_adjust_bytes == 0;
     const bool closed = count != 0 && emitted->exit_count != 0 && emitted->exits[emitted->exit_count - 1] == count - 1;
+    for (uint32_t k = 0; k < emitted->exit_count; k += 1)
+    {
+        describable &= emitted->exits[k] < count && records[emitted->exits[k]].form == X86_FORM_RET;
+    }
+    describable &= closed || count == 0 || records[count - 1].form != X86_FORM_RET;
     const uint32_t tail_count = frameless ? 0 : closed ? emitted->exit_count - 1 : emitted->exit_count;
     for (uint32_t k = 0; k < tail_count; k += 1)
     {
@@ -217,6 +226,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .edge_moves = emitted.edge_moves,
             .spill_slots = emitted.allocation.spill_count,
             .frame_bytes = emitted.frame.maximum_stack_bytes,
+            .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
         };
         *code = (Tier0Code){
             .records = records,
@@ -228,7 +238,10 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .reference_count = emitted.reference_count,
             .error = TIER0_OK,
         };
-        if (!check_tier1_frame(&emitted, selected->count, tails, code))
+        const bool published = check_tier1_frame(&emitted, selected->count, tails, code);
+        counts->open_frames = code->frame_open && (code->frame_saved != 0 || code->frame_pointer || code->frame_size != 0);
+        counts->return_tails = code->tail_count;
+        if (!published)
         {
             arena_pop_to(output, mark);
             *code = (Tier0Code){ 0 };
@@ -288,7 +301,8 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
         }
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
-                    "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\n",
+                    "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
+                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
-            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes);
+            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones);
 }

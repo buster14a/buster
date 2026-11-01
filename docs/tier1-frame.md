@@ -255,18 +255,33 @@ return's `ret` (a loop whose latch's jump comes last, a call that doesn't
 return, a trap), the frame is open (`Tier0Code.frame_open`,
 `UnwindFunction.open`): its FDE has the prologue's transitions alone, the body's
 rules hold to its end, and each of its returns is a tail. A frameless function
-publishes neither, since its rules are the CIE's throughout. A frame with probes
-isn't the protocol, and the C driver refuses it (`TIER1_EMIT_FRAME`), never
-asking for one.
+publishes no tails, since its rules are the CIE's throughout; it is published
+open where its code doesn't end in a `ret` (the reader otherwise wants a closed
+frameless function to end in a `ret` or a `ud2`), and its FDE is the closed one
+either way. A frame with probes isn't the protocol, and the C driver refuses it
+(`TIER1_EMIT_FRAME`), never asking for one. So does a frame whose exits aren't
+all `ret`s, or whose last record is a `ret` though the frame is published open:
+`check_tier1_frame` checks both, so that a disagreement with the emission's
+reader would send the function to Tier 0 rather than fail the compile.
+`--tier1-report` counts the shapes: `open_frames` (open frames with
+transitions), `return_tails` (returns published as tails) and `red_zones`
+(frames whose objects are in the red zone).
 
 `test-check-debug --cross-check` (`c_check_unwind_test.c`) checks it on a
 fixture compiled by `--tier1 --verify`, every function but `main` by Tier 1:
 a frame of spill slots alone, one with pushes, two returns each after its own
-epilogue, an open frame whose loop's latch comes last, and a realigned frame.
+epilogue, an open frame whose loop's latch comes last, a realigned frame, and a
+leaf whose spills are in the red zone, whose shapes `--tier1-report`'s counts
+must show.
 By each path and through GNU ld and lld, `backtrace()` walks through every frame
 to `main` (and without unwind tables stops at the first), and gdb's backtrace at
 every instruction of each function, both returns and the loop's iterations
-among them, gives the function and `main`. `test-unwind` checks the writer's
+among them, gives the function and `main`. Tier 1 doesn't make the other
+shapes the planner can: its allocator gives a leaf no callee-saved register (they
+go only to values live across a call), so a red zone has no pushes above it, and
+its selection refuses the dynamic stack's operations, so no frame of Tier 1's is
+addressed from rbp (`test-tier1-frame` and `test-tier1-frame-execution` check
+those). `test-unwind` checks the writer's
 open descriptions against its independent CFI interpreter and
 `unwind_tier0_frame_tails` on early returns and open frames of every save mask,
 with and without a frame pointer, with its refusals. `test-c-testsuite --tier1`

@@ -40,11 +40,15 @@
 //   --tier1-refusals), whose frames are Tier 0's protocol with Tier 1's shapes: a frame of spill slots alone (`kept`),
 //   one with callee-saved registers' pushes too (`crowded`), two returns each after its own epilogue (`early`, the
 //   first one's teardown remembered and restored), a loop whose latch's jump is the code's last record, so that its
-//   frame is open and its one return a teardown of its own (`spin`), and a realigned frame (`aligned`). By each path
-//   (whose frames' slots may be colored apart, so not the same bytes), and its object linked by cc through GNU ld and
-//   lld, the unwinder walks through every function to main; without unwind tables it stops at the first, and the program prints 1 1 1 1 -1 1 1. And gdb, without -g (which
-//   --tier1 refuses), at every instruction of each of the six from its first to its ret, both of early's returns and
-//   spin's iterations among them: each backtrace's frames are the function and main.
+//   frame is open and its one return a teardown of its own (`spin`), a realigned frame (`aligned`), and a leaf whose
+//   spills are in the red zone below an unmoved rsp (`red_leaf`: gdb's `break *leaf` finds a library's `leaf` once the
+//   program runs). --tier1-report's counts must show those shapes: an open frame at least, two returns published as
+//   tails (early's first and spin's) and a red zone. By each path (whose
+//   frames' slots may be colored apart, so not the same bytes), and its object linked by cc through GNU ld and lld,
+//   the unwinder walks through every function to main; without unwind tables it stops at the first, and the program
+//   prints 1 1 1 1 -1 1 1. And gdb, without -g (which --tier1 refuses), at every instruction of each of the seven
+//   from its first to its ret, both of early's returns and spin's iterations among them: each backtrace's frames are
+//   the function and main.
 
 static const char check_unwind_test_text[] =
     "#include <execinfo.h>\n"
@@ -320,8 +324,29 @@ static const char check_unwind_test_tier1_text[] =
     "    return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
     "}\n"
     "\n"
+    "long red_leaf(long x)\n"
+    "{\n"
+    "    long a = x * 3 + 1;\n"
+    "    long b = x * 5 + 2;\n"
+    "    long c = x * 7 + 3;\n"
+    "    long d = x * 11 + 4;\n"
+    "    long e = x * 13 + 5;\n"
+    "    long f = x * 17 + 6;\n"
+    "    long g = x * 19 + 7;\n"
+    "    long h = x * 23 + 8;\n"
+    "    long i = x * 29 + 9;\n"
+    "    long j = x * 31 + 10;\n"
+    "    long k = x * 37 + 11;\n"
+    "    long l = x * 41 + 12;\n"
+    "    return a * b + c * d + e * f + g * h + i * j + k * l;\n"
+    "}\n"
+    "\n"
     "int main(void)\n"
     "{\n"
+    "    if (red_leaf(2) != 17010)\n"
+    "    {\n"
+    "        return 2;\n"
+    "    }\n"
     "    int baseline = depth();\n"
     "    long held = kept(5);\n"
     "    long crowd = crowded(-3);\n"
@@ -741,8 +766,8 @@ static bool check_unwind_test_tier1_compile(const char* source, const char* outp
 {
     char errors[PATH_MAX + 8];
     snprintf(errors, sizeof(errors), "%s.err", output);
-    char* arguments[12] = { (char*)"/proc/self/exe", (char*)"--tier1", (char*)"--tier1-refusals", (char*)"--verify" };
-    uint32_t count = 4;
+    char* arguments[12] = { (char*)"/proc/self/exe", (char*)"--tier1", (char*)"--tier1-refusals", (char*)"--tier1-report", (char*)"--verify" };
+    uint32_t count = 5;
     arguments[count] = tables ? 0 : (char*)"-fno-asynchronous-unwind-tables";
     count += tables ? 0 : 1;
     arguments[count] = object ? (char*)"-c" : 0;
@@ -780,10 +805,23 @@ static bool check_unwind_test_tier1_run(const char* program, bool tables, Arena*
     return read && (tables ? walked : stopped);
 }
 
+// A field of --tier1-report's line in `text` (the compile's standard error), into *value; false without it.
+static bool check_unwind_test_tier1_field(const char* text, const char* name, uint64_t* value)
+{
+    const char* line = text != NULL ? strstr(text, "tier1\tfunctions=") : NULL;
+    char key[64];
+    snprintf(key, sizeof(key), "\t%s=", name);
+    const char* end = line != NULL ? strchr(line, '\n') : NULL;
+    const char* field = line != NULL ? strstr(line, key) : NULL;
+    const bool found = field != NULL && (end == NULL || field < end);
+    *value = found ? strtoull(field + strlen(key), NULL, 10) : 0;
+    return found;
+}
+
 // The Tier 1 fixture (check_unwind_test_tier1_text, #177; see the file's comment).
 static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
-    static const char* const names[] = { "depth", "kept", "crowded", "early", "spin", "aligned" };
+    static const char* const names[] = { "depth", "kept", "crowded", "early", "spin", "aligned", "red_leaf" };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/dbg_tier1.c", directory);
     const bool written = foreign_test_write(source, check_unwind_test_tier1_text, sizeof(check_unwind_test_tier1_text) - 1);
@@ -808,6 +846,16 @@ static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* dire
             tier1 = strstr(refusals.pointer, line) == 0;
         }
         check_debug_test_expect(tally, tier1, "Tier 1 compiles every function of the fixture but main", errors);
+        // The frames' shapes the fixture is for: spin's open frame, early's first return and spin's one as tails, and
+        // red_leaf's red zone, which a change of layout could take away unseen.
+        uint64_t open_frames = 0;
+        uint64_t return_tails = 0;
+        uint64_t red_zones = 0;
+        const bool counted = refusals.pointer != 0 && check_unwind_test_tier1_field(refusals.pointer, "open_frames", &open_frames) &&
+                             check_unwind_test_tier1_field(refusals.pointer, "return_tails", &return_tails) &&
+                             check_unwind_test_tier1_field(refusals.pointer, "red_zones", &red_zones);
+        check_debug_test_expect(tally, counted && open_frames >= 1 && return_tails >= 2 && red_zones >= 1,
+                                "the Tier 1 fixture's frames are open, end in returns published as tails and use the red zone", errors);
     }
     // Tier 1's paths may color its frames' slots apart (tier1_frame.c), so their executables needn't be the same bytes:
     // each must walk.
@@ -847,8 +895,10 @@ static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* dire
     static const char* const early[] = { "early", "main" };
     static const char* const spin[] = { "spin", "main" };
     static const char* const aligned[] = { "aligned", "main" };
+    static const char* const red_leaf[] = { "red_leaf", "main" };
     if (files[0].pointer != 0)
     {
+        check_unwind_test_gdb(tally, outputs[0], files[0], red_leaf, BUSTER_ARRAY_LENGTH(red_leaf), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], kept, BUSTER_ARRAY_LENGTH(kept), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], crowded, BUSTER_ARRAY_LENGTH(crowded), 1, arena);

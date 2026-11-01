@@ -854,8 +854,9 @@ designs and the compilers already built this way.
   `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
   (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret);
   and a `--tier1 --verify` fixture's Tier 1 frames (#177: spill slots alone,
-  pushes, two returns, an open frame, a realigned one), walked by `backtrace()`
-  by each path and linked by GNU ld and lld, and by gdb at every instruction.
+  pushes, two returns, an open frame, a realigned one, a red-zone leaf, the
+  shapes `--tier1-report`'s counts show), walked by `backtrace()` by each path
+  and linked by GNU ld and lld, and by gdb at every instruction.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order

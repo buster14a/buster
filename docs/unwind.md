@@ -238,11 +238,12 @@ reaches the handler.
 
 A third, compiled by `--tier1 --verify` (#177), has every function but `main`
 by Tier 1: a frame of spill slots alone, one with pushes, two returns each after
-its own epilogue, an open frame whose loop's latch comes last, and a realigned
-frame. By each path (whose frames may be colored apart, so not the same bytes)
+its own epilogue, an open frame whose loop's latch comes last, a realigned frame,
+and a leaf whose spills are in the red zone, whose shapes `--tier1-report`'s
+counts must show. By each path (whose frames may be colored apart, so not the same bytes)
 and from its object linked by GNU ld and lld, `backtrace()` walks through every
 frame to `main`, and without unwind tables stops at the first; GDB's backtrace
-at every instruction of each of the six, without `-g`, gives the function and
+at every instruction of each of the seven, without `-g`, gives the function and
 `main`.
 
 ## Checks and measurements

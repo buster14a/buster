@@ -297,6 +297,11 @@ struct CheckTier1Counts
     uint32_t edge_moves;
     uint32_t spill_slots;
     uint32_t frame_bytes;
+    // Its unwind table's shape (#177): an open frame (UnwindFunction.open), its returns published as tails, and whether
+    // its objects are in the red zone.
+    uint32_t open_frames;
+    uint32_t return_tails;
+    uint32_t red_zones;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -318,6 +323,9 @@ struct CheckTier1Report
     uint64_t edge_moves;
     uint64_t spill_slots;
     uint64_t frame_bytes;
+    uint64_t open_frames;
+    uint64_t return_tails;
+    uint64_t red_zones;
 };
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
@@ -1613,6 +1621,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
         lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
         lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
+        lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
+        lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
+        lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.

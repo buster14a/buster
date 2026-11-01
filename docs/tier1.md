@@ -110,8 +110,9 @@ and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
 that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
 1's code: its records, its spills' stores and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
-definitions of them it left out, its edges' moves, its spill slots and its
-frames' bytes. `--tier1-no-rematerialize` compiles Tier 1's functions spilling
+definitions of them it left out, its edges' moves, its spill slots, its
+frames' bytes, and its unwind tables' shapes: open frames, returns published as
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`). `--tier1-no-rematerialize` compiles Tier 1's functions spilling
 what they would recompute (#178's comparison: [the allocation
 guide](tier1-allocation.md)'s "Rematerialization"):
 
