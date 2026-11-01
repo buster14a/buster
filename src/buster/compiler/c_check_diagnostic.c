@@ -105,6 +105,9 @@ static const char* check_diagnostic_message(uint32_t warning)
 
 static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t index, CheckWarningSeverity severity)
 {
+    // -Wfatal-errors makes an error the command line or the diagnostic's default severity chose fatal before a source
+    // pragma is read; a source pragma's error, warning or fatal then replaces that, as clang's pragmas do.
+    severity = input->fatal_errors && severity == CHECK_WARNING_ERROR ? CHECK_WARNING_FATAL : severity;
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
     if (history != NULL && index < BUSTER_ARRAY_LENGTH(check_warning_descriptions))
     {
@@ -468,7 +471,7 @@ static uint32_t check_diagnostic_parse_end(const Parser* parser)
 static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* parser, Preprocessor* pp,
                                               uint32_t before_token, Arena* arena, Arena* scratch)
 {
-    *result = (CheckInput){ 0 };
+    *result = (CheckInput){ .fatal_errors = pp->options.fatal_errors };
     const uint64_t retained = arena->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = parser->tokens.pragma_count;
