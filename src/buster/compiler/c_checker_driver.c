@@ -2490,6 +2490,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                          repairing ? repair.original_end : checking->tokens.count,
                                                          lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0);
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
+            if (stage_clock != NULL)
+            {
+                stage_clock->expression_ticks += input.expression_ticks;
+            }
             if (input.resource)
             {
                 fprintf(errors, "fatal error: checker input capacity exhausted\n");
