@@ -752,20 +752,22 @@ static void check_data_test_composite(CheckTest* test, TypeTable* types)
         pointer,
     };
     CheckDataTestLink test_link;
-    const bool initialized = check_data_test_open(&test_link, 8);
+    const bool initialized = check_data_test_open(&test_link, 10);
     check_test_expect(test, initialized, "static-data composite pointer Link allocation");
     if (initialized)
     {
-        SymbolId map[7] = { 0 };
+        SymbolId map[9] = { 0 };
         map[1] = check_data_test_symbol(&test_link.link, "function_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
         map[2] = check_data_test_symbol(&test_link.link, "array_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
         map[3] = check_data_test_symbol(&test_link.link, "local_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL);
         map[4] = check_data_test_symbol(&test_link.link, "local_target", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL);
         map[5] = check_data_test_symbol(&test_link.link, "external_function", BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL);
         map[6] = check_data_test_symbol(&test_link.link, "external_array", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
-        CheckValue values[3];
-        CheckDiagnostic diagnostics[3] = { 0 };
-        CheckDataObject objects[4];
+        map[7] = check_data_test_symbol(&test_link.link, "undefined_target", BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_LOCAL);
+        map[8] = check_data_test_symbol(&test_link.link, "undefined_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        CheckValue values[4];
+        CheckDiagnostic diagnostics[4] = { 0 };
+        CheckDataObject objects[5];
         for (uint32_t i = 0; i < 3; i += 1)
         {
             values[i] = (CheckValue){
@@ -789,14 +791,29 @@ static void check_data_test_composite(CheckTest* test, TypeTable* types)
             .initializer = BUSTER_CHECK_NONE,
             .token = 13,
         };
+        // A `static void missing(void);` only declared: an undefined source-less local is no error but an
+        // undefined global, which an ELF object can hold (#992).
+        values[3] = (CheckValue){
+            .type = old_types[0],
+            .category = CHECK_RVALUE,
+            .flags = BUSTER_CHECK_STATIC_OBJECT,
+            .constant_kind = CHECK_CONSTANT_ADDRESS,
+            .object = 7,
+        };
+        objects[4] = (CheckDataObject){
+            .type = new_types[2],
+            .object = 8,
+            .initializer = 3,
+            .token = 14,
+        };
         const CheckStream stream = {
             .values = values,
             .diagnostics = diagnostics,
-            .count = 3,
+            .count = 4,
         };
         CheckDataResult result;
-        const bool emitted = check_data_emit(types, &stream, objects, 4, map, 7, &test_link.link, 7, &test_link.bytes, &test_link.scratch, &result);
-        check_test_expect(test, emitted && result.fixup_count == 3, "static-data compatible function/array pointer completion");
+        const bool emitted = check_data_emit(types, &stream, objects, 5, map, 9, &test_link.link, 7, &test_link.bytes, &test_link.scratch, &result);
+        check_test_expect(test, emitted && result.fixup_count == 4, "static-data compatible function/array pointer completion");
         check_test_expect(test, emitted && link_check(&test_link.link) == LINK_ERROR_NONE, "static-data local forward reference validates");
         if (emitted)
         {
@@ -804,6 +821,14 @@ static void check_data_test_composite(CheckTest* test, TypeTable* types)
             const FixupId fixup = test_link.link.atoms.fixup_begin[atom];
             check_test_expect(test, test_link.link.fixups.target[fixup] == map[4] && link_fixup_addend(&test_link.link, fixup) == -17,
                               "static-data negative addend and local identity survive");
+            const AtomId undefined_atom = test_link.link.symbols.atom[map[8]];
+            const FixupId undefined_fixup = test_link.link.atoms.fixup_begin[undefined_atom];
+            check_test_expect(test, test_link.link.fixups.target[undefined_fixup] == map[7],
+                              "static-data undefined local reference resolves to its symbol");
+            check_test_expect(test, (test_link.link.symbols.flags[map[7]] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL,
+                              "static-data undefined internal-linkage reference publishes as a global");
+            check_test_expect(test, (test_link.link.symbols.flags[map[4]] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL,
+                              "static-data defined internal-linkage target keeps its local binding");
         }
     }
     check_data_test_close(&test_link);

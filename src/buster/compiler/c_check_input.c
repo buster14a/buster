@@ -205,6 +205,9 @@ struct CheckInputKrDiagnostic
 {
     uint32_t token;
     uint32_t warning;
+    // A definition diagnostic's body opening, where clang completes the warning when the function's checking does:
+    // its body's own diagnostics publish first, ahead of the same boundary's deferred and return ones (#992).
+    uint32_t body;
 };
 
 typedef struct CheckInput CheckInput;
@@ -1093,6 +1096,96 @@ static void check_input_warning_once(CheckInputReader* reader, const CheckWarnin
 
 #include "c_check_warning_queries.c"
 
+// A declaration's typedef-name specifier's own declaration, for a warning's type spelling (#992): scan the
+// declarator's name backward over its declarator and specifiers for the identifier that resolves to a typedef.
+// The scan may cross sibling declarators, their initializers and parameter commas — a declarator's own name and
+// `,`/`=` can sit between the name and the shared specifiers (`S a, *b`, `f(T x, U y)`) — while a `;`, `:`,
+// brace or group close cannot. `declaration` is the declaration's name token; 0 says its base was spelled
+// directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
+// then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
+static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t result = 0;
+    bool found = declaration < input->token_count;
+    for (uint32_t token = declaration; found && result == 0 && token > 0;)
+    {
+        token -= 1;
+        if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+        {
+            const uint32_t resolved = input->declarations != 0 ? input->declarations[token] : 0;
+            if (resolved != 0 && resolved != token && resolved < input->token_count && input->declaration_kinds != 0 &&
+                input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+            {
+                result = resolved;
+            }
+            // Any other identifier is a sibling declarator's or use's name: cross it for the shared specifiers.
+        }
+        else
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            const uint8_t role = parser->tree.roles[token];
+            found = kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE &&
+                    kind != PARSE_KIND_COLON && role != PARSE_ROLE_TERMINATOR &&
+                    role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
+        }
+    }
+    return result;
+}
+
+// The printed type and its typedef specifier's declaration for a warning operand that names `token`'s
+// declaration (#992): its declared type as written, with the qualifiers a conversion's type strips, and the
+// typedef's declaration or 0. `fallback` is the operand's own (converted) type where `token` names nothing, and
+// also where the declaration's type isn't that one's unqualified self (a member's lvalue names the object, not
+// the member: only the conversion type is right there). `declared` supplies the declaration's type where a
+// caller holds it — an INITIALIZE node's own graph type is its declaration's — and 0 takes `declared_types`'s.
+static TypeId check_input_object_spelling(const TypeTable* types, const CheckInput* input, const Parser* parser,
+                                          uint32_t token, TypeId declared, TypeId fallback, uint32_t* spelling)
+{
+    const uint32_t declaration = token < input->token_count && input->declarations != 0 ? input->declarations[token] : 0;
+    TypeId result = fallback;
+    *spelling = 0;
+    if (declared == 0 && declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count &&
+        input->declared_types != 0)
+    {
+        declared = input->declared_types[declaration];
+    }
+    if (type_is_valid(types, declared) && type_is_valid(types, fallback) &&
+        type_unqualified(type_strip_aligned(types, declared)) == type_unqualified(type_strip_aligned(types, fallback)))
+    {
+        result = declared;
+        // A declarationless token is still a scan start: an initializer's `=` reads its declaration's
+        // specifiers backward as the name's own token does.
+        *spelling = check_input_typedef_spelling(input, parser,
+                                                 declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
+                                                 declaration : token);
+    }
+    return result;
+}
+
+// One ordered-comparison operand's typedef-specifier declaration for its warning spelling (#992): the
+// BUSTER_CHECK_NONE sentinel where its expression was a sizeof/alignof — clang's `__size_t` there — else the
+// typedef naming its operand declaration's specifier, else 0. `node` is the operand's own graph node, from the
+// graph walk directly or `token_nodes` at an action's token.
+static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    uint32_t result = 0;
+    if (node < graph->count)
+    {
+        if (graph->ops[node] == CHECK_OP_SIZEOF || graph->ops[node] == CHECK_OP_ALIGNOF)
+        {
+            result = BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            const uint32_t token = graph->tokens[node];
+            result = token < reader->output->token_count && reader->output->declarations != 0 ?
+                     check_input_typedef_spelling(reader->output, reader->parser, reader->output->declarations[token]) : 0;
+        }
+    }
+    return result;
+}
+
 static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
                                       uint32_t first, uint32_t end, uint32_t completion)
 {
@@ -1101,6 +1194,23 @@ static void check_input_null_warning(CheckInputReader* reader, TypeId destinatio
     {
         event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
         event.payload.token = reader->warning_bound_open;
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// The same, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
+// shows (the declaration's written type, qualifiers kept) and `spelling` its typedef specifier's declaration,
+// or BUSTER_CHECK_NONE for `__size_t`, or 0 for no sugar.
+static void check_input_null_spelling(CheckInputReader* reader, TypeId destination, TypeId printed, uint32_t spelling,
+                                      const CheckValue* value, uint32_t first, uint32_t end, uint32_t completion)
+{
+    CheckWarningEvent event;
+    if (check_warning_null_event(reader->parser, reader->types, destination, value, first, end, completion, &event))
+    {
+        event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
+        event.payload.token = reader->warning_bound_open;
+        event.payload.first_type = printed != 0 ? printed : destination;
+        event.payload.data = spelling;
         check_input_warning_once(reader, &event);
     }
 }
@@ -1329,7 +1439,7 @@ static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t tok
 
 // Only source diagnostics that cannot be carried by a retained expression need this list. Type-only queries
 // may revisit a call; adjacent repetitions coalesce here, and the report collector coalesces by source token.
-static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, uint32_t warning)
+static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, uint32_t warning, uint32_t body)
 {
     CheckInput* input = reader->output;
     const uint32_t count = input->kr_diagnostic_count;
@@ -1358,7 +1468,7 @@ static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, 
         }
         if (!input->resource)
         {
-            input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning };
+            input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning, .body = body };
         }
     }
 }
@@ -3715,7 +3825,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                             .completion = after,
-                            .payload = { .first_type = value.type, .name = value.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                            // data: the member's typedef specifier's own declaration, or 0 — clang's 'S'
+                            // (aka 'struct S') spelling (#992).
+                            .payload = { .first_type = value.type, .name = value.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                         .data = check_input_typedef_spelling(reader->output, parser, members[member].token) },
                         };
                         valid = check_input_warning_event(reader, &event, NULL, 0);
                     }
@@ -4638,7 +4751,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (body < count)
                 {
-                    check_input_kr_diagnostic(reader, name, CHECK_WARNING_KR_DEFINITION);
+                    check_input_kr_diagnostic(reader, name, CHECK_WARNING_KR_DEFINITION, body);
                 }
                 valid = body < count && check_input_kr_declarations(reader, parameters, i, body);
                 uint32_t parameter_count = 0;

@@ -2,6 +2,36 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original CLI/source/system-policy controls. Clang independently supplies counts, status and the emission barrier.
 
+// The distinct diagnostic fragments whose publication order a fixture checks (#992): a K&R definition's warning
+// completes where the definition's checking does, after its body's own diagnostics and the lookahead past its
+// closing brace, ahead of the same boundary's deferred and return warnings.
+static void check_test_kr_sequence(const char* text, char* sequence, uint32_t capacity)
+{
+    static const char* const marks[] = {
+        "too many braces around scalar initializer",
+        "initializer overrides prior initialization",
+        "previous initialization is here",
+        "treated as a null pointer constant",
+        "non-void function does not return a value",
+        "without a prototype",
+        "too many arguments in call to",
+        "implicit declaration of function",
+    };
+    uint32_t used = 0;
+    for (const char* p = text; *p != 0 && used + 1 < capacity; p += 1)
+    {
+        for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(marks); m += 1)
+        {
+            if (strncmp(p, marks[m], strlen(marks[m])) == 0)
+            {
+                sequence[used++] = (char)('A' + m);
+                break;
+            }
+        }
+    }
+    sequence[used] = 0;
+}
+
 static void check_test_driver_kr_policy(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char definition[] = "int f(a)int a;{return a;}\n";
@@ -38,6 +68,12 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
         { definition, "-Wno-system-headers", "-Wsystem-headers", true, 1, 0 },
         { "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n", "-Wsystem-headers", NULL, true, 0, 1 },
         { "int f();int g(void){return f(1);}\n", "-Werror", NULL, false, 0, 1 },
+        // #992: the body warnings of a K&R definition precede its deprecated-non-prototype warning, which the
+        // same boundary's -Wreturn-type follows.
+        { "int f(a)int a;{int x={{1}};return x+a;}\n", NULL, NULL, false, 2, 0 },
+        { "int f(a)int a;{int b[2]={1,2,[0]=3};return b[0]+a;}\n", NULL, NULL, false, 2, 0 },
+        { "struct P{int *q;};struct P g(b)int b;{struct P p={1-1};return p;}\n", NULL, NULL, false, 2, 0 },
+        { "struct S{long a,b;};struct S h(c)int c;{int x={{1}};}\n", NULL, NULL, false, 3, 0 },
         { arity, "-Wno-deprecated-non-prototype", NULL, false, 1, 0 },
         { arity, "-Werror", NULL, false, 0, 1 },
         { "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}int g(void){return sizeof((&f)(1,2));}\n", "-Werror", NULL, false, 0, 1 },
@@ -76,6 +112,8 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
             const bool deprecated = expected != NULL && strstr(expected, "without a prototype") != NULL;
             const bool arity_warning = expected != NULL && strstr(expected, "too many arguments") != NULL;
             const bool return_warning = expected != NULL && strstr(expected, "non-void function") != NULL;
+            char expected_order[64];
+            check_test_kr_sequence(expected != NULL ? expected : "", expected_order, sizeof(expected_order));
             check_test_expect(test, oracle == (cases[c].errors != 0) && expected != NULL &&
                               check_test_implicit_count(expected, ": warning:") == cases[c].warnings &&
                               check_test_implicit_count(expected, ": error:") == cases[c].errors &&
@@ -105,6 +143,10 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
                                   (strstr(actual, "non-void function") != NULL) == return_warning, description);
                 check_test_expect(test, mode == 0 || (access(objects[scalar], F_OK) == 0) == (status == 0),
                                   "K&R warning promotion blocks object publication and permitted warnings retain emission");
+                char actual_order[64];
+                check_test_kr_sequence(actual != NULL ? actual : "", actual_order, sizeof(actual_order));
+                check_test_expect(test, strcmp(expected_order, actual_order) == 0,
+                                  "K&R policy case diagnostics publish in Clang's order (#992)");
                 free(actual);
             }
             free(expected);
