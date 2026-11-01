@@ -316,10 +316,13 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 //   - in an opmask register's field (a K field: reg, vvvv or rm): MASK(j), mask operand j's register (#179), which holds
 //     it when the records start; MASK_RESULT, the mask result's, which holds it when they end; MASK_SCRATCH(k), a free
 //     one (0 to 3); and in EVEX's opmask decoration (decorations' bits 0 to 2) MASK(j) and MASK_SCRATCH(k) by
-//     BUSTER_TIER0_DECORATION_MASK(j) and BUSTER_TIER0_DECORATION_MASK_SCRATCH(k), whose bits 3 and 4 a placed record has
-//     zero. The roles are k1 to k7, the mask stack's (tier0_operation_mask_plan): a row with a mask operand or
-//     result names its opmask registers by role, or k0, which no value takes. Any other row may name them by number,
-//     k0 to k7, as its scratch, and Tier 0 saves around it the masks the ones it names hold (tier0_emit_operation).
+//     BUSTER_TIER0_DECORATION_MASK(j) and BUSTER_TIER0_DECORATION_MASK_SCRATCH(k), in bits 3 and 4, which every 64-bit
+//     mode record has zero: a segment override is theirs only in 16- and 32-bit modes (BUSTER_X86_DECORATION_SEGMENT),
+//     and Tier 0's code is 64-bit mode's, whose FS and GS overrides are a form's (BUSTER_X86_FORM_FS and _GS), which no
+//     row has (tier0_operation_form_valid). Placing a record clears them and keeps the rest: zeroing, and an _ER form's
+//     rounding in bits 5 and 6. The roles are k1 to k7, the mask stack's (tier0_operation_mask_plan): a row with a mask
+//     operand or result names its opmask registers by role, or k0, which no value takes. Any other row may name them by
+//     number, k0 to k7, as its scratch, and Tier 0 saves around it the masks the ones it names hold (tier0_emit_operation).
 // Each form is a VEX or an EVEX one with its operands in its fields alone, without a branch, a symbol or another class of
 // register (tier0_operation_valid), so that a row reads and writes its operands, its result, its scratch registers, the
 // opmask registers and memory through its addresses, and nothing else. The VECTOR registers are the floating stack's free
@@ -363,7 +366,7 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
 #define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
-// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
+// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes; the mask stack's too (#179).
 #define BUSTER_TIER0_MAX_DEPTH 240
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS (BUSTER_TIER0_MAX_DEPTH - 1)
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
@@ -567,7 +570,8 @@ typedef enum Tier0Error
     TIER0_OK,
     // An entry no template or deferred emitter covers yet: `node` names it.
     TIER0_ERROR_UNSUPPORTED,
-    // A stack deeper than the deep slots take (BUSTER_TIER0_MAX_DEPTH, tier0_select_deep).
+    // A stack deeper than the deep slots take (BUSTER_TIER0_MAX_DEPTH, tier0_select_deep), the mask stack's among them
+    // (tier0_mask_depths_scalar).
     TIER0_ERROR_DEPTH,
     // The output arena or the scratch arena has no room.
     TIER0_ERROR_MEMORY,
@@ -3236,7 +3240,8 @@ struct Tier0Entries
     uint8_t* deep_depths;
     uint8_t* deep_floating_depths;
     // The mask stack (#179), 0 in a function without masks: each entry's depth before it (tier0_vector_mask_depths and
-    // tier0_mask_depths_scalar), and the most masks any entry leaves or finds on it.
+    // tier0_mask_depths_scalar), below BUSTER_TIER0_MAX_DEPTH as the other stacks' (both refuse a deeper one), and the
+    // most masks any entry leaves or finds on it.
     uint8_t* mask_depths;
     uint32_t mask_top;
 };
@@ -3680,19 +3685,21 @@ static int32_t tier0_mask_effect(const Tier0Function* function, uint32_t i)
 
 // The mask stack's depth before each entry (Tier0Entries.mask_depths), its effects' exclusive prefix sum, and the most
 // masks on it at once (mask_top), for a function with masks: tier0_vector_mask_depths' twin. Both paths make it after
-// phase 2, as a column of its own, so that a function without masks counts nothing for them.
-static void tier0_mask_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
+// phase 2, as a column of its own, so that a function without masks counts nothing for them. Returns TIER0_OK, or
+// TIER0_ERROR_DEPTH where an entry finds BUSTER_TIER0_MAX_DEPTH masks or more, as tier0_select_deep refuses the other
+// stacks: the column's bytes would wrap past 255 (a depth of 256 read as 0, its slot and register the first mask's).
+static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
 {
     int32_t depth = 0;
-    int32_t top = 0;
+    int32_t deepest = 0;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         entries->mask_depths[i] = (uint8_t)depth;
-        top = depth > top ? depth : top;
+        deepest = depth > deepest ? depth : deepest;
         depth += tier0_mask_effect(function, i);
     }
-    top = depth > top ? depth : top;
-    entries->mask_top = (uint32_t)top;
+    entries->mask_top = (uint32_t)(depth > deepest ? depth : deepest);
+    return deepest >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -9538,7 +9545,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
         }
         if (error == TIER0_OK && function->masks)
         {
-            tier0_mask_depths_scalar(function, &entries);
+            error = tier0_mask_depths_scalar(function, &entries);
         }
         error = error == TIER0_OK ? tier0_generate(function, &entries, scratch.arena, output, &code, false) : error;
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
@@ -9723,14 +9730,15 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_UWRMSR_R64_R64,
 };
 
-// Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
-// branch, whose syntax names its operands (or that has none: TILERELEASE, and VZEROUPPER and VZEROALL, which the effects
-// keep out), that has a vector or an opmask operand when it is EVEX (APX's forms of general registers alone are a
-// target's that Tier 0 doesn't take), and whose effects (x86_semantics.c's, #760) touch nothing its syntax doesn't name:
-// a covered form without implicit registers (mulx's rdx) or vzeroupper's every vector register. A form the tables don't
-// cover has the conservative record, whose registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the
-// string compares (rax, rcx, rdx and xmm0) among them. Or one of tier0_operation_legacy_forms. Requires
-// x86_semantics_initialize, as tier0_compile does.
+// Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override (below
+// X86_FORM_COUNT: without BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS, the only ones 64-bit mode has; a 64-bit-mode
+// record's decorations have none), a symbol or a branch, whose syntax names its operands (or that has none:
+// TILERELEASE, and VZEROUPPER and VZEROALL, which the effects keep out), that has a vector or an opmask operand when it
+// is EVEX (APX's forms of general registers alone are a target's that Tier 0 doesn't take), and whose effects
+// (x86_semantics.c's, #760) touch nothing its syntax doesn't name: a covered form without implicit registers (mulx's
+// rdx) or vzeroupper's every vector register. A form the tables don't cover has the conservative record, whose
+// registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the string compares (rax, rcx, rdx and xmm0)
+// among them. Or one of tier0_operation_legacy_forms. Requires x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
     bool valid = form < X86_FORM_COUNT;
@@ -9809,7 +9817,9 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
 }
 
 // Whether a record's opmask decoration is a number, k0 to k7, or a role a row may have there (#179): MASK(j) of a mask
-// operand j, or MASK_SCRATCH(k).
+// operand j, or MASK_SCRATCH(k), by bits 3 and 4 (BUSTER_TIER0_DECORATION_ROLE: one of them, or neither for a number),
+// which no segment override has in 64-bit mode. Its other bits are x86_validate's once the role is placed: bit 5, which
+// the 16- and 32-bit modes' FS and GS overrides set, is rounding's in 64-bit mode, of an _ER form alone.
 static bool tier0_operation_decoration_valid(const Tier0Operation* operation, uint32_t decorations)
 {
     const uint32_t index = decorations & BUSTER_X86_DECORATION_MASK;
@@ -11382,8 +11392,11 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
 
 // tier0_mask_depths_scalar's twin, 64 entries at a time: each entry's effect from its shape's codes
 // (tier0_vector_shapes) and the classes, as P1 makes the other stacks' raw effects, an X86 entry's from its row (they are
-// few, as calls are), and the depths their exclusive prefix sums, as P4 makes the others'.
-static void tier0_vector_mask_depths(const Tier0Function* function, Tier0Entries* entries)
+// few, as calls are), and the depths their exclusive prefix sums, as P4 makes the others'. Its sums are bytes, the
+// depths modulo 256 (a block's own sum among them, which rows of many masks take past an int8's range), exact while the
+// depths stay below 256; and since an entry pushes one mask at most, the first entry that finds BUSTER_TIER0_MAX_DEPTH
+// masks or more finds exactly that many, so that the highest of the bytes refuses what the twin refuses.
+static Tier0Error tier0_vector_mask_depths(const Tier0Function* function, Tier0Entries* entries)
 {
     const uint32_t count = function->count;
     const __m512i one = _mm512_set1_epi8(1);
@@ -11445,12 +11458,14 @@ static void tier0_vector_mask_depths(const Tier0Function* function, Tier0Entries
         _mm512_reduce_max_epu32(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(highest, 2))),
         _mm512_reduce_max_epu32(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(highest, 3))),
     };
-    uint32_t top = (uint8_t)depth;
+    uint32_t deepest = 0;
     for (uint32_t quarter = 0; quarter < 4; quarter += 1)
     {
-        top = quarters[quarter] > top ? quarters[quarter] : top;
+        deepest = quarters[quarter] > deepest ? quarters[quarter] : deepest;
     }
-    entries->mask_top = top;
+    const uint32_t last = (uint8_t)depth;
+    entries->mask_top = last > deepest ? last : deepest;
+    return deepest >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
 }
 
 // A template's word (a slot's adds HOME_DEPENDENT and HOME_UNIFORM, in tier0_build_words).
@@ -12137,7 +12152,7 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
         }
         if (error == TIER0_OK && function->masks)
         {
-            tier0_vector_mask_depths(function, &entries);
+            error = tier0_vector_mask_depths(function, &entries);
         }
         error = error == TIER0_OK ? tier0_generate(function, &entries, scratch.arena, output, &code, true) : error;
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
@@ -12355,10 +12370,10 @@ static const uint8_t tier0_scan_sides[BUSTER_TYPED_KIND_LIMIT] __attribute__((al
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SIDE_TRANSFER,
 };
 
-// Masks of classes, a bit per class: every class but the vectors' (which the vector path leaves to the scalar validator),
-// every one with a value, those without the memory classes, the integers, the widths arithmetic takes (4 bytes and more),
-// those division takes (no 128-bit integers), remainder's and the bitwise operations' (integers, and the 128-bit ones
-// but for remainder), NOT's, PTR_ADD's index's, and single classes.
+// Masks of classes, a bit per class: every class but the vectors' and the masks' (which the vector path leaves to the
+// scalar validator), every one with a value, those without the memory classes, the integers, the widths arithmetic
+// takes (4 bytes and more), those division takes (no 128-bit integers), remainder's and the bitwise operations'
+// (integers, and the 128-bit ones but for remainder), NOT's, PTR_ADD's index's, and single classes.
 #define BUSTER_TIER0_CLASSES_ALL 0x3fff
 #define BUSTER_TIER0_CLASSES_VALUES 0x3ffe
 #define BUSTER_TIER0_CLASSES_SCALARS 0x07fe

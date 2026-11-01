@@ -12,9 +12,13 @@
 //     the rows of tier0_test_mask_row (by role, with scratch registers, from and to integers, and by number), against
 //     this file's own stack machine over the same stream (tier0_test_mask_model) and, for the programs without rows or
 //     objects, which interpreter.c doesn't model, the typed interpreter's (#176);
-//   - fixtures: a zero-masked vector move whose decoration is a mask role, under no live mask and under seven (a row
-//     past the registers, which borrows them), against C;
-//   - the rules: each break of the class's refused by tier0_validate, and its valid neighbours taken.
+//   - fixtures: a zero-masked vector move whose decoration is a mask role, and a vaddps rounding down beside one (the
+//     decoration a 16- or 32-bit mode record would read as FS's override), each under no live mask and under seven (a row
+//     past the registers, which borrows them), against C; and the mask stack's bound (BUSTER_TIER0_MAX_DEPTH): 239 masks
+//     live at once compiled alike and run against C and the interpreter, 240, 256 and 257 refused alike, and rows that
+//     take a block of 64 entries more masks lower than an int8 holds;
+//   - the rules: each break of the class's refused by tier0_validate, and its valid neighbours taken, the 16- and 32-bit
+//     modes' segment overrides' bits as decorations, and 64-bit mode's FS and GS forms, among them.
 // main.c includes it after interpreter_test.c, whose interpreter it runs; tier0_test.c calls it (tier0_test_masks).
 
 #define BUSTER_TIER0_TEST_MASK_SLOTS 16
@@ -1096,6 +1100,268 @@ static void tier0_test_mask_decoration(Tier0TestTally* tally, uint32_t live, boo
     free(program);
 }
 
+// An _ER form's rounding beside a mask role: vaddps of two 64-byte vectors of the inputs, rounding down, its lanes
+// zeroed where a 16-bit mask's bits are clear, by the decoration 0xa8: zeroing, MASK(0) and bit 5, which a 16- or 32-bit
+// mode record would read as FS's override, and which in 64-bit mode's is rounding's, kept as the role is placed and so
+// encoded as {rd-sae}. The sums are of 1 + j ulps and j mod 4 quarters of one, which rounding down leaves at 1 + j ulps
+// and rounding to nearest takes up from three quarters (lanes 3 and 15 of the mask's). Under `live` masks loaded first
+// (seven: the row's mask past the registers, which borrows k1), dropped after.
+static void tier0_test_mask_rounding(Tier0TestTally* tally, uint32_t live, bool host, Arena* arena)
+{
+    _Static_assert((BUSTER_X86_ROUND_DOWN | BUSTER_TIER0_DECORATION_MASK(0)) == BUSTER_X86_SEGMENT_OVERRIDE(4),
+                   "FS's override (segment 4) in 16- and 32-bit modes' decorations is MASK(0) and rounding down in 64-bit mode's");
+    static Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    row.record_count = 1;
+    row.records[0] = tier0_test_mask_record(X86_FORM_VADDPS_Z_Z_Z_ER, BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(1), BUSTER_TIER0_ROLE_VECTOR(2));
+    row.records[0].decorations = (uint8_t)(BUSTER_X86_DECORATION_ZEROING | BUSTER_X86_SEGMENT_OVERRIDE(4));
+    row.operand_count = 3;
+    row.operand_classes[0] = BUSTER_TYPED_CLASS_MASK;
+    row.operand_bytes[0] = 2;
+    row.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+    row.operand_bytes[1] = 64;
+    row.operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+    row.operand_bytes[2] = 64;
+    row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+    row.result_bytes = 64;
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint8_t* image = malloc(BUSTER_TIER0_TEST_MASK_CODE);
+    if (program != 0 && image != 0)
+    {
+        program->count = 0;
+        program->overflow = false;
+        for (uint32_t k = 0; k < live; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_MASK, 2);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_TEST_MASK_OUT);
+        tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, 8);
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_MASK, 2);
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_TEST_MASK_IN);
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 64);
+        tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, 16);
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 64);
+        tier0_test_mask_emit(program, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, 0);
+        tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, 64);
+        if (live != 0)
+        {
+            tier0_test_mask_emit(program, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_MASK, 0);
+        }
+        for (uint32_t k = 0; k < live + (live != 0 ? 1u : 0u); k += 1)
+        {
+            tier0_test_mask_emit(program, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_MASK, 0);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        program->objects = false;
+        Tier0Function function = tier0_test_mask_function(program);
+        function.operations = &row;
+        function.operation_count = 1;
+        char name[64];
+        snprintf(name, sizeof(name), "rounding under %u masks", live);
+        const uint32_t length = tier0_test_mask_build(tally, name, &function, 1, arena, image);
+        // The placed decoration: the role's bits gone, zeroing and bit 5 kept, the mask's register (k1, at depth 0 or
+        // borrowed past k7) in bits 0 to 2.
+        const uint64_t mark = arena->length;
+        const Tier0Code code = length != 0 ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+        uint32_t found = 0;
+        for (uint32_t r = 0; code.error == TIER0_OK && r < code.count; r += 1)
+        {
+            const X86Instruction* record = &code.records[r];
+            found += record->form == X86_FORM_VADDPS_Z_Z_Z_ER && record->decorations == (BUSTER_X86_DECORATION_ZEROING | BUSTER_X86_ROUND_DOWN | 1) ? 1u : 0u;
+        }
+        tier0_test_expect(tally, code.error == TIER0_OK && found == 1, "masks", "%s: %u vaddps records with zeroing, rounding down and k1 (%d)", name, found, code.error);
+        arena_pop_to(arena, mark);
+        Tier0TestMaskShared shared;
+        memset(&shared, 0, sizeof(shared));
+        uint32_t a[16];
+        uint32_t b[16];
+        uint32_t sums[16];
+        for (uint32_t j = 0; j < 16; j += 1)
+        {
+            // 1 + j ulps of 1.0f, and (j mod 4) quarters of an ulp: 0, 2^-25, 2^-24 and 3 * 2^-25.
+            static const uint32_t quarters[4] = { 0, 0x33000000u, 0x33800000u, 0x33c00000u };
+            a[j] = 0x3f800000u + j;
+            b[j] = quarters[j & 3];
+        }
+        memcpy(shared.in, a, sizeof(a));
+        memcpy(shared.in + 16, b, sizeof(b));
+        shared.in[8] = 0xa53c;
+        for (uint32_t j = 0; j < 16; j += 1)
+        {
+            sums[j] = ((shared.in[8] >> j) & 1) != 0 ? a[j] : 0;
+        }
+        if (length != 0 && host)
+        {
+            memset(shared.out, 0xa5, sizeof(shared.out));
+            const bool native = tier0_test_expect(tally, tier0_test_mask_native(image, length, &shared), "masks", "%s: the native run failed", name);
+            tier0_test_expect(tally, native && memcmp(shared.out, sums, sizeof(sums)) == 0, "masks", "%s: the sums aren't rounded down", name);
+        }
+    }
+    free(image);
+    free(program);
+}
+
+// The mask stack's bound, BUSTER_TIER0_MAX_DEPTH as the other stacks': `masks` constants converted to masks of 8 bytes,
+// all live at once, then XORed into one, converted back and stored into the outputs' slot 0. Both paths compile it into
+// the same code while the stack stays below the bound (239 masks: the first XOR finds 239), which runs natively and in
+// the typed interpreter to C's XOR; and both refuse it, TIER0_ERROR_DEPTH, from 240 masks on, past which the depth
+// column's bytes would wrap (256 and 257 among them: a depth of 256 would read as 0, the first mask's place).
+static void tier0_test_mask_bound(Tier0TestTally* tally, bool host, Arena* arena)
+{
+    static const uint32_t stacks[] = { 8, BUSTER_TIER0_MAX_DEPTH - 1, BUSTER_TIER0_MAX_DEPTH, 256, 257 };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint8_t* image = malloc(BUSTER_TIER0_TEST_MASK_CODE);
+    for (uint32_t s = 0; program != 0 && image != 0 && s < BUSTER_ARRAY_LENGTH(stacks); s += 1)
+    {
+        const uint32_t masks = stacks[s];
+        program->count = 0;
+        program->overflow = false;
+        program->objects = false;
+        uint64_t state = 0x1024u + masks;
+        uint64_t expected = 0;
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_TEST_MASK_OUT);
+        for (uint32_t m = 0; m < masks; m += 1)
+        {
+            const uint64_t constant = tier0_test_mask_random(&state);
+            expected ^= constant;
+            tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, constant);
+            tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, 8);
+        }
+        for (uint32_t m = 1; m < masks; m += 1)
+        {
+            tier0_test_mask_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_MASK, 8);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 8);
+        tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        const Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        char name[64];
+        snprintf(name, sizeof(name), "%u masks at once", masks);
+        const Tier0Check check = tier0_validate(&functions[0]);
+        const bool valid = tier0_test_expect(tally, !program->overflow && check.error == TIER0_OK, "masks", "%s: refused (rule \"%s\" at %u)", name,
+                                             check.rule != 0 ? check.rule : "", check.node);
+        if (valid && masks < BUSTER_TIER0_MAX_DEPTH)
+        {
+            const uint32_t length = tier0_test_mask_build(tally, name, functions, 1, arena, image);
+            Tier0TestMaskShared shared;
+            memset(&shared, 0, sizeof(shared));
+            if (length != 0 && host)
+            {
+                memset(shared.out, 0xa5, sizeof(shared.out));
+                const bool native = tier0_test_expect(tally, tier0_test_mask_native(image, length, &shared), "masks", "%s: the native run failed", name);
+                tier0_test_expect(tally, native && memcmp(shared.out, &expected, sizeof(expected)) == 0, "masks", "%s: the XOR differs from C's", name);
+            }
+            const uint64_t mark = arena->length;
+            memset(shared.out, 0xa5, sizeof(shared.out));
+            const bool interpreted = tier0_test_mask_interpret(functions, shared.in, shared.out, arena);
+            tier0_test_expect(tally, interpreted && memcmp(shared.out, &expected, sizeof(expected)) == 0, "masks", "%s: the interpreter's XOR differs from C's", name);
+            arena_pop_to(arena, mark);
+        }
+        else if (valid)
+        {
+            const uint64_t mark = arena->length;
+            const Tier0Code scalar = tier0_compile_scalar(&functions[0], arena);
+            const Tier0Code vector = tier0_compile(&functions[0], arena);
+            tier0_test_expect(tally, scalar.error == TIER0_ERROR_DEPTH && tier0_test_same_code(&scalar, &vector), "masks",
+                              "%s: the paths give %d and %d, not TIER0_ERROR_DEPTH", name, scalar.error, vector.error);
+            arena_pop_to(arena, mark);
+        }
+    }
+    free(image);
+    free(program);
+}
+
+// And the vector path's byte sums past an int8's range: 239 masks summed by rows of seven mask operands (kaddq into the
+// first one's register: six masks fewer an entry, so that the block of entries 448 to 511, 16 conversions and 33 rows,
+// ends 182 masks below its start) down to five, then XORed into one, converted and stored. Both paths' depths, the
+// vector path's sums of bytes modulo 256, must give the same code, and the native run C's value.
+static void tier0_test_mask_sums(Tier0TestTally* tally, bool host, Arena* arena)
+{
+    static Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    row.operand_count = 7;
+    for (uint32_t j = 0; j < 7; j += 1)
+    {
+        row.operand_classes[j] = BUSTER_TYPED_CLASS_MASK;
+        row.operand_bytes[j] = 8;
+    }
+    row.result_class = BUSTER_TYPED_CLASS_MASK;
+    row.result_bytes = 8;
+    row.records[0] = tier0_test_mask_record(X86_FORM_KADDQ_K_K_K, BUSTER_TIER0_ROLE_MASK_RESULT, BUSTER_TIER0_ROLE_MASK(0), BUSTER_TIER0_ROLE_MASK(1));
+    for (uint32_t j = 2; j < 7; j += 1)
+    {
+        row.records[j - 1] = tier0_test_mask_record(X86_FORM_KADDQ_K_K_K, BUSTER_TIER0_ROLE_MASK_RESULT, BUSTER_TIER0_ROLE_MASK_RESULT, (uint8_t)BUSTER_TIER0_ROLE_MASK(j));
+    }
+    row.record_count = 6;
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint8_t* image = malloc(BUSTER_TIER0_TEST_MASK_CODE);
+    if (program != 0 && image != 0)
+    {
+        program->count = 0;
+        program->overflow = false;
+        program->objects = false;
+        // The model: the stack of the masks' values, from the bottom.
+        uint64_t stack[BUSTER_TIER0_MAX_DEPTH];
+        uint32_t top = 0;
+        uint64_t state = 0x7e57u;
+        tier0_test_mask_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_TEST_MASK_OUT);
+        for (uint32_t m = 0; m < BUSTER_TIER0_MAX_DEPTH - 1; m += 1)
+        {
+            stack[top] = tier0_test_mask_random(&state);
+            tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, stack[top]);
+            tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, 8);
+            top += 1;
+        }
+        while (top > 5)
+        {
+            uint64_t sum = 0;
+            for (uint32_t j = 0; j < 7; j += 1)
+            {
+                sum += stack[top - 7 + j];
+            }
+            top -= 6;
+            stack[top - 1] = sum;
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_MASK, 0);
+        }
+        while (top > 1)
+        {
+            stack[top - 2] ^= stack[top - 1];
+            top -= 1;
+            tier0_test_mask_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_MASK, 8);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 8);
+        tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        Tier0Function function = tier0_test_mask_function(program);
+        function.operations = &row;
+        function.operation_count = 1;
+        // What the fixture is for: a block of 64 entries whose effects come to less than an int8 holds.
+        int32_t lowest = 0;
+        for (uint32_t first = 0; first < function.count; first += 64)
+        {
+            int32_t sum = 0;
+            for (uint32_t i = first; i < function.count && i < first + 64; i += 1)
+            {
+                sum += tier0_mask_effect(&function, i);
+            }
+            lowest = sum < lowest ? sum : lowest;
+        }
+        tier0_test_expect(tally, !program->overflow && lowest < INT8_MIN, "masks", "sums of rows of seven masks: no block's sum is past an int8's (%d)", lowest);
+        const uint32_t length = tier0_test_mask_build(tally, "sums of rows of seven masks", &function, 1, arena, image);
+        if (length != 0 && host)
+        {
+            Tier0TestMaskShared shared;
+            memset(&shared, 0, sizeof(shared));
+            memset(shared.out, 0xa5, sizeof(shared.out));
+            const bool native = tier0_test_expect(tally, tier0_test_mask_native(image, length, &shared), "masks", "sums of rows of seven masks: the native run failed");
+            tier0_test_expect(tally, native && memcmp(shared.out, &stack[0], sizeof(stack[0])) == 0, "masks", "sums of rows of seven masks: the value differs from C's");
+        }
+    }
+    free(image);
+    free(program);
+}
+
 // The class's rules: each break refused by tier0_validate (with its rule's words), and a valid neighbour taken. Each case
 // is a statement of the program's function (or the callee's) changed in one place.
 typedef struct Tier0TestMaskRule Tier0TestMaskRule;
@@ -1230,6 +1496,54 @@ static void tier0_test_mask_rules(Tier0TestTally* tally)
         decorated.records[0].decorations = decorations[d];
         tier0_test_expect(tally, tier0_operation_valid(&decorated) == (d < 2), "mask rules", "decoration %02x: %s", decorations[d], d < 2 ? "refused" : "taken");
     }
+    // The 16- and 32-bit modes' segment overrides as decorations (BUSTER_X86_SEGMENT_OVERRIDE of segments ES = 0 to
+    // GS = 5), which no 64-bit-mode record has: there bits 3 and 4 are the roles' and bit 5 rounding's. On the row above,
+    // whose operand 0 is a vector: CS's bits (MASK_SCRATCH(0)) taken; ES's and FS's (MASK(0), FS's with bit 5) of a
+    // vector operand, SS's (both roles' bits), and DS's and GS's (bit 5: rounding, on a form without it) refused.
+    for (uint32_t segment = 0; segment < 6; segment += 1)
+    {
+        decorated.records[0].decorations = (uint8_t)BUSTER_X86_SEGMENT_OVERRIDE(segment);
+        tier0_test_expect(tally, tier0_operation_valid(&decorated) == (segment == 1), "mask rules", "segment %u's override's bits as a decoration: %s", segment,
+                          segment == 1 ? "refused" : "taken");
+    }
+    // 64-bit mode's own overrides, FS's and GS's forms (BUSTER_X86_FORM_FS and _GS), refused on a zero-masked load that a
+    // row takes without them, and that the encoder takes with them.
+    static Tier0Operation load;
+    memset(&load, 0, sizeof(load));
+    load.record_count = 1;
+    load.records[0] = tier0_test_mask_record(X86_FORM_VMOVDQU32_Z_ZM512, BUSTER_TIER0_ROLE_VECTOR(0), 0, BUSTER_TIER0_ROLE_INTEGER(0));
+    load.records[0].mode = BUSTER_X86_MEMORY_BASE;
+    load.records[0].decorations = (uint8_t)(BUSTER_X86_DECORATION_ZEROING | BUSTER_TIER0_DECORATION_MASK(1));
+    load.operand_count = 2;
+    load.operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+    load.operand_classes[1] = BUSTER_TYPED_CLASS_MASK;
+    load.operand_bytes[1] = 2;
+    load.result_class = BUSTER_TYPED_CLASS_VECTOR;
+    load.result_bytes = 64;
+    tier0_test_expect(tally, tier0_operation_valid(&load), "mask rules", "a zero-masked load: refused");
+    for (uint32_t g = 0; g < 2; g += 1)
+    {
+        const uint32_t segment = g == 0 ? BUSTER_X86_FORM_FS : BUSTER_X86_FORM_GS;
+        Tier0Operation segmented = load;
+        segmented.records[0].form = (uint16_t)(X86_FORM_VMOVDQU32_Z_ZM512 + segment);
+        X86Instruction encodable = segmented.records[0];
+        encodable.reg = 0;
+        encodable.rm = X86_REGISTER_RSI;
+        encodable.decorations = (uint8_t)(BUSTER_X86_DECORATION_ZEROING | 1);
+        tier0_test_expect(tally, x86_validate(&encodable, 1) == 1 && !tier0_operation_valid(&segmented), "mask rules",
+                          "a zero-masked load with %s's override: refused by the encoder, or taken by a row", g == 0 ? "FS" : "GS");
+    }
+    // The encoder's rule the roles' bits rest on (X86Instruction.decorations): in 64-bit mode, every form a row may have
+    // takes no decoration with bit 3 or 4, as its checks (x86_template_checks') say.
+    uint32_t forms = 0;
+    uint32_t taking = 0;
+    for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+    {
+        const bool row = tier0_operation_form_valid(form);
+        forms += row ? 1u : 0u;
+        taking += row && ((x86_template_checks(x86_form_description(form)) >> 24) & BUSTER_TIER0_DECORATION_ROLE) != BUSTER_TIER0_DECORATION_ROLE ? 1u : 0u;
+    }
+    tier0_test_expect(tally, forms != 0 && taking == 0, "mask rules", "%u of a row's %u forms take decorations' bit 3 or 4 in 64-bit mode", taking, forms);
 }
 
 static void tier0_test_masks(Tier0TestTally* tally, uint64_t seed, uint32_t count, uint64_t* entries)
@@ -1242,6 +1556,10 @@ static void tier0_test_masks(Tier0TestTally* tally, uint64_t seed, uint32_t coun
     {
         tier0_test_mask_decoration(tally, 0, host, &arena);
         tier0_test_mask_decoration(tally, 7, host, &arena);
+        tier0_test_mask_rounding(tally, 0, host, &arena);
+        tier0_test_mask_rounding(tally, 7, host, &arena);
+        tier0_test_mask_bound(tally, host, &arena);
+        tier0_test_mask_sums(tally, host, &arena);
         tier0_test_mask_programs(tally, seed, count, host, &arena, entries);
     }
     arena_release(&arena);
