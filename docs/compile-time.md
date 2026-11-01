@@ -888,11 +888,13 @@ What changed:
   ([the encoder's design](x86-64-encoder.md), "Templates and the canonical
   slot"). Each entry's marked copy is written as the entry is completed.
 - **The template tables get huge pages.** Before the build, the encoder asks
-  for huge pages over the two or three 2 MB pages a table's bytes fall in
-  (`MADV_HUGEPAGE`) and commits the ranges it writes (`MADV_POPULATE_WRITE`).
-  That is a fault per huge page where huge pages come, and base pages
-  committed in one call each where they don't.
-  - These are the pages a kernel that uses huge pages `always` gives the table.
+  for huge pages (`MADV_HUGEPAGE`) and commits the ranges it writes
+  (`MADV_POPULATE_WRITE`).
+  - It asks only for the 2 MB pages the table fills at least 750 KB of
+    (`lane.c`'s measured break-even). Its bytes fall in two or three, and that
+    is usually two of them.
+  - That is a fault per huge page where huge pages come, and base pages
+    committed in one call each for the rest, or where none come.
   - A 2 MB margin on either side keeps them in the table's own storage, adding
     address space, not memory.
   - The storage isn't aligned to a huge page, because wild 0.10, which links
@@ -907,29 +909,30 @@ What changed:
 Objects are the same bytes: the 220 programs of c-testsuite's subset,
 `hello.c`, and the compiler's own `main.c` (39 MB), all compiled with `-c` by
 both builds. The encoder's loops are unchanged. Measured on the same VM against
-`91cfe9e0`, with tcc 0.9.27 (Ubuntu's) as the reference:
+`91cfe9e0`, both builds linked by wild 0.10.0 as CI links them, with tcc 0.9.27
+(Ubuntu's) as the reference:
 
 | input | THP | `91cfe9e0` | this change | tcc |
 | --- | --- | ---: | ---: | ---: |
-| `hello.c`, `measure-compile --runs 31`, two rounds | `madvise` | 14.2, 14.5 ms | 12.6, 11.9 ms | 3.4 to 3.9 ms |
-| `hello.c`'s `backend-setup` | `madvise` | 4.5, 4.2 ms (1,132 faults) | 2.4, 2.8 ms (354) | |
-| `hello.c`, `measure-compile --runs 31`, two rounds | disabled | 14.0, 14.4 ms | 11.6, 12.8 ms | |
-| `hello.c`'s `backend-setup` | disabled | 4.1, 4.4 ms | 2.7, 2.8 ms | |
-| c-testsuite's 220, best of 3 each, mean | `madvise` | 10.31 ms | 8.16 ms | 2.25 ms |
-| c-testsuite's 220, best of 3 each, mean | disabled | 10.51 ms | 9.06 ms | 2.24 ms |
-| `main.c -c`, median of 7 | `madvise` | 8.2 s | 8.1 s | |
+| `hello.c`, `measure-compile --runs 31`, two rounds | `madvise` | 11.7, 14.0 ms | 10.1, 11.0 ms | 3.1 to 3.8 ms |
+| `hello.c`'s `backend-setup` | `madvise` | 3.4, 4.3 ms (1,132 faults) | 2.4, 2.1 ms (426) | |
+| `hello.c`, `measure-compile --runs 31`, two rounds | disabled | 12.1, 13.0 ms | 11.7, 10.4 ms | |
+| `hello.c`'s `backend-setup` | disabled | 4.1, 3.5 ms | 2.6, 2.7 ms | |
+| c-testsuite's 220, best of 3 each, mean | `madvise` | 9.80 ms | 8.36 ms | 2.23 ms |
+| c-testsuite's 220, best of 3 each, mean | disabled | 9.58 ms | 8.77 ms | |
+| `main.c -c`, median of 5 | `madvise` | 7.87 s | 7.74 s | |
 
 - **The THP column.** "Disabled" is a process's `PR_SET_THP_DISABLE`, which
   its children inherit; it stands in for a kernel with `never`. That kernel
   counts `MADV_POPULATE_WRITE`'s pages as minor faults: 1,136 of them there,
   with none taken one at a time.
-- **Peak RSS.** With huge pages, peak RSS grows by 1.2 MB (26.8 to 28.0 MB):
+- **Peak RSS.** With huge pages, peak RSS grows by 1.2 MB (28.0 to 29.3 MB):
   the kernel clears the table's huge pages whole.
 - **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 is several
   times the median.
-- **Where it stands against tcc.** A small file still takes 3.1 to 3.6 times
-  tcc's time, against 4.1 to 4.6 times before. What remains of
-  `backend-setup` (2.4 to 2.8 ms here) is mostly the encoder's build and its
+- **Where it stands against tcc.** c-testsuite's programs still take 3.7
+  times tcc's time, against 4.4 times before. What remains of
+  `backend-setup` (2.1 to 2.7 ms here) is mostly the encoder's build and its
   pages' clearing, Tier 0's build, and semantics and unwind.
 - **Not done.** Building the tables ahead of time, into a snapshot or
   read-only data, would take their build and clearing out of a compile. That

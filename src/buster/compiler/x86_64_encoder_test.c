@@ -1435,16 +1435,17 @@ static bool x86_check_templates(void)
         derived_differ += !built || memcmp(&expected, &x86_templates[form], sizeof(expected)) != 0 ||
                           memcmp(&expected, &x86_templates[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) != 0;
     }
-    // x86_templates_prepare's huge pages: those the table's bytes fall in, all in its storage, from a table on a page.
-    const uintptr_t huge = BUSTER_X86_TEMPLATE_HUGE_PAGE;
-    const uintptr_t table = (uintptr_t)(x86_templates - BUSTER_X86_TEMPLATE_PADDING);
-    const uintptr_t table_end = (uintptr_t)(x86_templates + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING);
-    const uintptr_t first = table & ~(huge - 1);
-    const uintptr_t last = (table_end + huge - 1) & ~(huge - 1);
-    const bool aligned = table % BUSTER_X86_TEMPLATE_ALIGNMENT == 0 && first >= (uintptr_t)x86_template_storage &&
-                         last <= (uintptr_t)(x86_template_storage + BUSTER_X86_TEMPLATE_STORAGE);
+    // x86_templates_prepare's huge pages: one or more, each in the table's storage, which starts on a page.
+    uintptr_t pages[3];
+    const uint32_t huge_pages = x86_templates_huge_pages(x86_templates, pages);
+    bool aligned = (uintptr_t)(x86_templates - BUSTER_X86_TEMPLATE_PADDING) % BUSTER_X86_TEMPLATE_ALIGNMENT == 0 && huge_pages >= 1;
+    for (uint32_t p = 0; p < huge_pages; p += 1)
+    {
+        aligned = aligned && pages[p] % BUSTER_X86_TEMPLATE_HUGE_PAGE == 0 && pages[p] >= (uintptr_t)x86_template_storage &&
+                  pages[p] + BUSTER_X86_TEMPLATE_HUGE_PAGE <= (uintptr_t)(x86_template_storage + BUSTER_X86_TEMPLATE_STORAGE);
+    }
     printf("templates against the builder: %u entries and their marked copies, %u differ; %u huge pages, %s\n", (unsigned)BUSTER_X86_FORM_TEMPLATES, derived_differ,
-           (unsigned)((last - first) / huge), aligned ? "all in the table's storage" : "NOT ALL IN THE TABLE'S STORAGE");
+           huge_pages, aligned ? "all in the table's storage" : "NOT ALL IN THE TABLE'S STORAGE");
     if (!result)
     {
         for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
