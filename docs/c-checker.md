@@ -3681,8 +3681,18 @@ the oracle.
     (`CheckInput.overload_heads`). In them, every function declaration is a
     candidate, 18,413 of them, whose head the walk's action carries through its
     nodes to its calls. The class actions don't carry heads yet, so such a unit
-    is the walk's throughout. Carrying them is #1038's remaining work, beside
-    the numbering below.
+    is the walk's throughout.
+  - **The trigger is the name.** Any token spelled `overloadable` or
+    `__overloadable__` gives a unit the tables (the reader's count of the
+    unit's names, `CHECK_INPUT_COUNT_OVERLOADABLE`). A member or a variable of
+    that name counts as much as the attribute does, whether or not the unit
+    declares an overloadable function. So one stray identifier turns the coded
+    walk off for the whole unit. `main.c`'s column is hypothetical, and the
+    compiler's own compile gets none of the coded walk. Either way out is
+    #1038's remaining work, beside the numbering below:
+    - tables only for a unit that names the attribute where an attribute goes,
+      rather than for any token's spelling;
+    - class actions that carry the heads.
   - **The sparse tail.** It has to stay ordered, and is small in all three:
     0.03%, 0.08% and 0.86%.
 - **Measured.** In a 4-CPU Sapphire Rapids VM without performance counters, `-c`

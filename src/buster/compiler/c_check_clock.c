@@ -326,8 +326,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
 // `usage` is null each stage's system milliseconds, minor faults and peak KB added into usage[3 * stage] to
 // usage[3 * stage + 2]. Every row must occur once, and the walk's within its stage's time (each rounded to a
 // microsecond). Values are nonnegative except
-// that every stage's RSS may be -1 together, with an explicit unavailable status. Legacy numeric reports
-// remain readable, but cannot claim an unavailable reading by silently substituting zero.
+// that every stage's RSS may be -1 together, with an explicit unavailable status. A report without the status
+// line has numeric peaks, and cannot claim an unavailable reading by silently substituting zero. A report from
+// before the walk's row (#1038) has no such row and is not read: its readers (measure-compile, the tests) read
+// this build's reports.
 static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* walk, double* usage)
 {
     uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 2] = { 0 };
