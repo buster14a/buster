@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Isolated validation branch only; not part of PR #1094.
+# Isolated validation branch only; never part of PR #1094.
 name: Issue 1054 workspace
 on:
   push:
@@ -8,18 +8,82 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
+  integrate:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.integrate.outputs.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: 890627cbf958fa9bf1cb19930e1211e0ac91cbe3
-          persist-credentials: false
-      - name: Archive current main without credentials or build products
-        run: git archive --format=tar HEAD > "$RUNNER_TEMP/buster-main-890627.tar"
-      - uses: actions/upload-artifact@v4
+      - id: integrate
+        name: Reproduce reviewed integration on an exact main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 1f66a9a6a54a1bbd6cddd5fa4a5b05b280d80769 894657d8c8c61fbc9e72b995c3b8bd983dc9fd83
+          for n in 0 1 2; do git show "1f66a9a6a54a1bbd6cddd5fa4a5b05b280d80769:.github/1054-integrate-$n.b64"; done | base64 -d | gzip -d > "$RUNNER_TEMP/integrate.patch"
+          printf '3c73a484eeb8f792c6077708e0e818428c12f363ad7d9f8f271e80b125e717aa  %s\n' "$RUNNER_TEMP/integrate.patch" | sha256sum --check
+          files=(src/buster/compiler/c_check_lanes_test.c src/buster/compiler/c_check_program_emit.c src/buster/compiler/c_check_tier1.c src/buster/compiler/c_check_tier1_outcome.c src/buster/compiler/c_check_tier1_outcome_test.c src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_units.c src/buster/compiler/main.c src/buster/compiler/tier1_emit.c src/buster/compiler/tier1_emit_cfg.c docs/tier1-outcomes.md)
+          git restore --source=894657d8c8c61fbc9e72b995c3b8bd983dc9fd83 --staged --worktree -- "${files[@]}"
+          git apply --check "$RUNNER_TEMP/integrate.patch"
+          git apply "$RUNNER_TEMP/integrate.patch"
+          git diff --check
+          git add -- "${files[@]}"
+          git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'fix: preserve Tier 1 failures and enforce explicit fallback (#1054)' -m 'Integrate optional GVN without losing its original IrCheck. Preserve main instrumentation and options. Original outcomes, strict qualification, lane rollback and mixed-tier tests are retained. No early-admission optimization or speedup is claimed.' -m 'Agent: OpenAI / GPT-6 Astra Pro; no private session permalink or provider identifier is exposed. No human DCO sign-off is asserted: BUSTER_DCO_SIGN_OFF was not supplied.'
+          git push origin HEAD:refs/heads/chatgpt/1054-integrated-tested
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  correctness:
+    needs: integrate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: native
+            sanitizer: none
+          - arch: x86-64
+            sanitizer: address
+    env:
+      BUSTER_HOST_ARCH: ${{ matrix.arch }}
+      BUSTER_SANITIZER: ${{ matrix.sanitizer }}
+      BUSTER_SANITIZER_OPTIMIZATION: 1
+      BUSTER_DEBUG_INFO: 0
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          name: issue-1054-main-890627
-          path: ${{ runner.temp }}/buster-main-890627.tar
-          retention-days: 1
+          ref: ${{ needs.integrate.outputs.sha }}
+          persist-credentials: false
+      - name: Install pinned Clang and dependencies
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build integrated production sources
+        run: ./build.sh
+      - name: Explicit outcomes including GVN, strict coverage and rollback
+        run: ./build/compiler test-check-lanes --tier1-outcomes --keep
+      - name: Existing emitter and pipeline regressions
+        if: success() || failure()
+        run: ./build/compiler test-tier1-emit && ./build/compiler test-tier1-pipeline
+      - name: Full lane regressions
+        if: success() || failure()
+        run: ./build/compiler test-check-lanes --keep
+      - name: Multi-unit driver regressions
+        if: success() || failure()
+        run: ./build/compiler test-check-units --keep
+      - name: Preserve exact tested revision
+        if: always()
+        run: git archive --format=tar HEAD > "$RUNNER_TEMP/buster-1054-integrated.tar"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-1054-integrated-${{ matrix.arch }}-${{ matrix.sanitizer }}
+          path: |
+            ${{ runner.temp }}/buster-1054-integrated.tar
+            /tmp/buster-check-lanes-*
+            /tmp/buster-check-units-*
+          retention-days: 3
