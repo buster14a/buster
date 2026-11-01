@@ -139,8 +139,9 @@ patterns are:
   (`tier1_frame_emit.c`). The overflow area is in the caller's frame, so its
   address is a `lea` of its own and never a memory operand's base. The lea is
   16 bytes past RBP where the frame has a frame pointer, and otherwise past
-  RSP's reservation and the return address, plus the named arguments' stack
-  bytes (`tier1_emit_cfg_incoming`). Every variadic definition goes to the CFG
+  RSP's reservation, the callee-saved registers the prologue pushed and the
+  return address, plus the named arguments' stack bytes
+  (`tier1_emit_cfg_incoming`). Every variadic definition goes to the CFG
   consumer. A function with its own ABI records is still refused whole.
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and

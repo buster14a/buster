@@ -174,8 +174,8 @@ conditional saves are decided. Variadic stores explicitly name RSP as their
 base. Tier 1's CFG consumer asks for this area for a variadic definition with a
 register save area (#789). The IR's save-area slot is the area itself, at
 `variadic_offset`. Its overflow area is addressed from the incoming frame:
-16 bytes past RBP with a frame pointer, and otherwise past the reservation
-and the return address from RSP.
+16 bytes past RBP with a frame pointer, and otherwise past the reservation,
+the pushed callee-saved registers and the return address from RSP.
 
 With `PROBE_STACK`, allocations of at least 4096 bytes use a
 `PROBE_ALLOCATE` step. A realigning prologue probes its subtraction whatever its
