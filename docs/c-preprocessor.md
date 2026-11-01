@@ -2154,7 +2154,7 @@ differ by up to 1% from code placement alone.
 | Pastes (#122) | Two identifiers, or an identifier and a number, interned without lexing | Lexing every paste | `main.c` (66,520 pastes) 16.5 to 15.2 ms |
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
-| Printer (#124) | Spellings, then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer | `pp_print_scalar`, through stdio | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms |
+| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms (before #649's spellings, which halved printing on a Xeon host; the 9700X's are pending) |
 
 **The directive tables alone** (`benchmark-preprocessor --tables`, the 9700X,
 CPU 2, three runs of 21 passes on the C library corpus: 8,983 files, 13,152,141
@@ -2255,9 +2255,17 @@ would show.
 buffer, written with `fwrite` as it fills, in three steps:
 
 1. Each token's spelling: an identifier's from the intern table, any other
-   token's bytes at its location. The location is found through a directory of
-   256-location pages instead of a binary search over the ranges. A masked
-   64-byte load checks a literal for the rare backslash.
+   token's bytes at its location (`pp_print_spellings`, #649), with no branch
+   on each token's kind. The identifiers' spans come from a loop over their
+   bits. The other tokens' ranges are found a range at a time. The printer's
+   directory of 256-location pages gives the range of the first token not
+   placed yet, and four compares of the chunk's 64 locations with that range's
+   bounds place every token inside it. A chunk holds 1.5 (`sqlite3.c`) to 1.8
+   (`main.c`) ranges on average. Each spelling's address is its range's bytes
+   less its base plus its location, eight to a vector, and its length is its
+   value less its location. A chunk with a pragma line's identifiers (spelled
+   as written), a generated integer or an `#embed`, or a token outside every
+   range, goes through the general loop instead, token by token.
 2. The spaces of all 64 tokens at once. A token at the start of a line gets
    none. Any other token gets one if whitespace was before it, or if its first
    character would lex together with the previous token's last. That is a
@@ -2267,6 +2275,22 @@ buffer, written with `fwrite` as it fills, in three steps:
 3. The copies: a line break, a space, and one masked 64-byte store per token,
    with branches only for line markers (which `-P` doesn't print), a run of
    blank lines, and spellings longer than 64 bytes.
+
+A fast spelling is its bytes as written unless a line splice or, with
+trigraphs, a trigraph is in it. A splice is a backslash, blanks and a line
+break, so only a backslash followed by a blank (any byte up to `' '`), or at a
+token's end, can start one; with trigraphs, so can any `?`. A backslash in an
+escape sequence (`"\n"`) can't, so literals with escapes stay on the fast
+path. The `-P` batch checks this on the bytes its copies load anyway; the
+zeros past a spelling of less than 64 bytes count as blanks. Every other chunk
+is checked before step 3's copies (`pp_print_unspliced`, 64 bytes at a time,
+a backslash in a block's last lane counting too). A chunk that may hold a
+splice is made again by the general loop: its spellings, spaces and copies,
+over the batch's bytes, which aren't counted yet. With `-P`, 376 of `main.c`'s
+103,935 chunks were made again (11 after the batch's copies, 365 of the 5,219
+with a spelling past 64 bytes after `pp_print_unspliced`, most of them for a
+backslash in a block's last lane), and 76 went to the general loop at once for
+a pragma line or an integer; 4 of `sqlite3.c`'s 11,035 were made again.
 
 For `-P`, a batch whose spellings each have 1–64 bytes and which has no pragma
 end or streamed `#embed` computes all output offsets first (#649). Two
@@ -2287,10 +2311,33 @@ retrospective interference audit excludes the extra reversed main phase pair.
 Line markers count lines from the last marked token in the same file
 (`pp_print_line`), not through `pp_line_of`'s per-file cursor and column scan.
 The scalar printer, `pp_print_scalar`, writes a token at a time through stdio.
-The two give the same bytes on every test. A variant whose first step had no
-branch on the kind (it looked up both spellings and picked one) was 1–2%
-slower in an A/B: the location lookups it adds for identifiers cost more than
-the mispredictions it saves.
+The two give the same bytes on every test. Before #649's spellings, step 1 was
+a loop over the tokens with a branch on each one's kind and a directory lookup
+for each token that isn't an identifier. A variant without the branch (it
+looked up both spellings and picked one) was 1–2% slower in an A/B on the
+9700X: the location lookups it added for identifiers cost more than the
+mispredictions it saved. `pp_print_spellings` takes neither: identifiers and
+the other tokens go through loops of their own, and a range is looked up once
+for all of the chunk's tokens inside it.
+
+Where the time went before it, measured on a 2.1 GHz Intel Xeon with AVX-512
+(a cloud VM, not the 9700X; medians of 41 prints of the same run, `-P` to
+`/dev/null`): stubbing step 1's spellings out took printing from 76 to 32 ms
+on `main.c` (6.6 million output tokens) and from 7.6 to 3.3 ms on `sqlite3.c`
+(706,237), 57–59% of it. Leaving the batch's copies out took 8–10% more. With
+`pp_print_spellings` and the check in the copies, printing took 38–40 ms
+against 77–84 ms before on `main.c`, and 3.2–3.7 against 7.2–8.1 ms on
+`sqlite3.c`, about half. The first print of an `-E` with line markers, as the
+driver runs it, took 95–104 against 141–157 ms on `main.c`, and 12.7–15.1
+against 15.7–17.0 ms on `sqlite3.c`. Unmasked 64-byte copies (each token's
+zeros overwritten by the next) and unmasked stores of the spellings' columns
+were within 1–3% on that host and were left out: Zen 5's power cap makes
+overlapping 512-bit stores a cost to avoid (`docs/coding-style.md`), and the
+9700X hasn't measured them. Compacting a run's source bytes (#649's third
+direction) would replace each token's copy with work per token of about the
+same size (setting its boundary bits), and isn't built; after
+`pp_print_spellings`, the copies are a quarter to a third of printing on that
+host, and the 9700X's numbers decide the next step.
 
 `test-preprocessor` checks every 0–64-token prefix size with guarded input and
 output tails, arbitrary inactive gap bits, and zero/64/65/large lengths. Full
@@ -2298,6 +2345,26 @@ printer fixtures move a pragma end through all 64 alignments, continue into
 ordinary batches, cross the 1 MiB output buffer, and compare marker and `-P`
 bytes with the independent scalar printer. Long literals, line splices,
 trigraphs, UCNs, generated numbers and embeds cover the exceptional handoffs.
+
+`pp_print_spellings` is checked against a reference of its own (a linear
+search of the ranges, the span of each identifier) on a preprocessor of four
+ranges with gaps between some, every chunk size from 0 to 64 and 24 patterns
+each: file runs, mixed ranges in any order, identifiers, spellings past 64
+bytes, and a location in a gap, past every range, an empty spelling or an
+empty identifier, which must refuse the chunk. The columns, the ranges' bytes
+and the interned records end at `PROT_NONE` pages, and the lanes past the
+count keep their canaries. `pp_print_unspliced` is checked against its rule on
+4,000 groups of random spellings of up to 200 bytes, each ending at a
+`PROT_NONE` page, with and without trigraphs. Every spelling it passes must be
+what `pp_remove_splices` leaves as it is, for each kind that function treats
+apart, and splices placed at every offset from 60 to 132 must be refused.
+A fixture prints both ways, with markers and without, with trigraphs and
+without, at 65 alignments. It mixes two headers' macros between the file's own
+tokens, so that a chunk holds several ranges, with escapes, a backslash before
+a blank, stray backslashes, splices in strings, numbers and punctuators and in
+strings of 60 to 136 bytes at their middle, 63 and 64, identifiers past 64
+bytes, pastes, stringizing and trigraphs. Disabling the copies' check makes
+it, seven of the built-in cases and hundreds of fuzz cases fail.
 
 ## The oracle
 
