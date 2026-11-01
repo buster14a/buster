@@ -183,6 +183,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
             .minimum_alignment = evidence.minimum_alignment, .alignment_known = evidence.alignment_known,
+            .const_values = &reader->output->const_values, .constant_evaluated = true,
         };
         CheckBuiltinAtomicResult checked;
         check_builtin_atomic_family(reader->types, &action, &checked);
@@ -225,6 +226,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .id = builtin, .argument_count = count, .node = closing,
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
+            .const_values = &reader->output->const_values, .constant_evaluated = true,
         };
         for (uint32_t i = 0; i < count && i < 3; i += 1)
         {
