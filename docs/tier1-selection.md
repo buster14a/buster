@@ -148,9 +148,10 @@ without weakening that API's checks.
 ## Producer, plan and allocation handoff
 
 `tier1_select_plan(function, dominance, output, scratch, vector, result,
-error_node)` returns `Tier1SelectError`. Both the vector and scalar paths invoke
-their corresponding IR verifier. A cross-block value use requires the supplied
-dominator intervals; structural verification alone is insufficient.
+error_node)` returns `Tier1SelectError`. It verifies its input first, by its
+path's IR verifier: `ir_verify` on the vector path, `ir_verify_scalar` on the
+scalar one. A cross-block value use requires the supplied dominator intervals;
+structural verification alone is insufficient.
 `tier1_select_plan_verified`, with the same arguments, gives the same plan
 without the verification: it takes a function its caller has verified with
 those dominator intervals, as the C driver's `--tier1` takes `ir_optimize`'s

@@ -146,8 +146,9 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(base) != CHECK_HALF_NONE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
-        // A __float128 object's bytes are zeros without an initializer (#137); the checker folds none of its constants, so
-        // that one with an initializer is refused below as not constant.
+        // A __float128 object's bytes are zeros without an initializer (#137). The checker folds none of its arithmetic or
+        // conversions, so that one with such an initializer is refused below as not constant; the constant builtins'
+        // values are its constants (__builtin_inff128, __builtin_nanf128 and the others, #148).
         quad = base == BUSTER_TYPE_FLOAT128;
         const uint64_t size = type_size(types, object->type);
         const uint32_t natural = type_alignment_log2(types, object->type);
@@ -232,7 +233,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                     check_data_integer_bytes(plan->bytes, bits, plan->size);
                 }
             }
-            else if (floating && value->constant_kind == CHECK_CONSTANT_FLOATING)
+            else if ((floating || quad) && value->constant_kind == CHECK_CONSTANT_FLOATING)
             {
                 const long double rounded = check_action_round_float(base, value->floating);
                 if (!isnan(value->floating) && (rounded != value->floating || signbit(rounded) != signbit(value->floating)))

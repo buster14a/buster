@@ -102,11 +102,28 @@ writer, lane by lane, as it leaves a frame pointer's: tail calls are rarer.
 
 `unwind_tier0_frame_tails` reads them from Tier 0's published frame and its
 `Tier0Code.tail_records`: each teardown's records are checked as the epilogue's
-are, and each jump must be a direct `jmp` or one through r11. Their ends go into
-a column of `unwind_tier0_tail_room`'s room, which the C driver's emission takes
-from the lane's scratch for a function with tail calls. Without that column,
-such a function is `UNWIND_ERROR_INVALID`; `unwind_tier0_frame` is the reader of
-a function without tail calls.
+are, and each jump must be a direct `jmp` or one through r11, or a `ret`. Their
+ends go into a column of `unwind_tier0_tail_room`'s room, which the C driver's
+emission takes from the lane's scratch for a function with tail calls. Without
+that column, such a function is `UNWIND_ERROR_INVALID`; `unwind_tier0_frame` is
+the reader of a function without tail calls.
+
+### Early returns and open frames (#177)
+
+Tier 1's code puts an epilogue before every return's `ret`, and publishes its
+frame as Tier 0's (the [Tier 1 frame guide](tier1-frame.md)'s "Unwind tables").
+An early return's teardown and `ret` are a tail's: the same release and pops,
+after which the body's rules hold again, so `Tier0Code.tail_records` lists each
+return's `ret` but the code's last record. A function whose code doesn't end in
+its last epilogue's `ret` (a loop's latch last, a call that doesn't return, a
+trap) is open: `Tier0Code.frame_open` and `UnwindFunction.open`, whose events are
+the prologue's alone (`n + 1` or `n`, and with a frame pointer `n + 2`), whose
+CFI has no epilogue at its end, and every one of whose returns is a tail.
+`unwind_tier0_frame_tails` refuses an open frame whose last record is a `ret`,
+which would be an epilogue read as the body's. A frameless function's open
+description is the closed one (no transitions either way), which keeps it on the
+vector writer's path; the vector writer leaves any other open function to the
+exact writer, lane by lane, as it leaves tail calls'.
 
 ## Format and linker handoff
 
@@ -219,13 +236,26 @@ through the helper and its caller to `main`, by each path into the same bytes
 and from its object linked by GNU ld; without unwind tables, the trap still
 reaches the handler.
 
+A third, compiled by `--tier1 --verify` (#177), has every function but `main`
+by Tier 1: a frame of spill slots alone, one with pushes, two returns each after
+its own epilogue, an open frame whose loop's latch comes last, a realigned frame,
+and a leaf whose spills are in the red zone, whose shapes `--tier1-report`'s
+counts must show. By each path (whose frames may be colored apart, so not the same bytes)
+and from its object linked by GNU ld and lld, `backtrace()` walks through every
+frame to `main`, and without unwind tables stops at the first; GDB's backtrace
+at every instruction of each of the seven, without `-g`, gives the function and
+`main`.
+
 ## Checks and measurements
 
 `test-unwind` checks scalar/vector identity, an independent CFI interpreter,
 all 64 save masks across CFA LEB boundaries and the 32 a frame pointer leaves,
 as pairs and with one CIE, capacity refusal, signed limits, each rule a frame
 pointer's descriptor must keep, and protected descriptor/byte/location tails
-from zero through 65 functions, a frame pointer's every third. The interpreter
+from zero through 65 functions, a frame pointer's every third, a tail call's
+every fifth and an open function's every seventh; and open descriptions of every
+save mask, with and without a frame pointer, with no returns to three, and their
+descriptors' rules (#177). The interpreter
 checks every row transition, including stack release and pops, and the
 constant state between transitions; a frame pointer's rows by the CFA's register
 too. Corrupted return rules and ranges are negative controls for the

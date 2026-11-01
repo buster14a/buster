@@ -5620,6 +5620,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_selection_test.c"
 #include "c_check_program_library_test.c"
 #include "c_check_program_classify_test.c"
+#include "c_check_program_constants_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -5698,6 +5699,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_asm = false;
     bool program_bits = false;
     bool program_align = false;
+    bool program_float_constants = false;
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
@@ -5749,6 +5751,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_align = true;
         }
+        else if (strcmp(argv[i], "--program-float-constants") == 0)
+        {
+            program_float_constants = true;
+        }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
@@ -5768,7 +5774,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5830,6 +5836,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_align)
         {
             check_test_align(&test, clang);
+        }
+        else if (initialized && program_float_constants)
+        {
+            check_test_float_constants(&test, clang);
         }
         else if (initialized)
         {
@@ -5934,6 +5944,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_program_initializers(&test, clang);
             check_test_library(&test, clang);
             check_test_classify(&test, clang);
+            check_test_float_constants(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);
