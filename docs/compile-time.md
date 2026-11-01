@@ -435,6 +435,58 @@ Not at the peak, the reader's own arena's 61 MB of huge pages are still most of
 `check-input`'s system time. [#628](https://github.com/buster14a/buster/issues/628)
 follows up on these.
 
+### The binding table, the fresh output and the stream's columns (#628)
+
+Three of those allocations touched memory that held nothing:
+- **The binding table.** Its nine event columns each have room for four events
+  a token, of which the walk writes a prefix (`sqlite3.c`'s 167,456 of 2.86
+  million) and reads no further. In the reader's arena's huge pages each
+  column's first touch cleared one or two 2 MB pages, 11 of the arena's 34.
+  The table is now in the arena's base pages, with the scope stacks: about
+  4.5 MB of pages (1,126 more faults) where it took 22 MB.
+- **The zero-default output columns.** The C driver's reader
+  (`check_input_compile`) says that no copy of its arena pushed past its
+  length. Where that arena's pages past its length are still the kernel's zero
+  (`arena_untouched`: an owned mapping that no push reached past its length),
+  the reader no longer writes zeros over its 17 zero-default output columns
+  and the graph's `warning_suppressed`.
+  A column the walk never writes then takes no memory: the later passes read
+  the kernel's zero page there. That covers most of `sqlite3.c`'s byte columns
+  and `expression_regions`. Every other caller, and a reused, popped or poisoned
+  arena, keeps the clear. The `NONE` columns keep their fills.
+- **The stream's values.** `CheckStream.values` had a 96-byte `CheckValue` for
+  every node, of which `sqlite3.c`'s 323,557 nodes use little: 36% have an
+  object and 12% anything past it (a constant's payload, an address
+  constant's offset, a bit-field's place, a fault).
+  - The fields every node has are now columns: type, flags, object, category
+    and constant kind, 14 bytes a node.
+  - A node with more keeps its whole value as a row of `payloads`, which
+    `payload_rows` finds. On `sqlite3.c` the columns and row indices take
+    5.8 MB and the rows under 4 MB, where the values took 31 MB.
+  - The lowering reads the columns it prefetched before, and the batch path's
+    classification loads the type column 16 nodes at a time where it gathered
+    from 96-byte records.
+  - Readers take values through `check_stream_value` and its fields' accessors
+    ([the checker guide](c-checker.md)).
+
+On this repository's 4-core cloud VM, without Zen 5's vector set (the scalar
+host build, `--lanes 1`), `-c` of the frozen `sqlite3.c` peaks as follows, with
+each build's object the same bytes by both paths:
+
+| build | peak RSS | check-input's peak added |
+| --- | ---: | ---: |
+| main `f152e63` | 399,772 KB | 256,276 KB |
+| binding table and fresh output | 395,680 KB | 234,204 KB |
+| and the stream's columns | 377,332 KB | 233,992 KB |
+
+- **The binding table** cuts `check-input`'s addition by 18 MB, and **the
+  fresh output** cuts it by 4 MB more. The compile's peak is later than the
+  reader's, so only the fresh output's empty columns showed there at first.
+- **The stream's columns** take 18 MB more off the end of the compile, where
+  the peak then is. The reader's peak is now within 4 MB of the end's.
+- **The 9700X's numbers** come from the `compile_time` step of the PR's run
+  (#518's measurement).
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
@@ -572,6 +624,23 @@ checker suites. The visits column adds 706,240 bytes to the reader's
 scratch-written extent, while its retained output extent is unchanged.
 These measurements precede integration of #572's storage and #186's
 traversal; they are not a measured sum of those independent improvements.
+
+**The next-mark scan's loads.** The walk in source order finds each next
+marked token with `check_input_resolve_next`. It loaded the 64 bytes of
+`visits` from the token after the current one, a masked load that crossed a
+cache line for nearly every token it visited: 92 of 95 sampled loads on the
+9700X (the 29 October record, 0.85% of `-c`'s cycle samples). It now loads
+the aligned 64 bytes that hold that token, with the bytes below it and from
+the walk's stop on masked off and not read (`check_input_scan_nonzero_from`),
+and steps a line at a time after that. `visits` starts on a cache line, so no
+load crosses one. The walk visits the same tokens, and `test-checker` checks
+both functions against a scalar reading of columns that end at a `PROT_NONE`
+page.
+
+The same PR's #628 changes also shorten `check-input` itself: the reader no
+longer writes zeros over its fresh output columns, and the binding table's
+pages are base pages, of which it clears a fifth of what it did ("The binding
+table, the fresh output and the stream's columns", above).
 
 ## The passes after checking (#592)
 
