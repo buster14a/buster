@@ -224,13 +224,6 @@ static __attribute__((unused)) const char* cbuiltin_library_refusal(const char* 
         { "__builtin_alloca_uninitialized", "__builtin_alloca_uninitialized" },
         { "__builtin_alloca_with_align", "__builtin_alloca_with_align, whose alignment Tier 0's allocation doesn't take" },
         { "__builtin_alloca_with_align_uninitialized", "__builtin_alloca_with_align_uninitialized, whose alignment Tier 0's allocation doesn't take" },
-        { "__builtin_nans", "__builtin_nans, a signaling NaN that clang folds and no library function makes" },
-        { "__builtin_nansf", "__builtin_nansf, a signaling NaN that clang folds and no library function makes" },
-        { "__builtin_nansl", "__builtin_nansl, a signaling NaN that clang folds and no library function makes" },
-        { "__builtin_nansf128", "__builtin_nansf128, a signaling NaN that clang folds and no library function makes" },
-        { "__builtin_nanf128", "__builtin_nanf128, a _Float128 NaN that clang folds" },
-        { "__builtin_nanf16", "__builtin_nanf16, a _Float16 NaN that clang folds and no library function makes" },
-        { "__builtin_nansf16", "__builtin_nansf16, a signaling NaN that clang folds and no library function makes" },
     };
     const char* result = NULL;
     for (uint32_t i = 0; name != NULL && result == NULL && i < sizeof(refusals) / sizeof(refusals[0]); i += 1)
