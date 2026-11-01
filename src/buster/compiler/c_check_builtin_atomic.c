@@ -50,16 +50,12 @@ struct CheckBuiltinAtomicAction
     const CheckValue* arguments;
     uint32_t argument_count;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
+    CheckContext context;
     uint64_t minimum_alignment;
     bool alignment_known;
     // A C11 operation on an object that isn't _Atomic: clang's __hip_atomic_* (check_builtin_atomic_family).
     bool plain_object;
-    // The call is in a constant context (CheckStream.constant_evaluated), which clang's Sema evaluates where it reads it.
-    bool constant_evaluated;
+
 };
 
 typedef struct CheckBuiltinAtomicResult CheckBuiltinAtomicResult;
@@ -109,15 +105,7 @@ struct CheckBuiltinAtomicResult
 
 static bool check_builtin_atomic_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinAtomicAction* input)
 {
-    const TypeId base = type_strip_aligned(table, type);
-    bool complete = type_is_complete(table, base);
-    const uint8_t kind = type_kind(table, base);
-    if (complete && input->tag_completions != NULL &&
-        (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM))
-    {
-        const uint32_t tag = table->types.index[type_index(base)];
-        complete = tag < input->tag_completion_count && input->tag_completions[tag] <= input->source_position;
-    }
+    const bool complete = type_is_complete(table, type) && check_context_tag_visible(table, type, &input->context);
     return complete;
 }
 
@@ -143,10 +131,7 @@ static CheckValue check_builtin_atomic_argument(TypeTable* table, const CheckBui
             const CheckAction action = {
                 .operands = { value },
                 .node = input->node,
-                .tag_completions = input->tag_completions,
-                .tag_completion_count = input->tag_completion_count,
-                .source_position = input->source_position,
-                .extensions = input->extensions,
+                .context = input->context,
             };
             value = check_action_operand(table, &action, &converted, 0);
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -165,7 +150,7 @@ static bool check_builtin_atomic_pointer_comparison_visible(const TypeTable* tab
     // through type_compatible, including inside pointer chains, array elements or function signatures. Walk the
     // same bounded inner-pair protocol as compatibility; enum visibility is checked before its shallow query.
     bool visible = true;
-    if (input->tag_completions != NULL && left != right)
+    if (input->context.tag_completions != NULL && left != right)
     {
         const Scratch scratch = scratch_begin(0);
         void* stack = NULL;
@@ -296,10 +281,7 @@ static void check_builtin_atomic_convert(TypeTable* table, const CheckBuiltinAto
     {
         const CheckAction context = {
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
+            .context = input->context,
         };
         accepted = check_action_assignable(table, destination, value, &context, &output->action);
     }
@@ -493,7 +475,7 @@ static void check_builtin_atomic_query(TypeTable* table, const CheckBuiltinAtomi
         const int32_t answer = sized ? check_builtin_atomic_lock_free(table, input, input->id, (uint64_t)values[0].integer, &pointer, false) : -1;
         const int32_t at_end = sized ? check_builtin_atomic_lock_free(table, input, input->id, (uint64_t)values[0].integer, &pointer, true) : -1;
         // Code, where the unit completes the pointee after the call: the lowering's, by its function's emission.
-        output->late_completion = answer != at_end && !input->constant_evaluated;
+        output->late_completion = answer != at_end && !input->context.constant_evaluated;
         output->answers[0] = (int8_t)answer;
         output->answers[1] = (int8_t)at_end;
         output->query_size = output->late_completion ? (uint64_t)values[0].integer : 0;

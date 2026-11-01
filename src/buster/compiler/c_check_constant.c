@@ -19,6 +19,23 @@ static uint32_t check_input_expression_extensions(const Parser* parser)
     return BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0);
 }
 
+// Declaration evaluation has one source cut for every action family. The histories remain the reader's;
+// constant_evaluated grants receipt reads, not permission to skip discarded or effectful operands.
+static CheckContext check_input_context(const CheckInputReader* reader, uint32_t position, uint32_t token, bool constant_evaluated)
+{
+    const CheckContext context = {
+        .tag_completions = reader->tag_completions,
+        .transparent_unions = reader->transparent_unions,
+        .tag_completion_count = reader->types->tags.capacity,
+        .source_position = position,
+        .extensions = check_input_expression_extensions(reader->parser) |
+                      (check_graph_system_token(&reader->output->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
+        .const_values = &reader->output->const_values,
+        .constant_evaluated = constant_evaluated,
+    };
+    return context;
+}
+
 // Required value contexts consume a copy. The cached expression keeps its lvalue identity for typeof,
 // address formation and later member selection; a GNU object read never becomes a standard ICE.
 static bool check_input_const_rvalue(CheckInputReader* reader, uint32_t position, CheckValue* value)
@@ -26,10 +43,7 @@ static bool check_input_const_rvalue(CheckInputReader* reader, uint32_t position
     const CheckAction action = {
         .op = CHECK_OP_VALUE,
         .operands = { *value },
-        .const_values = &reader->output->const_values,
-        .constant_evaluated = true,
-        .source_position = position,
-        .extensions = check_input_expression_extensions(reader->parser),
+        .context = check_input_context(reader, position, BUSTER_CHECK_NONE, true),
     };
     CheckActionResult checked = { 0 };
     *value = check_action_operand(reader->types, &action, &checked, 0);
@@ -232,11 +246,7 @@ static CheckOverloadResult check_constant_address(CheckConstantInput* input, con
 {
     CheckInputReader* reader = input->reader;
     const CheckOverloadContext context = {
-        .tag_completions = reader->tag_completions,
-        .transparent_unions = reader->transparent_unions,
-        .tag_completion_count = reader->types->tags.capacity,
-        .source_position = input->end,
-        .extensions = check_input_expression_extensions(reader->parser),
+        .semantic = check_input_context(reader, input->end, BUSTER_CHECK_NONE, false),
     };
     const CheckGraph* graph = &reader->output->graph;
     const CheckOverloadResult selected = check_overload_argument(reader->types, source, target, graph->overload_candidates,
@@ -1792,15 +1802,11 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                     .operands = { { .type = type, .category = CHECK_LVALUE, .constant_kind = CHECK_CONSTANT_ADDRESS, .object = 1 } },
                     .member = parser->tokens.names[i],
                     .node = i,
-                    .tag_completions = reader->tag_completions,
-                    .transparent_unions = reader->transparent_unions,
-                    .tag_completion_count = reader->types->tags.capacity,
-                    .source_position = token + 1,
-                    .extensions = check_input_expression_extensions(parser),
+                    .context = check_input_context(reader, token + 1, i, false),
                 };
                 CheckActionResult checked;
                 check_action_scalar(reader->types, &action, &checked);
-                check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
+                check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE && (checked.value.flags & BUSTER_CHECK_BIT_FIELD) == 0 && checked.value.offset >= 0;
                 valid &= (uint64_t)checked.value.offset <= UINT64_MAX - number;
@@ -2084,11 +2090,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
                             head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, arguments, NULL);
             if (checked->diagnostic == CHECK_DIAG_NONE)
             {
-                check_constant_selected_uses(input, head, &selected, check_constant_action_source(input, callee, ranges, 0), action->source_position);
+                check_constant_selected_uses(input, head, &selected, check_constant_action_source(input, callee, ranges, 0), action->context.source_position);
                 for (uint32_t i = 0; pending_arguments && i < action->argument_count; i += 1)
                 {
                     check_constant_selected_uses(input, action->arguments[i].overload_head, arguments + i,
-                                                  check_constant_action_source(input, callee, ranges, i + 1), action->source_position);
+                                                  check_constant_action_source(input, callee, ranges, i + 1), action->context.source_position);
                 }
             }
         }
@@ -2116,7 +2122,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
                 if (valid)
                 {
                     check_constant_selected_uses(input, action->operands[i].overload_head, &selected,
-                                                  check_constant_action_source(input, callee, ranges, i), action->source_position);
+                                                  check_constant_action_source(input, callee, ranges, i), action->context.source_position);
                 }
             }
         }
@@ -2170,13 +2176,13 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
 static bool check_constant_speculate(CheckConstantInput* input, const CheckAction* action, uint32_t callee, CheckValue* value)
 {
     CheckAction speculative = *action;
-    speculative.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
+    speculative.context.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
     CheckActionResult checked;
     check_constant_action(input, &speculative, callee, NULL, &checked);
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
-        check_input_warning_add_at(input->reader, action->node, checked.warnings, action->source_position);
+        check_input_warning_add_at(input->reader, action->node, checked.warnings, action->context.source_position);
     }
     *value = checked.value;
     return checked.diagnostic == CHECK_DIAG_NONE;
@@ -2259,13 +2265,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         {
             .op = CHECK_OP_COUNT,
             .node = token,
-            .tag_completions = reader->tag_completions,
-            .transparent_unions = reader->transparent_unions,
-            .tag_completion_count = reader->types->tags.capacity,
-            .source_position = reader->ends[token] + 1,
-                .const_values = &reader->output->const_values,
-                .constant_evaluated = true,
-            .extensions = check_input_expression_extensions(parser),
+            .context = check_input_context(reader, reader->ends[token] + 1, token, true),
         };
         for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
         {
@@ -2764,10 +2764,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     }
                     if (source >= input->first && source < input->end)
                     {
-                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, begin, reader->ends[source] + 1, action.source_position);
+                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, begin, reader->ends[source] + 1, action.context.source_position);
                     }
                 }
-                check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
+                check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
@@ -2878,13 +2878,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 .op = operation.op,
                 .type = operation.type,
                 .node = operation.token,
-                .tag_completions = reader->tag_completions,
-                .transparent_unions = reader->transparent_unions,
-                .tag_completion_count = reader->types->tags.capacity,
-                .source_position = input->end,
-                .const_values = &reader->output->const_values,
-                .constant_evaluated = true,
-                .extensions = check_input_expression_extensions(reader->parser),
+                .context = check_input_context(reader, input->end, operation.token, true),
             };
             *value_count -= operation.arity;
             CheckConstantRange range = { .first = operation.token, .end = operation.token + 1 };
@@ -2991,7 +2985,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 }
                 arena_pop_to(reader->scratch, mark);
             }
-            check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
+            check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             ranges[*value_count] = range;

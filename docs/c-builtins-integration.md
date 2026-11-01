@@ -29,6 +29,20 @@ entry. Node identities are diagnostic locations, not source positions. A null
 completion slice deliberately selects the current-table contract for direct
 action callers. The extension mask travels with each action.
 
+The optional `const_values` and `constant_evaluated` fields carry the unit's
+constant objects' receipts and whether the action is in a constant context.
+Only then does the operand's lvalue conversion in `check_action_operand`,
+before `check_action_conversion`'s parameter conversion, read a const
+object's constant initializer, as clang's evaluator does when it folds a
+builtin call: the folded integer result without side effects is an integer
+constant expression there (#990). The atomic action carries the same pair
+into `check_builtin_atomic_argument`, which the typed-overflow prototype
+conversion reuses. An ordinary call's runtime view doesn't request the read —
+the graph still supplies `const_values` and only leaves `constant_evaluated`
+false — so it reads none; volatile objects, mutable objects and
+runtime-initialized const objects fold nowhere, and an overflow's store keeps
+the call out of every constant context.
+
 The result contains the ordinary `CheckActionResult`, a separate destination
 and stored value, the fold status and an explicit store requirement. A valid
 overflow action always retains that store, including when its overflow boolean

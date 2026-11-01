@@ -111,7 +111,7 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
     const long double imaginary[] = { 2, 6, -2, 2 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operations); i += 1)
     {
-        const CheckAction action = { .op = operations[i], .operands = { left, right }, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+        const CheckAction action = { .op = operations[i], .operands = { left, right }, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
         const CheckActionResult result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_COMPLEX_DOUBLE &&
                                result.value.constant_kind == CHECK_CONSTANT_COMPLEX && result.value.floating == real[i] &&
@@ -131,7 +131,7 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
                 const CheckAction action = {
                     .op = operations[i],
                     .operands = { swapped != 0 ? r : c, swapped != 0 ? c : r },
-                    .extensions = BUSTER_CHECK_EXTENSION_GNU,
+                    .context.extensions = BUSTER_CHECK_EXTENSION_GNU,
                 };
                 const CheckActionResult result = check_test_action(test, table, action);
                 const long double expected_real = i == 0 ? -1.0L : i == 1 ? swapped != 0 ? -3.0L : 3.0L : i == 2 ? -2.0L : swapped != 0 ? -2.0L : -0.5L;
@@ -147,7 +147,7 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
     const TypeId destinations[] = { BUSTER_TYPE_BOOL, BUSTER_TYPE_INT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_COMPLEX_FLOAT };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(destinations); i += 1)
     {
-        const CheckAction action = { .op = CHECK_OP_CAST, .operands = { left }, .type = destinations[i], .extensions = BUSTER_CHECK_EXTENSION_GNU };
+        const CheckAction action = { .op = CHECK_OP_CAST, .operands = { left }, .type = destinations[i], .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
         const CheckActionResult result = check_test_action(test, table, action);
         const bool value = i == 0 ? result.value.integer == 1 : i == 1 ? result.value.integer == 3 :
                            i == 2 ? result.value.floating == 3 : result.value.floating == 3 && result.value.imaginary == 4;
@@ -177,11 +177,11 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
     const CheckOp rejected[] = { CHECK_OP_LESS, CHECK_OP_GREATER_EQUAL, CHECK_OP_REMAINDER, CHECK_OP_BIT_AND };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
-        const CheckAction action = { .op = rejected[i], .operands = { left, right }, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+        const CheckAction action = { .op = rejected[i], .operands = { left, right }, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
         check_test_expect(test, check_test_action(test, table, action).diagnostic != CHECK_DIAG_NONE,
                           "complex operands do not grant ordered comparisons or integer-only operations");
     }
-    const CheckAction conjugate = { .op = CHECK_OP_BIT_NOT, .operands = { left }, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+    const CheckAction conjugate = { .op = CHECK_OP_BIT_NOT, .operands = { left }, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
     const CheckActionResult conjugated = check_test_action(test, table, conjugate);
     check_test_expect(test, conjugated.diagnostic == CHECK_DIAG_NONE && conjugated.value.constant_kind == CHECK_CONSTANT_COMPLEX &&
                            conjugated.value.floating == 3 && conjugated.value.imaginary == -4,
@@ -189,7 +189,7 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
     for (uint32_t imaginary_part = 0; imaginary_part < 2; imaginary_part += 1)
     {
         const CheckOp op = imaginary_part != 0 ? CHECK_OP_IMAGINARY : CHECK_OP_REAL;
-        const CheckAction constant = { .op = op, .operands = { left }, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+        const CheckAction constant = { .op = op, .operands = { left }, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
         const CheckActionResult result = check_test_action(test, table, constant);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_DOUBLE && result.value.category == CHECK_RVALUE &&
                                result.value.constant_kind == CHECK_CONSTANT_FLOATING && result.value.floating == (imaginary_part != 0 ? 4 : 3),
@@ -198,7 +198,7 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
             .op = op,
             .operands = { { .type = BUSTER_TYPE_COMPLEX_DOUBLE, .category = CHECK_LVALUE, .constant_kind = CHECK_CONSTANT_ADDRESS,
                             .flags = BUSTER_CHECK_STATIC_OBJECT, .object = 133701, .offset = 16 } },
-            .extensions = BUSTER_CHECK_EXTENSION_GNU,
+            .context.extensions = BUSTER_CHECK_EXTENSION_GNU,
         };
         const CheckActionResult component = check_test_action(test, table, lvalue);
         check_test_expect(test, component.diagnostic == CHECK_DIAG_NONE && component.value.type == BUSTER_TYPE_DOUBLE && component.value.category == CHECK_LVALUE &&
@@ -207,14 +207,14 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
                           "complex lvalue components retain their object and exact component byte offset");
     }
     const CheckValue scalar = { .type = BUSTER_TYPE_INT | BUSTER_TYPE_CONST, .category = CHECK_LVALUE, .object = 133702 };
-    const CheckAction real_scalar = { .op = CHECK_OP_REAL, .operands = { scalar }, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+    const CheckAction real_scalar = { .op = CHECK_OP_REAL, .operands = { scalar }, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
     const CheckActionResult identity = check_test_action(test, table, real_scalar);
     check_test_expect(test, identity.diagnostic == CHECK_DIAG_NONE && identity.value.category == CHECK_LVALUE && identity.value.type == scalar.type,
                       "scalar real extraction preserves lvalue and const qualification");
     const CheckAction imaginary_scalar = {
         .op = CHECK_OP_IMAGINARY,
         .operands = { { .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_SIDE_EFFECT, .fault = CHECK_FAULT_DIVIDE_BY_ZERO, .fault_node = 8 } },
-        .extensions = BUSTER_CHECK_EXTENSION_GNU,
+        .context.extensions = BUSTER_CHECK_EXTENSION_GNU,
     };
     const CheckActionResult evaluated = check_test_action(test, table, imaginary_scalar);
     check_test_expect(test, evaluated.diagnostic == CHECK_DIAG_NONE && evaluated.value.type == BUSTER_TYPE_INT && evaluated.value.category == CHECK_RVALUE &&

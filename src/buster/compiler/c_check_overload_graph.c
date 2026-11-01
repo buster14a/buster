@@ -51,11 +51,7 @@ static bool check_graph_overload_capacity(const CheckGraph* graph, Arena* scratc
 static CheckOverloadContext check_graph_overload_context(const CheckAction* action, CheckStream* stream)
 {
     const CheckOverloadContext context = {
-        .tag_completions = action->tag_completions,
-        .transparent_unions = action->transparent_unions,
-        .tag_completion_count = action->tag_completion_count,
-        .source_position = action->source_position,
-        .extensions = action->extensions,
+        .semantic = action->context,
         .scratch_peak = &stream->statistics.scratch_bytes,
     };
     return context;

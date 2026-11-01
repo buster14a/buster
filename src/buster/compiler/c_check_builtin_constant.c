@@ -9,7 +9,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
                                 TypeId destination_type, const CheckValue* arguments, uint32_t count, CheckValue* value)
 {
     CheckInputReader* reader = input->reader;
-    const uint32_t extensions = check_input_expression_extensions(reader->parser);
+    const CheckContext context = check_input_context(reader, closing + 1, closing, true);
     CheckBuiltinCall evidence = { 0 };
     const uint32_t first = keyword + 2;
     const uint32_t end = check_constant_punctuation(reader->parser, first, closing, PARSE_KIND_COMMA);
@@ -33,8 +33,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         const CheckBuiltinBitCastAction action =
         {
             .id = builtin, .destination_type = destination_type, .arguments = arguments, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1,
+            .context = context,
             .source_proof = constant ? CHECK_BUILTIN_BIT_CAST_PROOF_CONSTANT : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
         };
         CheckBuiltinBitCastResult checked;
@@ -50,9 +49,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         const CheckBuiltinMiscAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1, .extensions = extensions,
-            .const_values = &reader->output->const_values, .constant_evaluated = true,
+            .context = context,
             .pointer_object = evidence.base_object, .pointer_alignment = evidence.base_alignment,
         };
         CheckBuiltinMiscResult checked;
@@ -67,12 +64,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .arguments = arguments,
             .argument_count = count,
             .node = closing,
-            .tag_completions = reader->tag_completions,
-            .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1,
-            .extensions = extensions,
-            .const_values = &reader->output->const_values,
-            .constant_evaluated = true,
+            .context = context,
         };
         check_builtin_library_fold_memory(reader->types, builtin, &folding, checked.argument_conversions, &result);
     }
@@ -88,9 +80,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         const CheckBuiltinMathAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1, .extensions = extensions,
-            .const_values = &reader->output->const_values, .constant_evaluated = true,
+            .context = context,
         };
         CheckBuiltinMathResult checked;
         check_builtin_math(reader->types, &action, &checked, 1);
@@ -101,9 +91,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         const CheckBuiltinFloatAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1, .extensions = extensions,
-            .const_values = &reader->output->const_values, .constant_evaluated = true,
+            .context = context,
             .nan_payload = evidence.nan_payload, .nan_payload_length = evidence.nan_payload_length, .nan_payload_known = evidence.nan_payload_known,
         };
         CheckBuiltinFloatResult checked;
@@ -115,8 +103,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         CheckBuiltinQueryAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1, .extensions = extensions,
+            .context = context,
             .string_literal_start = evidence.string_literal_start, .absolute_address_constant = evidence.absolute_address_constant,
             .complex_constant = count != 0 && arguments[0].constant_kind == CHECK_CONSTANT_COMPLEX &&
                                 arguments[0].fault == CHECK_FAULT_NONE && (arguments[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0,
@@ -138,10 +125,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .argument_count = count,
             .destination_type = destination_type,
             .node = closing,
-            .tag_completions = reader->tag_completions,
-            .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1,
-            .extensions = extensions,
+            .context = context,
             .allow_gnu_index_ice = reader->parser->language.gnu,
         };
         if (builtin == CBUILTIN_SHUFFLEVECTOR && count > 2)
@@ -180,8 +164,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         const CheckBuiltinAtomicAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1, .extensions = extensions,
+            .context = context,
             .minimum_alignment = evidence.minimum_alignment, .alignment_known = evidence.alignment_known,
         };
         CheckBuiltinAtomicResult checked;
@@ -202,11 +185,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
                 .type = check_input_type_result(reader, type_complex(reader->types, check_input_complex_format(builtin))),
                 .operands = { arguments[0] },
                 .node = closing,
-                .tag_completions = reader->tag_completions,
-                .transparent_unions = reader->transparent_unions,
-                .tag_completion_count = reader->types->tags.capacity,
-                .source_position = closing + 1,
-                .extensions = extensions,
+                .context = context,
             };
             check_action_scalar(reader->types, &action, &result);
             if (result.diagnostic == CHECK_DIAG_NONE)
@@ -223,8 +202,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         CheckBuiltinAction action =
         {
             .id = builtin, .argument_count = count, .node = closing,
-            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
-            .source_position = closing + 1, .extensions = extensions,
+            .context = context,
         };
         for (uint32_t i = 0; i < count && i < 3; i += 1)
         {
@@ -246,6 +224,6 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
     check_input_warning_add_at(reader, closing, result.warnings, closing + 1u);
     *value = result.value;
-    value->flags &= ~BUSTER_CHECK_LITERAL_ZERO;
+    value->flags = check_value_source_flags(family, value->flags);
     return result.diagnostic == CHECK_DIAG_NONE;
 }

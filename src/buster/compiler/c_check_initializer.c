@@ -349,6 +349,21 @@ static uint32_t check_init_extensions(const CheckInitWalker* walker, uint32_t to
            BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0)) : 0;
 }
 
+// Initializers consume a graph view but have their own completion cut and receipt permission. Runtime
+// initializers keep a null receipt view; a known value alone must never turn their object accesses into reads
+// of an earlier initializer. Inference/empty vector lanes can have no graph node and need no node-column load.
+static CheckContext check_init_context(const CheckInitWalker* walker, uint32_t node, uint32_t token)
+{
+    const CheckGraph* graph = walker->graph;
+    const bool constant_evaluated = walker->const_values != NULL;
+    CheckContext context = graph != NULL && node < graph->count ? check_graph_context(graph, node, constant_evaluated) : (CheckContext){ 0 };
+    context.source_position = walker->source_position;
+    context.extensions = check_init_extensions(walker, token);
+    context.const_values = walker->const_values;
+    context.constant_evaluated = constant_evaluated;
+    return context;
+}
+
 static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
 {
     if (!walker->infer && walker->result->status == CHECK_INIT_OK)
@@ -1152,7 +1167,7 @@ static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSele
             .operands = { check_stream_value(walker->stream, node) },
             .type = destination,
             .node = node,
-            .extensions = check_init_extensions(walker, begin),
+            .context = check_init_context(walker, node, begin),
         };
         CheckActionResult checked = { 0 };
         check_action_scalar(walker->types, &action, &checked);
@@ -1784,7 +1799,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             .operands = { source },
             .type = element,
             .node = source_node,
-            .extensions = check_init_extensions(walker, token),
+            .context = check_init_context(walker, source_node, token),
         };
         CheckActionResult converted;
         check_action_scalar(walker->types, &action, &converted);
@@ -1792,8 +1807,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         {
             check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
         }
-        else if (walker->static_storage && (converted.value.constant_kind == CHECK_CONSTANT_NONE || converted.value.fault != CHECK_FAULT_NONE ||
-                 (converted.value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0))
+        else if (walker->static_storage && !check_value_evaluated_constant(&converted.value))
         {
             check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
         }
@@ -1825,6 +1839,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             .operands = { check_stream_value(walker->stream, node) },
             .type = destination,
             .node = node,
+            .context = check_init_context(walker, node, token),
         };
         CheckActionResult converted;
         check_action_scalar(walker->types, &action, &converted);
@@ -1889,13 +1904,10 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
         }
         else
         {
-            const CheckOverloadContext context = {
-                .tag_completions = graph->tag_completions,
-                .transparent_unions = graph->transparent_unions,
-                .tag_completion_count = graph->tag_completion_count,
-                .source_position = graph->source_positions != NULL ? graph->source_positions[action->node] : BUSTER_CHECK_NONE,
-                .extensions = action->extensions,
-            };
+            CheckContext semantic = action->context;
+            // Overload visibility belongs to this expression's end, not the containing initializer's end.
+            semantic.source_position = graph->source_positions != NULL ? graph->source_positions[action->node] : BUSTER_CHECK_NONE;
+            const CheckOverloadContext context = { .semantic = semantic };
             CheckValue resolved = { 0 };
             const CheckOverloadResult selected = check_overload_argument(walker->types, action->operands, action->type,
                                                                          graph->overload_candidates, graph->overload_candidate_count,
@@ -2118,10 +2130,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 .op = CHECK_OP_INITIALIZE,
                 .type = destination,
                 .node = node,
-                .const_values = walker->const_values,
-                .constant_evaluated = walker->const_values != NULL,
-                .source_position = walker->source_position,
-                .extensions = check_init_extensions(walker, token),
+                .context = check_init_context(walker, node, token),
             };
             action.operands[0] = check_init_constant_value(walker, node);
             const uint32_t overload_head = action.operands[0].overload_head;
@@ -2146,10 +2155,8 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             {
                 check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
             }
-            else if (walker->static_storage && !walker->defer_constants && (converted.value.constant_kind == CHECK_CONSTANT_NONE ||
-                     converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0 ||
-                     (converted.value.constant_kind == CHECK_CONSTANT_ADDRESS && converted.value.object != 0 &&
-                     ((converted.value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || selected->width != 0))))
+            else if (walker->static_storage && !walker->defer_constants &&
+                     !check_value_static_initializer(&converted.value, selected->width != 0))
             {
                 check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
             }
@@ -2595,10 +2602,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             {
                 const CheckInitPart* part = result->parts + p;
                 const CheckValue* value = &part->value;
-                if (part->kind == CHECK_INIT_VALUE && (value->constant_kind == CHECK_CONSTANT_NONE || value->fault != CHECK_FAULT_NONE ||
-                    (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0 ||
-                    (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 &&
-                    ((value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || part->bit_width != 0))))
+                if (part->kind == CHECK_INIT_VALUE && !check_value_static_initializer(value, part->bit_width != 0))
                 {
                     result->status = CHECK_INIT_NON_CONSTANT;
                     result->failed_token = part->token;

@@ -107,7 +107,7 @@ static void check_test_overload_address_oracle(CheckTest* test, TypeTable* table
     const char* mode = "-std=gnu17";
     const bool oracle = ready && parse_test_clang(clang, &mode, 1, pointers, BUSTER_ARRAY_LENGTH(fixtures), outcomes);
     check_test_expect(test, oracle, "independent contextual address Clang oracle runs");
-    const CheckOverloadContext context = { .source_position = 100 };
+    const CheckOverloadContext context = { .semantic.source_position = 100 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         const CheckOverloadAddressFixture* fixture = fixtures + i;
@@ -161,7 +161,7 @@ static void check_test_overload_address_history(CheckTest* test, TypeTable* tabl
         { .type = fd, .declaration = 30, .canonical = 30, .object = 300, .previous = 1, .scope = 1, .position = 31, .flags = BUSTER_CHECK_OVERLOADABLE },
         { .type = fi, .declaration = 40, .canonical = 10, .object = 100, .previous = 2, .scope = 1, .position = 41, .flags = BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE },
     };
-    const CheckOverloadContext context = { .source_position = 50 };
+    const CheckOverloadContext context = { .semantic.source_position = 50 };
     Arena scratch = arena_reserve(65536);
     CheckOverloadResult result = check_overload_address(table, candidates, 4, 0, 0, &context, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.candidate == 0 && result.flags == BUSTER_CHECK_OVERLOADABLE,
@@ -175,7 +175,7 @@ static void check_test_overload_address_history(CheckTest* test, TypeTable* tabl
                       "multiple-set canonical deduplication retains the latest selected snapshot and exact object");
     result = check_overload_address(table, candidates, 4, 3, 0, &context, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_AMBIGUOUS, "repeated identity does not erase a different overload");
-    const CheckOverloadContext earlier = { .source_position = 40 };
+    const CheckOverloadContext earlier = { .semantic.source_position = 40 };
     result = check_overload_address(table, candidates, 4, 3, pi, &earlier, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_INVALID, "future candidate cannot enter an earlier context");
     const CheckOverloadContext final = { 0 };
@@ -253,7 +253,7 @@ static void check_test_overload_address_capacity(CheckTest* test, TypeTable* tab
     CheckOverloadCandidate original[COUNT];
     memcpy(original, candidates, sizeof(original));
     uint64_t peak = 0;
-    const CheckOverloadContext context = { .source_position = COUNT, .scratch_peak = &peak };
+    const CheckOverloadContext context = { .semantic.source_position = COUNT, .scratch_peak = &peak };
     const TypeId target = type_pointer(table, candidates[0].type);
     Arena scratch = arena_reserve(65536);
     const uint64_t capacity = scratch.capacity;

@@ -148,8 +148,8 @@ static void check_builtin_library_fold_call(TypeTable* types, CBuiltinLibraryFol
         clean = temporary.diagnostic == CHECK_DIAG_NONE && converted[i].fault == CHECK_FAULT_NONE &&
                 (converted[i].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
     }
-    const CheckConstValues* values = action->const_values;
-    const uint32_t position = action->source_position;
+    const CheckConstValues* values = action->context.const_values;
+    const uint32_t position = action->context.source_position;
     CheckValue folded = { .type = result->value.type, .category = CHECK_RVALUE };
     bool done = false;
     if (clean && (fold == CBUILTIN_LIBRARY_FOLD_COMPARE || fold == CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED || fold == CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY))

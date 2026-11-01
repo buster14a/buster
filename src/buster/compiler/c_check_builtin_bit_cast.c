@@ -52,9 +52,7 @@ struct CheckBuiltinBitCastAction
     const CheckValue* arguments;
     uint32_t argument_count;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
+    CheckContext context;
     CheckBuiltinBitCastProof source_proof;
     const uint8_t* source_bytes;
     uint32_t source_byte_count;
@@ -92,12 +90,7 @@ static bool check_builtin_bit_cast_complete(const TypeTable* table, TypeId type,
         const uint8_t kind = type_kind(table, type);
         // Functions are not incomplete in Clang; they fail the later trivially-copyable constraint.
         complete = kind == BUSTER_TYPE_KIND_FUNCTION || type_is_complete(table, type);
-        if (complete && input->tag_completions != NULL &&
-            (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM))
-        {
-            const uint32_t tag = table->types.index[type_index(type)];
-            complete = tag < input->tag_completion_count && input->tag_completions[tag] <= input->source_position;
-        }
+        complete = complete && check_context_tag_visible(table, type, &input->context);
         *variable |= kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
         more = type_kind_is_array(kind);
         *trivial &= kind != BUSTER_TYPE_KIND_ATOMIC && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VOID;
@@ -141,7 +134,7 @@ static __attribute__((unused)) void check_builtin_bit_cast_one(const TypeTable* 
     else if (input->arguments == NULL || !type_is_valid(table, input->destination_type) ||
         (unsigned)input->source_proof > CHECK_BUILTIN_BIT_CAST_PROOF_ICE ||
         (input->source_bytes == NULL && input->source_byte_count != 0) ||
-        (input->tag_completions == NULL && input->tag_completion_count != 0))
+        (input->context.tag_completions == NULL && input->context.tag_completion_count != 0))
     {
         check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
     }

@@ -261,7 +261,7 @@ static void check_test_record_casts(CheckTest* test, TypeTable* table)
         const CheckActionResult strict = check_test_action(test, table, cast);
         check_test_expect(test, strict.diagnostic == CHECK_DIAG_NONE && strict.value.type == records[i],
                           "a same-record cast is GNU's extension, which clang has outside GNU modes too");
-        cast.extensions = BUSTER_CHECK_EXTENSION_GNU;
+        cast.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
         const CheckActionResult gnu = check_test_action(test, table, cast);
         check_test_expect(test, gnu.diagnostic == CHECK_DIAG_NONE && gnu.value.type == records[i] && gnu.value.category == CHECK_RVALUE &&
                                gnu.value.constant_kind == CHECK_CONSTANT_NONE && (gnu.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
@@ -296,7 +296,7 @@ static void check_test_mixed_void_conditional(CheckTest* test, TypeTable* table)
             const CheckActionResult strict = check_test_action(test, table, action);
             check_test_expect(test, strict.diagnostic == CHECK_DIAG_NONE && strict.value.type == BUSTER_TYPE_VOID,
                               "a conditional with one void operand is void outside GNU modes too");
-            action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+            action.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
             const CheckActionResult gnu = check_test_action(test, table, action);
             const bool selected_integer = truth == reverse;
             check_test_expect(test, gnu.diagnostic == CHECK_DIAG_NONE && gnu.value.type == BUSTER_TYPE_VOID && gnu.value.category == CHECK_RVALUE &&
@@ -349,12 +349,12 @@ static void check_test_action_histories(CheckTest* test, TypeTable* table)
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(requiring); i += 1)
         {
-            requiring[i].tag_completions = completions;
-            requiring[i].tag_completion_count = table->tags.count;
-            requiring[i].source_position = 19;
+            requiring[i].context.tag_completions = completions;
+            requiring[i].context.tag_completion_count = table->tags.count;
+            requiring[i].context.source_position = 19;
             CheckActionResult result = check_test_action(test, table, requiring[i]);
             check_test_expect(test, result.diagnostic != CHECK_DIAG_NONE, "later tag completion cannot validate an earlier operation needing completeness");
-            requiring[i].source_position = 20;
+            requiring[i].context.source_position = 20;
             result = check_test_action(test, table, requiring[i]);
             check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE, "the same operation is valid at the completion cutoff");
         }
@@ -368,9 +368,9 @@ static void check_test_action_histories(CheckTest* test, TypeTable* table)
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(opaque); i += 1)
         {
-            opaque[i].tag_completions = completions;
-            opaque[i].tag_completion_count = table->tags.count;
-            opaque[i].source_position = 19;
+            opaque[i].context.tag_completions = completions;
+            opaque[i].context.tag_completion_count = table->tags.count;
+            opaque[i].context.source_position = 19;
             const CheckActionResult result = check_test_action(test, table, opaque[i]);
             check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE, "opaque pointers, incomplete designators and their addresses stay valid");
         }
@@ -484,7 +484,7 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
             CheckActionResult result = check_test_action(test, table, action);
             check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.integer == (i == 1 && operation == 1 ? 4 : 1),
                               "void/function layout extensions apply outside GNU modes too");
-            action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+            action.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
             result = check_test_action(test, table, action);
             check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && (result.value.flags & BUSTER_CHECK_ICE) != 0 && result.value.integer == (i == 1 && operation == 1 ? 4 : 1), "explicit GNU void/function target layout matches Clang");
         }
@@ -493,7 +493,7 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         CheckAction action = { .op = CHECK_OP_ADD, .operands = { base, check_test_integer(BUSTER_TYPE_INT, 3) } };
         CheckActionResult result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.offset == 11, "void/function pointer arithmetic applies outside GNU modes too");
-        action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+        action.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == pointer && result.value.object == 31 && result.value.offset == 11, "GNU void/function pointer addition uses a one-byte scale");
         action.op = CHECK_OP_SUBTRACT;
@@ -506,7 +506,7 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         action.operands[1] = check_test_integer(BUSTER_TYPE_INT, 3);
         result = check_test_action(test, table, action);
         check_test_expect(test, i == 0 ? result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_VOID && result.value.category == CHECK_LVALUE : result.diagnostic == CHECK_DIAG_INCOMPLETE, "GNU void subscripts remain lvalues while function-pointer subscripts are still invalid");
-        action = (CheckAction){ .op = CHECK_OP_CAST, .operands = { { .type = BUSTER_TYPE_VOID, .category = CHECK_LVALUE } }, .type = BUSTER_TYPE_VOID, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+        action = (CheckAction){ .op = CHECK_OP_CAST, .operands = { { .type = BUSTER_TYPE_VOID, .category = CHECK_LVALUE } }, .type = BUSTER_TYPE_VOID, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_VOID, "GNU discarded void indirection can be explicitly converted to void");
     }
@@ -522,16 +522,16 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         CheckActionResult result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 && result.value.object == 37,
                           "void/function pointer implicit conversion is clang's pedantic extension in every mode");
-        action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+        action.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == destinations[direction] && result.value.object == 37, "explicit GNU mode accepts void/function pointer interchange preserving provenance");
     }
-    CheckAction action = { .op = CHECK_OP_SUBTRACT, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1), check_test_float(BUSTER_TYPE_DOUBLE, 1) }, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+    CheckAction action = { .op = CHECK_OP_SUBTRACT, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1), check_test_float(BUSTER_TYPE_DOUBLE, 1) }, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
     CheckActionResult result = check_test_action(test, table, action);
-    action = (CheckAction){ .op = CHECK_OP_CAST, .operands = { result.value }, .type = BUSTER_TYPE_INT, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+    action = (CheckAction){ .op = CHECK_OP_CAST, .operands = { result.value }, .type = BUSTER_TYPE_INT, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
     result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == 0 && (result.value.flags & BUSTER_CHECK_ICE) == 0, "GNU arithmetic folding keeps non-ICE zero distinct from a null pointer constant");
-    action = (CheckAction){ .op = CHECK_OP_CONVERT, .operands = { result.value }, .type = void_pointer, .extensions = BUSTER_CHECK_EXTENSION_GNU };
+    action = (CheckAction){ .op = CHECK_OP_CONVERT, .operands = { result.value }, .type = void_pointer, .context.extensions = BUSTER_CHECK_EXTENSION_GNU };
     result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE, "GNU known zero from floating arithmetic still cannot initialize a pointer implicitly");
 }
@@ -656,7 +656,7 @@ static void check_test_qualifier_warnings(CheckTest* test, TypeTable* table)
     CheckActionResult result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS && result.value.type == plain,
                       "qualifier discard outside GNU modes warns, as clang does");
-    action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+    action.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
     result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS && result.value.type == plain,
                       "GNU qualifier discard preserves warning metadata while accepting the compatible target");
@@ -668,7 +668,7 @@ static void check_test_qualifier_warnings(CheckTest* test, TypeTable* table)
         .arguments = &source,
         .argument_count = 1,
         .argument_conversions = &conversion,
-        .extensions = BUSTER_CHECK_EXTENSION_GNU,
+        .context.extensions = BUSTER_CHECK_EXTENSION_GNU,
     };
     result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS && conversion.type == plain,
@@ -863,7 +863,7 @@ static void check_test_vla_actions(CheckTest* test, TypeTable* table)
         .operands = { { .type = type_pointer(table, zero), .constant_kind = CHECK_CONSTANT_ADDRESS,
                         .flags = BUSTER_CHECK_STATIC_OBJECT, .object = 133803, .offset = 8 },
                       check_test_integer(BUSTER_TYPE_INT, 1) },
-        .extensions = BUSTER_CHECK_EXTENSION_GNU,
+        .context.extensions = BUSTER_CHECK_EXTENSION_GNU,
     };
     const CheckActionResult unchanged = check_test_action(test, table, zero_offset);
     check_test_expect(test, unchanged.diagnostic == CHECK_DIAG_NONE && unchanged.value.constant_kind == CHECK_CONSTANT_ADDRESS &&
@@ -876,7 +876,7 @@ static void check_test_void_return_conversion(CheckTest* test, TypeTable* table)
     CheckAction action = { .op = CHECK_OP_CONVERT, .type = BUSTER_TYPE_VOID,
                            .operands = { { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT } } };
     const CheckActionResult strict = check_test_action(test, table, action);
-    action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+    action.context.extensions = BUSTER_CHECK_EXTENSION_GNU;
     const CheckActionResult accepted = check_test_action(test, table, action);
     action.operands[0] = check_test_integer(BUSTER_TYPE_INT, 1);
     const CheckActionResult integer = check_test_action(test, table, action);

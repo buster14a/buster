@@ -203,6 +203,8 @@ depend on it. `test-checker`'s fixtures check each against clang with
 fixture's own signedness (`-fsigned-char` but for those that ask otherwise),
 one of them from the same source both ways.
 
+The action families share the [semantic-context and provenance contract](checker-semantic-context.md): source visibility, receipt-read permission and runtime effects are separate.
+
 ## Implementation boundary
 
 The source adapter handles nested pointer, array and function declarators;
