@@ -12,12 +12,16 @@ struct CheckPackedTestDiagnostic
     char message[512];
 };
 
-static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar, bool quiet)
+// The driver on `source`, by `executable` or in a child as a command line runs it, with `-fsyntax-only` and `-std=gnu17`, by
+// the scalar path with `scalar`, and `option` (or none: null), its output and errors into `output` and `errors`. Returns
+// its exit status.
+static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar, const char* option)
 {
     int result = -1;
+    char* const extra = (char*)(option != NULL ? option : "-fsyntax-only");
     if (executable != NULL)
     {
-        char* arguments[] = { (char*)executable, scalar ? "--scalar" : "-fsyntax-only", quiet ? "-w" : "-fsyntax-only", "-fsyntax-only", "-std=gnu17", (char*)source, NULL };
+        char* arguments[] = { (char*)executable, scalar ? "--scalar" : "-fsyntax-only", extra, "-fsyntax-only", "-std=gnu17", (char*)source, NULL };
         result = object_test_run(arguments, output, errors);
     }
     else
@@ -34,7 +38,7 @@ static int check_test_packed_run(const char* executable, const char* source, con
             }
             close(out);
             close(err);
-            char* arguments[] = { scalar ? "--scalar" : "-fsyntax-only", quiet ? "-w" : "-fsyntax-only", "-fsyntax-only", "-std=gnu17", (char*)source };
+            char* arguments[] = { scalar ? "--scalar" : "-fsyntax-only", extra, "-fsyntax-only", "-std=gnu17", (char*)source };
             const int code = run_check_command(BUSTER_ARRAY_LENGTH(arguments), arguments, true);
             fflush(NULL);
             _exit(code);
@@ -430,7 +434,7 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         check_test_expect(test, oracle_status == (fixtures[i].rejected ? 1 : 0) && oracle_count == fixtures[i].warnings, description);
         for (uint32_t route = 0; route < (executable != NULL ? 4u : 2u); route += 1)
         {
-            const int status = written ? check_test_packed_run(route >= 2 ? executable : NULL, path, output, errors, (route & 1) != 0, false) : -1;
+            const int status = written ? check_test_packed_run(route >= 2 ? executable : NULL, path, output, errors, (route & 1) != 0, NULL) : -1;
             CheckPackedTestDiagnostic actual[16] = { 0 };
             const uint32_t count = check_test_packed_diagnostics(errors, actual, BUSTER_ARRAY_LENGTH(actual));
             snprintf(description, sizeof(description), "packed fixture %u, route %u: %u diagnostics/status %d, Clang %u/%d", i, route, count, status, oracle_count, oracle_status);
