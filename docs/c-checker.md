@@ -2216,6 +2216,20 @@ What the lowering covers past scalars (#145's programs):
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
+- **Multiversioning's attribute conflicts (#839).** The checker reports clang's
+  Sema errors for GNU's function multiversioning at `-fsyntax-only`: a function
+  with `target("default")`, `target_clones`, `cpu_specific` or `cpu_dispatch`
+  refuses every declaration attribute clang keeps except `used` (for `target`
+  alone), `nonnull` and `nothrow`, at the function's name. `target` beside
+  `target_clones`, `cpu_specific` or `cpu_dispatch` is the later attribute's
+  "not compatible" error with clang's note at the earlier one. A target
+  declaration that makes a function multiversioned with an earlier declaration
+  checks the earlier declaration's attributes first, at its name, with clang's
+  "function multiversioning caused by this declaration" note at the new one.
+  `cpu_specific` and `cpu_dispatch` are retained by the checker, and their code
+  generation is still refused by name with the other multiversioning forms.
+  `test-checker` compares the errors' places with clang's, and
+  `test-checker-driver` compares the errors and notes line for line.
 - **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
   GNU's complex integer types (`_Complex char` to `_Complex unsigned
   __int128`) and the complex `_BitInt`s of up to 128 bits that the usual

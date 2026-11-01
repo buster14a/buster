@@ -97,6 +97,11 @@ typedef enum CheckInputMessage
     CHECK_INPUT_MUSTTAIL_ARGUMENTS,
     CHECK_INPUT_MUSTTAIL_DECLARATION,
     CHECK_INPUT_MUSTTAIL_STATEMENT,
+    // GNU's function multiversioning: a function attribute clang refuses beside target("default"), target_clones or
+    // cpu_specific/cpu_dispatch, at the function's name, naming the attribute; and a target attribute incompatible with
+    // another multiversioning attribute, at the later attribute, with a note at the earlier one.
+    CHECK_INPUT_MULTIVERSION_ATTRIBUTE,
+    CHECK_INPUT_MULTIVERSION_INCOMPATIBLE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -161,6 +166,8 @@ static const char* const check_input_messages[] =
     "'musttail' attribute takes no arguments",
     "'musttail' attribute cannot be applied to a declaration",
     "'musttail' attribute only applies to return statements",
+    "attribute multiversioning cannot be combined with another attribute",
+    "multiversioning attributes are not compatible",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -181,6 +188,16 @@ static bool check_input_target_supported(const PPOptions* options)
 #define BUSTER_CHECK_ENUM_FIXED 1
 #define BUSTER_CHECK_ENUM_LISTED 2
 
+// The note a report carries, if any: clang's note at the earlier attribute of an incompatible multiversioning pair, at
+// the declaration that caused a function to be multiversioned, or at a naked function's attribute.
+typedef enum CheckInputNoteKind
+{
+    CHECK_INPUT_NOTE_NONE,
+    CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE,
+    CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED,
+    CHECK_INPUT_NOTE_ATTRIBUTE_HERE,
+} CheckInputNoteKind;
+
 typedef struct CheckInputReport CheckInputReport;
 struct CheckInputReport
 {
@@ -191,6 +208,16 @@ struct CheckInputReport
     uint32_t completion;
     // The declaration a message located elsewhere names (an attribute's, #147), plus one; 0 for none.
     uint32_t subject;
+    // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.
+    uint32_t attribute;
+    // The note's token and kind (CheckInputNoteKind), or BUSTER_CHECK_NONE and CHECK_INPUT_NOTE_NONE.
+    uint32_t note_token;
+    uint8_t note_kind;
+    // The multiversioning kind a message names (CheckInputMultiversionKind, c_check_attribute.c), or 0.
+    uint8_t multiversion;
+    // A token to order this report by instead of `token`, or 0: an alias definition's error is clang's after the
+    // multiversioning error at the function's name, though its attribute is earlier.
+    uint32_t sort;
 };
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
@@ -1237,6 +1264,24 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
     if (reader->output->report_count != count)
     {
         reader->output->reports[count].subject = subject + 1;
+    }
+}
+
+// check_input_report of a multiversioning message that names the attribute at `attribute` and carries `note` at
+// `note_token`, if any.
+static void check_input_report_multiversion(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint8_t multiversion,
+                                            uint32_t attribute, uint32_t note_token, CheckInputNoteKind note, uint32_t sort)
+{
+    const uint32_t count = reader->output->report_count;
+    check_input_report(reader, token, message);
+    if (reader->output->report_count != count)
+    {
+        CheckInputReport* report = reader->output->reports + count;
+        report->attribute = attribute;
+        report->note_token = note_token;
+        report->note_kind = (uint8_t)note;
+        report->multiversion = multiversion;
+        report->sort = sort;
     }
 }
 
@@ -4761,7 +4806,20 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 .variable_definition = !function && !is_typedef && (kind == PARSE_KIND_EQUAL || (file && !is_static && storage != C_NAME_EXTERN)),
                 .external = file && !is_static,
             };
+            // The entity's previous declaration, for GNU's multiversioning checks (#839) and the inline rules below.
+            const uint32_t previous_handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
+            const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
+            const CheckInputAttributes* previous_attributes =
+                reader->output->attributes != 0 && previous_declaration < parser->tokens.count ? reader->output->attributes[previous_declaration] : 0;
+            const bool previous_inline = previous_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
+                                         previous_declaration < parser->tokens.count &&
+                                         (reader->output->function_flags[previous_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+            const bool attributes_valid = valid;
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
+            if (attributes_valid && file && function && !is_typedef)
+            {
+                check_input_attribute_multiversion(reader, attributes, name, previous_attributes, previous_declaration, is_inline, previous_inline);
+            }
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid && reader->cleanup_attributes && attributes != 0)
@@ -4793,11 +4851,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 // idiom, and gnu_inline in later modes). C99's inline definition and GNU89's plain inline are
                 // definitions here, as clang reports a later one as a redefinition, and so is an extern inline
                 // definition after one.
-                const uint32_t previous_handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
-                const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
                 const bool prior_definition = previous_declaration != BUSTER_CHECK_NONE && reader->definition_origins[previous_declaration] != 0;
-                const CheckInputAttributes* previous_attributes =
-                    reader->output->attributes != 0 && previous_declaration < parser->tokens.count ? reader->output->attributes[previous_declaration] : 0;
                 const bool gnu_inline_definition = function && !is_typedef && kind == PARSE_KIND_L_BRACE && is_inline && storage == C_NAME_EXTERN && !prior_definition &&
                                                    (predefines_gnu_inline(&reader->pp->options.predefines, reader->pp->options.language) ||
                                                     check_input_attribute_gnu_inline(attributes) || check_input_attribute_gnu_inline(previous_attributes));

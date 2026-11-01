@@ -110,6 +110,29 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
         case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
+        case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
+        case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
+    }
+    return result;
+}
+
+// The spelling of the attribute whose name token is `token`: as written, or clang's normalized spelling (without the
+// double underscores around GNU's name).
+static String8 check_driver_attribute_spelling(const Parser* parser, const Preprocessor* pp, uint32_t token, bool normalized)
+{
+    String8 result = { 0 };
+    if (token < parser->tokens.count && parser->tokens.names[token] != 0)
+    {
+        const uint32_t name = parser->tokens.names[token];
+        if (normalized)
+        {
+            CheckInputReader names = { .pp = (Preprocessor*)pp };
+            result = check_input_attribute_name(&names, name);
+        }
+        else
+        {
+            result = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+        }
     }
     return result;
 }
@@ -676,7 +699,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t report_total = 0;
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
-            const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
+            const uint32_t located = input->reports[i].sort != 0 ? input->reports[i].sort : input->reports[i].token;
+            const uint32_t token = located < count ? located : count;
             if (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | i;
@@ -950,7 +974,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
                     const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
                                                                                          check_driver_input_report_message(input, input->reports + index);
-                    const uint32_t located = phase == 2 ? extra[index].token : token;
+                    const uint32_t located = phase == 2 ? extra[index].token : phase == 1 ? stream->reports[index].token : input->reports[index].token;
                     const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                     const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
                     const uint32_t node = phase == 1 ? stream->reports[index].node :
@@ -961,7 +985,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
                     if (source != BUSTER_CHECK_NONE)
                     {
-                        const uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
+                        uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
+                        // An alias or ifunc definition's error is clang's after the multiversioning error at the
+                        // function's name, though its location is its earlier attribute (#839).
+                        if (phase == 0 && input->reports[index].sort != 0)
+                        {
+                            publication = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                        }
                         // The input's reports whose messages name their token's identifier.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
                         const bool named = phase == 0 && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
@@ -1008,6 +1038,47 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "weakref declaration of '%.*s' must %s", length, spelling,
                                                      kind == CHECK_INPUT_WEAKREF_CONTEXT ? "be in a global context" : "also have an alias attribute");
+                            }
+                        }
+                        else if (phase == 0 && (kind == CHECK_INPUT_MULTIVERSION_ATTRIBUTE || kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE) &&
+                                 input->reports[index].attribute != BUSTER_CHECK_NONE)
+                        {
+                            // GNU's function multiversioning (#839), as clang's messages spell it: the attribute it refuses
+                            // at the function's name, or the two incompatible attributes at the later one, with clang's
+                            // note at the earlier or at the declaration that caused multiversioning.
+                            const CheckInputReport* report = input->reports + index;
+                            const String8 later = check_driver_attribute_spelling(parser, pp, report->attribute, false);
+                            if (kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE)
+                            {
+                                const String8 earlier = check_driver_attribute_spelling(parser, pp, report->note_token, true);
+                                const PPOutputDiagnosticNote note = {
+                                    .token = report->note_token < count ? parser->tokens.sources[report->note_token] : source,
+                                    .message = "conflicting attribute is here",
+                                };
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1,
+                                    "'%.*s' and '%.*s' attributes are not compatible", (int)later.length, later.pointer,
+                                    (int)earlier.length, earlier.pointer);
+                            }
+                            else
+                            {
+                                const String8 attribute = check_driver_attribute_spelling(parser, pp, report->attribute, true);
+                                const char* multiversion = check_input_multiversion_name((CheckInputMultiversionKind)report->multiversion);
+                                if (report->note_kind == CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED)
+                                {
+                                    const PPOutputDiagnosticNote note = {
+                                        .token = report->note_token < count ? parser->tokens.sources[report->note_token] : source,
+                                        .message = "function multiversioning caused by this declaration",
+                                    };
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1,
+                                        "attribute '%s' multiversioning cannot be combined with attribute '%.*s'", multiversion,
+                                        (int)attribute.length, attribute.pointer);
+                                }
+                                else
+                                {
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                        "attribute '%s' multiversioning cannot be combined with attribute '%.*s'", multiversion,
+                                        (int)attribute.length, attribute.pointer);
+                                }
                             }
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
@@ -1073,6 +1144,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
                                 "unsupported semantic '#pragma %.*s%s%.*s' directive",
                                 (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
+                        else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
+                                 input->reports[index].note_token < count)
+                        {
+                            // A naked function's error has clang's note at its attribute.
+                            const PPOutputDiagnosticNote note = {
+                                .token = parser->tokens.sources[input->reports[index].note_token],
+                                .message = "attribute is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
                         }
                         else
                         {

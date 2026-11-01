@@ -182,7 +182,8 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
                 result.always_inline |= attribute->kind == CHECK_ATTRIBUTE_ALWAYS_INLINE;
                 result.flatten |= attribute->kind == CHECK_ATTRIBUTE_FLATTEN;
                 result.noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN;
-                result.versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES;
+                result.versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                                   attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
                 int32_t cpu = -1;
                 // What clang ignores with a warning isn't the function's attribute at all.
                 const PredefinesTargetAttribute kind = attribute->kind == CHECK_ATTRIBUTE_TARGET && attribute->text.length < UINT32_MAX ?
