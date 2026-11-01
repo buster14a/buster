@@ -3223,32 +3223,48 @@ enumerator `case` labels; it compares the enumerators' checked values, so
 aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
 computed case leaves the switch to a full constant evaluator.
 `-Wuninitialized` follows graph evaluation order: a local scalar object read
-before any write and not address-taken warns; a `sizeof` operand, a void cast,
-an unselected constant `&&`/`||`/`?:` arm, an address computation and an
-assignment target are not reads, while an initializer's value, a compound
-assignment and an increment are, with the write ordered after the read. An
-unmodeled write through inline assembly or a builtin suppresses it.
+before any write and not address-taken warns; a `sizeof` operand (except a
+variably modified type's bound), a void cast, an address computation, an
+unselected `&&`/`||`/`?:` arm, a static selection's unselected arms and
+controlling expression, and an assignment target are not reads, while an
+initializer's value, a compound assignment and an increment are, with the write
+ordered after the read. A variable read in its own initializer gets Clang's
+"within its own initialization" message. An unmodeled write through inline
+assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
+keeps a separate read that is not the target of the same compound assignment or
+increment.
 `-Wformat` checks the four `printf`-family names, a declaration's
-`format(printf, ...)` attribute, wide `%ls`/`%lc` (and `%S`/`%C`) arguments with
-`wchar_t`/`wint_t`, and literal formats' common conversions and sizes.
-`-Wunused-value` covers a bare identifier or literal and a parenthesized
-comparison as well as an unparenthesized one.
+`format(printf, ...)` attribute, exact integer widths for every length modifier
+(`%lld`, `%zd`, `%jd`, `%td`, ...), `%n`'s integer pointer, each `*` field
+width's `int`, extra and insufficient arguments, and wide `%ls`/`%lc` (and
+`%S`/`%C`) arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal
+formats' common conversions and sizes. Its literal-internal diagnostics keep
+Clang's column and the diagnostic collector's source order.
+`-Wunused-value` covers a bare identifier or literal, a parenthesized
+comparison, a cast, a conditional, and a two-operand comma expression as well
+as an unparenthesized comparison.
 `-Warray-bounds` reports a direct array object, including a nested subscript
-such as `b[1][5]` at `b`, and leaves struct-member arrays to a full bounds
-analysis. `-Wunused-function` reports a declaration chain once, at its definition
-when it has one and otherwise at its first declaration; a shadowing local use
-does not keep a file-scope variable used. `-Wreturn-stack-address` traces
-`&x[0]` and `&s.m` to their local object but not `&p->m` through a pointer.
-The return-flow walk runs for non-aggregate functions only where
-`-Wreturn-type` is enabled.
+such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
+struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
+declaration chain once, at its definition when it has one and otherwise at its
+first declaration; a shadowing local use does not keep a file-scope variable
+used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
+but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
+`else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
+`while` or `?:` condition. The `-Wswitch` definition following the selector's
+tag accepts a fixed underlying type and the nearest shadowing definition. The
+return-flow walk runs for non-aggregate functions only where `-Wreturn-type` is
+enabled.
 
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
 `-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
-uninitialized evaluation contexts and read-modify-writes, wide formats, enum
-aliases, zero sign comparisons, array-member/nested bounds, declaration chains,
-bare/parenthesized unused values and returned stack addresses line for line
-against Clang on both check paths. The semantics are also covered by
+uninitialized evaluation contexts, static selections, self-initialization,
+read-modify-writes and VLA bounds, wide and width-mismatched formats, enum
+aliases, fixed-underlying and shadowing definitions, zero sign comparisons,
+array-member/nested/zero-length bounds, declaration chains, bare/parenthesized/
+cast/conditional/comma unused values, `for` conditions and returned stack
+addresses line for line against Clang on both check paths. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
 

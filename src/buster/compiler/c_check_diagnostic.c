@@ -99,6 +99,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wdangling-else", NULL, "add explicit braces to avoid dangling else" },
     { "-Wunused-but-set-parameter", NULL, "parameter set but not used" },
     { "-Wunused-const-variable", "-Wunused-variable", "unused variable" },
+    { "-Wformat-extra-args", "-Wformat", "data argument not used by format string" },
+    { "-Wformat-insufficient-args", "-Wformat", "more '%' conversions than data arguments" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
