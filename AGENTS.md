@@ -398,7 +398,10 @@ designs and the compilers already built this way.
   them natively against clang -O0's build. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
-  bit builtins' and `expect`'s; `test-checker --program-align` runs them. The
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them, and
+  `classify_type`, `eh_return_data_regno`, `dwarf_cfa`, `launder` and the
+  generic leaves (`debugtrap`, `memcpy_inline` and the others: the guide's
+  "Generic builtins of clang's own checks and of an instruction or two"). The
   signaling NaNs and the `_Float16` and `__float128` constants (`nans`,
   `nanf16`, `inff128` and the others) are floating builtins, their NaNs' bits
   exact in static data and code (`check_action_nan_bits`); `test-checker

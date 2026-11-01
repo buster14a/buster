@@ -199,9 +199,9 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
         builtin_intrinsic_own_main_lookup(outside, sizeof(outside) - 1) == NULL && !builtin_intrinsic_own_main_x86_in_scope(outside, sizeof(outside) - 1),
         "valid full-catalog lfence target is rejected because it is absent from the frozen workload");
     // The supplementary scope (c_builtin_supplementary_scope.inc): its names in strcmp's order, which its lookup's binary
-    // search needs, each an x86 record of the full catalogue that the frozen inventory hasn't, admitted whole and not
-    // by a longer slice, nor by a prefix but one that is a name of its own (pternlogd128_mask, before
-    // pternlogd128_maskz).
+    // search needs, each an x86 record of the full catalogue that the frozen inventory hasn't, or a generic one that is a
+    // leaf (#148: __builtin_debugtrap and the others of c_builtin_x86_leaves.inc), admitted whole and not by a longer
+    // slice, nor by a prefix but one that is a name of its own (pternlogd128_mask, before pternlogd128_maskz).
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(builtin_intrinsic_supplementary_names); i += 1)
     {
         const BuiltinIntrinsicName* entry = builtin_intrinsic_supplementary_names + i;
@@ -214,12 +214,13 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
             const BuiltinIntrinsicName* other = builtin_intrinsic_supplementary_names + j;
             shorter_listed |= other->length + 1 == entry->length && memcmp(other->name, entry->name, other->length) == 0;
         }
-        builtin_intrinsic_catalog_test_expect(test, info != NULL && (strcmp(info->shard, "x86") == 0 || strcmp(info->shard, "x86_64") == 0) &&
+        const bool generic_leaf = info != NULL && strcmp(info->shard, "generic") == 0 && cbuiltin_source_intrinsic((const uint8_t*)entry->name, entry->length);
+        builtin_intrinsic_catalog_test_expect(test, info != NULL && (strcmp(info->shard, "x86") == 0 || strcmp(info->shard, "x86_64") == 0 || generic_leaf) &&
             builtin_intrinsic_own_main_lookup(entry->name, entry->length) == NULL && (i == 0 || strcmp(entry[-1].name, entry->name) < 0) &&
             builtin_intrinsic_supplementary_in_scope(entry->name, entry->length) && builtin_intrinsic_own_main_prototype_in_scope(entry->name, entry->length) &&
             builtin_intrinsic_supplementary_in_scope(entry->name, entry->length - 1) == shorter_listed &&
             !builtin_intrinsic_supplementary_in_scope(longer, entry->length + 1),
-            "the supplementary scope's names are sorted catalogued x86 records past the inventory, admitted only whole");
+            "the supplementary scope's names are sorted catalogued x86 records or generic leaves past the inventory, admitted only whole");
     }
     builtin_intrinsic_catalog_test_expect(test, !builtin_intrinsic_supplementary_in_scope(NULL, 1) &&
         !builtin_intrinsic_supplementary_in_scope(outside, sizeof(outside) - 1), "the supplementary scope rejects unrelated and null names");
