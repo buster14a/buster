@@ -270,13 +270,18 @@ transitions), `return_tails` (returns published as tails) and `red_zones`
 `test-check-debug --cross-check` (`c_check_unwind_test.c`) checks it on a
 fixture compiled by `--tier1 --verify`, every function but `main` by Tier 1:
 a frame of spill slots alone, one with pushes, two returns each after its own
-epilogue, an open frame whose loop's latch comes last, a realigned frame, and a
-leaf whose spills are in the red zone, whose shapes `--tier1-report`'s counts
-must show.
+epilogue, an open frame whose loop's latch comes last, a realigned frame (with
+its frame pointer), the same open and with two returns, and a leaf whose spills
+are in the red zone, whose shapes `--tier1-report`'s counts must show. Each
+function's FDE, as `readelf -wF` interprets it, must have its shape: from the
+entry's row, a row with the CFA rsp+8 after each return's `ret`, a last row with
+another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in
+some row exactly for the frame pointers, and the leaf's one row.
 By each path and through GNU ld and lld, `backtrace()` walks through every frame
-to `main` (and without unwind tables stops at the first), and gdb's backtrace at
-every instruction of each function, both returns and the loop's iterations
-among them, gives the function and `main`. Tier 1 doesn't make the other
+to `main` (and without unwind tables stops at the first), `--lanes 1` and 8 make
+the vector path's bytes, and gdb's backtrace at every instruction of each
+function, both returns and the loops' iterations among them, gives the function
+and `main`. Tier 1 doesn't make the other
 shapes the planner can: its allocator gives a leaf no callee-saved register (they
 go only to values live across a call), so a red zone has no pushes above it, and
 its selection refuses the dynamic stack's operations, so no frame of Tier 1's is
