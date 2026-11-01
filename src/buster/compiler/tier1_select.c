@@ -606,13 +606,18 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 // I1, I8 or I16 value selects COPY instead, with canonical width and the narrow source width retained; COPY of a narrow
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
-// code leaves out follows from what the chosen patterns read (tier1_select_plan). The original function stays immutable.
+// code leaves out follows from what the chosen patterns read (tier1_select_plan). For TIER1_RULE_ADDRESS,
+// TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE and TIER1_RULE_STORE_ADDRESS,
+// `stack_object` is BUSTER_IR_NONE, or the frame object the address walk reached, whose offset the consumer adds to the
+// displacement at emission (tier1_emit_cfg.c): the base value is then BUSTER_IR_NONE, and no register is read for it.
+// The original function stays immutable.
 typedef struct Tier1SelectPattern Tier1SelectPattern;
 struct Tier1SelectPattern
 {
     uint64_t immediate;
     uint32_t values[3];
     int32_t displacement;
+    uint32_t stack_object;
     uint8_t rule;
     uint8_t operation;
     uint8_t width;
@@ -1009,13 +1014,24 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
     return result;
 }
 
-// A memory operand's address: base + index * 2^scale + displacement, and the nodes its walk passed.
+// A frame object's address the selector takes: a lea from the frame's base (TIER1_RULE_STACK_ADDRESS), or folded into
+// a user's memory operand (tier1_select_address), both filled at emission from the frame's layout. The frame's offsets
+// are 32-bit, and an over-aligned object realigns it.
+static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot)
+{
+    return slot < function->slot_count && (function->slots[slot].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0 &&
+           function->slots[slot].size <= BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES && function->slots[slot].alignment <= BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT;
+}
+
+// A memory operand's address: base + index * 2^scale + displacement, the frame object the walk reached instead of a
+// base value, and the nodes its walk passed.
 typedef struct Tier1SelectAddress Tier1SelectAddress;
 struct Tier1SelectAddress
 {
     int64_t displacement;
     uint32_t base;
     uint32_t index;
+    uint32_t object;
     uint8_t scale;
     uint8_t folds;
 };
@@ -1054,12 +1070,14 @@ static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t roo
 // BUSTER_TIER1_SELECT_WALK of them: the conversions between a pointer and its 64 bits that the typed stream's integers
 // put around every address (`inttoptr`, `ptrtoint`), a 64-bit addition of a constant, and addresses, each taken whole
 // while the operand has room for its index, a constant index joining the displacement, and while the displacement fits
-// 32 bits. No narrowed address or speculative load is introduced: the walk stops at the base, the first node it can't
-// take.
+// 32 bits. A frame object's address ends the walk: its offset joins the displacement at emission, from the frame's
+// layout, with the frame's base register, so no value is read for it. The object may live in the entry block past the
+// walk's block: the producer materializes every slot address there, which dominates every use. No narrowed address or
+// speculative load is introduced: the walk stops at the base, the first node it can't take.
 static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address)
 {
     const IrFunction* function = forest->function;
-    bool walking = true;
+    bool walking = address.object == BUSTER_IR_NONE;
     for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
     {
         const uint32_t node = address.base;
@@ -1092,6 +1110,20 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
             next.base = right ? a : b;
             constant_node = right ? b : a;
         }
+        else if (taken && op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
+        {
+            next.object = a;
+            next.base = BUSTER_IR_NONE;
+        }
+        else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a) && forest->blocks[node] == 0 && forest->uses[node] == 1 && node < root)
+        {
+            // The same past its block: the producer materializes every slot address in the entry block, which dominates
+            // every use, and the address is pure with a function-global offset, so no value is read for it anywhere.
+            // Longer cross-block chains stay unfolded.
+            next.object = a;
+            next.base = BUSTER_IR_NONE;
+            taken = true;
+        }
         else
         {
             taken = taken && ((op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && function->type[node] == IR_I64));
@@ -1102,6 +1134,7 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         {
             next.folds = (uint8_t)(address.folds + 1 + peeled + (constant_node != BUSTER_IR_NONE && tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
             address = next;
+            walking = address.object == BUSTER_IR_NONE;
         }
     }
     return address;
@@ -1111,9 +1144,10 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
 // with its scale and displacement. Returns whether the walk took anything.
 static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
 {
-    const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE });
+    const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE });
     pattern->values[first] = address.base;
     pattern->values[first + 1] = address.index;
+    pattern->stack_object = address.object;
     pattern->scale = address.scale;
     pattern->displacement = (int32_t)address.displacement;
     pattern->fold_count += address.folds;
@@ -1133,6 +1167,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
+        .stack_object = BUSTER_IR_NONE,
         .operation = (uint8_t)tier1_select_operation(op),
         .width = (uint8_t)width,
     };
@@ -1169,17 +1204,24 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         base.source_width = narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0 ? narrow_width : 0;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
         // A pointer's 64 bits, or the pointer of 64 bits, from an address: the address's lea, or the copy of what the
         // conversions around it convert.
-        const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE })
-                                                                                  : (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE };
+        const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE })
+                                                                                  : (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE };
+        // Through a frame object the walked address stands alone: its base would tie it where the object is past the
+        // walk's block (a cross-block read costs nothing), and the paths would cover the object apart.
+        if (address.folds == 0 || address.object == BUSTER_IR_NONE)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
         if (address.folds != 0)
         {
             Tier1SelectPattern walked = base;
-            walked.rule = address.index == BUSTER_IR_NONE && address.displacement == 0 ? TIER1_RULE_COPY : TIER1_RULE_ADDRESS;
+            // Through a frame object the address is a lea from the frame's base, never a copy of no value.
+            walked.rule = address.object != BUSTER_IR_NONE || address.index != BUSTER_IR_NONE || address.displacement != 0 ? TIER1_RULE_ADDRESS : TIER1_RULE_COPY;
             walked.values[0] = address.base;
             walked.values[1] = address.index;
+            walked.stack_object = address.object;
             walked.scale = address.scale;
             walked.displacement = (int32_t)address.displacement;
             walked.fold_count = address.folds;
@@ -1421,6 +1463,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
                 .displacement = displacement,
                 .base = a,
                 .index = constant_index ? BUSTER_IR_NONE : b,
+                .object = BUSTER_IR_NONE,
                 .scale = constant_index ? 0 : (uint8_t)tier1_select_log2(operand.scale),
             };
             start.index = start.index != BUSTER_IR_NONE ? tier1_select_index(forest, node, b, operand.scale, &start.displacement, &start.folds) : start.index;
@@ -1428,6 +1471,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             base.rule = TIER1_RULE_ADDRESS;
             base.values[0] = address.base;
             base.values[1] = address.index;
+            base.stack_object = address.object;
             base.displacement = (int32_t)address.displacement;
             base.scale = address.scale;
             base.fold_count = address.folds;
@@ -1447,9 +1491,14 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.values[2] = store ? b : BUSTER_IR_NONE;
         base.width = (uint8_t)tier1_select_memory_width(store ? function->type[b] : type);
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
         Tier1SelectPattern folded = base;
-        if (tier1_select_memory(forest, node, a, &folded, 0))
+        const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
+        // Through a frame object the folded address stands alone, as above.
+        if (!walked || folded.stack_object == BUSTER_IR_NONE)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        if (walked)
         {
             folded.rule = store ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS;
             tier1_select_add_candidate(forest, node, &candidates, folded);
@@ -1536,8 +1585,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_PHI;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_STACK_ADDR && a < function->slot_count && (function->slots[a].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0 &&
-             function->slots[a].size <= BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES && function->slots[a].alignment <= BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT)
+    else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
     {
         base.rule = TIER1_RULE_STACK_ADDRESS;
         base.immediate = a;
@@ -1935,7 +1983,9 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
     const X86Instruction result =
     {
         .displacement = pattern->displacement,
-        .rm = registers[pattern->values[first]],
+        // A frame object's base is the frame's base register, which the consumer sets at emission with the object's
+        // offset (tier1_emit_cfg.c): until then the stack pointer's, as the object's lea's is.
+        .rm = pattern->stack_object != BUSTER_IR_NONE ? X86_REGISTER_RSP : registers[pattern->values[first]],
         .index = index == BUSTER_IR_NONE ? 0 : registers[index],
         .mode = index == BUSTER_IR_NONE ? BUSTER_X86_MEMORY_BASE : (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(pattern->scale),
     };
@@ -2015,12 +2065,12 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     }
     // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
     // edge moves a phi needs. Reject the complete plan before allocating records, even if earlier value locations are
-    // spilled.
+    // spilled. A memory operand through a frame object needs the frame's layout too: the CFG consumer's.
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_DIVIDE ||
-            plan->patterns[node].rule == TIER1_RULE_SHIFT)
+            plan->patterns[node].rule == TIER1_RULE_SHIFT || plan->patterns[node].stack_object != BUSTER_IR_NONE)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;
