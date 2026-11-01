@@ -455,10 +455,10 @@ struct CheckInput
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
-    // Only a rejected unit whose declaration/body resolution completed can have these per-token diagnostic cuts
-    // (check_input_diagnostic_recover): each token's is the first report at or after its subtree's first token in its
-    // declaration, so that every construct without a missing name keeps its graph, and declarations without one their
-    // whole graph.
+    // Only a rejected unit whose declaration/body resolution completed, and whose reports are all missing operand
+    // names, can have these per-token diagnostic cuts (check_input_diagnostic_recover): each token's is the first report
+    // at or after its subtree's first token in its declaration, so that every construct without a missing name keeps
+    // its graph, and declarations without one their whole graph.
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
     bool diagnostic_graph;

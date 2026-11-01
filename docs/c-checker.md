@@ -2837,9 +2837,14 @@ name silences and the siblings it doesn't with clang, by both paths, with
 that holds the name is cut whole, where clang still checks an operator on its
 value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
 runtime (non-constant) shift warning, where clang, which then skips their
-reachability analysis, publishes them all (`x << 40`); and a missing name that
+reachability analysis, publishes them all (`x << 40`); a missing name that
 the declaration walk reports (an enumerator's or an array bound's) is a
-declarator failure, which keeps the whole unit's conservative prefix.
+declarator failure, which keeps the whole unit's conservative prefix; and a
+unit with any report other than a missing name (a control-flow error such as
+a `break` outside a loop, a declaration conflict) keeps the previous
+whole-unit prefix, which starts at the unit's first report of any kind, even
+after a missing name, since these per-construct cuts are made only when the
+unit's only reports are missing operand names.
 Type-query/declarator failures, unsupported pragmas, resource failures and
 unfinished resolver states retain the conservative prefix. Repaired/deferred
 views with skipped bodies do not enable this new binding recovery. A successful

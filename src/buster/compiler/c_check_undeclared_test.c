@@ -249,16 +249,25 @@ static __attribute__((noinline)) void check_test_undeclared(CheckTest* test, con
           "3:22: error: -\n", true },
     };
     const char* temporary = getenv("TMPDIR");
-    char directory[256];
-    snprintf(directory, sizeof(directory), "%s/buster-undeclared-XXXXXX", temporary != NULL && temporary[0] != 0 ? temporary : "/tmp");
-    const bool ready = mkdtemp(directory) != NULL;
-    check_test_expect(test, ready, "undeclared-identifier recovery: the fixtures' directory");
-    char source[320];
-    char object[320];
-    char errors[320];
-    snprintf(source, sizeof(source), "%s/source.c", directory);
-    snprintf(object, sizeof(object), "%s/source.o", directory);
-    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    const char* base = temporary != NULL && temporary[0] != 0 ? temporary : "/tmp";
+    // The directory and its files in one allocation each: a TMPDIR of any length, never a silently truncated template.
+    const size_t room = strlen(base) + sizeof("/buster-undeclared-XXXXXX");
+    char* directory = malloc(room);
+    const int length = directory != NULL ? snprintf(directory, room, "%s/buster-undeclared-XXXXXX", base) : -1;
+    const bool named = directory != NULL && length > 0 && (size_t)length < room && mkdtemp(directory) != NULL;
+    check_test_expect(test, named, "undeclared-identifier recovery: the fixtures' directory");
+    char* source = named ? malloc(room + sizeof("/source.c")) : NULL;
+    char* object = named ? malloc(room + sizeof("/source.o")) : NULL;
+    char* errors = named ? malloc(room + sizeof("/errors")) : NULL;
+    const bool paths = source != NULL && object != NULL && errors != NULL;
+    check_test_expect(test, !named || paths, "undeclared-identifier recovery: the fixtures' files");
+    const bool ready = named && paths;
+    if (ready)
+    {
+        snprintf(source, room + sizeof("/source.c"), "%s/source.c", directory);
+        snprintf(object, room + sizeof("/source.o"), "%s/source.o", directory);
+        snprintf(errors, room + sizeof("/errors"), "%s/errors", directory);
+    }
     static char theirs[BUSTER_CHECK_UNDECLARED_TEXT];
     static char ours[BUSTER_CHECK_UNDECLARED_TEXT];
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -300,4 +309,8 @@ static __attribute__((noinline)) void check_test_undeclared(CheckTest* test, con
         unlink(errors);
         rmdir(directory);
     }
+    free(errors);
+    free(object);
+    free(source);
+    free(directory);
 }
