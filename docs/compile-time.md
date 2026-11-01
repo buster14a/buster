@@ -950,18 +950,22 @@ report, on standard error after the command, a row per stage.
 - **System-time qualification.** The stage `system-ms` values are raw
   `getrusage(RUSAGE_SELF).ru_stime` deltas between resource marks, summed into
   the named row; the counter includes all process threads. They are
-  **unqualified** estimates, not precise exclusive
-  stage kernel costs: the resource boundaries may differ from the TSC laps,
-  and kernel accounting can attribute CPU time across short phase boundaries.
-  The October 29 repeated SQLite capture had stable parse elapsed time but
-  widely varying attributed system time ([issue #870](https://github.com/buster14a/buster/issues/870)).
+  **low-confidence** estimates, not precise exclusive stage kernel costs: the
+  resource boundaries may differ from the TSC laps, and kernel accounting can
+  attribute CPU time across short phase boundaries. The October 29 repeated
+  SQLite capture had stable parse elapsed time but widely varying attributed
+  system time ([issue #870](https://github.com/buster14a/buster/issues/870)).
   Do not rank stages by these deltas or subtract them from elapsed time to
-  infer stage user time. The report retains the raw numbers and identifies their
-  source, boundaries and unqualified accuracy in `time-process` rows. A failed
-  `getrusage` read currently substitutes zeros and can distort a later delta,
-  so a zero is not proof of no system work; availability detection and
-  independent validation remain open.
-  Elapsed timings and minor fault counts are separate measurements.
+  infer stage user time. The report retains the raw numbers and identifies
+  their source, boundaries, status and low-confidence accuracy in
+  `time-process` rows: `stage-system-status` is `available` or `unavailable`,
+  `stage-system-accuracy` is `low-confidence` or `unavailable`, and every
+  stage's system and fault columns are `-1` when the read failed. A failed
+  `getrusage` is latched, so a substituted zero cannot distort a later delta.
+  Elapsed timings remain exact when the split is unavailable; minor fault
+  counts share the split's availability, because both come from the same read.
+  The [accounting control](#the-accounting-control-870) validates the split
+  against hardware user/kernel cycles rather than trusting `task-clock:k`.
 - **Lanes.** The driver compiles the functions on lanes (#151), by default as
   many as their tokens pay for, up to one per core of the CPUs it may run on
   (#905). On one lane, the
@@ -1001,8 +1005,49 @@ without the option, with it, and the reference compiler.
   run must be the same bytes, and every report must be whole.
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
-  ranked. The preprocessor's phases and the expressions' walk
+  ranked by elapsed time. The preprocessor's phases and the expressions' walk
   (`check-input.expressions`) come under their stages, outside the stages' sum.
+  Its stage table's system-time, fault and peak columns are `-1` when
+  unavailable; it never ranks by the low-confidence system split.
+
+### The accounting control (#870)
+
+`--time-stages` cannot certify `getrusage`'s user/kernel split on every host:
+the source is a process-wide CPU-time counter, and the kernel may account it
+in ticks or charge a boundary's work to a neighboring interval. The reporting
+side therefore labels the values low-confidence. The control campaign measures
+that label instead of asserting it:
+
+- **Known work.** A small C control alternates a CPU-only xorshift chain, page
+  faults on freshly `madvise(MADV_DONTNEED)`-ed anonymous pages, and
+  `getpid` syscalls. It sweeps phase lengths from 250 µs to 50 ms and start
+  offsets across a 10 ms grid, so quantization and boundary leakage show as
+  both a length effect and a phase-of-tick effect.
+- **Independent split.** At every phase boundary it reads hardware
+  `cycles:u` and `cycles:k` through `perf_event_open`
+  (`exclude_user`/`exclude_kernel`), converts them with that phase's own
+  cycle rate, and compares them with the `getrusage` system delta and minor
+  faults. `task-clock:k` is collected and reported but not trusted: it is a
+  software task clock with a privilege suffix, and the control shows it
+  tracking whole-phase time rather than kernel cycles. Its previous use as an
+  independent kernel timer is rejected.
+- **Overhead and configuration.** An empty phase measures the marks' own
+  system time, and the control records the kernel version, command line,
+  accounting options from `/proc/config.gz` when readable, online, isolated
+  and `nohz_full` CPUs, affinity, governor, frequency, and
+  `perf_event_paranoid`. Voluntary and involuntary context switches separate
+  a preempted phase from accounting leakage.
+- **Verdict.** The control compares the system share with the hardware kernel
+  share and their absolute difference at each tested length. A disagreement
+  outside the campaign's tolerance yields `low-confidence`; unavailable
+  hardware counters yield `unavailable`. A consistent host is evidence that
+  the split is usable *there and at those lengths*, not a claim that every
+  stage boundary is exact.
+
+The harness, raw TSV and the repeated frozen SQLite report live in
+[the 2026-11-01 accounting record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/compile-clock-870-2026-11-01).
+Its results and the locked-9700X configuration are summarized there and in
+the record's `analysis/summary.md`; no performance gate consumes the split.
 
 **The 9700X step.** "Attribute sqlite3.c's compile time to the compiler's
 stages, against tcc" runs, pinned to CPU 2 under the host's lock:
