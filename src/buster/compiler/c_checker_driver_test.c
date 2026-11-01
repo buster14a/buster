@@ -4371,6 +4371,43 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static int b(void) { if (0) { int y __attribute__((cleanup(hp))) = 0; (void)y; } return 0; }\n"
           "static int c(void) { if (0) { lbl: int y __attribute__((cleanup(hp))) = 0; (void)y; } return 0; }\n"
           "int e(void) { return a() + b() + c(); }\n" },
+        // #891's re-review findings: the library builtins' noreturn merge takes the declaration's type as clang's does,
+        // a `jmp_buf` typedef counts only at file scope before the declaration in effect at the call, a statement
+        // expression's value and labels emit after a dead statement, an unlabeled statement after a dead one doesn't
+        // in a constant switch's kept statements, and ContainsLabel sees labels inside sizeof and __alignof__.
+        { "the C library's noreturn declarations inherit it whatever their result type",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int exit(int);\nint abort(void);\nint _Exit(int);\ntypedef int jmp_buf;\nint longjmp(jmp_buf, int);\n"
+          "int x1(int x) { exit(0); return h(x); }\nint x2(int x) { abort(); return h(x + 1); }\n"
+          "int x3(int x) { _Exit(0); return h(x + 2); }\nint x4(int x) { longjmp(0, 1); return h(x + 3); }\n"
+          "int e(int x) { return x1(x) + x2(x) + x3(x) + x4(x) + h(x + 4); }\n" },
+        { "a jmp_buf typedef at file scope before the declaration in effect at the call, not a block-scope one",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "void g(void) { typedef int jmp_buf; (void)sizeof(jmp_buf); }\nvoid longjmp(void *, int);\n"
+          "int x1(int x) { longjmp(0, 1); return h(x); }\ntypedef int jmp_buf;\nvoid longjmp(void *, int);\n"
+          "int x2(int x) { longjmp(0, 1); return h(x + 1); }\nint e(int x) { return x1(x) + x2(x); }\n" },
+        { "a statement expression's value and labels after a dead statement",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((noreturn)) void stop(void);\n"
+          "static int a(int x) { int y = ({ stop(); h(x); }); return y; }\n"
+          "static int b(int x) { return ({ stop(); h(x + 1); }); }\n"
+          "static int c(int x) { ({ stop(); h(x + 2); }); return h(x + 3); }\n"
+          "static int d(int x) { int y = ({ stop(); lbl: h(x + 4); }); return y; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x); }\n" },
+        { "a constant switch's kept statements after a dead statement",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((noreturn)) void stop(void);\n"
+          "int a(int x) { switch (0) { case 0: stop(); x = h(x); break; } return x; }\n"
+          "int b(int x) { switch (0) { case 0: stop(); x = h(x + 1); break; } return h(x + 2); }\n"
+          "int c(int x) { switch (0) { case 0: stop(); break; } return h(x + 3); }\n"
+          "int g(int x) { return h(x + 4); }\nint e(int x) { return a(x) + b(x) + c(x) + g(x); }\n" },
+        { "labels inside sizeof and __alignof__ operands",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static int a(int x) { return 0 && (h(x), sizeof(({ lbl: 1; }))); }\n"
+          "static int b(int x) { switch (sizeof(({ lbl2: 1; }))) { case 0: x = 1; break; case 4: x = h(x + 1); break; } return x; }\n"
+          "static int c(int x) { if (sizeof(({ lbl3: 1; }))) { x = 1; } else { x = h(x + 2); } return x; }\n"
+          "static int d(int x) { if (__alignof__(({ lbl4: 1; })) == 4) { x = 1; } else { x = h(x + 3); } return x; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x); }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {

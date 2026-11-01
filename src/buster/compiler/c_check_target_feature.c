@@ -53,10 +53,14 @@
 // conditions, and code after a label whatever precedes it: a statement that holds a label from its start (an if, loop
 // or switch after a point where its code stops, or the arm of an if or a switch that a constant condition would leave
 // out), and an operand a constant condition leaves out where a statement expression in it holds a label, which
-// check_program_references keeps (a labeled operand is code clang emits, so its references are the body's). A switch
+// check_program_references keeps (a labeled operand is code clang emits, so its references are the body's) — a label
+// inside sizeof or alignof's operand too, as ContainsLabel is syntactic. A statement expression's last expression and
+// labels emit after a statement whose code stops, as EnsureInsertPoint gives the value a block of its own. The
+// library builtins' noreturn merges into the user's declaration whatever its result type, but longjmp's named types
+// must be file-scope typedefs before the declaration in effect at the call. A switch
 // on a constant emits just the case the value takes where its scan can skip the rest — no label a skipped statement
 // holds, no declaration at the body's scope, no case range the list's order puts first, no kept statement's own break
-// — and the whole body where it can't (docs/x86-target.md).
+// — and the whole body where it can't (docs/x86-target.md), an unlabeled statement after a dead one skipped either way.
 //
 // The pass is cold and scalar: it runs in a unit with a target attribute (CheckProgram.attribute_keys) or an x86
 // builtin's call, and walks only a body that refers to a callee that may fail or calls a builtin that fails, whose call
@@ -370,17 +374,20 @@ static uint32_t check_target_feature_noreturn_object(const CheckProgram* program
 // It isn't the declaration's signature that decides but the builtin declaration clang creates to redeclare it
 // (Sema::LazilyCreateBuiltin), whose noreturn the redeclaration merge propagates (SemaDecl.cpp's
 // mergeTypeWithPrevious: `OldTypeInfo.getNoReturn() && !NewTypeInfo.getNoReturn()`): the declaration merges it
-// whatever its parameters — `void exit(void *)` doesn't return — where the builtin's type can be built at all, and
-// where the declaration is unprototyped or its result is the builtin's — `int exit(int)` returns. The builtin's type
-// needs the typedef names its signature's letters name (LookupNecessaryTypesForBuiltin: `jmp_buf`, `sigjmp_buf`), or
-// clang's allowTypeMismatch still leaves the declaration alone — `void longjmp(void *, int)` without `jmp_buf`
-// declared before it returns.
+// whatever its type — `void exit(void *)` and `int exit(int)` both don't return — where the builtin's type can be
+// built at all. That needs the typedef names its signature's letters name (LookupNecessaryTypesForBuiltin: `jmp_buf`,
+// `sigjmp_buf`) at file scope before the function's declaration, or clang's allowTypeMismatch still leaves the
+// declaration alone — `void longjmp(void *, int)` without `jmp_buf` returns. The declaration is the one the call's
+// callee resolves to (`use`, `CheckInput.declarations`): a later redeclaration that gains noreturn from a `jmp_buf`
+// declared since doesn't make an earlier call one.
 static bool check_target_feature_library_noreturn(const CheckProgram* program, const PPOptions* options, const uint32_t* type_names,
-                                                  uint32_t object)
+                                                  uint32_t object, uint32_t use)
 {
     const CheckInput* input = program->input;
     const Parser* parser = program->parser;
-    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const uint32_t resolved = use < input->token_count && input->declarations != NULL ? input->declarations[use] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = resolved != BUSTER_CHECK_NONE ? resolved :
+                                 object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
     const bool function = declaration < parser->tokens.count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
                           input->linkage[declaration] == 2;
     const uint32_t name = function ? parser->tokens.names[declaration] : 0;
@@ -403,20 +410,6 @@ static bool check_target_feature_library_noreturn(const CheckProgram* program, c
             noreturn = needed == BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES ||
                        (type_names != NULL && type_names[needed] < declaration);
         }
-    }
-    if (noreturn)
-    {
-        // The merge skips noreturn only where the declaration has a prototype whose result isn't the builtin's —
-        // all the noreturn library builtins' results are void.
-        const TypeId declared = input->declared_types[declaration];
-        const TypeId stripped = declared != 0 ? type_strip_aligned(program->types, declared) : 0;
-        const uint8_t flags = stripped != 0 && type_kind(program->types, stripped) == BUSTER_TYPE_KIND_FUNCTION ?
-                              program->types->types.flags[type_index(stripped)] :
-                              0;
-        const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 &&
-                               !(input->kr_parameter_count != 0 && input->function_flags != NULL &&
-                                 declaration < input->token_count && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0);
-        noreturn = !prototype || info->encoding[0] != 'v' || type_return(program->types, stripped) == BUSTER_TYPE_VOID;
     }
     return noreturn;
 }
@@ -602,11 +595,12 @@ struct CheckTargetFeatureEmission
     // A prefix count of the unit's labels (check_target_feature_label_between's ranges are arbitrary, not subtrees).
     uint32_t* label_prefix;
     // Per expression, whether its subtree holds a label: a statement expression's whose block does
-    // (check_target_feature_labeled's answer, memoized over the graph, whose operands precede their node).
+    // (check_target_feature_labeled's answer, memoized over the graph, whose operands precede their node). A `sizeof`
+    // or `__alignof__` operand's labels count, as ContainsLabel is syntactic.
     uint8_t* node_labeled;
     // The typedefs the library builtins' types need (clang's LookupNecessaryTypesForBuiltin): `jmp_buf` for longjmp's
-    // and `sigjmp_buf` for siglongjmp's, each its name token's declaration, or BUSTER_CHECK_NONE where the unit
-    // declares none before the function's. BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES entries.
+    // and `sigjmp_buf` for siglongjmp's, each its first file-scope name token's declaration, or BUSTER_CHECK_NONE
+    // where the unit declares none. BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES entries.
     uint32_t* type_names;
     // The unit's options, for the library builtins' gate (check_target_feature_library_noreturn).
     const PPOptions* options;
@@ -860,7 +854,7 @@ static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTar
             const uint32_t callee = op == CHECK_OP_CALL ? check_target_feature_noreturn_object(program, node, &name) : 0;
             const bool noreturn = callee != 0 && (check_target_feature_attributes(program, callee, name).noreturn ||
                                                 (emission->options != NULL &&
-                                                 check_target_feature_library_noreturn(program, emission->options, emission->type_names, callee)));
+                                                 check_target_feature_library_noreturn(program, emission->options, emission->type_names, callee, name)));
             const bool unreachable = op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_UNREACHABLE;
             const bool builtin = op == CHECK_OP_BUILTIN_X86 && check_target_feature_intrinsic_noreturn(program, node);
             const uint32_t region = op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < input->token_count ?
@@ -896,6 +890,21 @@ static bool check_target_feature_enterable(const CheckTargetFeatureEmission* emi
     return token < program->parser->tokens.count &&
            ((emission->subtree_bits[token] & BUSTER_CHECK_TARGET_FEATURE_LABEL) != 0 ||
             emission->min_case_owner[token] < emission->extent_first[token]);
+}
+
+// Whether `token`'s declaration is at file scope: its parent chain reaches a declaration's terminator whose own parent
+// is the translation unit's root. A typedef in a function body reaches that body's closing brace instead
+// (check_target_feature_columns's `jmp_buf` scan).
+static bool check_target_feature_file_scope(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t parent = token < count ? parser->tree.parents[token] : BUSTER_PARSE_ROOT;
+    uint32_t steps = 0;
+    while (parent < count && parser->tree.roles[parent] != PARSE_ROLE_TERMINATOR && steps++ < count)
+    {
+        parent = parser->tree.parents[parent];
+    }
+    return parent < count && parser->tree.parents[parent] == BUSTER_PARSE_ROOT;
 }
 
 // The answers `check_target_feature_columns` computes once for the program, where the check's repeated parent walks
@@ -973,15 +982,18 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
                 emission->label_prefix[token] = labels;
             }
             emission->label_prefix[count] = labels;
-            // The library builtins' named typedefs (Sema::LookupNecessaryTypesForBuiltin): the first `jmp_buf` or
-            // `sigjmp_buf` typedef declaration, which the noreturn gate compares with the function's declaration.
+            // The library builtins' named typedefs (Sema::LookupNecessaryTypesForBuiltin): the first file-scope
+            // `jmp_buf` or `sigjmp_buf` typedef declaration, which the noreturn gate compares with the function's
+            // declaration. A block-scope one is a different type name and builds no builtin (Longjmp's
+            // `void longjmp(void *, int)` then returns).
             static const char* const names[BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES] = { "jmp_buf", "sigjmp_buf" };
             for (uint32_t n = 0; n < BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES; n += 1)
             {
                 const IdentId name = intern_find(program->identifiers, (const uint8_t*)names[n], (uint32_t)strlen(names[n]));
                 for (uint32_t token = 0; name != 0 && emission->type_names[n] == BUSTER_CHECK_NONE && token < count; token += 1)
                 {
-                    const bool found = input->declaration_kinds[token] == C_BINDING_TYPEDEF && parser->tokens.names[token] == name;
+                    const bool found = input->declaration_kinds[token] == C_BINDING_TYPEDEF && parser->tokens.names[token] == name &&
+                                       check_target_feature_file_scope(parser, token);
                     emission->type_names[n] = found ? token : emission->type_names[n];
                 }
             }
@@ -997,7 +1009,7 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
                     labeled = region != 0 && region <= input->region_count &&
                               check_target_feature_enterable(emission, program, input->regions[region - 1].block);
                 }
-                else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+                else
                 {
                     const uint32_t operands[] = { input->graph.operand0[node], input->graph.operand1[node], input->graph.operand2[node] };
                     for (uint32_t k = 0; !labeled && k < BUSTER_ARRAY_LENGTH(operands); k += 1)
@@ -1254,30 +1266,19 @@ static bool check_target_feature_emission_prepare(CheckX86DiagnosticWalk* walk, 
     }
     // The body's statement expressions' block states, innermost first: a statement expression's own analysis asks its
     // nested regions' states, which an expression's can only reference where they nest inside it — never its own —
-    // so the dead-end analysis reads finished answers, and this never recurses into it (check-call-graph).
+    // so the dead-end analysis reads finished answers, and this never recurses into it (check-call-graph). The input
+    // numbers regions in source order as it reads their openings, so a nested region's id is larger than its
+    // enclosing one's: descending ids are innermost first, without a sort (a deeply nested function's used to make
+    // this quadratic).
     if (valid && program->region_count != 0)
     {
-        uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->region_count);
-        valid = order != NULL;
-        uint32_t order_count = 0;
-        for (uint32_t r = 0; valid && r < program->region_count; r += 1)
+        for (uint32_t r = program->region_count; r-- > 0;)
         {
             const CheckProgramRegion* item = program->regions + r;
             if (item->body == (uint32_t)(body - program->bodies) && emission->regions[r] == 0)
             {
-                uint32_t place = order_count;
-                while (place != 0 && program->regions[order[place - 1]].count > item->count)
-                {
-                    order[place] = order[place - 1];
-                    place -= 1;
-                }
-                order[place] = r;
-                order_count += 1;
+                emission->regions[r] = check_target_feature_region_dead(walk, emission, r + 1) ? 2 : 1;
             }
-        }
-        for (uint32_t r = 0; r < order_count; r += 1)
-        {
-            emission->regions[order[r]] = check_target_feature_region_dead(walk, emission, order[r] + 1) ? 2 : 1;
         }
     }
     return valid;
@@ -1429,6 +1430,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
             // another statement holds fails the collection; so does a declaration a skipped statement adds at the
             // body's own scope — the kept ones may use it — or a label a skipped statement holds.
             uint32_t kept_end = high + 1;
+            bool broke = false;
             for (uint32_t i = selected; !whole && i < end; i += 1)
             {
                 if (controls[i].kind == CHECK_CONTROL_JUMP && controls[i].target == end &&
@@ -1439,6 +1441,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
                         const uint32_t terminator = parser->tree.parents[controls[i].token];
                         kept_end = terminator < parser->tokens.count ? terminator + 1 : kept_end;
                         kept_control_end = i + 1;
+                        broke = true;
                     }
                     else
                     {
@@ -1456,15 +1459,24 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
                         check_target_feature_top_level(parser, token, body,
                                                        BUSTER_CHECK_TARGET_FEATURE_TOP_LABEL | BUSTER_CHECK_TARGET_FEATURE_TOP_COMPOUND);
             }
+            // A declaration in the statements that fall out of the body's end without a break fails the collection
+            // too (CollectStatementsForCase's AnyDecls): the switch body's own compound began before the case was
+            // found, so it can't be emitted whole. The kept statements may use it, so the whole body's code goes.
+            for (uint32_t token = selected_token; !whole && !broke && token <= high; token += 1)
+            {
+                whole = program->input->declaration_kinds[token] != 0 &&
+                        check_target_feature_top_level(parser, token, body, BUSTER_CHECK_TARGET_FEATURE_TOP_LABEL);
+            }
             whole = whole || check_target_feature_label_between(emission, parser, low, selected_token) ||
                     check_target_feature_label_between(emission, parser, kept_end, high + 1);
         }
     }
     if (whole)
     {
-        // The collection failed: the whole body emits — except the dead statements before its first case label, which
-        // only a label of their own makes reachable (a `goto`'s target, clang's unreachable-code elision). A label
-        // there emits the statement that holds it from its start (ContainsLabel's whole statements), not the body's.
+        // The collection failed: the whole body emits as code generation's dispatch does — a block at each case, the
+        // default's or the block after the switch, and the statements a label can enter from their start. An unlabeled
+        // statement after one whose code stopped is skipped (EmitStmt's insertion point), so only the first reachable
+        // control and the case labels' targets go on the walk.
         uint32_t first_target = end;
         uint32_t first_case_token = high;
         for (uint32_t i = index + 1; i < next; i += 1)
@@ -1483,20 +1495,22 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
                 from = root < from ? root : from;
             }
         }
-        for (uint32_t i = from; i < end; i += 1)
+        check_x86_diagnostic_push(walk, from, true);
+        for (uint32_t i = index + 1; i < next; i += 1)
         {
-            check_x86_diagnostic_push(walk, i, true);
+            check_x86_diagnostic_push(walk, program->cases[controls[i].target].target, true);
         }
         check_x86_diagnostic_push(walk, controls[next].target, true);
     }
     else if (selected != BUSTER_CHECK_NONE)
     {
-        // The kept statements — each emits where it is (clang emits every one of its CaseStmts, dead or not) — and the
-        // switch's merge where the last kept control falls into it; a break's own jump already reaches it, and a kept
-        // statement whose code ends dead (a call that doesn't return) leaves the merge's block nothing.
-        for (uint32_t i = selected; i < kept_control_end; i += 1)
+        // The kept statements walk from the first: each emits where it is, and EmitStmt's insertion-point rule skips
+        // an unlabeled statement after one whose code stopped, as the walk's dead end does. The switch's merge emits
+        // where the last kept control falls into it; a break's own jump reaches it, and a kept statement whose code
+        // ends dead (a call that doesn't return) leaves the merge's block nothing.
+        if (selected < kept_control_end)
         {
-            check_x86_diagnostic_push(walk, i, true);
+            check_x86_diagnostic_push(walk, selected, true);
         }
         if (check_target_feature_falls(walk, emission, kept_control_end - 1))
         {
@@ -1634,15 +1648,14 @@ static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckT
         const uint32_t region = program->input->expression_regions[graph->tokens[node]];
         if (region != 0 && region <= program->region_count && program->input->regions[region - 1].final_statement != BUSTER_CHECK_NONE)
         {
+            // EmitCompoundStmtWithoutScope's value: EnsureInsertPoint gives the last expression a block of its own
+            // where the block's code stopped, so it and the block's cleanups run (and their calls are checked) however
+            // dead the statements before them are. The region's END control pushes the result and then its cleanups.
             const CheckProgramRegion* item = program->regions + region - 1;
-            const uint32_t last = item->first + item->count - item->cleanups;
-            for (uint32_t i = last; i > item->first && i - 1 < walk->body->count; i -= 1)
+            const uint32_t end = item->count > item->cleanups ? item->first + item->count - item->cleanups - 1 : BUSTER_CHECK_NONE;
+            if (end < walk->body->count && program->controls[walk->body->first + end].kind == CHECK_CONTROL_END)
             {
-                if (program->controls[walk->body->first + i - 1].kind == CHECK_CONTROL_EVALUATE)
-                {
-                    check_x86_diagnostic_push(walk, i - 1, true);
-                    break;
-                }
+                check_x86_diagnostic_push(walk, end, true);
             }
         }
     }

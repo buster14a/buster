@@ -2227,7 +2227,9 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
 
 // Whether `root`'s code holds a label — a statement expression's whose block does — which code generation emits even
 // where a constant condition leaves the operand out (clang's ContainsLabel: a label is a statement's, so an operand
-// can hold one only through a statement expression, or a case of a switch outside it). The scan's marks in `nodes` are
+// can hold one only through a statement expression, or a case of a switch outside it). The scan is syntactic: a
+// `sizeof` or `_Alignof` operand counts too, as it does for ContainsLabel, though code generation evaluates neither.
+// The scan's marks in `nodes` are
 // `tag`, disjoint from the run's epochs, so they don't hide a node the run hasn't pushed; `stack`/`depth` start where
 // the run's does and return to it.
 static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t tag, uint32_t* nodes, uint32_t* stack, uint32_t depth)
@@ -2262,7 +2264,7 @@ static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t
                 }
             }
         }
-        else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+        else
         {
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
@@ -3117,8 +3119,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
     uint32_t* label_positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     // The label scan a constant condition's dead operand can need nests inside the run's traversal, on marks of its
-    // own: each set of pushes is bounded by node_count.
-    uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count * 2 + 2) : 0;
+    // own: each set of pushes is bounded by node_count. Only a unit with a statement expression can need it, so its
+    // extra room is the regions' alone (#891).
+    uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count * (regions ? 2 : 1) + 2) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     // A body's references: its nodes', and its cleanups' functions.
