@@ -23,12 +23,20 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. Returns false if one can't be reserved.
-static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target)
+// for a target other than the last one's. The solver's arena (#866, step 6) is reserved only when `gvn` asks for it, so
+// that --tier1 alone maps no address space it never uses. Returns false if one can't be reserved.
+static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, bool gvn)
 {
-    if (!lane->reserved)
+    const uint32_t steps = gvn ? BUSTER_CHECK_TIER1_STEPS : BUSTER_CHECK_TIER1_STEPS - 1;
+    if (!lane->reserved || lane->gvn_reserved != gvn)
     {
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+        {
+            arena_release(&lane->steps[k]);
+        }
+        arena_release(&lane->scratch);
+        arena_release(&lane->forms);
+        for (uint32_t k = 0; k < steps; k += 1)
         {
             lane->steps[k] = arena_reserve(UINT64_C(1) << 34);
         }
@@ -36,9 +44,10 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
         lane->forms = arena_reserve_small(X86_FORM_COUNT, X86_FORM_COUNT);
         lane->allowed = BUSTER_ARENA_PUSH_ARRAY(&lane->forms, uint8_t, X86_FORM_COUNT);
         lane->reserved = true;
+        lane->gvn_reserved = gvn;
     }
     bool valid = lane->scratch.base != 0 && lane->allowed != 0;
-    for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+    for (uint32_t k = 0; k < steps; k += 1)
     {
         valid = valid && lane->steps[k].base != 0;
         arena_pop_to(&lane->steps[k], 0);
@@ -60,7 +69,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
 {
     *operation = 0;
     *counts = (CheckTier1Counts){ 0 };
-    CheckTier1Stage stage = check_tier1_lane_prepare(lane, target) ? CHECK_TIER1_COMPILED : CHECK_TIER1_RESOURCE;
+    CheckTier1Stage stage = check_tier1_lane_prepare(lane, target, gvn) ? CHECK_TIER1_COMPILED : CHECK_TIER1_RESOURCE;
     Arena* scratch = &lane->scratch;
     const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
     IrFunction lowered = { 0 };

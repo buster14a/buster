@@ -2319,9 +2319,11 @@ struct CheckDriverCommand
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
-    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize.
+    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
+    // too (check_units_compile), so that a command of several files runs the solver its option asked for.
     bool tier1;
     bool tier1_no_rematerialize;
+    bool tier1_gvn;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
 };
@@ -3350,6 +3352,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .libraries = &libraries,
         .tier1 = lanes.tier1,
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
+        .tier1_gvn = lanes.tier1_gvn,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
     };

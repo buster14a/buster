@@ -123,19 +123,29 @@ tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
 promotion, so that promotion's phi placement decides what its merged values
 need. It is a measurement option, off by default, and the measurement says to
 keep it off: its class representatives lengthen live ranges that Tier 1's
-allocation pays for in moves and spills. On the frozen `sqlite3.c` (2,604
-functions, 2,155 of them Tier 1's), the object's text grows from 1,283,627 to
-1,439,515 bytes (+12.1%) and five compiles' median wall time from 525 to 698 ms
-(+33.0%). On c-testsuite's 430 functions Tier 1 still compiles the same 350,
-with the objects 1.2% smaller (347,912 to 343,624 bytes) but 13.9% more
-instructions (9,136 to 10,402), 25 spill stores and reloads where it had none,
-and 146 edge moves where it had 113; no program fails to compile either way.
-Running it after `ir_optimize` instead is worse still (text +15.8%, instructions
-+40%, 2.5 times the spill traffic), and the pipeline's cleanup after it changes
-nothing (205,229 against 205,269 instructions), so the cost is the merge rather
-than dead values. Tier 1 therefore doesn't route C source through GVN until a
-variant accounts for allocation cost; [the value-numbering
-guide](ir-value-numbering.md) has the figures.
+allocation pays for in moves and spills.
+
+The figures are from a Ryzen 9 7940HS (Zen 4), `BUSTER_DEBUG_INFO=0`, Clang
+23, one pinned CPU; the generated-code deltas are target-independent, the times
+are not, and the 9700X's are still to be taken. The source is a local
+`sqlite3.c` of 2,604 functions (2,155 of them Tier 1's), not the frozen file
+[the value-numbering guide](ir-value-numbering.md) measures at 2,602, so the
+two counts aren't comparable. There the object's text grows from 1,283,627 to
+1,439,515 bytes (+12.1%), and five compiles' median wall time from 525 to
+698 ms in one pair of runs and 751 to 910 ms in another (+33.0% and +21.2%; the
+host is shared, so the time is reported as a range and the byte count is the
+stable figure). On c-testsuite's 430 functions Tier 1 still compiles the same
+350, with the objects 1.2% smaller (347,912 to 343,624 bytes) but 13.9% more
+instructions (9,136 to 10,402), 25 spill stores and 25 reloads where it had
+none, and 146 edge moves where it had 113; no program fails to compile either
+way. Running it after `ir_optimize` instead is worse still (text +15.8%,
+instructions +40%, 2.5 times the spill traffic), and the pipeline's cleanup
+after it does not recover the regression (205,229 against 205,269
+instructions, 0.02%), so the cost is the merge rather than dead values. Tier 1
+therefore doesn't route C source through GVN until a variant accounts for
+allocation cost. [The measurement record](https://github.com/buster14a/buster-performance/tree/f8ba0a38d23f3b74d5374e67e8a7300cf8785c1b/docs/measurements/gvn-866-tier1-2026-11-01)
+has the commands, the host and the raw logs; [the value-numbering
+guide](ir-value-numbering.md) has the rest of the figures.
 
 The driver refuses what Tier 1's code can't carry yet: unwind tables (Tier 1's
 frames save registers with stores, which the push-based unwind descriptor doesn't

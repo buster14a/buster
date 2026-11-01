@@ -235,6 +235,7 @@ static bool check_test_tier1_zeroing(const X86Instruction* instruction)
 typedef struct CheckTestTier1Build CheckTestTier1Build;
 struct CheckTestTier1Build
 {
+    uint64_t records;
     uint64_t rematerializations;
     uint64_t dropped;
     uint64_t stores;
@@ -275,7 +276,8 @@ static bool check_test_tier1_build(const char* executable, const char* source, c
     char* text = NULL;
     const int status = check_test_driver_spawn(arguments, &text);
     *build = (CheckTestTier1Build){ 0 };
-    build->reported = check_test_tier1_field(text, "rematerializations", &build->rematerializations) && check_test_tier1_field(text, "dropped_definitions", &build->dropped) &&
+    build->reported = check_test_tier1_field(text, "records", &build->records) && check_test_tier1_field(text, "rematerializations", &build->rematerializations) &&
+                      check_test_tier1_field(text, "dropped_definitions", &build->dropped) &&
                       check_test_tier1_field(text, "spill_stores", &build->stores) && check_test_tier1_field(text, "spill_loads", &build->loads) &&
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
                       check_test_tier1_field(text, "call_stores", &build->call_stores);
@@ -440,9 +442,11 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
 }
 
 // --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
-// path. Its function is still Tier 1's and its executable still prints clang's build's output, so the solver's merged
-// values reach Tier 1's code without changing what the program does. The option is a measurement one (docs/tier1.md's
-// "The C driver's --tier1" has what it costs), so no code-size claim is made here.
+// path, against the same fixture compiled without it. Its function is still Tier 1's and its executable still prints
+// clang's build's output, so the solver's merged values reach Tier 1's code without changing what the program does; and
+// its record count must differ from the build without the option, which is what a dropped `tier1_gvn` would show. The
+// option is a measurement one (docs/tier1.md's "The C driver's --tier1" has what it costs), so no direction of that
+// difference is asserted here.
 static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char source[512];
@@ -459,16 +463,77 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
     check_test_expect(test, ran, "clang's build of the gvn fixture runs");
     for (uint32_t path = 0; ran && path < 2; path += 1)
     {
-        char output[512];
-        snprintf(output, sizeof(output), "%s/tier1-gvn-%u", directory, path);
-        CheckTestTier1Build build;
-        const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, true, path != 0, false, true, &build);
-        check_test_expect(test, built, "--tier1-gvn compiles the fixture, its function Tier 1's");
+        char plain_output[512];
+        char gvn_output[512];
+        snprintf(plain_output, sizeof(plain_output), "%s/tier1-gvn-plain-%u", directory, path);
+        snprintf(gvn_output, sizeof(gvn_output), "%s/tier1-gvn-%u", directory, path);
+        CheckTestTier1Build plain;
+        CheckTestTier1Build with;
+        const bool plain_built = check_test_tier1_build(executable, source, "tier1_remat", plain_output, true, path != 0, false, false, &plain);
+        const bool gvn_built = check_test_tier1_build(executable, source, "tier1_remat", gvn_output, true, path != 0, false, true, &with);
+        check_test_expect(test, gvn_built, "--tier1-gvn compiles the fixture, its function Tier 1's");
+        check_test_expect(test, plain_built && gvn_built && plain.records != with.records, "--tier1-gvn changes the fixture's code, so the option reached Tier 1");
         char actual[256] = { 0 };
-        check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+        check_test_expect(test, gvn_built && check_test_driver_capture(gvn_output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                           "--tier1-gvn's executable prints clang's build's output");
-        unlink(output);
+        printf("  Tier 1's GVN, %s path: %" PRIu64 " records (%" PRIu64 " without the option)\n", path == 0 ? "vector" : "scalar", with.records, plain.records);
+        unlink(plain_output);
+        unlink(gvn_output);
     }
+    // Two source files in one command: each unit's lanes take the option too (#866's review), which a single-file
+    // fixture cannot show. -c writes each unit's object in the working directory, so the command runs inside `directory`.
+    char first[512];
+    char second[512];
+    snprintf(first, sizeof(first), "%s/tier1-gvn-two-a.c", directory);
+    snprintf(second, sizeof(second), "%s/tier1-gvn-two-b.c", directory);
+    // The second unit defines nothing the first does: a command of two units refuses a global name twice, and the
+    // first unit's function is the one the solver changes.
+    static const char other[] = "int tier1_gvn_two_other(int x)\n{\n    return x + 1;\n}\n";
+    const bool two = parse_test_write(first, check_test_tier1_remat_source, sizeof(check_test_tier1_remat_source) - 1) &&
+                     parse_test_write(second, other, sizeof(other) - 1);
+    check_test_expect(test, two, "the gvn two-file fixture writes");
+    uint64_t two_records[2] = { 0, 0 };
+    for (uint32_t gvn = 0; two && gvn < 2; gvn += 1)
+    {
+        // The command runs inside `directory`, so a relative --executable must be resolved first.
+        char resolved[4096];
+        const char* program = realpath(executable, resolved) != NULL ? resolved : executable;
+        char script[1024];
+        snprintf(script, sizeof(script), "cd '%s' && '%s' --tier1 %s --tier1-report -fno-asynchronous-unwind-tables -c '%s' '%s'", directory, program,
+                 gvn != 0 ? "--tier1-gvn" : "", first, second);
+        char* arguments[] = { "sh", "-c", script, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        // The report's tier1 lines: one per unit or one summed over them, so every line's records are added.
+        uint64_t records = 0;
+        for (const char* line = text; line != NULL && *line != 0;)
+        {
+            const char* end = strchr(line, '\n');
+            const size_t length = end != NULL ? (size_t)(end - line) : strlen(line);
+            if (length > 6 && memcmp(line, "tier1\t", 6) == 0)
+            {
+                uint64_t value = 0;
+                // A report line is longer than its first fields: keep it whole, up to the buffer.
+                char field[1024];
+                const size_t kept = length < sizeof(field) - 1 ? length : sizeof(field) - 1;
+                snprintf(field, sizeof(field), "%.*s", (int)kept, line);
+                records += check_test_tier1_field(field, "records", &value) ? value : 0;
+            }
+            line = end != NULL ? end + 1 : NULL;
+        }
+        two_records[gvn] = records;
+        check_test_expect(test, status == 0 && records != 0, "--tier1 -c compiles two files in one command");
+        free(text);
+    }
+    check_test_expect(test, two && two_records[0] != 0 && two_records[0] != two_records[1], "--tier1-gvn reaches the lanes of a command of several files");
+    char object_a[512];
+    char object_b[512];
+    snprintf(object_a, sizeof(object_a), "%s/tier1-gvn-two-a.o", directory);
+    snprintf(object_b, sizeof(object_b), "%s/tier1-gvn-two-b.o", directory);
+    unlink(object_a);
+    unlink(object_b);
+    unlink(first);
+    unlink(second);
     unlink(source);
     unlink(reference);
 }

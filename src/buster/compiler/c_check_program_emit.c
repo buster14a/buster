@@ -258,6 +258,8 @@ struct CheckTier1Lane
     uint8_t* allowed;
     X86Target target;
     bool reserved;
+    // Whether the solver's arena (step 6) is among the reserved steps: --tier1-gvn's, only.
+    bool gvn_reserved;
     bool targeted;
 };
 
