@@ -2043,9 +2043,10 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
   (`--part K/N`): test-checker-driver as 4 (the list's longest, 197 s on a hosted
   runner and 48 s on the 9700X, whose start late in the list ended the step) and
   test-checker as 4 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
-  busy). The parts together run each check once, but each part's random
-  numbers start from the run's seed, so a check that draws them after others
-  draws other samples than in the whole command. c-testsuite's self-test,
+  busy). The parts together run each check once, with the whole command's
+  random samples: test-checker starts each unit's numbers afresh from the seed
+  and the unit's place (`check_test_part_random`), and no check of
+  test-checker-driver's draws from the shared stream. c-testsuite's self-test,
   about 7 s of waiting out its timeouts, is a command of its own on one CPU,
   apart from the subset's four.
 

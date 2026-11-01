@@ -23,8 +23,8 @@ struct CheckDriverFixture
 // runner, 48 s on the 9700X). A check deals one unit, or, where it is a long sweep (check_test_driver_recovery,
 // check_test_driver_error_limits), one per case. Every part goes through the same units in the same order, whatever
 // the others' outcomes, since each unit is dealt before anything it runs decides the next: so the parts together run
-// each unit once. A part's random numbers (CheckTest.random) start from the run's seed, so a check that draws them
-// after others draws other numbers in a part than in the whole run. Without --part, the one part takes every unit.
+// each unit once, as the whole run runs it: no check draws from CheckTest.random, which the driver leaves at 0, and
+// those that draw numbers seed their own. Without --part, the one part takes every unit.
 typedef struct CheckDriverPart CheckDriverPart;
 struct CheckDriverPart
 {

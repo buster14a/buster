@@ -29,9 +29,10 @@ struct CheckTest
 // command as N commands. A section deals one unit, and check_test_programs (79 s of the command's 171 s here) one per
 // run of up to 12 consecutive programs: dealing each of its 296 on its own added 2.2 s to the checker unit's compile, the
 // build's longest, and 27 runs add none. The sections that share the run's type table or graph arenas, whose state
-// each leaves to the next, aren't dealt: part 1 runs them all, in their order. A part's random numbers
-// (CheckTest.random) start from the run's seed, so a section that draws them after others draws other numbers in a
-// part than in the whole run. Without --part, the one part takes every unit.
+// each leaves to the next, aren't dealt: part 1 runs them all, in their order. Each unit, and each of those sections,
+// starts the run's random numbers (CheckTest.random) afresh from the seed and its place among them
+// (check_test_part_random), so that a part draws for each the numbers the whole run draws, whatever ran before it.
+// Without --part, the one part takes every unit.
 typedef struct CheckTestPart CheckTestPart;
 struct CheckTestPart
 {
@@ -40,17 +41,43 @@ struct CheckTestPart
     // The units dealt so far, and of them this part's.
     uint32_t dealt;
     uint32_t taken;
+    // The sections that share the run's state passed so far, which part 1 runs.
+    uint32_t shared;
+    // The run's seed, and the test whose numbers each unit starts afresh (none outside run_checker_tests' default run).
+    uint64_t seed;
+    CheckTest* test;
 };
 
 static CheckTestPart check_test_part = { .index = 0, .count = 1 };
+
+// The numbers a unit or a shared section starts from: the seed and its place mixed by splitmix64's finalizer.
+static void check_test_part_random(uint64_t place)
+{
+    if (check_test_part.test != 0)
+    {
+        uint64_t mixed = check_test_part.seed + (place + 1) * UINT64_C(0x9e3779b97f4a7c15);
+        mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+        mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94d049bb133111eb);
+        check_test_part.test->random = mixed ^ (mixed >> 31);
+    }
+}
 
 // Whether this part runs the next unit, which it deals.
 static bool check_test_takes(void)
 {
     const bool taken = check_test_part.dealt % check_test_part.count == check_test_part.index;
+    check_test_part_random(check_test_part.dealt);
     check_test_part.dealt += 1;
     check_test_part.taken += taken;
     return taken;
+}
+
+// Whether this part runs the next of the sections that share the run's type table or graph arenas: part 1 runs them all.
+static bool check_test_shared(void)
+{
+    check_test_part_random((UINT64_C(1) << 32) | check_test_part.shared);
+    check_test_part.shared += 1;
+    return check_test_part.index == 0;
 }
 
 typedef struct CheckTestTypes CheckTestTypes;
@@ -5812,6 +5839,9 @@ static int run_checker_tests(int argc, char** argv)
             options = false;
         }
     }
+    // Each unit of the default run starts its numbers afresh from the seed (check_test_takes).
+    check_test_part.seed = test.random;
+    check_test_part.test = &test;
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
@@ -5886,23 +5916,23 @@ static int run_checker_tests(int argc, char** argv)
         }
         else if (initialized)
         {
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_action_fixtures(&test, &types.table);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_action_constraints(&test, &types.table);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_action_regressions(&test, &types.table);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_update_actions(&test, &types.table);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_integer_float_rounding(&test, &types.table);
             }
@@ -5910,7 +5940,7 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_action_oracles(&test, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_actions_batch(&test, &types.table);
             }
@@ -5969,43 +5999,43 @@ static int run_checker_tests(int argc, char** argv)
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_literals(&test, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_literal_warnings(&test, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_recorded(&test, &types.table, &storage, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_limits(&test, &types.table, &storage, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_type_order(&test, &storage, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_arguments(&test, &types.table, &storage, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_guarded(&test, &types.table, &output, &scratch);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_graph_regressions(&test, &types.table, &storage, &output, &scratch);
             }
@@ -6096,7 +6126,7 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_bindings(&test);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_builtin_graph(&test, &types.table, clang);
             }
@@ -6128,19 +6158,19 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_selection_roots(&test);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_varargs_graph(&test, &types.table);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_special_graph(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_builtin_vector_graph(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_x86_graph(&test, &types.table, clang);
             }
@@ -6156,15 +6186,15 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_body_binding_exit_points(&test);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_data(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_actions_extra(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_transparent_calls(&test, &types.table, clang);
             }
@@ -6172,7 +6202,7 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_transparent_types(&test, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_complex(&test, &types.table, clang);
             }
@@ -6184,23 +6214,23 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_sizeof_scaling(&test);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_integer_policy(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_fp_actions(&test, &types.table);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_query_runtime(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_vectors(&test, &types.table, clang);
             }
-            if (check_test_part.index == 0)
+            if (check_test_shared())
             {
                 check_test_vector_graph(&test, &types.table);
             }
@@ -6329,6 +6359,7 @@ static int run_checker_tests(int argc, char** argv)
     }
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;
+    check_test_part.test = 0;
     oracle_epoch_end(epoch);
     return returned;
 }
