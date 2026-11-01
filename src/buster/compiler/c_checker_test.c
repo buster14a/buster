@@ -22,6 +22,10 @@ struct CheckTest
     uint64_t checks;
     uint64_t failures;
     uint64_t random;
+    // The coded walk's tokens acted at and left to the walk's visit, by class, over the source fixtures' vector path
+    // (CheckInput.expression_acted and expression_left, #1038), which check_test_expression_coverage requires of each class.
+    uint64_t expression_acted[BUSTER_CHECK_EXPRESSION_CODES];
+    uint64_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
 };
 
 typedef struct CheckTestTypes CheckTestTypes;
@@ -2148,6 +2152,62 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
     arena_pop_to(scratch, mark);
 }
 
+// After every section of a full run: the coded walk (#1038) must have acted by each class's own action somewhere in the
+// source fixtures, and left a token of each class whose action declines valid code to the walk's visit; never acted
+// by CHECK_INPUT_CODE_SCALAR's, nor left a list's, nor met a DROP's (whose tokens its compaction leaves out). Prints
+// each class's counts, among them the tokens no class's action takes.
+static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* test)
+{
+    static const char* const names[BUSTER_CHECK_EXPRESSION_CODES] = {
+        [CHECK_INPUT_CODE_SCALAR] = "scalar",
+        [CHECK_INPUT_CODE_LIST] = "list",
+        [CHECK_INPUT_CODE_DROP] = "drop",
+        [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
+        [CHECK_INPUT_CODE_LITERAL] = "literal",
+        [CHECK_INPUT_CODE_PREFIX] = "prefix",
+        [CHECK_INPUT_CODE_BINARY] = "binary",
+        [CHECK_INPUT_CODE_SEPARATOR] = "separator",
+        [CHECK_INPUT_CODE_GROUP] = "group",
+        [CHECK_INPUT_CODE_CAST] = "cast",
+        [CHECK_INPUT_CODE_TERNARY] = "ternary",
+        [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
+        [CHECK_INPUT_CODE_MEMBER] = "member",
+        [CHECK_INPUT_CODE_POSTFIX] = "postfix",
+        [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
+        [CHECK_INPUT_CODE_CONDITION] = "condition",
+        [CHECK_INPUT_CODE_CALL] = "call",
+    };
+    printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
+    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+    {
+        const bool named = names[code] != NULL;
+        if (named)
+        {
+            printf(" %s %" PRIu64 "/%" PRIu64, names[code], test->expression_acted[code], test->expression_left[code]);
+        }
+        // Only the classes the enum names occur.
+        const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
+        // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
+        // identifiers, a function's name, a label's address, sizeof or alignof, an initializer's assignment or
+        // a builtin, a statement expression's terminators, and builtins', intrinsics' and K&R calls. The others' actions
+        // leave a token only where a child has no value, which no unit the coded walk takes has (their guard keeps the
+        // walk's refusal), and a list's takes every token; DROP's tokens never reach an action.
+        const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
+                              code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_TERMINATOR || code == CHECK_INPUT_CODE_CALL;
+        const bool expected = !named                            ? !counted
+                              : code == CHECK_INPUT_CODE_SCALAR ? test->expression_acted[code] == 0
+                              : code == CHECK_INPUT_CODE_DROP   ? !counted
+                              : code == CHECK_INPUT_CODE_LIST   ? test->expression_acted[code] != 0 && test->expression_left[code] == 0
+                                                                : test->expression_acted[code] != 0 && (!declines || test->expression_left[code] != 0);
+        char message[192];
+        snprintf(message, sizeof(message), "the coded walk's class %u (%s) acted at %" PRIu64 " tokens and left %" PRIu64 " to the walk's visit", code,
+                 named ? names[code] : "unnamed", test->expression_acted[code], test->expression_left[code]);
+        check_test_expect(test, expected, message);
+    }
+    printf("\n");
+    check_test_expect(test, test->expression_left[CHECK_INPUT_CODE_SCALAR] != 0, "the coded walk leaves the scalar class's tokens to the walk's visit");
+}
+
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
 {
     static InternTable identifiers;
@@ -2226,6 +2286,11 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
             }
+            for (uint32_t code = 0; p == 1 && code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+            {
+                test->expression_acted[code] += input[p].expression_acted[code];
+                test->expression_left[code] += input[p].expression_left[code];
+            }
             char resource_message[256];
             snprintf(resource_message, sizeof(resource_message), "%s: %s source adapter exhausted fixture resources", fixture->name, p == 0 ? "scalar" : "vector");
             check_test_expect(test, !input[p].resource, resource_message);
@@ -2240,11 +2305,14 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 const bool visits = input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits;
                 check_test_expect(test, visits, resource_message);
                 // The coded walk acts by class (#1038) at tokens of every unit whose features it takes, and the scalar walk at none.
+                const uint32_t classed = check_input_expression_classed(&input[1]);
+                const uint32_t scalar_counted = check_input_expression_classed(&input[0]) + check_input_expression_declined(&input[0]) +
+                                                input[0].expression_left[CHECK_INPUT_CODE_SCALAR];
                 snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
-                         fixture->name, input[1].expression_classed, input[1].expression_visits, input[0].expression_classed);
+                         fixture->name, classed, input[1].expression_visits, scalar_counted);
                 const bool coded = input[1].overload_heads != NULL || input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
-                                   (input[1].expression_classed != 0 && input[1].expression_classed <= input[1].expression_visits);
-                check_test_expect(test, coded && input[0].expression_classed == 0, resource_message);
+                                   (classed != 0 && classed <= input[1].expression_visits);
+                check_test_expect(test, coded && scalar_counted == 0, resource_message);
             }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;
@@ -5953,6 +6021,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
+            check_test_expression_coverage(&test);
         }
         // The program harness's build directory, which the sections' programs share: removed after the last of them,
         // whichever sections ran.

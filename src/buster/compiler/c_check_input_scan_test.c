@@ -491,9 +491,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const uint8_t classes = check_test_expression_class(&reader, i);
+                // --scalar's walk, which reads no class code, gets none.
+                const uint8_t uncoded = (uint8_t)(classes & ~BUSTER_CHECK_EXPRESSION_CODE_MASK);
                 const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
-                class_differences += visits[i] != classes || reader.first_value[i] != first_value;
-                class_differences += check_input_expression_class(&reader, i) != classes;
+                class_differences += visits[i] != (scalar != 0 ? uncoded : classes) || reader.first_value[i] != first_value;
+                class_differences += check_input_expression_class(&reader, i, true) != classes || check_input_expression_class(&reader, i, false) != uncoded;
                 expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
             }
             class_differences += visits[count] != 0xa5 || acting != expected_acting;
@@ -518,9 +520,10 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const uint8_t classes = expected_empty[i];
+                const uint8_t uncoded = (uint8_t)(classes & ~BUSTER_CHECK_EXPRESSION_CODE_MASK);
                 const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
-                class_differences += visits[i] != classes || reader.first_value[i] != first_value;
-                class_differences += check_input_expression_class(&reader, i) != classes || check_input_asm_id(&input, i) != 0;
+                class_differences += visits[i] != (scalar != 0 ? uncoded : classes) || reader.first_value[i] != first_value;
+                class_differences += check_input_expression_class(&reader, i, true) != classes || check_input_asm_id(&input, i) != 0;
                 expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
             }
             class_differences += visits[count] != 0xa5 || acting != expected_acting || check_input_asm_id(&input, count) != 0;
@@ -529,11 +532,12 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         parser.options.scalar = false;
         // The coded walk's compaction of these classes (check_input_expression_compact), by both paths: the tokens the walk
         // acts at among each range of a postorder (a random permutation of the tokens), in its order, with their bytes;
-        // from bytes that end three past the last token's, the most the gathers reach, and into arrays of exactly the
-        // range's room, each ending at a PROT_NONE page.
+        // from bytes that end as the reader's do (count + 1 and BUSTER_CHECK_VISITS_PADDING, three past the last token's,
+        // the most the gathers reach), and into arrays of exactly the range's room, each ending at a PROT_NONE page.
         check_input_expression_classes(&reader);
         uint32_t* postorder = check_test_scan_column(mappings[POSTORDER] + page, count, 4);
-        uint8_t* padded = check_test_scan_column(mappings[PADDED_VISITS] + page, count + 3, 1);
+        const uint32_t padded_count = count + 1 + BUSTER_CHECK_VISITS_PADDING;
+        uint8_t* padded = check_test_scan_column(mappings[PADDED_VISITS] + page, padded_count, 1);
         for (uint32_t i = 0; i < count; i += 1)
         {
             postorder[i] = i;
@@ -546,7 +550,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             postorder[j] = swapped;
         }
         memcpy(padded, visits, count);
-        for (uint32_t i = count; i < count + 3; i += 1)
+        for (uint32_t i = count; i < padded_count; i += 1)
         {
             padded[i] = (uint8_t)check_test_random(test);
         }

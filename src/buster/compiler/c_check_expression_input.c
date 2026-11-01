@@ -47,7 +47,8 @@ static uint32_t check_input_expression_compact(const CheckInputReader* reader, u
     {
         const uint32_t token = postorder[position];
         const uint8_t visit = visits[token];
-        // Written whatever the token, and kept by counting it: result is below the positions read so far.
+        // The compress store a token at a time, without a branch: every token is written at `result`, and the next one
+        // writes over it unless counting keeps it. `result` never passes the positions read, so the room holds both.
         tokens[result] = token;
         classes[result] = visit;
         result += (visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && visit != skipped;
@@ -88,56 +89,11 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
     return values;
 }
 
-// A node of `op` at `token` with operands a, b and c, as check_input_add makes it, but for its record of the nodes before
-// it (check_graph_record_nodes), which the next check_input_add or check_graph_record_finish makes, in node order and from
-// the nodes' final columns; and but for a VALUE node's leaf, which its caller writes whole. A full graph is a resource
-// failure, as there.
-static uint32_t check_input_expression_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
-{
-    CheckGraph* graph = &reader->output->graph;
-    const uint32_t node = graph->count;
-    uint32_t result = BUSTER_CHECK_NONE;
-    if (node < graph->capacity)
-    {
-        const bool leaf = op == CHECK_OP_VALUE;
-        graph->ops[node] = op;
-        graph->tokens[node] = token;
-        graph->operand0[node] = a;
-        graph->operand1[node] = b;
-        graph->operand2[node] = c;
-        graph->leaf_slots[node] = leaf ? graph->leaf_count : BUSTER_CHECK_NONE;
-        graph->leaf_count += leaf;
-        graph->types[node] = 0;
-        graph->members[node] = 0;
-        graph->contexts[node] = 0;
-        graph->source_positions[node] = check_input_expression_end(reader, token);
-        graph->argument_offsets[node] = 0;
-        graph->argument_counts[node] = 0;
-        if (graph->warning_suppressed != NULL)
-        {
-            graph->warning_suppressed[node] = reader->warning_suppressed != 0 ? reader->warning_suppressed[token] : 0;
-        }
-        if (graph->fp_environments != NULL)
-        {
-            graph->fp_environments[node] = reader->constant_contexts[token] == 0 ? reader->output->fp_environments[token] : 0;
-        }
-        graph->count = node + 1;
-        graph->recorded_ready = false;
-        reader->value_next[node] = BUSTER_CHECK_NONE;
-        result = node;
-    }
-    else
-    {
-        reader->output->resource = true;
-    }
-    return result;
-}
-
 // An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, and a
 // static initializer's context.
 static uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
-    const uint32_t node = check_input_expression_node(reader, op, token, a, b, c);
+    const uint32_t node = check_input_add_node(reader, op, token, a, b, c);
     if (node != BUSTER_CHECK_NONE)
     {
         CheckGraph* graph = &reader->output->graph;
@@ -214,7 +170,7 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
     const bool acted = reader->output->kr_parameter_count == 0 && (type == 0 || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) == 0);
     if (acted && type != 0)
     {
-        const uint32_t node = check_input_expression_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
             check_input_identifier_leaf(reader, type, declaration, check_graph_leaf_of(&reader->output->graph, node));
@@ -239,7 +195,7 @@ static bool check_input_expression_literal(CheckInputReader* reader, uint32_t to
         }
         else
         {
-            const uint32_t node = check_input_expression_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
                 *check_graph_leaf_of(&reader->output->graph, node) = check_input_literal_value(reader, token, literal);
@@ -346,7 +302,7 @@ static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t
     const bool acted = reader->output->region_count == 0 && (!condition || values.count <= 1);
     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
     {
-        const uint32_t discard = check_input_expression_node(reader, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t discard = check_input_add_node(reader, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (discard != BUSTER_CHECK_NONE)
         {
             reader->output->graph.types[discard] = BUSTER_TYPE_VOID;
@@ -499,7 +455,9 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
                 break;
         }
     }
-    reader->output->expression_classed += acted;
+    // Counted in units the coded walk takes alone: in another, the walk's visit takes every token.
+    reader->output->expression_acted[code] += acted;
+    reader->output->expression_left[code] += coded && !acted;
     if (!acted)
     {
         check_input_expression_visit(reader, token, classes);
@@ -509,8 +467,9 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
 // reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred,
-// or with overloadable functions, whose values the walk's action carries in a column of its own, is acted at by the
-// walk's visit throughout, though still compacted.
+// or with overload tables (CheckInput.overload_heads: a unit that spells `overloadable` or `__overloadable__`, whose
+// every function declaration is a candidate whose head the walk's action carries through its nodes to its calls), is
+// acted at by the walk's visit throughout, though still compacted.
 static void check_input_expressions_coded(CheckInputReader* reader)
 {
     const CheckInput* input = reader->output;
@@ -530,4 +489,27 @@ static void check_input_expressions_coded(CheckInputReader* reader)
             check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded);
         }
     }
+}
+
+// The tokens the coded walk acted at by their classes' own actions: CheckInput.expression_acted's sum over the classes.
+static __attribute__((unused)) uint32_t check_input_expression_classed(const CheckInput* input)
+{
+    uint32_t total = 0;
+    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+    {
+        total += input->expression_acted[code];
+    }
+    return total;
+}
+
+// The tokens the coded walk's class actions declined and left to the walk's visit: CheckInput.expression_left's sum over
+// the classes but CHECK_INPUT_CODE_SCALAR, whose tokens no class's action takes.
+static __attribute__((unused)) uint32_t check_input_expression_declined(const CheckInput* input)
+{
+    uint32_t total = 0;
+    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+    {
+        total += code != CHECK_INPUT_CODE_SCALAR ? input->expression_left[code] : 0;
+    }
+    return total;
 }

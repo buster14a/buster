@@ -321,14 +321,16 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
 }
 
 // Reads a report check_clock_report wrote, in `text` among other lines (a compile's diagnostics): each stage's
-// milliseconds into `stages` (by CheckStage), the preprocessor's rows into `phases` (by check_clock_phase_names) and the
-// total into `*total`, and unless `usage` is null each stage's system milliseconds, minor faults and peak KB added into
-// usage[3 * stage] to usage[3 * stage + 2]. Every row must occur once. Values are nonnegative except
+// milliseconds into `stages` (by CheckStage), the preprocessor's rows into `phases` (by check_clock_phase_names), the
+// total into `*total`, the reader's expressions' walk (its `time-check expressions` row, #1038) into `*walk`, and unless
+// `usage` is null each stage's system milliseconds, minor faults and peak KB added into usage[3 * stage] to
+// usage[3 * stage + 2]. Every row must occur once, and the walk's within its stage's time (each rounded to a
+// microsecond). Values are nonnegative except
 // that every stage's RSS may be -1 together, with an explicit unavailable status. Legacy numeric reports
 // remain readable, but cannot claim an unavailable reading by silently substituting zero.
-static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* usage)
+static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* walk, double* usage)
 {
-    uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 1] = { 0 };
+    uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 2] = { 0 };
     uint32_t missing_peaks = 0;
     uint32_t peak_status_count = 0;
     bool peak_unavailable = false;
@@ -384,12 +386,20 @@ static bool check_clock_read(const char* text, double* stages, double* phases, d
             matches += whole;
             valid = valid && matches == 1 && value >= 0;
         }
+        double walked = -1;
+        if (strncmp(line, "time-check\texpressions\t", sizeof("time-check\texpressions\t") - 1) == 0)
+        {
+            valid = valid && sscanf(line + sizeof("time-check\texpressions\t") - 1, "%lf", &walked) == 1 && walked >= 0;
+            *walk = walked;
+            seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 1] += 1;
+        }
         at = end != NULL ? end + 1 : NULL;
     }
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(seen); i += 1)
     {
         valid = seen[i] == 1;
     }
+    valid = valid && *walk <= stages[CHECK_STAGE_CHECK_INPUT] + 0.001;
     valid = valid && peak_status_count <= 1 &&
             (missing_peaks == 0 ? !peak_unavailable : missing_peaks == CHECK_STAGE_COUNT && peak_unavailable);
     return valid;

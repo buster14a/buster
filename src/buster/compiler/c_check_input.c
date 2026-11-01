@@ -207,6 +207,9 @@ struct CheckInputKrDiagnostic
     uint32_t warning;
 };
 
+// The class codes the visits byte's bits 2 to 6 hold (CheckInputExpressionCode, BUSTER_CHECK_EXPRESSION_CODE_MASK).
+#define BUSTER_CHECK_EXPRESSION_CODES 32u
+
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
 struct CheckInputLiteralTable
@@ -452,9 +455,14 @@ struct CheckInput
     // path, and on the vector path those they act at, which the tests require to be fewer.
     uint32_t resolve_visits;
     uint32_t expression_visits;
-    // The tokens the coded walk acted at by their classes (c_check_expression_input.c, #1038), rather than through the
-    // walk's own action: 0 on the scalar path.
-    uint32_t expression_classed;
+    // The tokens the coded walk (c_check_expression_input.c, #1038) acted at by their classes' own actions, and those it
+    // left to the walk's visit, by class (CheckInputExpressionCode): CHECK_INPUT_CODE_SCALAR's tokens, which no class's
+    // action takes, are all left, and so is a token whose class's action can't decide it (check_input_expression_coded).
+    // All 0 on the scalar path and in a unit the coded walk leaves to the walk's visit throughout (one with expressions
+    // past its limit or deferred, or with overload tables); test-checker requires each class's action to act, and where
+    // it declines valid code, to leave a token, in its fixtures.
+    uint32_t expression_acted[BUSTER_CHECK_EXPRESSION_CODES];
+    uint32_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
     // The TSC's ticks the expressions' walk took (check_input_expressions), which --time-stages reports apart within the
     // reader's stage (#1038).
     uint64_t expression_ticks;
@@ -524,8 +532,9 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 // they don't hold. A token the walk doesn't act at has no class: its byte is 0.
 #define BUSTER_CHECK_EXPRESSION_CODE_SHIFT 2u
 #define BUSTER_CHECK_EXPRESSION_CODE_MASK 0x7cu
-// The bytes CheckInputReader.visits has past its last token's, for the coded walk's gathers of four bytes at a token.
-#define BUSTER_CHECK_VISITS_PADDING 64u
+// The bytes CheckInputReader.visits has past its count + 1: a gather of four bytes at the last token, count - 1, reads to
+// count + 2 (the coded walk's compaction).
+#define BUSTER_CHECK_VISITS_PADDING 2u
 
 typedef enum CheckInputExpressionCode
 {
@@ -568,6 +577,7 @@ typedef enum CheckInputExpressionCode
 } CheckInputExpressionCode;
 
 _Static_assert(CHECK_INPUT_CODE_OPERAND << BUSTER_CHECK_EXPRESSION_CODE_SHIFT <= BUSTER_CHECK_EXPRESSION_CODE_MASK, "the classes fit their bits");
+_Static_assert(BUSTER_CHECK_EXPRESSION_CODE_MASK >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == BUSTER_CHECK_EXPRESSION_CODES - 1, "a counter per code the bits hold");
 
 // The walks' tests of a token's role and of its kind, a bit each, in tables that a pass looks 64 tokens up in at once
 // (_mm512_permutex2var_epi8 of a 128-byte table: roles and kinds are below 128). The scalar twins of the passes that read
@@ -6100,11 +6110,13 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
     return reader->parser->tree.roles[token] == PARSE_ROLE_CLOSE_CONDITION ? token + 1 : reader->ends[token] + 1;
 }
 
-static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+// A node of `op` at `token` with operands a, b and c (check_graph_add's, its checks and columns), the end of its value
+// chain, and the columns the reader gives every node: where its expression ends, its warnings' suppression and its
+// floating-point environment. A full graph is a resource failure. It doesn't record the nodes before it, which
+// check_input_add does first; the coded walk leaves that to the next check_input_add or check_graph_record_finish, which
+// record them in node order from their final columns.
+static uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
-    // The previous node's caller has now filled its action data and witnesses. Finish it before a new node
-    // can consume its purity, while its columns are still hot. Late reader passes only add diagnostic context.
-    check_graph_record_nodes(&reader->output->graph);
     const uint32_t node = check_graph_add(&reader->output->graph, op, token, a, b, c);
     if (node == BUSTER_CHECK_NONE)
     {
@@ -6124,6 +6136,14 @@ static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t t
         }
     }
     return node;
+}
+
+static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+{
+    // The previous node's caller has now filled its action data and witnesses. Finish it before a new node
+    // can consume its purity, while its columns are still hot. Late reader passes only add diagnostic context.
+    check_graph_record_nodes(&reader->output->graph);
+    return check_input_add_node(reader, op, token, a, b, c);
 }
 
 static void check_input_vector_member(CheckInputReader* reader, uint32_t node, uint32_t token)
@@ -6275,7 +6295,7 @@ static uint8_t check_input_expression_code(const CheckInputReader* reader, uint3
                          kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_ASM || kind == PARSE_KIND_ATTRIBUTE ||
                          kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
                          kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
-    uint8_t code = CHECK_INPUT_CODE_SCALAR;
+    uint8_t code;
     if (sparse || reader->specifier_finishes[token] != 0)
     {
         code = CHECK_INPUT_CODE_SCALAR;
@@ -6357,8 +6377,10 @@ static uint8_t check_input_expression_code(const CheckInputReader* reader, uint3
 // The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
 // check_input_expression_classes' vector path. The walk acts at a token with children, at one a sparse column has an
 // entry for, and at one whose role or kind its other tests take: for an ignored token, a role whose values it passes on
-// as a list. At any other token it writes the token's first value, NONE, and nothing else.
-static uint8_t check_input_expression_class(const CheckInputReader* reader, uint32_t token)
+// as a list. At any other token it writes the token's first value, NONE, and nothing else. The class code
+// (check_input_expression_code) only where `coded`, the coded walk's: the walk's action reads its ACTS and SPARSE bits
+// alone, so that --scalar's walk doesn't pay for the code's tests at every token.
+static uint8_t check_input_expression_class(const CheckInputReader* reader, uint32_t token, bool coded)
 {
     const Parser* parser = reader->parser;
     const uint8_t role = parser->tree.roles[token];
@@ -6382,13 +6404,14 @@ static uint8_t check_input_expression_class(const CheckInputReader* reader, uint
                          kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
                          kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
     const bool acts = reader->first_child[token] != BUSTER_CHECK_NONE || sparse || (reader->ignored[token] ? list : operation || closing || refused);
-    const uint8_t code = check_input_expression_code(reader, token, sparse, list);
+    const uint8_t code = coded ? check_input_expression_code(reader, token, sparse, list) : CHECK_INPUT_CODE_OTHER;
     return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
 // The expressions' walk's classes of every token, into CheckInputReader.visits, as check_input_expression_class gives
 // them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests, check_input_role_codes)
-// and 16 tokens' sparse columns, type queries and first children at a time; on the scalar path, its twin's, a token at a time. Each token the walk
+// and 16 tokens' sparse columns, type queries and first children at a time; on the scalar path, its twin's, a token at a
+// time, with the class codes only for the coded walk (all but --scalar's, which reads none). Each token the walk
 // doesn't act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path
 // skips it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
 // reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
@@ -6472,9 +6495,11 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         _mm512_mask_storeu_epi8(reader->visits + token, lanes, classes);
         result += (uint32_t)__builtin_popcountll(acts);
     }
+    // The coded walk reads the class codes, on any path but --scalar's (check_input_expressions).
+    const bool coded = !parser->options.scalar;
     for (; token < count; token += 1)
     {
-        reader->visits[token] = check_input_expression_class(reader, token);
+        reader->visits[token] = check_input_expression_class(reader, token, coded);
         if ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
         {
             reader->first_value[token] = BUSTER_CHECK_NONE;
@@ -6489,7 +6514,10 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
 // The walk's action at `token`, of classes `classes` (its visits byte), once its first value is NONE and it is within the
 // expressions' limit (check_input_expression_visit): its children's values gathered, then the node, the list or the
 // report its role, kind and columns ask for. The scalar walk's for every token, and the coded walk's for a token of
-// CHECK_INPUT_CODE_SCALAR or one its class's action leaves to it (c_check_expression_input.c).
+// CHECK_INPUT_CODE_SCALAR or one its class's action leaves to it (c_check_expression_input.c). Called, not inlined, by
+// both walks: clang 23's code is the same without the attribute (its 28 KB aren't inlined at two places), which keeps the
+// coded walk's dispatch small. --scalar's walk of sqlite3.c, which calls it at every token, took 57.5 ms against 55.5
+// before the coded walk (minima of 21 runs in a 4-CPU VM, #1038's review); no benchmark times that path.
 static __attribute__((noinline)) void check_input_expression_act(CheckInputReader* reader, uint32_t token, uint8_t classes)
 {
     const Parser* parser = reader->parser;
@@ -7805,8 +7833,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     }
     const uint64_t mark = scratch->length;
     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
-    // With BUSTER_CHECK_VISITS_PADDING bytes past the last token's, which the coded walk's gathers of four bytes may read.
-    uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
+    // With BUSTER_CHECK_VISITS_PADDING bytes past its count + 1, which the coded walk's gathers of four bytes may read.
+    uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
     const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, BUSTER_SCALAR_PATH(parser->options.scalar));
     input->vla_capacity = counts.subscripts;
     input->asm_capacity = counts.asms;

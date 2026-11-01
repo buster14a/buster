@@ -779,7 +779,8 @@ report, on standard error after the command, a row per stage.
   total, `time-check expressions MILLISECONDS PERCENT`: the TSC's ticks across
   `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
   #1038; two TSC reads a unit, with the option or without) and the driver adds
-  up. It overlaps the stage, so it is no row of the stages' sum.
+  up. It overlaps the stage, so it is no row of the stages' sum. The report's
+  reader (`check_clock_read`) requires it once, within its stage.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
@@ -794,7 +795,8 @@ without the option, with it, and the reference compiler.
   run must be the same bytes, and every report must be whole.
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
-  ranked.
+  ranked. The preprocessor's phases and the expressions' walk
+  (`check-input.expressions`) come under their stages, outside the stages' sum.
 
 **The 9700X step.** "Attribute sqlite3.c's compile time to the compiler's
 stages, against tcc" runs, pinned to CPU 2 under the host's lock:
