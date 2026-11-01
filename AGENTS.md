@@ -1274,7 +1274,18 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`); long double's, the 128-bit integers' and the
-  vectors' values keep their own slots there, by their true depths (#780). The
+  vectors' values keep their own slots there, by their true depths (#780).
+  AVX-512's masks (MASK, #179) are a third stack beside the integer and the
+  floating ones, of 1 to 8 bytes each: depths 0 to 6 in k1 to k7, deeper ones in
+  frame slots (`Tier0Frame.mask_area`), saved around calls (every opmask
+  register is caller-saved) and around rows that name opmask registers by
+  number; rows take them by role (`MASK(j)`, `MASK_RESULT`, `MASK_SCRATCH(k)`,
+  borrowing k1 on past k7), and the stack's depths are a column of their own
+  in a function with masks (`Tier0Function.masks`, `tier0_vector_mask_depths`
+  and its twin). `interpreter.c` runs them; `ir_lower.c` refuses them; the
+  front end's AVX-512 builtins are their first user (`check_x86_lower_masks`);
+  `test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over
+  them natively against the interpreter and a model of its own. The
   output is
   the records with #144's branch columns, `LinkReference`s, the frame
   (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
