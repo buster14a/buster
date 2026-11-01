@@ -104,7 +104,7 @@ static CheckValue check_init_constant_value(const CheckInitWalker* walker, uint3
 static bool check_init_constant_known(const CheckValue* value)
 {
     return (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING) &&
-           value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+           value->fault == CHECK_FAULT_NONE && (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
 }
 
 static unsigned __int128 check_init_bytes_integer(const uint8_t* bytes, uint32_t size)
