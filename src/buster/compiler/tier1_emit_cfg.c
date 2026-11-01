@@ -956,10 +956,13 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
 // Whether value v's definition at `definition` writes a register nothing reads: v is recomputed (#178), and the first
 // fragment of the interval its definition starts serves no use of v but those of definitions left out (`dropped`, by
 // node, decided for every later node first), and ends where a recomputation takes over (the next fragment's) or, as the
-// interval's last, before its block's end, where an edge would read it. Its records can then be left out, the value
-// recomputed where it is used (an edge's move or a fragment's transition takes the recipe rather than the register), as
-// the definition's records only compute a value: a constant, an address or a copy of one. A use at position p > the
-// definition is node (p - base) / 2's.
+// interval's last, before its block's end, where an edge would read it; either way before the last position of the
+// block the definition is in. An edge leaving a block whose end the fragment covers reads its register: for a phi's
+// operand on the edge, or for v live into the successor, moved from the register or found there where the successor
+// keeps v (or the phi) in the same one, with no move at all (#141: sqlite3VdbeExec's join of an error code). Its
+// records can then be left out, the value recomputed where it is used (an edge's move or a fragment's transition takes
+// the recipe rather than the register), as the definition's records only compute a value: a constant, an address or a
+// copy of one. A use at position p > the definition is node (p - base) / 2's.
 static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint32_t v, uint32_t definition, const uint8_t* dropped, uint32_t base)
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
@@ -970,8 +973,9 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
     const bool last = interval != BUSTER_TIER1_CFG_NONE && first + 1 == allocation->fragment_offsets[interval + 1];
     const uint32_t end = interval != BUSTER_TIER1_CFG_NONE ? cfg->intervals.ends[interval] : 0;
     const bool inside = last && end != input->block_starts[tier1_cfg_block_of(input, end - 1) + 1];
+    const uint32_t block = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_block_of(input, definition) : 0;
     bool dead = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
-                (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
+                allocation->ends[first] < input->block_starts[block + 1] && (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
     // Uses are sorted: the definition's own (at its position), then those the first fragment serves, before its end.
     for (uint32_t u = dead ? input->use_offsets[v] : 0; dead && u < input->use_offsets[v + 1]; u += 1)
     {
