@@ -48,10 +48,11 @@ static __attribute__((noinline)) void check_test_bits_sources(CheckTest* test, c
           "_Static_assert(__builtin_bswapg(ks)==0x3412 && __builtin_bitreverseg((unsigned char)ku)==0xe0, \"\");\n"
           "_Static_assert(__builtin_stdc_count_ones(ku)==3 && __builtin_stdc_bit_width(ku)==3 && __builtin_stdc_bit_ceil(ku)==8, \"\");\n"
           "_Static_assert(__builtin_popcountg(kw)==3 && __builtin_bswapg(kw16)==0x3412 && __builtin_stdc_rotate_left(kc,4)==0x0f, \"\");\n"
+          "static int gs = __builtin_popcountg(ku);\n"
           "int ga[__builtin_popcountg(ku)];\n"
           "enum { GE=__builtin_stdc_bit_floor(ku) };\n"
           "struct GF { unsigned field:__builtin_stdc_bit_width(ku); };\n"
-          "unsigned f(unsigned n) { switch (n) { case __builtin_stdc_count_ones(ku): return 1; } return 0; }\n" },
+          "unsigned f(unsigned n) { switch (n) { case __builtin_stdc_count_ones(ku): return gs; } return 0; }\n" },
         { .name = "bits: fold of a volatile object is no constant", .source =
           "static const volatile unsigned kv=7u;\n"
           "int gv[__builtin_popcountg(kv)];\n", .rejected = true },

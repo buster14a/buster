@@ -842,7 +842,13 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             // #990: clang's evaluator reads a const object's constant initializer inside a builtin call, so the folded
             // call is an integer constant expression in every context.
             .name = "declaration builtin calls of a const integer object",
-            .source = "static const int x=5; _Static_assert(__builtin_popcount(x)==2, \"const object\"); int bound[__builtin_popcount(x)]; enum { F=__builtin_ffs(x) }; struct W { int field:__builtin_popcount(x); }; int f(void) { const int y=6; switch (0) { case __builtin_popcount(y)-2: return 1; } return bound[0]; }\n",
+            .source = "static const int x=5; _Static_assert(__builtin_popcount(x)==2, \"const object\"); static int s=__builtin_popcount(x); int bound[__builtin_popcount(x)]; enum { F=__builtin_ffs(x) }; struct W { int field:__builtin_popcount(x); }; int f(void) { const int y=6; switch (0) { case __builtin_popcount(y)-2: return 1; } return bound[0]+s; }\n",
+        },
+        {
+            // #990: the same const-object read at block scope, for the generic bit and floating builtin families and a
+            // static local's initializer.
+            .name = "block-scope builtin calls of const objects in other families",
+            .source = "int g(void) { const unsigned u=7u; const unsigned short h=0x1234; const double d=4.0; _Static_assert(__builtin_popcountg(u)==3 && __builtin_bswapg(h)==0x3412, \"generic bits\"); _Static_assert(__builtin_signbit(d)==0 && __builtin_ctz((int)d)==2, \"floating object\"); enum { G=__builtin_stdc_bit_width(u) }; struct V { unsigned field:__builtin_stdc_bit_floor(u); }; static int t=__builtin_stdc_count_ones(u); switch (0) { case __builtin_clzg(u,99)-29: return t+G+(int)sizeof(struct V); } return 0; }\n",
         },
         {
             .name = "declaration builtin calls of const integer objects across families",

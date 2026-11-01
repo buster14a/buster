@@ -1896,6 +1896,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .extensions = action->extensions,
             .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
             .alignment_known = walked < 64,
+            .const_values = action->const_values,
             .constant_evaluated = action->constant_evaluated,
         };
         // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what the

@@ -29,9 +29,9 @@ struct CheckBuiltinAction
     uint32_t source_position;
     uint32_t extensions;
     // The unit's constant objects' receipts and whether the action is in a constant context, whose operand
-    // conversions read a const object's constant initializer as clang's evaluator does (a builtin call it folds
-    // to an integer constant without side effects is an integer constant expression there); an ordinary call's
-    // runtime view reads none.
+    // conversions' lvalue read loads a const object's constant initializer as clang's evaluator does (a builtin
+    // call it folds to an integer constant without side effects is an integer constant expression there); an
+    // ordinary call's runtime view doesn't request the read and loads none.
     const CheckConstValues* const_values;
     bool constant_evaluated;
 };

@@ -126,6 +126,8 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
             .tag_completion_count = input->tag_completion_count,
             .source_position = input->source_position,
             .extensions = input->extensions,
+            .const_values = input->const_values,
+            .constant_evaluated = input->constant_evaluated,
         };
         CheckBuiltinAtomicResult checked = { 0 };
         const TypeId pointer = type_pointer(table, info->type);
