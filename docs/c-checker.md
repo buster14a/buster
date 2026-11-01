@@ -3404,6 +3404,31 @@ they do per token where little of it was per declaration or expression:
 - **Builtins' names.** `cbuiltin_resolve`, which the reader asks of each
   distinct identifier, refuses a name that doesn't start with `__` before it
   scans its catalog, whose names all do (`test-preprocessor` checks it).
+- **Const-object receipts (#754).** Every string literal and every
+  const-eligible completed static initializer retains a sparse receipt
+  (`check_const_append`, `c_check_const_values.c`): a duplicate search over
+  the buffer's hash trie, a copy of a `BYTES` part's bytes, and 32 trie nodes
+  per appended object. A string literal's token is seen once through the
+  reader's string cache, and the deferred merge replays each object once into
+  an empty buffer, so both pass `fresh` and skip the duplicate search (#872);
+  completed initializers keep the search, since two declarations can share one
+  object identity. What remains is the feature's own work: the tries, the
+  byte copies, the initializers' expression re-evaluation
+  (`check_input_evaluate_cached`), the liveness walk
+  (`check_initializer_live_writes`) and the constant-fold warnings. On #872's
+  M7-style units, #754 is the whole measured `bc11fddb`..`d11a91d2`
+  difference (local Ryzen 9 7940HS instruction counts, `perf stat -e
+  instructions:u` over `benchmark-checker-deferred --passes 6 --lanes 1`
+  runs with the frozen corpus's pinned predefines and headers, three repeats,
+  all within 0.02%: `00213.c` +6.3%, `00182.c` +0.7%, `00204.c` +3.7%,
+  `00200.c` +1.6%, `sqlite3.c` +4.1%; the K&R stack #735+#752+#756 with the
+  six non-reader merges is +0.0 to +0.2%, and #831 is unchanged, so the
+  endpoint sums match). The `fresh` skip itself removes 0.06% of `sqlite3.c`'s
+  run (`00204.c` 0.20%, `00200.c` 0.07%, `00213.c` 0.13%, `00182.c` 0.00%).
+  `perf` on `sqlite3.c` puts `check_const_append` at 1.2 to 1.4% of the
+  reading's cycles. A locked-9700X five-round M7-style campaign with
+  `ns/token` medians is still needed for qualification numbers; these local
+  counts are attribution only.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
