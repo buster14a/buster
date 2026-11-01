@@ -5629,7 +5629,12 @@ it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
 each alone, and with `--generate DIR` it writes a program of synth's shape
 (512 units of 200 functions by default) for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
-measurements.
+measurements. The end-to-end single- and multi-unit contract, with the
+mixed-tier and actual command-team receipts, is
+[the multicore acceptance guide](docs/multicore-acceptance.md);
+`tests/driver/multicore.c` runs it in the shared correctness suite. What
+#149's remaining whole-process performance acceptance still needs is there
+too.
 
 ## Selective lowering
 
