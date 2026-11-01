@@ -5,7 +5,7 @@
 // Tier 0: lowered to the shared IR (ir_lower.c), promoted to SSA (ssa_ir.c), optimized (ir_optimize.c's SCCP, dead
 // code and CFG cleanup), its CFG and dominators analyzed, selected (tier1_select.c) and emitted (tier1_emit.c, whose
 // CFG consumer allocates a general CFG's values over it, tier1_cfg.c), each step with --scalar by its scalar twin. The
-// emission's check_program_emit_tier1 calls it for each body and gives Tier 0 the bodies a step refuses, so that a
+// emission's check_program_emit_tier1 calls it for each body and gives Tier 0 only explicit unsupported bodies, so a
 // program of both tiers' functions is one System V program. Tier 1's code publishes its frame as Tier 0's does
 // (check_tier1_frame, #177), so that the emission writes its unwind tables as it writes Tier 0's. What Tier 1's code
 // leaves out (-g's rows) the driver refuses with the option. Include after tier1_emit.c and c_check_program_emit.c.
@@ -139,7 +139,7 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
 // function ends in a ret or a ud2, and its FDE is the closed one either way. A probe's loop
 // (BUSTER_TIER1_FRAME_PROBE_STACK, which the driver doesn't ask for) moves rsp a page at a time, which the protocol
 // doesn't describe; and every exit must be a ret, the last record exactly when the frame is closed. Returns false for
-// a frame it can't publish so, whose function Tier 0 then compiles, rather than fail the emission's reader.
+// a frame it cannot publish. This is an internal publication failure, never an unsupported-input fallback.
 static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* tails, Tier0Code* code)
 {
     const Tier1Frame* frame = &emitted->frame;

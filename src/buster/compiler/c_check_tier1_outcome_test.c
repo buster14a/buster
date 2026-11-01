@@ -52,8 +52,12 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
     Arena output = arena_reserve(UINT64_C(1) << 24);
     CheckProgramLowered lowered = { 0 };
     const CheckProgram* program = &unit->selected.program;
-    const bool ready = lowered_arena.base != NULL && scratch.base != NULL && output.base != NULL &&
-                       check_program_lower(&lowered, program, scalar, &lowered_arena, &scratch);
+    bool ready = lowered_arena.base != NULL && scratch.base != NULL && output.base != NULL &&
+                 check_program_lower(&lowered, program, scalar, &lowered_arena, &scratch);
+    // Lowering does not publish the symbol-access column; the normal emission does that before Tier 1.
+    CheckProgramCode publication = { .lowered = lowered };
+    uint8_t* defined_objects = NULL;
+    ready = ready && check_program_access(&publication, program, &lowered_arena, &scratch, &defined_objects);
     check_lanes_test_expect(tally, ready, "Tier 1 rollback fixture lowers", NULL);
     CheckTier1Lane lane = { 0 };
     uint8_t* prefix = ready ? arena_push(&output, 32, 1) : NULL;
