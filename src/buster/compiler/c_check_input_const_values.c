@@ -136,7 +136,7 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
         if (part->kind == CHECK_INIT_VALUE)
         {
             valid = valid && part->value.constant_kind != CHECK_CONSTANT_NONE && part->value.fault == CHECK_FAULT_NONE &&
-                    (part->value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_INACTIVE_UNION_READ)) == 0 &&
+                    (part->value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                     (part->value.constant_kind != CHECK_CONSTANT_ADDRESS || part->value.object == 0 ||
                      (part->value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0);
         }

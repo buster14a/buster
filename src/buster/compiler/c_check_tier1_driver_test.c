@@ -222,6 +222,108 @@ static const char check_test_tier1_labels_source[] =
     "    return 0;\n"
     "}\n";
 
+// The variadic definitions' fixture (#789): va_start, va_arg of integers, pointers and an int, va_copy, unnamed arguments
+// past the registers (in the overflow area), five named ones before them, a va_list handed to vsnprintf, a variadic
+// function that reads none, and one whose result crosses a call after it read its overflow area, which takes a
+// callee-saved register its prologue pushes (#1060's review). main's calls pass more than six arguments, which Tier 1
+// doesn't take yet: it is Tier 0's.
+static const char check_test_tier1_variadic_source[] =
+    "#include <stdarg.h>\n"
+    "#include <stdio.h>\n"
+    "static long tier1_sum(int count, ...)\n"
+    "{\n"
+    "    va_list ap;\n"
+    "    va_start(ap, count);\n"
+    "    long total = 0;\n"
+    "    for (int i = 0; i < count; i += 1)\n"
+    "    {\n"
+    "        total = total * 31 + va_arg(ap, long);\n"
+    "    }\n"
+    "    va_end(ap);\n"
+    "    return total;\n"
+    "}\n"
+    "static long tier1_mixed(long first, ...)\n"
+    "{\n"
+    "    va_list ap;\n"
+    "    va_start(ap, first);\n"
+    "    const char* s = va_arg(ap, const char*);\n"
+    "    int i = va_arg(ap, int);\n"
+    "    long* p = va_arg(ap, long*);\n"
+    "    va_end(ap);\n"
+    "    return first + (long)s[1] * 3 + i * 5 + *p * 7;\n"
+    "}\n"
+    "static long tier1_copy(int count, ...)\n"
+    "{\n"
+    "    va_list ap;\n"
+    "    va_list again;\n"
+    "    va_start(ap, count);\n"
+    "    va_copy(again, ap);\n"
+    "    long a = 0;\n"
+    "    for (int i = 0; i < count; i += 1)\n"
+    "    {\n"
+    "        a += va_arg(ap, long);\n"
+    "    }\n"
+    "    long b = 0;\n"
+    "    for (int i = 0; i < count; i += 1)\n"
+    "    {\n"
+    "        b ^= va_arg(again, long) << i;\n"
+    "    }\n"
+    "    va_end(again);\n"
+    "    va_end(ap);\n"
+    "    return a * 1000003 + b;\n"
+    "}\n"
+    "static long tier1_tail(long a, long b, long c, long d, long e, ...)\n"
+    "{\n"
+    "    va_list ap;\n"
+    "    va_start(ap, e);\n"
+    "    long x = va_arg(ap, long);\n"
+    "    long y = va_arg(ap, long);\n"
+    "    long z = va_arg(ap, long);\n"
+    "    va_end(ap);\n"
+    "    return a + b * 2 + c * 3 + d * 4 + e * 5 + x * 6 + y * 7 + z * 8;\n"
+    "}\n"
+    "static int tier1_format(char* buffer, unsigned long size, const char* format, ...)\n"
+    "{\n"
+    "    va_list ap;\n"
+    "    va_start(ap, format);\n"
+    "    int n = vsnprintf(buffer, size, format, ap);\n"
+    "    va_end(ap);\n"
+    "    return n;\n"
+    "}\n"
+    "static long tier1_bump(long x)\n"
+    "{\n"
+    "    return x * 5 + 1;\n"
+    "}\n"
+    "static long tier1_late(int count, ...)\n"
+    "{\n"
+    "    va_list ap;\n"
+    "    va_start(ap, count);\n"
+    "    long total = 0;\n"
+    "    for (int i = 0; i < count; i += 1)\n"
+    "    {\n"
+    "        total = total * 3 + va_arg(ap, long);\n"
+    "    }\n"
+    "    va_end(ap);\n"
+    "    long r = tier1_bump(total);\n"
+    "    return r + total;\n"
+    "}\n"
+    "static long tier1_ignore(long x, ...)\n"
+    "{\n"
+    "    return x * 2 + 1;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    long value = 11;\n"
+    "    char buffer[64];\n"
+    "    printf(\"%ld %ld %ld\\n\", tier1_sum(9, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L), tier1_sum(0), tier1_sum(2, -5L, 7L));\n"
+    "    printf(\"%ld %ld\\n\", tier1_mixed(10L, \"abc\", 7, &value), tier1_copy(7, 10L, 20L, 30L, 40L, 50L, 60L, 70L));\n"
+    "    printf(\"%ld %ld\\n\", tier1_tail(1, 2, 3, 4, 5, 6L, 7L, 8L), tier1_ignore(20, 1L, 2L));\n"
+    "    int n = tier1_format(buffer, sizeof(buffer), \"%s-%d-%ld-%c\", \"x\", 42, 123456789012L, 'q');\n"
+    "    printf(\"%d %s\\n\", n, buffer);\n"
+    "    printf(\"%ld %ld\\n\", tier1_late(9, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L), tier1_late(7, 11L, 12L, 13L, 14L, 15L, 16L, 17L));\n"
+    "    return 0;\n"
+    "}\n";
+
 // The opmask fixture (#179): tier1_masks is the function under test, every _k* builtin's row of its two words' masks (the
 // words truncated to each width, as the builtins' prototypes convert them), folded into one hash; main prints the hash
 // over pairs of words around each width's edges.
@@ -393,12 +495,26 @@ struct CheckTestTier1Build
     bool reported;
 };
 
+// Whether `text`, a --tier1-refusals report, refuses none of `count` functions `names` (no refusal line names one), or
+// with an empty name in them none at all.
+static bool check_test_tier1_taken(const char* text, const char* const* names, uint32_t count)
+{
+    bool taken = text != NULL;
+    for (uint32_t n = 0; taken && n < count; n += 1)
+    {
+        char refused[128];
+        snprintf(refused, sizeof(refused), "tier1-refused\t%s%s", names[n], names[n][0] == 0 ? "" : "\t");
+        taken = strstr(text, refused) == NULL;
+    }
+    return taken;
+}
+
 // A fixture compiled by --tier1 with and without rematerialization (`rematerialize`) by each path, into an executable
 // (`-o output`) or with `object` an object (-c), with `option` (as -march=x86-64-v4) where it isn't NULL, whose report
-// goes into *build: whether it compiled with its function `name` by Tier 1 (no refusal line names it), or with an empty
-// name every function.
-static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, const char* option,
-                                   CheckTestTier1Build* build)
+// goes into *build: whether it compiled with each of its `name_count` functions `names` by Tier 1
+// (check_test_tier1_taken).
+static bool check_test_tier1_build_names(const char* executable, const char* source, const char* const* names, uint32_t name_count, const char* output, bool rematerialize, bool scalar, bool object,
+                                         const char* option, CheckTestTier1Build* build)
 {
     char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
     uint32_t count = 5;
@@ -429,15 +545,20 @@ static bool check_test_tier1_build(const char* executable, const char* source, c
                       check_test_tier1_field(text, "spill_stores", &build->stores) && check_test_tier1_field(text, "spill_loads", &build->loads) &&
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
                       check_test_tier1_field(text, "call_stores", &build->call_stores);
-    char refused[128];
-    snprintf(refused, sizeof(refused), "tier1-refused\t%s%s", name, name[0] == 0 ? "" : "\t");
-    const bool taken = text != NULL && strstr(text, refused) == NULL;
+    const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
         fprintf(stderr, "%s", text);
     }
     free(text);
     return status == 0 && build->reported && taken;
+}
+
+// check_test_tier1_build_names of one function `name`, or with an empty name every function.
+static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, const char* option,
+                                   CheckTestTier1Build* build)
+{
+    return check_test_tier1_build_names(executable, source, &name, 1, output, rematerialize, scalar, object, option, build);
 }
 
 // The fixture's object, decoded: every zeroing xor leaves no status flag live (#178: a recomputed zero is an xor only
@@ -764,6 +885,137 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             check_test_expect(test, decoded && registers[1] == 1 && memory[1] == 0, "tier1_classify's switch is one indirect jump through a register");
             check_test_expect(test, decoded && registers[3] == 0 && memory[3] == 0, "tier1_single's jump to its one label is a direct jump");
             check_test_expect(test, decoded && registers[4] == 1 && trailing[4] != 0, "tier1_both's indirect jump has a stub after it, for the label its edge moves into");
+            unlink(output);
+            unlink(object);
+        }
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(reference);
+    unlink(tier0);
+}
+
+// Whether the function `name` in `-c`'s object at `path` saves the argument registers in its prologue as a variadic
+// definition's register save area: rdi to r9 and xmm0 to xmm7 stored from rsp's frame, the vector ones after al's test.
+static bool check_test_tier1_variadic_saves(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types)
+{
+    uint32_t relocations = 0;
+    const uint32_t count = check_test_tier1_function(path, name, records, capacity, offsets, types, &relocations);
+    uint32_t general = 0;
+    uint32_t vectors = 0;
+    bool tested = false;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const X86Instruction* instruction = &records[i].instruction;
+        const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+        const bool frame = instruction->mode == BUSTER_X86_MEMORY_BASE && instruction->rm == X86_REGISTER_RSP;
+        for (uint32_t k = 0; k < BUSTER_ABI_INTEGER_ARGUMENTS; k += 1)
+        {
+            general |= form == X86_FORM_MOV_RM64_R64 && frame && instruction->reg == abi_integer_arguments[k] ? 1u << k : 0;
+        }
+        tested |= form == X86_FORM_TEST_RM8_IMM8 && instruction->rm == X86_REGISTER_RAX;
+        vectors |= tested && form == X86_FORM_MOVAPS_XM_X && frame && instruction->reg < BUSTER_ABI_VECTOR_ARGUMENTS ? 1u << instruction->reg : 0;
+    }
+    return general == (1u << BUSTER_ABI_INTEGER_ARGUMENTS) - 1 && vectors == (1u << BUSTER_ABI_VECTOR_ARGUMENTS) - 1;
+}
+
+// Whether the function `name` in `-c`'s object at `path` builds its frame without a frame pointer, pushing callee-saved
+// registers before its reservation, and takes its overflow area's address in one lea at the first stack argument: rsp
+// + 8 per push, plus the reservation, plus 8 for the return address, read off the decoded prologue (#1060's review).
+static bool check_test_tier1_variadic_overflow(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types)
+{
+    uint32_t relocations = 0;
+    const uint32_t count = check_test_tier1_function(path, name, records, capacity, offsets, types, &relocations);
+    int64_t pushes = 0;
+    int64_t reservation = -1;
+    bool pointer = false;
+    for (uint32_t i = 0; reservation < 0 && i < count; i += 1)
+    {
+        const X86Instruction* instruction = &records[i].instruction;
+        const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+        const bool direct = (instruction->mode & BUSTER_X86_MODE_MEMORY) == 0;
+        pushes += form == X86_FORM_PUSH_R64;
+        pointer |= form == X86_FORM_MOV_RM64_R64 && direct && instruction->rm == X86_REGISTER_RBP && instruction->reg == X86_REGISTER_RSP;
+        reservation = (form == X86_FORM_SUB_RM64_IMM8 || form == X86_FORM_SUB_RM64_IMM32) && direct && instruction->rm == X86_REGISTER_RSP ? instruction->immediate : -1;
+    }
+    const int64_t displacement = 8 * pushes + reservation + 8;
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const X86Instruction* instruction = &records[i].instruction;
+        found += (instruction->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_BASE && instruction->rm == X86_REGISTER_RSP &&
+                 instruction->displacement == displacement;
+    }
+    return !pointer && pushes != 0 && reservation > 0 && found == 1;
+}
+
+// The variadic definitions' fixture (#789): by --tier1, every variadic definition Tier 1's, by each path with and without
+// rematerialization, and its program prints what clang -O0's and Tier 0's builds of it print. Each definition that calls
+// va_start saves the argument registers in its prologue; the one that doesn't has no save area. tier1_late pushes the
+// callee-saved register its call's crossing value takes, and its overflow area's address counts the push.
+static void check_test_driver_tier1_variadic(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_VARIADIC_RECORDS = 4096,
+    };
+    char source[512];
+    char reference[512];
+    char tier0[512];
+    snprintf(source, sizeof(source), "%s/tier1-variadic.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-variadic-clang", directory);
+    snprintf(tier0, sizeof(tier0), "%s/tier1-variadic-tier0", directory);
+    const bool written = parse_test_write(source, check_test_tier1_variadic_source, sizeof(check_test_tier1_variadic_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* tier0_arguments[] = { (char*)executable, "--verify", "-o", tier0, source, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool tier0_built = written && check_test_driver_spawn(tier0_arguments, &text) == 0;
+    free(text);
+    char expected[512] = { 0 };
+    char tier0_output[512] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the variadic fixture runs");
+    check_test_expect(test, ran && tier0_built && check_test_driver_capture(tier0, tier0_output, sizeof(tier0_output)) && strcmp(tier0_output, expected) == 0,
+                      "Tier 0's build of the variadic fixture prints clang's build's output");
+    const bool ready = ran && x86_disassembler_initialize();
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_VARIADIC_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_VARIADIC_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_VARIADIC_RECORDS, sizeof(uint32_t));
+    // Every definition but the last calls va_start.
+    static const char* const names[7] = { "tier1_sum", "tier1_mixed", "tier1_copy", "tier1_tail", "tier1_format", "tier1_late", "tier1_ignore" };
+    const uint32_t starts = BUSTER_ARRAY_LENGTH(names) - 1;
+    for (uint32_t rematerialize = 0; ready && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            char object[512];
+            snprintf(output, sizeof(output), "%s/tier1-variadic-%u-%u", directory, rematerialize, path);
+            snprintf(object, sizeof(object), "%s/tier1-variadic-%u-%u.o", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            CheckTestTier1Build object_build;
+            const bool built = check_test_tier1_build_names(executable, source, names, BUSTER_ARRAY_LENGTH(names), output, rematerialize != 0, path != 0, false, NULL, &build);
+            const bool compiled = check_test_tier1_build_names(executable, source, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, NULL, &object_build);
+            check_test_expect(test, built && compiled, "the variadic fixture compiles by --tier1, every variadic definition Tier 1's");
+            char actual[512] = { 0 };
+            check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "the variadic fixture prints clang's build's output");
+            bool saved = compiled && records != NULL && offsets != NULL && types != NULL;
+            for (uint32_t f = 0; saved && f < starts; f += 1)
+            {
+                saved = check_test_tier1_variadic_saves(object, names[f], records, CHECK_TEST_TIER1_VARIADIC_RECORDS, offsets, types);
+            }
+            check_test_expect(test, saved, "each variadic definition that calls va_start saves the argument registers in its prologue");
+            const bool decodable = compiled && records != NULL && offsets != NULL && types != NULL;
+            check_test_expect(test, decodable && !check_test_tier1_variadic_saves(object, names[starts], records, CHECK_TEST_TIER1_VARIADIC_RECORDS, offsets, types),
+                              "a variadic definition that reads no unnamed argument saves none");
+            check_test_expect(test, decodable && check_test_tier1_variadic_overflow(object, "tier1_late", records, CHECK_TEST_TIER1_VARIADIC_RECORDS, offsets, types),
+                              "tier1_late pushes a callee-saved register, and its overflow area's address is rsp past the push, its reservation and the return address");
             unlink(output);
             unlink(object);
         }
