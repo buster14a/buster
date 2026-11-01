@@ -62,11 +62,11 @@ static CheckValue check_test_stream_random_value(uint64_t* state)
     return value;
 }
 
-// Whether `value`'s bytes past the columns' fields are all zero, by its fields rather than check_stream_set_value's words.
+// Whether `value` has nothing past the columns' fields, by the test's own reading: a long double by its ten bytes.
 static bool check_test_stream_rest_zero(const CheckValue* value)
 {
-    return value->integer == 0 && value->floating_storage[0] == 0 && value->floating_storage[1] == 0 && value->imaginary_storage[0] == 0 &&
-           value->imaginary_storage[1] == 0 && value->overload_head == 0 && value->offset == 0 && value->bit_width == 0 && value->fault == 0 &&
+    return value->integer == 0 && value->floating_storage[0] == 0 && (uint16_t)value->floating_storage[1] == 0 && value->imaginary_storage[0] == 0 &&
+           (uint16_t)value->imaginary_storage[1] == 0 && value->overload_head == 0 && value->offset == 0 && value->bit_width == 0 && value->fault == 0 &&
            value->fault_node == 0 && value->object_bit_offset == 0 && (uint32_t)value->category < 256 && (uint32_t)value->constant_kind < 256;
 }
 
@@ -136,27 +136,56 @@ static __attribute__((noinline)) void check_test_stream_columns(CheckTest* test)
         }
         check_test_expect(test, same, "stream columns: every value read back byte for byte, from columns and from whole values");
         check_test_expect(test, fields, "stream columns: the fields' readers agree with the values");
-        // A node written again: a value with a rest keeps its row, and one without drops it.
+        // A node written again keeps its row, whatever it holds: a value with a rest, one without, and one with a rest again,
+        // so that no node takes a second row; and a node without a row takes none for a value without a rest.
         uint32_t with = 0;
         while (with < count && check_test_stream_rest_zero(&expected[with]))
         {
             with += 1;
         }
-        bool rewritten = with < count;
+        uint32_t without = 0;
+        while (without < count && !check_test_stream_rest_zero(&expected[without]))
+        {
+            without += 1;
+        }
+        bool rewritten = with < count && without < count;
         if (rewritten)
         {
             const uint32_t row = columns.payload_rows[with];
             CheckValue changed = expected[with];
             changed.integer += 1;
-            check_stream_set_value(&columns, with, &changed);
-            const CheckValue read = check_stream_value(&columns, with);
-            rewritten = columns.payload_rows[with] == row && columns.payload_count == rows && memcmp(&read, &changed, sizeof(changed)) == 0;
             const CheckValue plain = { .type = BUSTER_TYPE_INT, .category = CHECK_LVALUE, .flags = 5, .object = 9 };
-            check_stream_set_value(&columns, with, &plain);
-            const CheckValue cleared = check_stream_value(&columns, with);
-            rewritten = rewritten && columns.payload_rows[with] == 0 && memcmp(&cleared, &plain, sizeof(plain)) == 0;
+            const CheckValue* const writes[] = { &changed, &plain, &expected[with] };
+            for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(writes); w += 1)
+            {
+                check_stream_set_value(&columns, with, writes[w]);
+                const CheckValue read = check_stream_value(&columns, with);
+                rewritten = rewritten && columns.payload_rows[with] == row && columns.payload_count == rows && memcmp(&read, writes[w], sizeof(CheckValue)) == 0;
+            }
+            check_stream_set_value(&columns, without, &plain);
+            const CheckValue read = check_stream_value(&columns, without);
+            rewritten = rewritten && columns.payload_rows[without] == 0 && columns.payload_count == rows && memcmp(&read, &plain, sizeof(plain)) == 0;
         }
-        check_test_expect(test, rewritten, "stream columns: a node written again keeps its row, or drops it without a rest");
+        check_test_expect(test, rewritten, "stream columns: a node written again keeps its one row, and a plain value takes none");
+        // A long double's six bytes of padding, which a store of the type leaves as they were, don't make a row; its ten do.
+        if (without < count && with < count)
+        {
+            CheckValue padded = { .type = BUSTER_TYPE_LONG_DOUBLE, .category = CHECK_RVALUE };
+            padded.floating_storage[1] = UINT64_C(0xa5a5a5a5a5a50000);
+            padded.imaginary_storage[1] = UINT64_C(0x5a5a5a5a5a5a0000);
+            const uint32_t before = columns.payload_count;
+            check_stream_set_value(&columns, without, &padded);
+            const CheckValue read = check_stream_value(&columns, without);
+            bool padding = columns.payload_rows[without] == 0 && columns.payload_count == before && read.type == padded.type &&
+                           read.floating_storage[0] == 0 && (uint16_t)read.floating_storage[1] == 0 && read.imaginary_storage[0] == 0;
+            padded.floating = 1.5L;
+            const uint32_t fresh = (uint32_t)(((uint64_t)without * 2731 + 1) % count);
+            columns.payload_rows[fresh] = 0;
+            check_stream_set_value(&columns, fresh, &padded);
+            const CheckValue valued = check_stream_value(&columns, fresh);
+            padding = padding && columns.payload_rows[fresh] == before + 1 && valued.floating == 1.5L;
+            check_test_expect(test, padding, "stream columns: a long double's padding takes no row, and its value does");
+        }
         // A row index past the rows written (an arena's dirty value where a failed run wrote none) reads as no row.
         columns.payload_rows[0] = columns.payload_count + 1;
         const CheckValue bounded = check_stream_value(&columns, 0);

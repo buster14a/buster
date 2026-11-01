@@ -417,7 +417,9 @@ The stages that changed, from each compile's `--time-stages` medians:
 
 ### What's left
 
-At about 393 MB, by arena (smaps at the compile's end, on the laptop):
+At about 393 MB, by arena (smaps at the compile's end, on the laptop), as #572
+left them; "The binding table, the fresh output and the stream's columns",
+below, has what #628 changed since (the stream's values among it, now columns):
 - **The driver's arena, 120 MB.** It holds:
   - the reader's output columns, which the later stages read, about 58 MB.
     Most are filled with `NONE` or zero for every token, though few tokens

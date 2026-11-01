@@ -651,9 +651,22 @@ static uint32_t check_stream_overload_head(const CheckStream* stream, uint32_t n
     return result;
 }
 
-// Writes `value` as node `node`'s: its columns, and when the rest of it isn't zero, it whole as a payload row, the node's
-// own if a write before gave it one (check_graph_run clears `payload_rows` first), else the next. Each node has at most
-// one row, so that `payloads` needs no more rows than the stream has nodes.
+// Whether `value` has more than the stream's columns hold: a field past its type, flags, category, constant kind and
+// object, or a category or a constant kind past a byte. A long double component counts by its ten bytes, never by the six
+// of padding that a store of the type leaves as they were (c_check_literals.c), which no reader reads.
+static bool check_stream_value_rest(const CheckValue* value)
+{
+    const uint64_t rest = (uint64_t)value->integer | (uint64_t)(value->integer >> 64) | value->floating_storage[0] | (value->floating_storage[1] & 0xffff) |
+                          value->imaginary_storage[0] | (value->imaginary_storage[1] & 0xffff) | value->overload_head | (uint64_t)value->offset |
+                          value->bit_width | value->fault | value->fault_node | value->object_bit_offset |
+                          (((uint32_t)value->category | (uint32_t)value->constant_kind) >> 8);
+    return rest != 0;
+}
+
+// Writes `value` as node `node`'s: its columns, and its whole value as the node's payload row, where the node has one or
+// the value has more than the columns (check_stream_value_rest), which takes the next row. A node keeps the row a write
+// gave it (check_graph_run clears `payload_rows` first), so that it has at most one, and `payloads` needs no more rows
+// than the stream has nodes, whatever its writes.
 static void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
 {
     if (stream->dense_values != NULL)
@@ -662,35 +675,20 @@ static void check_stream_set_value(CheckStream* stream, uint32_t node, const Che
     }
     else
     {
-        CheckValue rest = *value;
-        rest.type = 0;
-        rest.category = CHECK_RVALUE;
-        rest.flags = 0;
-        rest.constant_kind = CHECK_CONSTANT_NONE;
-        rest.object = 0;
-        uint64_t words[sizeof(CheckValue) / sizeof(uint64_t)];
-        memcpy(words, &rest, sizeof(words));
-        uint64_t any = 0;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(words); i += 1)
-        {
-            any |= words[i];
-        }
-        // The columns hold a category and a constant kind in a byte each: one past it takes a row.
-        any |= ((uint32_t)value->category | (uint32_t)value->constant_kind) >> 8;
         stream->value_types[node] = value->type;
         stream->value_flags[node] = value->flags;
         stream->value_objects[node] = value->object;
         stream->value_categories[node] = (uint8_t)value->category;
         stream->value_constants[node] = (uint8_t)value->constant_kind;
         uint32_t row = stream->payload_rows[node];
-        if (any != 0)
+        row = row != 0 && row <= stream->payload_count ? row : 0;
+        if (row == 0 && check_stream_value_rest(value))
         {
-            row = row != 0 && row <= stream->payload_count ? row : ++stream->payload_count;
-            stream->payloads[row - 1] = *value;
+            row = ++stream->payload_count;
         }
-        else
+        if (row != 0)
         {
-            row = 0;
+            stream->payloads[row - 1] = *value;
         }
         stream->payload_rows[node] = row;
     }
