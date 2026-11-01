@@ -87,7 +87,18 @@ writes a relocation in read-only memory). `-dynamic-linker` is
 `--dynamic-linker`. Any other `-m` or `-z` keyword is refused, naming it. So
 a driver's command line for supported inputs can be passed directly: `-pie`
 for a PIE, `-static`, `-static -pie` and `-shared` for the others. GCC's
-LTO plugin options and plugin-dependent inputs are not supported.
+`collect2` line's LTO plugin options are taken too: `-plugin PATH` (or
+`--plugin PATH`, joined as `-plugin=PATH` too) when PATH names GCC's
+`liblto_plugin.so` (or a versioned `liblto_plugin.so.N`) or LLVM's
+`LLVMgold.so`, and `-plugin-opt=...` (or `-plugin-opt VALUE`), which change
+nothing when no input needs the plugin. Any other plugin may transform
+ordinary inputs, which this command doesn't run, so it is refused by name. An
+input that does need the plugin is refused too, naming the input, archive
+member and section: a relocatable object or loaded archive member with a
+`.gnu.lto_*` or `.llvm.lto` section, or raw LLVM bitcode. An archive member
+that the link doesn't load isn't an object of the link, so a lazy or thin
+archive may hold LTO members nothing needs; a `--whole-archive` member is
+loaded and refused.
 
 ## Input order and output boundary
 

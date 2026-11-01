@@ -1037,8 +1037,12 @@ designs and the compilers already built this way.
   files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
   `__libc_start_main`), which applies their `IRELATIVE` relocations, or
   `--startup-applies-irelative` says the program's own does. It keeps the
-  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
-  pooling and CIE pooling are off by default.
+  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. It takes
+  GCC's `collect2` LTO plugin options (`-plugin` for `liblto_plugin.so` or
+  `LLVMgold.so`, and `-plugin-opt=...`) when no input needs the plugin, and
+  refuses a direct object or loaded archive member with a `.gnu.lto_*` or
+  `.llvm.lto` section, or raw LLVM bitcode, by input, member and section
+  (#816). GC, literal pooling and CIE pooling are off by default.
   It runs on the lanes its objects pay for (#594, `foreign_driver_lanes`): one,
   and one more per 3 MB of its objects, at most 8 and one per core of the CPUs
   it may run on, which lane 0 decides by opening the command line's first inputs

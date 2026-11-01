@@ -121,6 +121,9 @@ typedef enum ForeignError
     // Something valid this linker doesn't link: an archive without a symbol index, scripts nested too deep, a member
     // that isn't an object, more objects than a record holds.
     FOREIGN_ERROR_UNSUPPORTED,
+    // An input only GCC's or LLVM's LTO plugin could link: an object with a .gnu.lto_* or .llvm.lto section, or raw
+    // LLVM bitcode. ForeignFailure.detail names the section or the bitcode.
+    FOREIGN_ERROR_PLUGIN,
     // An arena couldn't hold what a phase needs.
     FOREIGN_ERROR_MEMORY,
     // The lanes couldn't be started.
@@ -518,6 +521,9 @@ struct ForeignFailure
     ImportResult import;
     int system_error;
     uint32_t argument;
+    // What FOREIGN_ERROR_PLUGIN is about: the section's name in the input's bytes, or a static "LLVM bitcode". Empty
+    // otherwise. The bytes stay mapped through the link, so the name does too.
+    String8 detail;
 };
 
 // What each lane owns: its arena (the partitions' tables, its lists), its first failure, the members its partitions
@@ -920,6 +926,23 @@ static ForeignKind foreign_kind(String8 bytes)
     return result;
 }
 
+// LLVM's bitcode, raw or in its wrapper: bytes only its LTO plugin can turn into code.
+static bool foreign_bitcode(String8 bytes)
+{
+    static const char raw[] = "\x42\x43\xc0\xde";
+    static const char wrapper[] = "\xde\xc0\x17\x0b";
+    return (bytes.length >= sizeof(raw) - 1 && memcmp(bytes.pointer, raw, sizeof(raw) - 1) == 0) ||
+           (bytes.length >= sizeof(wrapper) - 1 && memcmp(bytes.pointer, wrapper, sizeof(wrapper) - 1) == 0);
+}
+
+// Records an input that needs an LTO plugin, `detail` naming what does (a section's name or "LLVM bitcode").
+static void foreign_fail_plugin(ForeignLane* lane, uint64_t position, uint32_t input, uint32_t member, String8 detail)
+{
+    ForeignFailure failure = foreign_failure(FOREIGN_ERROR_PLUGIN, position, input, member);
+    failure.detail = detail;
+    foreign_fail(lane, failure);
+}
+
 // Whether `path` is a regular file.
 static bool foreign_exists(const char* path)
 {
@@ -1052,6 +1075,23 @@ static String8 foreign_map(const char* path, int* error, ForeignFileIdentity* id
     return result;
 }
 
+// Tells what an input's bytes are, or records why they aren't an input this linker takes.
+static void foreign_open_bytes(ForeignLane* lane, ForeignInput* input, uint64_t position, uint32_t index)
+{
+    if (foreign_bitcode(input->bytes))
+    {
+        foreign_fail_plugin(lane, position, index, 0, foreign_string("LLVM bitcode"));
+    }
+    else
+    {
+        input->kind = foreign_kind(input->bytes);
+        if (input->kind == FOREIGN_KIND_NONE)
+        {
+            foreign_fail(lane, foreign_failure(FOREIGN_ERROR_FORMAT, position, index, 0));
+        }
+    }
+}
+
 // Finds and maps input `index`, and tells what it is. Its path is a copy in the lane's arena.
 static void foreign_open_input(Foreign* foreign, uint32_t index, ForeignLane* lane)
 {
@@ -1061,11 +1101,7 @@ static void foreign_open_input(Foreign* foreign, uint32_t index, ForeignLane* la
     if (input->given)
     {
         input->path = input->name;
-        input->kind = foreign_kind(input->bytes);
-        if (input->kind == FOREIGN_KIND_NONE)
-        {
-            foreign_fail(lane, foreign_failure(FOREIGN_ERROR_FORMAT, position, index, 0));
-        }
+        foreign_open_bytes(lane, input, position, index);
     }
     else if (!foreign_find(foreign, input, path))
     {
@@ -1089,7 +1125,6 @@ static void foreign_open_input(Foreign* foreign, uint32_t index, ForeignLane* la
                 .length = length,
             };
             input->bytes = foreign_map(copy, &error, &input->identity);
-            input->kind = error == 0 ? foreign_kind(input->bytes) : FOREIGN_KIND_NONE;
         }
         if (copy != 0 && error != 0)
         {
@@ -1097,9 +1132,9 @@ static void foreign_open_input(Foreign* foreign, uint32_t index, ForeignLane* la
             failure.system_error = error;
             foreign_fail(lane, failure);
         }
-        else if (copy != 0 && input->kind == FOREIGN_KIND_NONE)
+        else if (copy != 0)
         {
-            foreign_fail(lane, foreign_failure(FOREIGN_ERROR_FORMAT, position, index, 0));
+            foreign_open_bytes(lane, input, position, index);
         }
     }
 }
@@ -1792,6 +1827,26 @@ static bool foreign_headers_vector(ForeignObject* object, Arena* arena)
     return result;
 }
 
+// The name of the first section that only an LTO plugin can link (GCC's .gnu.lto_* or clang's .llvm.lto), or empty.
+static String8 foreign_lto_section(const ImportElf* elf)
+{
+    static const char gcc[] = ".gnu.lto_";
+    static const char llvm[] = ".llvm.lto";
+    String8 result = { 0 };
+    for (uint32_t index = 1; result.length == 0 && index < elf->section_count; index += 1)
+    {
+        const Elf64_Shdr header = import_section_header(elf, index);
+        String8 name = { 0 };
+        if (import_section_name(elf, &header, &name))
+        {
+            const bool gcc_lto = name.length >= sizeof(gcc) - 1 && memcmp(name.pointer, gcc, sizeof(gcc) - 1) == 0;
+            const bool llvm_lto = name.length == sizeof(llvm) - 1 && memcmp(name.pointer, llvm, sizeof(llvm) - 1) == 0;
+            result = gcc_lto || llvm_lto ? name : result;
+        }
+    }
+    return result;
+}
+
 // An object's headers, by the path's way; an archive member's header and bytes first. A library's object of references
 // has no headers: its global symbols are the library's references.
 static void foreign_object_headers(Foreign* foreign, uint32_t id, ForeignLane* lane)
@@ -1812,22 +1867,36 @@ static void foreign_object_headers(Foreign* foreign, uint32_t id, ForeignLane* l
     {
         foreign_fail(lane, failure);
     }
+    else if (foreign_bitcode(object->bytes))
+    {
+        foreign_fail_plugin(lane, object->position, object->input, object->member, foreign_string("LLVM bitcode"));
+    }
     else if (foreign_kind(object->bytes) != FOREIGN_KIND_OBJECT)
     {
-        // A member that isn't a relocatable object: another archive, a shared library, LLVM bitcode.
+        // A member that isn't a relocatable object: another archive or a shared library.
         foreign_fail(lane, foreign_failure(object->member != 0 ? FOREIGN_ERROR_UNSUPPORTED : FOREIGN_ERROR_FORMAT, object->position, object->input, object->member));
     }
     else
     {
         const uint64_t mark = lane->arena.length;
         const bool vector = foreign->path == FOREIGN_PATH_VECTOR && foreign_headers_vector(object, &lane->arena);
+        bool headers = vector;
         if (!vector)
         {
             arena_pop_to(&lane->arena, mark);
             const ImportResult read = foreign_headers_exact(object, &lane->arena);
-            if (read.error != IMPORT_ERROR_NONE)
+            headers = read.error == IMPORT_ERROR_NONE;
+            if (!headers)
             {
                 foreign_fail(lane, foreign_import_failure(read, object->position, object->input, object->member));
+            }
+        }
+        if (headers)
+        {
+            const String8 lto = foreign_lto_section(&object->elf);
+            if (lto.length != 0)
+            {
+                foreign_fail_plugin(lane, object->position, object->input, object->member, lto);
             }
         }
     }
