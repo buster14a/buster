@@ -55,17 +55,12 @@ static uint32_t tier1_liveness_register_mask(void)
     return mask;
 }
 
-static uint32_t tier1_liveness_parameter_mask(uint32_t parameter)
+// A parameter's incoming register, as its class's mask: the general register of its place (tier1_select_parameter_place,
+// #141) for an integer or a pointer, the xmm register's bit for a floating value, and none for one on the stack.
+static uint32_t tier1_liveness_parameter_mask(const IrFunction* function, uint32_t parameter)
 {
-    static const uint8_t registers[] = {
-        X86_REGISTER_RDI,
-        X86_REGISTER_RSI,
-        X86_REGISTER_RDX,
-        X86_REGISTER_RCX,
-        X86_REGISTER_R8,
-        X86_REGISTER_R9,
-    };
-    return parameter < sizeof(registers) ? 1u << registers[parameter] : 0;
+    const Tier1SelectPlace place = tier1_select_parameter_place(function, parameter);
+    return place.kind == BUSTER_TIER1_PLACE_GENERAL ? 1u << tier1_select_parameter_registers[place.index] : place.kind == BUSTER_TIER1_PLACE_VECTOR ? 1u << place.index : 0;
 }
 
 // With `phis`, for the CFG consumer (tier1_emit_cfg.c), a selected phi is valid too, and so are a parameter after other
@@ -118,9 +113,10 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             error = TIER1_LIVENESS_INVALID;
         }
         else if ((op == IR_PHI && !phis) || (op == IR_CALL_INDIRECT && !phis) || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)) ||
-                 (type != IR_VOID && tier1_select_width(type) == 0 && !(phis && tier1_select_mask_width(type) != 0)))
+                 (type != IR_VOID && tier1_select_width(type) == 0 && !(phis && (tier1_select_mask_width(type) != 0 || tier1_select_float_width(type) != 0))))
         {
-            // A mask (#179) is the CFG consumer's alone, whose allocation has the opmask class.
+            // A mask (#179) and a floating value (#141) are the CFG consumer's alone, whose allocation has the opmask and
+            // vector classes.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
         else if (op == IR_PHI && (plan->covered[node] || plan->patterns[node].rule != TIER1_RULE_PHI || first != end))
@@ -133,7 +129,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             const IrCall call = function->calls[function->b[node]];
             const Tier1SelectPattern* pattern = &plan->patterns[node];
             const uint32_t indirect = op == IR_CALL_INDIRECT;
-            if (plan->covered[node] || pattern->rule != TIER1_RULE_CALL || pattern->immediate != function->a[node] || pattern->width != tier1_select_width(type) || pattern->fold_count != 0 ||
+            if (plan->covered[node] || pattern->rule != TIER1_RULE_CALL || pattern->immediate != function->a[node] || pattern->width != (tier1_select_width(type) | tier1_select_float_width(type)) || pattern->fold_count != 0 ||
                 end - first != call.argument_count + indirect || (indirect && plan->effective_use_values[first + call.argument_count] != function->a[node]))
             {
                 error = TIER1_LIVENESS_INVALID;
@@ -178,8 +174,8 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             // reciprocal takes its fixed registers in either consumer.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
-        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || (tier1_liveness_parameter_mask(function->a[node]) == 0 && !phis) ||
-                                    (type != IR_I32 && type != IR_I64 && type != IR_PTR && !(phis && (type == IR_I1 || type == IR_I8 || type == IR_I16)))))
+        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || (tier1_liveness_parameter_mask(function, function->a[node]) == 0 && !phis) ||
+                                    (type != IR_I32 && type != IR_I64 && type != IR_PTR && !(phis && (type == IR_I1 || type == IR_I8 || type == IR_I16 || tier1_select_float_width(type) != 0)))))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
@@ -453,7 +449,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
                 starts[interval] = parameter ? 0 : node * 2 + 1;
                 ends[interval] = starts[interval] + 1;
                 values[interval] = node;
-                allowed[interval] = parameter ? tier1_liveness_parameter_mask(function->a[node]) : registers;
+                allowed[interval] = parameter ? tier1_liveness_parameter_mask(function, function->a[node]) : registers;
                 classes[interval] = BUSTER_TIER1_ALLOCATE_GPR;
             }
             for (uint32_t use = plan->effective_use_offsets[node]; use < plan->effective_use_offsets[node + 1]; use += 1)

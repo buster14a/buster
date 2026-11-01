@@ -1096,15 +1096,15 @@ static void tier1_call_failures(Tier1EmitTest* test)
     }
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->input, 0);
-    // Past the most arguments a call passes, and I128 and F64 results; variadic calls, calls through a pointer, narrow
-    // results and arguments past the registers (#141) are taken.
+    // Past the most arguments a call passes, and I128 and F80 results; variadic calls, calls through a pointer, narrow
+    // results, arguments past the registers and F32 and F64 results and arguments (#141, tier1_float_test.c) are taken.
     static const uint32_t failures[] = { 0, 4, 5 };
     for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
         const uint32_t failure = failures[index];
         const uint32_t arguments = failure == 0 ? BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1 : failure < 3 ? 1 : 0;
         const IrType parameter = failure == 2 ? IR_PTR : IR_I64;
-        const IrType result = failure == 3 ? IR_I8 : failure == 4 ? IR_I128 : failure == 5 ? IR_F64 : IR_I64;
+        const IrType result = failure == 3 ? IR_I8 : failure == 4 ? IR_I128 : failure == 5 ? IR_F80 : IR_I64;
         const IrSizes sizes = {
             .instruction_count = 3,
             .block_count = 1,

@@ -458,6 +458,30 @@ of its class's registers, and a mask's register fragment moved to k0. A mask
 class with k0 among its registers must be refused by both paths. Over seeds 1
 to 20 and the default, every mutant fails the checker.
 
+### The vector class's floating values (#141)
+
+Tier 1's CFG consumer gives `F32` and `F64` values the second class, the vector
+registers: xmm0 to xmm14, with xmm15 the class's scratch for cycles and
+slot-to-slot moves (`BUSTER_TIER1_EMIT_VECTOR_REGISTERS`, or the
+`Tier1EmitOptions.vector_register_mask` of them, which the tests narrow to force
+spills). A value's slot is its width, which `movss` or `movsd` spills and reloads,
+and a move between two registers is a `movaps`, which copies the whole register
+rather than merging into its destination as the scalar moves do. The class's
+temporary slot holds a value at its width too. The System V convention preserves
+no xmm register, so a call saves each floating value live past it in its
+register's row before the call and reloads it after, by `movsd`, as it saves the
+masks (`Tier1EmitPrepared.vector_save_mask`: rows after the opmask registers'),
+rather than through fixed ranges. No floating value is rematerializable: a
+constant's recipe would need its bits in a general register first, which the
+recipes don't make.
+
+A floating parameter arrives in xmm0 to xmm7 by its place among the function's
+floating parameters (`tier1_select_parameter_place`), its definition bound to
+that register (`Tier1CfgInput.definition_registers`) as a general parameter's
+is to its own, and the entry's moves bring a free one where its allocation has
+it, one parallel move per class. A parameter past xmm7 is in the incoming area's
+next slot, which the entry loads with `movss` or `movsd`.
+
 ### On real code
 
 `tier1_cfg_ir.c` turns a promoted function of the shared IR into an allocation

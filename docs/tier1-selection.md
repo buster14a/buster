@@ -130,6 +130,39 @@ patterns are:
   stub's where that edge has one (`tier1_emit_cfg_labels`), since the jump
   enters it through the label's address. A `br_indirect` that can go to one label
   alone jumps there.
+- Floating values (#141): `F32` and `F64` in the vector class's registers that
+  the CFG consumer allocates, by SSE2's scalar forms, the baseline target's
+  (`TIER1_RULE_FLOAT_CONSTANT` to `TIER1_RULE_FLOAT_RETURN`). A constant is zero's
+  `xorps`, or its bits through the scratch register (`mov`, then `movd` or
+  `movq`), and an integer constant's conversion is the floating constant it
+  converts to. A copy is a `movaps`. Addition, subtraction, multiplication and
+  division are the two-operand `ss` or `sd` forms, the right operand from memory
+  where it folds a load, as an integer's. A negation `xorps` the sign bit, which
+  the scratch register moves into xmm15. Loads and stores are one `movss` or
+  `movsd`, folded through their addresses as an integer's. A comparison's truth
+  value is `ucomis`, `setcc` and `movzx`, where `<` and `<=` swap their operands
+  so that `seta` and `setae` are false for unordered ones; `==` and `!=` combine
+  `sete` or `setne` with the parity flag's `setnp` or `setp`, by `and` or `or`,
+  since unordered operands set ZF too. A branch on `<`, `<=`, `>` or
+  `>=` folds the comparison into `ja` or `jae`, and its negation through C's
+  truth values into `jbe` or `jb`, which are true for unordered operands as
+  `!(a > b)` is: the unsigned conditions, whose negations the integer table
+  already has. `==` and `!=` read the parity flag too, which one jump can't, so
+  a branch tests their truth value. The conversions from and to integers of 8
+  to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
+  sign-extended into the scratch register first and an unsigned `I32` converted
+  as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
+  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
+  zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
+  alone, which would otherwise wait for the register's last writer. A return
+  moves its value into xmm0. Still refused: `F80` (the x87's), a select of
+  floating values, and conversions between floating values and unsigned 64-bit
+  integers, whose values past `INT64_MAX` no single conversion takes.
+- Call arguments and parameters take their places by the System V classes
+  (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
+  the six general argument registers, the k-th floating value in xmm k of eight,
+  and each one past its class's registers in the stack's next slot. A variadic
+  call's `al` is the count of its floating arguments in registers.
 - Variadic definitions (#789): the anchors that `va_start`'s lowering reaches,
   the register save area and the overflow area. The save area is a frame object
   (`TIER1_RULE_STACK_ADDRESS`, folded into its users' memory operands like any
@@ -423,8 +456,8 @@ offsets. The older frameless `tier1_select_emit` API still rejects call plans.
 Indirect and variadic calls, arguments and parameters past the registers, and
 floating-point and aggregate arguments/results are outside this bounded path.
 Calls in general CFGs, loops among them, and functions with arguments or
-parameters past the registers go through the CFG consumer, which saves the
-registers of values live past each call. Neither establishes acceptance of
+parameters past the registers or floating ones (#141) go through the CFG
+consumer, which saves the registers of values live past each call. Neither establishes acceptance of
 source functions.
 Unsupported calls and allocation/target/capacity errors publish no partial
 result. Correct execution of these component fixtures does not establish

@@ -1373,7 +1373,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                     }
                     if (calls == 1 && arguments == 6 && result_types[type] == IR_I64)
                     {
-                        for (uint32_t refusal = 0; refusal < 8; refusal += 1)
+                        for (uint32_t refusal = 0; refusal < 9; refusal += 1)
                         {
                             const IrCall saved = function.calls[0];
                             if (refusal == 0)
@@ -1401,11 +1401,13 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 function.type[5] = IR_I1;
                                 function.call_types[0] = IR_I1;
                             }
-                            else if (refusal == 4)
+                            else if (refusal == 4 || refusal == 8)
                             {
-                                function.result_type = IR_F64;
-                                function.type[6] = IR_F64;
-                                function.calls[0].result_type = IR_F64;
+                                // A double's result is taken (#141), a long double's x87 one isn't.
+                                const uint8_t floating = refusal == 4 ? IR_F64 : IR_F80;
+                                function.result_type = floating;
+                                function.type[6] = floating;
+                                function.calls[0].result_type = floating;
                             }
                             else if (refusal == 5)
                             {
@@ -1424,11 +1426,12 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 uint32_t failed = 0;
                                 const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &rejected, &failed);
                                 // A variadic call of integer arguments (its AL zero), a call through a pointer
-                                // (tier1_call_test.c runs both) and a call of seven, its last on the stack (#141,
-                                // tier1_stack_test.c), are taken.
-                                const bool taken = refusal == 0 || refusal == 2 || refusal == 7;
-                                const Tier1SelectError expected = taken ? TIER1_SELECT_OK : refusal < 5 ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
-                                tier1_select_test_expect(test, error == expected && (taken || refusal >= 5 || failed == 6), "unsupported call ABI and invalid IR remain distinct");
+                                // (tier1_call_test.c runs both), a call of seven, its last on the stack, and a double's
+                                // result (#141, tier1_stack_test.c and tier1_float_test.c) are taken.
+                                const bool taken = refusal == 0 || refusal == 2 || refusal == 4 || refusal == 7;
+                                const bool unsupported = refusal < 5 || refusal == 8;
+                                const Tier1SelectError expected = taken ? TIER1_SELECT_OK : unsupported ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
+                                tier1_select_test_expect(test, error == expected && (taken || !unsupported || failed == 6), "unsupported call ABI and invalid IR remain distinct");
                                 tier1_select_test_expect(test, error == TIER1_SELECT_OK || (output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0), "call refusal preserves result and arena lengths");
                                 arena_pop_to(&output, mark);
                             }

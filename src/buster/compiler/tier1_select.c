@@ -125,13 +125,70 @@ typedef enum Tier1SelectRule
     // A frame slot's lifetime marker (IR_LIFETIME, #177): no records. The CFG consumer colors the frame's objects by the
     // markers (tier1_emit_cfg_lifetimes).
     TIER1_RULE_LIFETIME,
+    // Floating values (#141), F32 and F64, in the vector class's registers that the CFG consumer's allocation gives them
+    // (xmm0 to xmm14, xmm15 the class's scratch: a node's register is its tier1_cfg.c location, class 1's, whose low
+    // four bits are the xmm register), by SSE2's scalar forms, the baseline target's. `width` is the value's bytes, 4 or
+    // 8: the ss or the sd form (tier1_select_float_forms). A constant: zero by xorps, any other's bits through the scratch
+    // general register (mov, then movd or movq). A copy (movaps). An add, subtract, multiply or divide of values[0] by
+    // values[1], `operation` its index among them (IR_FADD's order: `scale` is a folded address's), the right operand
+    // from memory where it folds a load (FLOAT_LOAD_OPERAND, values[1] and values[2] the address's base and index). A
+    // negation, xorps of the sign bit, which the scratch general register moves into the vector class's scratch
+    // register. A load and a store as the integer ones, the store's value in values[2], each one movss or movsd, which stays its node's last record (the CFG consumer patches a frame object's
+    // base and offset into it). A comparison's truth value, `condition` its IR predicate (EQ to GE): ucomis, setcc and
+    // movzx, and for == and != the parity flag's setcc and their and or or, since unordered operands set ZF too. A branch
+    // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
+    // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
+    // !(a >= b), true. The conversions (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others,
+    // `width` and `source_width` the result's and the operand's bytes, an integer's by its memory width). A return of
+    // values[0] in xmm0. Only the CFG consumer takes them.
+    TIER1_RULE_FLOAT_CONSTANT,
+    TIER1_RULE_FLOAT_COPY,
+    TIER1_RULE_FLOAT_BINARY,
+    TIER1_RULE_FLOAT_LOAD_OPERAND,
+    TIER1_RULE_FLOAT_NEGATE,
+    TIER1_RULE_FLOAT_LOAD,
+    TIER1_RULE_FLOAT_LOAD_ADDRESS,
+    TIER1_RULE_FLOAT_STORE,
+    TIER1_RULE_FLOAT_STORE_ADDRESS,
+    TIER1_RULE_FLOAT_COMPARE,
+    TIER1_RULE_FLOAT_BRANCH_COMPARE,
+    TIER1_RULE_FLOAT_CONVERT,
+    TIER1_RULE_FLOAT_RETURN,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
+
+// TIER1_RULE_FLOAT_CONVERT's kinds, its pattern's `scale` (#141):
+// - FROM_SIGNED, an integer's sitofp: cvtsi2ss or cvtsi2sd of its 32 or 64 bits, an I8's or an I16's sign-extended into
+//   the scratch register first (its canonical storage is zero-extended);
+// - FROM_UNSIGNED, uitofp of an integer narrower than 64 bits: its zero extension's, which the 32-bit form converts
+//   exactly below 2^16 and the 64-bit form of the scratch register's copy for an I32;
+// - TO_SIGNED and TO_UNSIGNED, fptosi to 8 to 64 bits and fptoui to 8 to 32: cvttss2si or cvttsd2si, a narrow result
+//   zero-extended into its canonical storage, and an unsigned 32-bit one converted to 64 bits, whose low 32 are its;
+// - RESIZE, fext and ftrunc: cvtss2sd and cvtsd2ss;
+// - FROM_BITS and TO_BITS, a bitcast between an F32 and an I32 or an F64 and an I64: movd or movq.
+// Each conversion to a floating value zeroes its destination first (xorps), but a resize: cvtsi2s* writes its low
+// element alone, which would otherwise wait for the register's last writer.
+#define BUSTER_TIER1_FLOAT_FROM_SIGNED 0
+#define BUSTER_TIER1_FLOAT_FROM_UNSIGNED 1
+#define BUSTER_TIER1_FLOAT_TO_SIGNED 2
+#define BUSTER_TIER1_FLOAT_TO_UNSIGNED 3
+#define BUSTER_TIER1_FLOAT_RESIZE 4
+#define BUSTER_TIER1_FLOAT_FROM_BITS 5
+#define BUSTER_TIER1_FLOAT_TO_BITS 6
+// The vector class's scratch register, which holds no value: a non-commutative operation's right operand where the
+// allocation gave it the destination.
+#define BUSTER_TIER1_SELECT_FLOAT_SCRATCH 15
 
 // Whether a rule is a mask's (#179), which the uniform-register consumer and the straight-line one don't take.
 static bool tier1_select_mask_rule(uint32_t rule)
 {
     return rule >= TIER1_RULE_MASK_CONSTANT && rule <= TIER1_RULE_MASK_STORE_ADDRESS;
+}
+
+// Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
+static bool tier1_select_float_rule(uint32_t rule)
+{
+    return rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN;
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -555,6 +612,55 @@ static const Tier1SelectMaskForms* tier1_select_mask_forms(uint32_t width)
     return &tier1_select_mask_forms_table[index];
 }
 
+// The scalar SSE forms of a floating value of each width (#141): single precision's (4 bytes), double precision's (8),
+// then a row of none for any other width, which no target's allow-list takes (the consumer then refuses its record:
+// TIER1_EMIT_TARGET). Moves from and to memory, the arithmetic in IR_FADD's order, ucomis, the bits from and to a general
+// register, the conversions from a 32- or 64-bit integer (a row of its result's width) and to one, truncating (a row
+// of its operand's width), and the other precision's (a row of its operand's: cvtss2sd widens, cvtsd2ss narrows).
+typedef struct Tier1SelectFloatForms Tier1SelectFloatForms;
+struct Tier1SelectFloatForms
+{
+    uint16_t load;
+    uint16_t store;
+    uint16_t arithmetic[4];
+    uint16_t compare;
+    uint16_t from_general;
+    uint16_t to_general;
+    uint16_t from_integer[2];
+    uint16_t to_integer[2];
+    uint16_t resize;
+};
+
+static const Tier1SelectFloatForms tier1_select_float_forms_table[3] =
+{
+    {
+        X86_FORM_MOVSS_X_XM32, X86_FORM_MOVSS_XM32_X, { X86_FORM_ADDSS_X_XM32, X86_FORM_SUBSS_X_XM32, X86_FORM_MULSS_X_XM32, X86_FORM_DIVSS_X_XM32 }, X86_FORM_UCOMISS_X_XM32,
+        X86_FORM_MOVD_X_RM32, X86_FORM_MOVD_RM32_X, { X86_FORM_CVTSI2SS_X_RM32, X86_FORM_CVTSI2SS_X_RM64 }, { X86_FORM_CVTTSS2SI_R32_XM32, X86_FORM_CVTTSS2SI_R64_XM32 },
+        X86_FORM_CVTSS2SD_X_XM32,
+    },
+    {
+        X86_FORM_MOVSD_X_XM64, X86_FORM_MOVSD_XM64_X, { X86_FORM_ADDSD_X_XM64, X86_FORM_SUBSD_X_XM64, X86_FORM_MULSD_X_XM64, X86_FORM_DIVSD_X_XM64 }, X86_FORM_UCOMISD_X_XM64,
+        X86_FORM_MOVQ_X_RM64, X86_FORM_MOVQ_RM64_X, { X86_FORM_CVTSI2SD_X_RM32, X86_FORM_CVTSI2SD_X_RM64 }, { X86_FORM_CVTTSD2SI_R32_XM64, X86_FORM_CVTTSD2SI_R64_XM64 },
+        X86_FORM_CVTSD2SS_X_XM64,
+    },
+    {
+        X86_FORM_NONE, X86_FORM_NONE, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, { X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
+};
+
+static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
+{
+    return &tier1_select_float_forms_table[width == 4 ? 0 : width == 8 ? 1 : 2];
+}
+
+// movaps between two xmm registers: a whole register's copy, which unlike movss's and movsd's doesn't merge into its
+// destination's old bits.
+static X86Instruction tier1_select_float_move(uint8_t destination, uint8_t source)
+{
+    return tier1_select_register_record(X86_FORM_MOVAPS_X_XM, destination, source);
+}
+
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 {
     Tier1SelectRecords result = {0};
@@ -851,6 +957,193 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, record);
         break;
     }
+    // A floating value's registers are xmm registers (#141): a node's register is its location (class 1's), whose low
+    // four bits are the xmm register; a memory operand's base and index, an integer's and the scratch register are
+    // general registers.
+    case TIER1_RULE_FLOAT_CONSTANT:
+    {
+        const uint8_t x = destination & 15;
+        if (holes->immediate == 0)
+        {
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        }
+        else
+        {
+            tier1_select_request(&result, X86_OPERATION_MOV, width, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)holes->immediate, 0);
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, x, BUSTER_TIER1_SELECT_SCRATCH));
+        }
+        break;
+    }
+    case TIER1_RULE_FLOAT_COPY:
+        if ((destination & 15) != (holes->left & 15))
+        {
+            tier1_select_append(&result, tier1_select_float_move(destination & 15, holes->left & 15));
+        }
+        break;
+    case TIER1_RULE_FLOAT_BINARY:
+    {
+        // Two operands, the destination's the left one, as TIER1_RULE_REGISTER's: a commutative operation's (add and
+        // multiply) swapped where the right one is in the destination, or the right one copied into the scratch register.
+        const uint8_t x = destination & 15;
+        uint8_t left = holes->left & 15;
+        uint8_t right = holes->right & 15;
+        const uint32_t operation = (uint32_t)holes->operation & 3;
+        if (x == right && left != right)
+        {
+            if (operation == IR_FADD - IR_FADD || operation == IR_FMUL - IR_FADD)
+            {
+                right = left;
+                left = x;
+            }
+            else
+            {
+                tier1_select_append(&result, tier1_select_float_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, right));
+                right = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+        }
+        if (x != left)
+        {
+            tier1_select_append(&result, tier1_select_float_move(x, left));
+        }
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->arithmetic[operation], x, right));
+        break;
+    }
+    case TIER1_RULE_FLOAT_LOAD_OPERAND:
+    {
+        // The right operand from memory: the address's registers are general ones, which the left operand's copy into the
+        // destination can't overwrite.
+        X86Instruction memory = holes->memory;
+        const uint8_t x = destination & 15;
+        if (x != (holes->left & 15))
+        {
+            tier1_select_append(&result, tier1_select_float_move(x, holes->left & 15));
+        }
+        memory.reg = x;
+        memory.form = tier1_select_float_forms(width)->arithmetic[(uint32_t)holes->operation & 3];
+        tier1_select_append(&result, memory);
+        break;
+    }
+    case TIER1_RULE_FLOAT_NEGATE:
+    {
+        // The sign bit in the vector class's scratch register, through the scratch general register, and the value's
+        // copy in the destination xor it: the value stays in its class, and its other bits as they were.
+        const uint8_t x = destination & 15;
+        tier1_select_request(&result, X86_OPERATION_MOV, width, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(UINT64_C(1) << (width * 8 - 1)), 0);
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, BUSTER_TIER1_SELECT_FLOAT_SCRATCH, BUSTER_TIER1_SELECT_SCRATCH));
+        if (x != (holes->left & 15))
+        {
+            tier1_select_append(&result, tier1_select_float_move(x, holes->left & 15));
+        }
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, BUSTER_TIER1_SELECT_FLOAT_SCRATCH));
+        break;
+    }
+    // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites.
+    case TIER1_RULE_FLOAT_LOAD:
+    case TIER1_RULE_FLOAT_LOAD_ADDRESS:
+    {
+        X86Instruction record = holes->memory;
+        record.reg = destination & 15;
+        record.form = tier1_select_float_forms(width)->load;
+        tier1_select_append(&result, record);
+        break;
+    }
+    case TIER1_RULE_FLOAT_STORE:
+    case TIER1_RULE_FLOAT_STORE_ADDRESS:
+    {
+        X86Instruction record = holes->memory;
+        record.reg = holes->right & 15;
+        record.form = tier1_select_float_forms(width)->store;
+        tier1_select_append(&result, record);
+        break;
+    }
+    case TIER1_RULE_FLOAT_COMPARE:
+    {
+        // ucomis sets ZF, PF and CF: 0, 0, 0 for greater, 0, 0, 1 for less, 1, 0, 0 for equal and 1, 1, 1 for unordered.
+        // a > b is seta and a >= b setae; a < b and a <= b are b > a and b >= a. a == b is ZF without PF, a != b either.
+        const uint32_t condition = holes->condition;
+        const bool swapped = condition == IR_LT || condition == IR_LE;
+        const uint8_t first = (swapped ? holes->right : holes->left) & 15;
+        const uint8_t second = (swapped ? holes->left : holes->right) & 15;
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, first, second));
+        if (condition == IR_EQ || condition == IR_NE)
+        {
+            const bool equal = condition == IR_EQ;
+            tier1_select_append(&result, (X86Instruction){ .form = equal ? X86_FORM_SETE_RM8 : X86_FORM_SETNE_RM8, .rm = destination });
+            tier1_select_append(&result, (X86Instruction){ .form = equal ? X86_FORM_SETNP_RM8 : X86_FORM_SETP_RM8, .rm = BUSTER_TIER1_SELECT_SCRATCH });
+            tier1_select_append(&result, tier1_select_register_record(equal ? X86_FORM_AND_RM8_R8 : X86_FORM_OR_RM8_R8, BUSTER_TIER1_SELECT_SCRATCH, destination));
+        }
+        else
+        {
+            const bool strict = condition == IR_LT || condition == IR_GT;
+            tier1_select_append(&result, (X86Instruction){ .form = strict ? X86_FORM_SETA_RM8 : X86_FORM_SETAE_RM8, .rm = destination });
+        }
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
+        break;
+    }
+    case TIER1_RULE_FLOAT_BRANCH_COMPARE:
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, holes->left & 15, holes->right & 15));
+        tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
+        break;
+    case TIER1_RULE_FLOAT_CONVERT:
+    {
+        const uint32_t source_width = holes->source_width;
+        const uint8_t x = destination & 15;
+        switch (holes->scale)
+        {
+        case BUSTER_TIER1_FLOAT_FROM_SIGNED:
+        case BUSTER_TIER1_FLOAT_FROM_UNSIGNED:
+        {
+            // A signed narrow operand's sign extension, or an unsigned I32's zero extension, in the scratch register,
+            // converted as 64 bits; any other operand from its own register, its 32 or 64 bits.
+            const bool is_signed = holes->scale == BUSTER_TIER1_FLOAT_FROM_SIGNED;
+            const bool extend = is_signed ? source_width < 4 : source_width == 4;
+            uint8_t source = holes->left;
+            if (extend)
+            {
+                const uint16_t form = !is_signed ? X86_FORM_MOV_R32_RM32 : source_width == 1 ? X86_FORM_MOVSX_R32_RM8 : X86_FORM_MOVSX_R32_RM16;
+                tier1_select_append(&result, tier1_select_register_record(form, BUSTER_TIER1_SELECT_SCRATCH, source));
+                source = BUSTER_TIER1_SELECT_SCRATCH;
+            }
+            const bool wide = source_width == 8 || (!is_signed && source_width == 4);
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_integer[wide], x, source));
+            break;
+        }
+        case BUSTER_TIER1_FLOAT_TO_SIGNED:
+        case BUSTER_TIER1_FLOAT_TO_UNSIGNED:
+        {
+            // An unsigned 32-bit result is the low half of the 64-bit conversion, whose range holds it.
+            const bool wide = width == 8 || (holes->scale == BUSTER_TIER1_FLOAT_TO_UNSIGNED && width == 4);
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->to_integer[wide], destination, holes->left & 15));
+            if (width < 4)
+            {
+                tier1_select_append(&result, tier1_select_register_record(width == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, destination, destination));
+            }
+            break;
+        }
+        case BUSTER_TIER1_FLOAT_RESIZE:
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->resize, x, holes->left & 15));
+            break;
+        case BUSTER_TIER1_FLOAT_FROM_BITS:
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, x, holes->left));
+            break;
+        case BUSTER_TIER1_FLOAT_TO_BITS:
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->to_general, holes->left & 15, destination));
+            break;
+        default:
+            tier1_select_append(&result, (X86Instruction){0});
+            break;
+        }
+        break;
+    }
+    case TIER1_RULE_FLOAT_RETURN:
+        if ((holes->left & 15) != 0)
+        {
+            tier1_select_append(&result, tier1_select_float_move(0, holes->left & 15));
+        }
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_RET });
+        break;
     default:
         tier1_select_append(&result, (X86Instruction){0});
         break;
@@ -1173,6 +1466,13 @@ static uint32_t tier1_select_mask_width(uint32_t type)
     return type == IR_M8 ? 1 : type == IR_M16 ? 2 : type == IR_M32 ? 4 : type == IR_M64 ? 8 : 0;
 }
 
+// A floating value's bytes (#141): F32's 4 and F64's 8, the ss and sd forms' widths; 0 for any other type. F80, the x87's,
+// isn't taken.
+static uint32_t tier1_select_float_width(uint32_t type)
+{
+    return type == IR_F32 ? 4 : type == IR_F64 ? 8 : 0;
+}
+
 // Whether a function has vectors, which the selector doesn't take (#141): ir_function_has_vectors_path's answer. Masks
 // (#179) it takes, as ir_function_has_simd doesn't.
 static bool tier1_select_has_vectors(const IrFunction* function, bool vector)
@@ -1197,8 +1497,9 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 //   IR_LOAD              MOVZX_R32_RM8/RM16 (byte/word loads zero-extend)
 //   IR_TRUNC             MOVZX_R32_RM8/RM16 (a truncation to I8/I16)
 //   IR_SEXT              MOVSX, then the I16 MOVZX
-//   IR_ICMP              setcc, then MOVZX_R32_RM8
+//   IR_ICMP, IR_FCMP     setcc (an FCMP's == and != with the parity's), then MOVZX_R32_RM8
 //   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
+//   IR_FPTOSI/FPTOUI     cvtts*2si, then MOVZX_R32_RM8/RM16 (a narrow result's, #141)
 // COPY, BITCAST, ZEXT, SELECT and PHI only move narrow values (MOV, CMOV, edge moves, spill/reload), so they are
 // canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it keeps its clearing
 // move and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
@@ -1221,6 +1522,9 @@ static void tier1_select_canonical(const IrFunction* function, const uint32_t* b
             case IR_TRUNC:
             case IR_SEXT:
             case IR_ICMP:
+            case IR_FCMP:
+            case IR_FPTOSI:
+            case IR_FPTOUI:
             case IR_CALL:
             case IR_CALL_INDIRECT:
                 canonical[node] = 1;
@@ -1283,8 +1587,69 @@ static uint32_t tier1_select_argument_type(const IrFunction* function, const IrC
     return argument < call->parameter_count ? function->call_types[call->type_first + argument] : function->type[function->extra[call->argument_first + argument]];
 }
 
-// This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers, floating-point
-// and aggregates. The shared verifier checks descriptor bounds and actual argument types before this helper runs.
+// Where a parameter or an argument is, by the System V convention's classes (#141): the k-th integer or pointer one in
+// the k-th of the six general argument registers (`index` k, tier1_select_parameter_registers'), the k-th floating one
+// in xmm k of eight, and each one past its class's registers in the stack's next 8-byte slot (`index` the slot's).
+#define BUSTER_TIER1_PLACE_GENERAL 0
+#define BUSTER_TIER1_PLACE_VECTOR 1
+#define BUSTER_TIER1_PLACE_STACK 2
+
+typedef struct Tier1SelectPlace Tier1SelectPlace;
+struct Tier1SelectPlace
+{
+    uint8_t kind;
+    uint8_t index;
+};
+
+// The places taken so far, as a list of parameters or arguments is walked in order.
+typedef struct Tier1SelectPlaces Tier1SelectPlaces;
+struct Tier1SelectPlaces
+{
+    uint32_t general;
+    uint32_t vector;
+    uint32_t stack;
+};
+
+static Tier1SelectPlace tier1_select_next_place(Tier1SelectPlaces* places, uint32_t type)
+{
+    const bool floating = type == IR_F32 || type == IR_F64;
+    const bool registered = floating ? places->vector < BUSTER_ABI_VECTOR_ARGUMENTS : places->general < BUSTER_ABI_INTEGER_ARGUMENTS;
+    const uint32_t index = !registered ? places->stack : floating ? places->vector : places->general;
+    const Tier1SelectPlace place = {
+        .kind = (uint8_t)(!registered ? BUSTER_TIER1_PLACE_STACK : floating ? BUSTER_TIER1_PLACE_VECTOR : BUSTER_TIER1_PLACE_GENERAL),
+        .index = (uint8_t)index,
+    };
+    places->general += registered && !floating;
+    places->vector += registered && floating;
+    places->stack += !registered;
+    return place;
+}
+
+// Parameter `parameter`'s place, by the types of the function's parameters up to it.
+static Tier1SelectPlace tier1_select_parameter_place(const IrFunction* function, uint32_t parameter)
+{
+    Tier1SelectPlaces places = { 0 };
+    Tier1SelectPlace place = { 0 };
+    for (uint32_t p = 0; p <= parameter && p < function->parameter_count; p += 1)
+    {
+        place = tier1_select_next_place(&places, function->parameter_types[p]);
+    }
+    return place;
+}
+
+// The stack slots a call's arguments take, past their classes' registers: its outgoing area's 8-byte slots.
+static uint32_t tier1_select_call_stack_slots(const IrFunction* function, const IrCall* call)
+{
+    Tier1SelectPlaces places = { 0 };
+    for (uint32_t a = 0; a < call->argument_count; a += 1)
+    {
+        tier1_select_next_place(&places, tier1_select_argument_type(function, call, a));
+    }
+    return places.stack;
+}
+
+// This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers and aggregates. The
+// shared verifier checks descriptor bounds and actual argument types before this helper runs.
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
     // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
@@ -1293,15 +1658,16 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
     {
         const IrCall call = function->calls[function->b[node]];
         const uint32_t type = function->type[node];
-        // A variadic call's unnamed arguments are promoted ones: its al says no vector register holds one (tier1_emit_call).
-        // A narrow result is zero-extended after the call.
-        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
+        // A variadic call's unnamed arguments are promoted ones, an F32 among them never: its al counts the vector
+        // registers its arguments take (tier1_emit_call). A narrow result is zero-extended after the call, and a floating
+        // one (#141) comes in xmm0.
+        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0;
         supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS &&
                     (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
-            supported = argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR;
+            supported = argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0;
         }
     }
     return supported;
@@ -1457,6 +1823,30 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
             pattern->compare_immediate = true;
             tier1_select_fold(forest, root, function->b[tested], pattern);
         }
+    }
+    return result;
+}
+
+// The comparison `tested`, an FCMP of F32 or F64 values by <, <=, > or >= that only `root`'s pattern uses, as the
+// pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
+// condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
+// operands; with `negated`, their negations ULE and ULT (jbe and jb), which are true for them, as !(a > b) and
+// !(a >= b) are. == and != read the parity flag too, which a single jump can't: their truth value is tested instead.
+static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, Tier1SelectPattern* pattern)
+{
+    const IrFunction* function = forest->function;
+    const uint32_t left = function->a[tested];
+    const uint32_t predicate = function->c[tested];
+    const bool result = function->op[tested] == IR_FCMP && tier1_select_tree_child(forest, root, tested) && tier1_select_float_width(function->type[left]) != 0 && predicate >= IR_LT && predicate <= IR_GE;
+    if (result)
+    {
+        const bool swapped = predicate == IR_LT || predicate == IR_LE;
+        const uint8_t condition = predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
+        pattern->values[0] = swapped ? function->b[tested] : left;
+        pattern->values[1] = swapped ? left : function->b[tested];
+        pattern->width = (uint8_t)tier1_select_float_width(function->type[left]);
+        pattern->condition = negated ? tier1_select_negations[condition] : condition;
+        tier1_select_fold(forest, root, tested, pattern);
     }
     return result;
 }
@@ -1628,8 +2018,12 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         .width = (uint8_t)width,
     };
     const bool integer = type == IR_I32 || type == IR_I64;
-    // A mask's operations (#179): the stored mask's width for a store, the result's for the others.
+    // A mask's operations (#179): the stored mask's width for a store, the result's for the others; and a floating
+    // value's (#141), the same way.
     const uint32_t mask_width = tier1_select_mask_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type);
+    const uint32_t float_width = tier1_select_float_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type);
+    // The operand's width where it is a floating value: a comparison's, a conversion's from one or a return's.
+    const uint32_t operand_float = a < function->instruction_count ? tier1_select_float_width(function->type[a]) : 0;
     if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
     {
         // An undefined mask is any mask: zero, kxor's.
@@ -1708,6 +2102,156 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     {
         base.rule = TIER1_RULE_PHI;
         base.width = (uint8_t)mask_width;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    // Floating values (#141): an undefined one is any value, zero's xorps.
+    else if (float_width != 0 && (op == IR_CONST || op == IR_UNDEF))
+    {
+        base.rule = TIER1_RULE_FLOAT_CONSTANT;
+        base.width = (uint8_t)float_width;
+        base.immediate = op == IR_CONST ? function->constants[a].low & (float_width == 4 ? UINT32_MAX : UINT64_MAX) : 0;
+        base.intrinsic_cost = base.immediate == 0 ? 1 : 2;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (float_width != 0 && op == IR_COPY)
+    {
+        base.rule = TIER1_RULE_FLOAT_COPY;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (float_width != 0 && (op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV))
+    {
+        base.rule = TIER1_RULE_FLOAT_BINARY;
+        base.width = (uint8_t)float_width;
+        base.operation = (uint8_t)(op - IR_FADD);
+        base.values[0] = a;
+        base.values[1] = b;
+        base.intrinsic_cost = 3;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        // The right operand's load as the memory operand, or for add and multiply the left's where the right isn't a load,
+        // as an integer's (TIER1_RULE_LOAD_OPERAND).
+        const bool commutative = op == IR_FADD || op == IR_FMUL;
+        const uint32_t load = function->op[b] == IR_LOAD ? b : commutative ? a : BUSTER_IR_NONE;
+        if (tier1_select_load_folds(forest, node, load))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_LOAD_OPERAND;
+            folded.values[0] = load == b ? a : b;
+            folded.values[1] = BUSTER_IR_NONE;
+            folded.values[2] = BUSTER_IR_NONE;
+            tier1_select_fold(forest, node, load, &folded);
+            tier1_select_memory(forest, node, function->a[load], &folded, 1);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+    }
+    else if (float_width != 0 && op == IR_FNEG)
+    {
+        base.rule = TIER1_RULE_FLOAT_NEGATE;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.intrinsic_cost = 3;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (float_width != 0 && (op == IR_LOAD || op == IR_STORE))
+    {
+        const bool store = op == IR_STORE;
+        base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.values[2] = store ? b : BUSTER_IR_NONE;
+        base.intrinsic_cost = 1;
+        Tier1SelectPattern folded = base;
+        const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
+        // Through a frame object the folded address stands alone, as an integer's does.
+        if (!walked || folded.stack_object == BUSTER_IR_NONE)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        if (walked)
+        {
+            folded.rule = store ? TIER1_RULE_FLOAT_STORE_ADDRESS : TIER1_RULE_FLOAT_LOAD_ADDRESS;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+    }
+    else if (float_width != 0 && op == IR_PHI)
+    {
+        base.rule = TIER1_RULE_PHI;
+        base.width = (uint8_t)float_width;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (float_width != 0 && op == IR_PARAM && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
+    {
+        base.rule = TIER1_RULE_LEAF;
+        base.width = (uint8_t)float_width;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_FCMP && operand_float != 0)
+    {
+        base.rule = TIER1_RULE_FLOAT_COMPARE;
+        base.width = (uint8_t)operand_float;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.condition = (uint8_t)c;
+        base.intrinsic_cost = c == IR_EQ || c == IR_NE ? 5 : 3;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    // Conversions (BUSTER_TIER1_FLOAT_FROM_SIGNED and the others): from an I8 to I64 signed, and an I1 to I32 unsigned, to
+    // a floating value; from one to an I8 to I64 signed, and an I8 to I32 unsigned; between the two precisions; and the
+    // bits of an F32 as an I32's or an F64 as an I64's, and back. An unsigned I64 isn't taken, whose values past INT64_MAX
+    // no single conversion handles.
+    else if ((float_width != 0 && ((op == IR_SITOFP && function->type[a] >= IR_I8 && function->type[a] <= IR_I64) || (op == IR_UITOFP && function->type[a] >= IR_I1 && function->type[a] <= IR_I32))) ||
+             (operand_float != 0 && ((op == IR_FPTOSI && type >= IR_I8 && type <= IR_I64) || (op == IR_FPTOUI && type >= IR_I8 && type <= IR_I32))) ||
+             (float_width != 0 && operand_float != 0 && (op == IR_FTRUNC || op == IR_FEXT)) ||
+             (op == IR_BITCAST && float_width != 0 && function->type[a] == (float_width == 8 ? IR_I64 : IR_I32)) ||
+             (op == IR_BITCAST && operand_float != 0 && type == (operand_float == 8 ? IR_I64 : IR_I32)))
+    {
+        const uint32_t source = function->type[a];
+        base.rule = TIER1_RULE_FLOAT_CONVERT;
+        base.values[0] = a;
+        base.width = (uint8_t)(float_width != 0 ? float_width : tier1_select_memory_width(type));
+        base.source_width = (uint8_t)(operand_float != 0 ? operand_float : source == IR_I1 ? 1 : tier1_select_memory_width(source));
+        base.scale = (uint8_t)(op == IR_SITOFP ? BUSTER_TIER1_FLOAT_FROM_SIGNED : op == IR_UITOFP ? BUSTER_TIER1_FLOAT_FROM_UNSIGNED : op == IR_FPTOSI ? BUSTER_TIER1_FLOAT_TO_SIGNED :
+                               op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
+        base.intrinsic_cost = op == IR_BITCAST ? 1 : 2;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        // An integer constant's conversion is the floating constant it converts to, rounded as cvtsi2s* rounds under the
+        // default rounding mode, to nearest: C's conversion on this host computes it so.
+        uint64_t integer = 0;
+        if ((op == IR_SITOFP || op == IR_UITOFP) && tier1_select_constant(function, a, &integer))
+        {
+            const uint32_t bits = ir_type_bits[source];
+            const uint64_t magnitude = bits < 64 ? integer & ((UINT64_C(1) << bits) - 1) : integer;
+            const int64_t signed_value = bits < 64 ? (int64_t)(magnitude << (64 - bits)) >> (64 - bits) : (int64_t)magnitude;
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_CONSTANT;
+            folded.values[0] = BUSTER_IR_NONE;
+            folded.source_width = 0;
+            folded.scale = 0;
+            if (float_width == 8)
+            {
+                const double converted = op == IR_SITOFP ? (double)signed_value : (double)magnitude;
+                memcpy(&folded.immediate, &converted, sizeof(converted));
+            }
+            else
+            {
+                const float converted = op == IR_SITOFP ? (float)signed_value : (float)magnitude;
+                uint32_t pattern = 0;
+                memcpy(&pattern, &converted, sizeof(converted));
+                folded.immediate = pattern;
+            }
+            folded.intrinsic_cost = folded.immediate == 0 ? 1 : 2;
+            tier1_select_fold(forest, node, a, &folded);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+    }
+    else if (op == IR_RET && a != BUSTER_IR_NONE && operand_float != 0)
+    {
+        base.rule = TIER1_RULE_FLOAT_RETURN;
+        base.values[0] = a;
+        base.width = (uint8_t)operand_float;
+        base.intrinsic_cost = 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_CONST && width != 0)
@@ -2111,11 +2655,18 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
+        else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, &folded))
+        {
+            folded.rule = TIER1_RULE_FLOAT_BRANCH_COMPARE;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if ((op == IR_CALL || op == IR_CALL_INDIRECT) && tier1_select_call_supported(function, node))
     {
         base.rule = TIER1_RULE_CALL;
         base.immediate = a;
+        // A floating result's width too (#141), which the consumer moves from xmm0.
+        base.width = (uint8_t)(width | float_width);
         // Structural lowering estimate: call plus possible argument/result copies; preservation is emitter-owned.
         base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -2192,9 +2743,13 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
         case TIER1_RULE_STORE_ADDRESS:
         case TIER1_RULE_MASK_LOAD_ADDRESS:
         case TIER1_RULE_MASK_STORE_ADDRESS:
+        case TIER1_RULE_FLOAT_BRANCH_COMPARE:
+        case TIER1_RULE_FLOAT_LOAD_ADDRESS:
+        case TIER1_RULE_FLOAT_STORE_ADDRESS:
             rank = 8;
             break;
         case TIER1_RULE_LOAD_OPERAND:
+        case TIER1_RULE_FLOAT_LOAD_OPERAND:
             rank = 7;
             break;
         case TIER1_RULE_MULTIPLY_LEA:
@@ -2649,13 +3204,19 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_MASK_LOAD_ADDRESS:
     case TIER1_RULE_MASK_STORE:
     case TIER1_RULE_MASK_STORE_ADDRESS:
+    case TIER1_RULE_FLOAT_LOAD:
+    case TIER1_RULE_FLOAT_LOAD_ADDRESS:
+    case TIER1_RULE_FLOAT_STORE:
+    case TIER1_RULE_FLOAT_STORE_ADDRESS:
         holes.memory = tier1_select_memory_holes(pattern, registers, 0);
-        if (pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS || pattern->rule == TIER1_RULE_MASK_STORE || pattern->rule == TIER1_RULE_MASK_STORE_ADDRESS)
+        if (pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS || pattern->rule == TIER1_RULE_MASK_STORE || pattern->rule == TIER1_RULE_MASK_STORE_ADDRESS ||
+            pattern->rule == TIER1_RULE_FLOAT_STORE || pattern->rule == TIER1_RULE_FLOAT_STORE_ADDRESS)
         {
             holes.right = holes.third;
         }
         break;
     case TIER1_RULE_LOAD_OPERAND:
+    case TIER1_RULE_FLOAT_LOAD_OPERAND:
         holes.memory = tier1_select_memory_holes(pattern, registers, 1);
         break;
     default:
@@ -2694,8 +3255,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
     // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
     // plan before allocating records, even if earlier value locations are spilled. A memory operand through a frame
-    // object needs the frame's layout too, an indirect jump's labels their symbols, and a variadic definition its register
-    // save area: the CFG consumer's.
+    // object needs the frame's layout too, an indirect jump's labels their symbols, a variadic definition its register
+    // save area, and a floating value the vector class's registers (#141): the CFG consumer's.
     if (error == TIER1_SELECT_OK && (plan->function->label_count != 0 || plan->function->variadic))
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
@@ -2705,7 +3266,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
             tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
-            tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE || plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
+            tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE ||
+            plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;
@@ -2743,7 +3305,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             }
             if (function->op[node] == IR_PARAM)
             {
-                allocated &= function->a[node] < 6 && registers[node] == tier1_select_parameter_registers[function->a[node]];
+                const Tier1SelectPlace place = tier1_select_parameter_place(function, function->a[node]);
+                allocated &= place.kind == BUSTER_TIER1_PLACE_GENERAL && registers[node] == tier1_select_parameter_registers[place.index];
             }
             if (!allocated)
             {

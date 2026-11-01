@@ -489,6 +489,160 @@ static const char check_test_tier1_stack_callee_source[] =
     "    return seven(x, x + 1, x - 2, x * 3, x ^ 4, ~x, x * x) + twelve(x, 2, 3, x, 5, 6, (int)(x * 7), 8, x - 9, 10, (short)(x * 11), x + 12);\n"
     "}\n";
 
+// The floating values' fixture (#141): F32 and F64 parameters, results and arguments interleaved with integers, past
+// xmm7 onto the stack, to clang -O2's code and from it through a pointer, a variadic call of doubles (printf's and the
+// other unit's: al their count), every comparison against NaNs, infinities and signed zeros, the conversions between
+// the precisions and to and from integers of every width, signed and unsigned, a negation, loops of doubles and floats
+// through arrays and a struct's members, and a conditional expression of doubles.
+static const char check_test_tier1_float_source[] =
+    "#include <stdio.h>\n"
+    "double tier1_other_mix(double a, int b, float c, double d, long e, double f, double g, double h, double i, double j, float k, double l);\n"
+    "float tier1_other_scale(float x, double y);\n"
+    "double tier1_other_sum(int count, ...);\n"
+    "double tier1_drive_float(double (*f)(double, float, long, double), double x);\n"
+    "struct tier1_point\n"
+    "{\n"
+    "    double x;\n"
+    "    float y;\n"
+    "    int k;\n"
+    "};\n"
+    "double tier1_float_take(double a, float b, long c, double d)\n"
+    "{\n"
+    "    double product = a * b;\n"
+    "    return product - c / d;\n"
+    "}\n"
+    "static double tier1_pass_float(double x, long n)\n"
+    "{\n"
+    "    float f = (float)x;\n"
+    "    double r = tier1_other_mix(x, (int)n, f, x * 2.0, n * 3, x + 1.0, x - 1.0, -x, x * x, 0.5, f * 2.0f, (double)n);\n"
+    "    r = r + tier1_other_scale(f, r);\n"
+    "    r = r + tier1_other_sum(3, x, r, (double)n);\n"
+    "    r = r + tier1_drive_float(tier1_float_take, x);\n"
+    "    return r;\n"
+    "}\n"
+    "static int tier1_classify(double x, double y)\n"
+    "{\n"
+    "    int r = 0;\n"
+    "    r = r * 2 + (x == y);\n"
+    "    r = r * 2 + (x != y);\n"
+    "    r = r * 2 + (x < y);\n"
+    "    r = r * 2 + (x <= y);\n"
+    "    r = r * 2 + (x > y);\n"
+    "    r = r * 2 + (x >= y);\n"
+    "    if (x < y)\n"
+    "    {\n"
+    "        r += 100;\n"
+    "    }\n"
+    "    if (!(x >= y))\n"
+    "    {\n"
+    "        r += 1000;\n"
+    "    }\n"
+    "    if (x != x)\n"
+    "    {\n"
+    "        r += 10000;\n"
+    "    }\n"
+    "    if (x == y)\n"
+    "    {\n"
+    "        r += 100000;\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
+    "static long tier1_convert(double x, float f, unsigned u, short s, unsigned char c)\n"
+    "{\n"
+    "    long a = (long)x;\n"
+    "    int b = (int)(x * 0.5);\n"
+    "    float g = (float)u + (float)s;\n"
+    "    double h = (double)c - (double)u;\n"
+    "    float k = -f;\n"
+    "    unsigned w = (unsigned)(x * x);\n"
+    "    return a * 7 + b * 5 + (long)(g * 3.0f) + (long)h + (long)(k * 100.0f) + (long)w + (long)(signed char)(int)(f * 0.25f);\n"
+    "}\n"
+    "static double tier1_accumulate(double* values, int n, float* weights)\n"
+    "{\n"
+    "    double s = 0.0;\n"
+    "    float w = 0.0f;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        s += values[i] * weights[i];\n"
+    "        w += weights[i];\n"
+    "        values[i] = s;\n"
+    "    }\n"
+    "    return s / w;\n"
+    "}\n"
+    "static double tier1_points(struct tier1_point* p, int n)\n"
+    "{\n"
+    "    double t = 0;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        t += p[i].x * p[i].y + p[i].k;\n"
+    "        p[i].y = (float)t;\n"
+    "    }\n"
+    "    return t;\n"
+    "}\n"
+    "static void tier1_print(double x, float f, long n)\n"
+    "{\n"
+    "    printf(\"%.17g %.9g %ld\\n\", x, (double)f, n);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    volatile double zero = 0.0;\n"
+    "    const double nan = zero / zero;\n"
+    "    const double inf = 1.0 / zero;\n"
+    "    const double samples[] = { 0.0, -0.0, 1.5, -2.25, 3.0e10, -7.5e-3, 1.0e300, 123.456, nan, inf, -inf };\n"
+    "    unsigned long total = 0;\n"
+    "    for (int i = 0; i < 11; i += 1)\n"
+    "    {\n"
+    "        for (int j = 0; j < 11; j += 1)\n"
+    "        {\n"
+    "            total = total * 31 + (unsigned long)tier1_classify(samples[i], samples[j]);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", total);\n"
+    "    for (int i = 0; i < 8; i += 1)\n"
+    "    {\n"
+    "        const double x = samples[i] < 1.0e20 && samples[i] > -1.0e20 ? samples[i] : 4.0;\n"
+    "        printf(\"%.17g %ld\\n\", tier1_pass_float(x * 0.001, i * 3 - 7), tier1_convert(x * 0.01, (float)(x * 0.5), (unsigned)(i * 1000), (short)(i * -77), (unsigned char)(i * 33)));\n"
+    "        tier1_print(x, (float)x, i);\n"
+    "    }\n"
+    "    double values[6] = { 1.0, 2.5, -3.0, 4.25, 0.5, 6.0 };\n"
+    "    float weights[6] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f };\n"
+    "    printf(\"%.17g\", tier1_accumulate(values, 6, weights));\n"
+    "    for (int i = 0; i < 6; i += 1)\n"
+    "    {\n"
+    "        printf(\" %.17g\", values[i]);\n"
+    "    }\n"
+    "    struct tier1_point points[4] = { { 1.5, 2.0f, 3 }, { -0.5, 4.0f, -1 }, { 10.0, 0.25f, 7 }, { 2.0, -1.0f, 0 } };\n"
+    "    printf(\" %.17g %.9g %.9g\\n\", tier1_points(points, 4), (double)points[0].y, (double)points[3].y);\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_float_other_source[] =
+    "#include <stdarg.h>\n"
+    "double tier1_other_mix(double a, int b, float c, double d, long e, double f, double g, double h, double i, double j, float k, double l)\n"
+    "{\n"
+    "    return a + b * 2.0 + c * 3.0 + d * 4.0 + e * 5.0 + f * 6.0 + g * 7.0 + h * 8.0 + i * 9.0 + j * 10.0 + k * 11.0 + l * 12.0;\n"
+    "}\n"
+    "float tier1_other_scale(float x, double y)\n"
+    "{\n"
+    "    return x * (float)y + 1.0f;\n"
+    "}\n"
+    "double tier1_other_sum(int count, ...)\n"
+    "{\n"
+    "    va_list arguments;\n"
+    "    va_start(arguments, count);\n"
+    "    double s = 0;\n"
+    "    for (int i = 0; i < count; i += 1)\n"
+    "    {\n"
+    "        s += va_arg(arguments, double) * (i + 1);\n"
+    "    }\n"
+    "    va_end(arguments);\n"
+    "    return s;\n"
+    "}\n"
+    "double tier1_drive_float(double (*f)(double, float, long, double), double x)\n"
+    "{\n"
+    "    return f(x, (float)x * 0.5f, (long)x + 3, x + 2.5);\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -1686,6 +1840,61 @@ static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang
     }
     check_test_expect(test, !ran || (frames[1][0] == frames[1][1] && frames[0][0] == frames[0][1]), "both paths' frames take the same bytes");
     unlink(source);
+    unlink(reference);
+}
+
+// The floating values' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
+// function Tier 1's (main's conditional expression of doubles among them), linked with its other unit compiled by clang
+// -O2, prints what clang -O0's build of both prints, bit for bit in its %.17g digits.
+static void check_test_driver_tier1_float(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-float.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-float-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-float-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-float-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_float_source, sizeof(check_test_tier1_float_source) - 1) &&
+                         parse_test_write(other, check_test_tier1_float_other_source, sizeof(check_test_tier1_float_other_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    char expected[2048] = { 0 };
+    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the floating values' fixture run");
+    static const char* const names[8] = { "tier1_float_take", "tier1_pass_float", "tier1_classify", "tier1_convert", "tier1_accumulate", "tier1_points", "tier1_print", "main" };
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-float-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-float-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build_names(executable, unit, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the floating values' unit compiles by --tier1, every function Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[2048] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's floating values meet clang -O2's code and print clang -O0's build's output");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
     unlink(reference);
 }
 

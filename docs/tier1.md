@@ -215,8 +215,14 @@ extends it to by its class, and a narrow parameter as an `i32` it truncates (#14
 the [IR guide](ir.md)'s "Typed-stream lowering"). Arguments and parameters past
 the six registers (#141) go through the CFG consumer too: a call stores each
 argument in its slot of the outgoing area, from wherever its value is, and the
-entry loads each parameter from its incoming slot. Still refused: floating
-point, switches and aggregates by value.
+entry loads each parameter from its incoming slot. Floating values (#141), `F32`
+and `F64`, go through the CFG consumer too, in the vector class's registers by
+SSE2's scalar forms: their arithmetic, comparisons, conversions, loads, stores,
+phis, parameters, arguments and results ([the selection guide](tier1-selection.md)'s
+"Floating values" and [the allocation guide](tier1-allocation.md)'s "The vector
+class's floating values"). Still refused: long double, selects of floating
+values, conversions between floating values and unsigned 64-bit integers,
+switches and aggregates by value.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
