@@ -3467,8 +3467,17 @@ they do per token where little of it was per declaration or expression:
   stack round trip. On the 7940HS, `perf stat -r 5` of the native build before the address
   sorts' change counted 2.25% fewer instructions and 9.62% fewer `stli_other`
   ([buster14a/buster#1037's review](https://github.com/buster14a/buster/pull/1037#pullrequestreview-5727977655)).
-  Neither is the 9700X's: its A/B of `stli_other`, cycles and the checker
-  stages' time is still to be run.
+  On the 9700X, against main at its fork point, with the same objects
+  ([the record](https://github.com/buster14a/buster-performance/tree/d2f5d31761d6f67cdcfe862306e29b0451bb2ae6/docs/measurements/checker-store-forwarding-873-2026-11-01)):
+  `-c` of that `sqlite3.c` took 2.15% fewer user cycles, 2.34% fewer
+  instructions and 18.1% fewer `stli_other` (`-fsyntax-only` 2.35%, 2.90% and
+  18.6%), the medians of 10 interleaved processes each; over six placements of
+  the checker's unit and two copies, in two rounds, −1.82% and −2.11% of
+  `-c`'s user cycles and −2.29% and −2.56% of `-fsyntax-only`'s, where main
+  against itself read within ±0.27%. `--time-stages` puts it in
+  `check-declarations`, 3.67 ms down to 1.90; `check_initializer_live_writes`
+  and `check_const_append`, which took 15.1% of main's `stli_other` samples,
+  are no longer among those over 0.41%.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
