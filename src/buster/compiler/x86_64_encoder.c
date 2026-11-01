@@ -5576,14 +5576,21 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // A table is written whole when it is built, so x86_templates_prepare commits the pages it writes first, in one call per
 // range, and for x86_encode's table, which every compile builds, asks for transparent huge pages over it (#590): a kernel
 // whose transparent huge pages are only `madvise`d (Ubuntu's, Debian's and Fedora's) gave .bss's 3.2 MB of it 788 base
-// pages' faults, half of a small file's compile. That table has a huge page's margin on either side, which keeps the
-// huge pages it asks for in its own storage; the others, which tests, the disassembler and other modes' entry points
-// build, keep their size, as the benchmarks' units have copies of them all. The storage isn't aligned to a huge page:
-// wild 0.10, which links the CI's builds, refuses alignments past 64 KB.
+// pages' faults, half of a small file's compile. In main.c's units, whose copy the C driver's compiles build, that table
+// has a huge page's margin on either side, which keeps the huge pages it asks for in its own storage; 4 MB in all, so
+// that what follows it in .bss keeps its place against huge pages (with 67 MB of margins over the benchmarks' copies too,
+// on the 9700X, whose kernel uses huge pages `always`, hello.c's stages that don't build the tables took 0.06 ms more).
+// A unit of its own (a benchmark's) keeps its copy without margins or huge pages, and the other modes' tables, which
+// tests, the disassembler and other modes' entry points build, keep their size. The storage isn't aligned to a huge
+// page: wild 0.10, which links the CI's builds, refuses alignments past 64 KB.
 #define BUSTER_X86_TEMPLATE_HUGE_PAGE (2u << 20)
 // A table's entries: the padding on either side, the forms' templates and their marked copies.
 #define BUSTER_X86_TEMPLATE_TABLE (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING)
+#if defined(BUSTER_UNIT)
 #define BUSTER_X86_TEMPLATE_MARGIN (BUSTER_X86_TEMPLATE_HUGE_PAGE / sizeof(X86TemplateEntry))
+#else
+#define BUSTER_X86_TEMPLATE_MARGIN 0
+#endif
 #define BUSTER_X86_TEMPLATE_ALIGNMENT 4096
 // The bytes of a huge page that x86_encode's table must fill for x86_templates_prepare to ask for it: the kernel clears a
 // huge page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X (lane.c's
@@ -5655,15 +5662,15 @@ static void x86_templates_commit(uintptr_t begin, uintptr_t bytes)
 
 // Before a table's first build, commits the bytes it writes, the templates and their marked copies, in one call per
 // range (MADV_POPULATE_WRITE), rather than a fault per page, which took a kernel without transparent huge pages from 1.39
-// to 0.88 ms for the table on a Xeon VM; and for x86_encode's table first asks for the huge pages
-// x86_templates_huge_pages picks (MADV_HUGEPAGE), where the commit takes a fault per huge page that comes. A call failing
+// to 0.88 ms for the table on a Xeon VM; and for x86_encode's table with its margins (main.c's units') first asks for the
+// huge pages x86_templates_huge_pages picks (MADV_HUGEPAGE), where the commit takes a fault per huge page that comes. A call failing
 // (an older kernel) leaves the pages to their faults, as before. `templates` is the table (past its padding).
 static void x86_templates_prepare(X86TemplateEntry* templates)
 {
     const uintptr_t written = (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry);
     const uintptr_t forms = (uintptr_t)(templates - BUSTER_X86_TEMPLATE_PADDING);
     uintptr_t pages[3];
-    const uint32_t count = templates == x86_templates ? x86_templates_huge_pages(templates, pages) : 0;
+    const uint32_t count = templates == x86_templates && BUSTER_X86_TEMPLATE_MARGIN != 0 ? x86_templates_huge_pages(templates, pages) : 0;
     for (uint32_t p = 0; p < count; p += 1)
     {
         madvise((void*)pages[p], BUSTER_X86_TEMPLATE_HUGE_PAGE, MADV_HUGEPAGE);
