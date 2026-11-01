@@ -1587,12 +1587,16 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
         // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
         const uint32_t switch_symbols = code.lowered.table_count + code.lowered.case_symbol_count;
-        uint8_t* temporary = valid && switch_symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code.link.symbols.count) : 0;
-        valid = valid && (switch_symbols == 0 || temporary != 0);
+        uint8_t* temporary = valid && (switch_symbols != 0 || code.unit_temporary_count != 0) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code.link.symbols.count) : 0;
+        valid = valid && ((switch_symbols == 0 && code.unit_temporary_count == 0) || temporary != 0);
         if (temporary != 0)
         {
             memset(temporary, 0, code.link.symbols.count);
             memset(temporary + code.lowered.case_symbol_base, 1, switch_symbols);
+            for (uint32_t s = 0; s < code.unit_temporary_count; s += 1)
+            {
+                temporary[code.unit_temporary[s]] = 1;
+            }
         }
         if (valid)
         {

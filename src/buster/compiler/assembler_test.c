@@ -1467,12 +1467,57 @@ static int run_assembler_tests(int count, char** arguments)
         asm_test_bytes(&test, "nop\n.p2align 2\nret\n", 1, after_instruction, sizeof(after_instruction), "code padding is GNU as's NOPs");
         static const uint8_t after_data[] = {0x01, 0x90, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0xc3};
         asm_test_bytes(&test, ".byte 1\n.p2align 3\nret\n", 1, after_data, sizeof(after_data), "code padding after data starts with a nop");
+        // .pushsection/.popsection and .previous switch sections and return; .nops writes GNU as's NOPs; .skip and .space
+        // fill, with a byte of their own.
+        static const uint8_t switched_text[] = {0x90, 0x91};
+        static const uint8_t switched_data[] = {1};
+        asm_test_bytes(&test, "before: .byte 0x90\n.pushsection .data\ndata: .byte 1\n.popsection\n.after: .byte 0x91\n", 1, switched_text, sizeof(switched_text),
+                       "a pushed section returns to the text");
+        asm_test_bytes(&test, "before: .byte 0x90\n.pushsection .data\ndata: .byte 1\n.popsection\n.after: .byte 0x91\n", 2, switched_data, sizeof(switched_data),
+                       "a pushed section's data");
+        static const uint8_t previous_text[] = {3};
+        static const uint8_t previous_rodata[] = {2};
+        asm_test_bytes(&test, ".section .rodata\n.byte 2\n.previous\n.byte 3\n", 1, previous_text, sizeof(previous_text), ".previous returns to the text");
+        asm_test_bytes(&test, ".section .rodata\n.byte 2\n.previous\n.byte 3\n", 2, previous_rodata, sizeof(previous_rodata), ".previous's other section");
+        static const uint8_t nops_bytes[] = {0x90, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0xc3};
+        asm_test_bytes(&test, "nop\n.nops 5\nret\n", 1, nops_bytes, sizeof(nops_bytes), ".nops writes GNU as's NOPs");
+        static const uint8_t skip_bytes[] = {0, 0, 0, 7, 7, 7, 7, 7};
+        asm_test_bytes(&test, ".data\n.skip 3\n.skip 2, 7\n.space 3, 7\n", 2, skip_bytes, sizeof(skip_bytes), ".skip and .space fill");
+        static const uint8_t skip_nops[] = {0x90, 0x90, 0x90, 0x90, 0xc3};
+        asm_test_bytes(&test, "nop\n.skip 3, 0x90\nret\n", 1, skip_nops, sizeof(skip_nops), ".skip writes its fill byte, not multi-byte NOPs");
+        static const uint8_t nested_data[] = {1, 3};
+        static const uint8_t nested_rodata[] = {2};
+        asm_test_bytes(&test, "nop\n.pushsection .data\n.byte 1\n.pushsection .rodata\n.byte 2\n.popsection\n.byte 3\n.popsection\nnop\n", 2, nested_data,
+                       sizeof(nested_data), "nested pushed sections return in order");
+        asm_test_bytes(&test, "nop\n.pushsection .data\n.byte 1\n.pushsection .rodata\n.byte 2\n.popsection\n.byte 3\n.popsection\nnop\n", 3, nested_rodata,
+                       sizeof(nested_rodata), "a nested pushed section's data");
         static const uint8_t zero_padded[] = {7, 0, 0, 0, 0, 0, 0, 0};
         asm_test_bytes(&test, ".intel_syntax noprefix\n.equ r08,7\n.data\n.quad r08\n", 2, zero_padded, sizeof(zero_padded), "a zero-padded register number is a symbol's name, as in GNU as");
         static const uint8_t plus_register[] = {0x8b, 0x04, 0x30};
         asm_test_bytes(&test, ".intel_syntax noprefix\n.equ rsi,8\nmov eax,[rax + +rsi]\n", 1, plus_register, sizeof(plus_register), "a register after a unary plus is the register, not a symbol of its name");
         const AsmResult pushed = asm_test_pair(&test, BUSTER_S8("push $external\n"), 1, 0);
         asm_test_check(&test, pushed.error == 0 && pushed.link.fixups.count == 2 && pushed.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S, "PUSH's sign-extended imm32 relocates as 32S", pushed.error);
+        // A unit's entry atom and code, its first control flow, and its absolute symbols (#812): the C checker's planner
+        // uses them to decide whether a template calls nothing, refuses a helper's early return and shares `.set`.
+        const AsmResult alignment_only = asm_test_pair(&test, BUSTER_S8(".p2align 4\n"), 1, 0);
+        asm_test_check(&test, alignment_only.error == 0 && alignment_only.entry_atom != 0 && !alignment_only.entry_code,
+                       "an alignment-only unit has an entry atom and no code", alignment_only.error);
+        const AsmResult instruction_only = asm_test_pair(&test, BUSTER_S8("nop\n"), 1, 0);
+        asm_test_check(&test, instruction_only.error == 0 && instruction_only.entry_code, "an instruction is code", instruction_only.error);
+        const AsmResult return_first = asm_test_pair(&test, BUSTER_S8(".p2align 4\nret\n"), 1, 0);
+        asm_test_check(&test, return_first.error == 0 && return_first.entry_code && return_first.ret_first, "a first return is ret_first", return_first.error);
+        const AsmResult branch_first = asm_test_pair(&test, BUSTER_S8("jmp 1f\nret\n1:\n"), 1, 0);
+        asm_test_check(&test, branch_first.error == 0 && !branch_first.ret_first, "a branch first makes a later return a snippet's", branch_first.error);
+        const AsmResult absolute = asm_test_pair(&test, BUSTER_S8(".set x, 7\n"), 1, 0);
+        asm_test_check(&test, absolute.error == 0 && absolute.absolute_count == 1 && absolute.absolutes[0].name.length == 1 &&
+                                  absolute.absolutes[0].value == 7 && absolute.link.symbols.count == 1,
+                       "an absolute symbol is recorded, not linked", absolute.error);
+        asm_test_check(&test, asm_test_pair(&test, BUSTER_S8(".pushsection .note.GNU-stack,\"\",@progbits\n.text\nnop\n"), 1, 0).error == 0,
+                       "a pushed non-executable-stack note is the writer's", 0);
+        const AsmResult hidden = asm_test_pair(&test, BUSTER_S8(".hidden h\nh: nop\n"), 1, 0);
+        asm_test_check(&test, hidden.error == 0 && hidden.link.symbols.count == 2 &&
+                                  (hidden.link.symbols.flags[1] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_HIDDEN,
+                       "a hidden label keeps its visibility", hidden.error);
         const uint32_t padding_capacity = 64u << 10;
         char* padding_text = arena_push(&arena, padding_capacity, 1);
         const String8 padding = padding_text != 0 ? asm_test_padding_source(padding_text, padding_capacity) : (String8){0};
