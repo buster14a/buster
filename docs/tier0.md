@@ -986,7 +986,9 @@ template fixes is that byte; a hole's is its index in the hole block. Its tables
 arrays, whose pages it commits first with one `MADV_POPULATE_WRITE` call each (`tier0_prepare_tables`, #590): a kernel
 whose transparent huge pages are only `madvise`d gave them 257 base pages' faults in every compile. Grouping them in
 one structure, in a huge page of its own, took `tier0_initialize` from 82 to 184 million instructions in 60 builds
-(callgrind, baseline x86-64), as LLVM can't tell that one object's members don't overlap.
+(callgrind, baseline x86-64), as LLVM can't tell that one object's members don't overlap. In the checker's unit, whose
+copy the C driver uses, those tables, the window and vector tables and the Zen 5 cost model's tables are baked into the
+executable (`baked.h`, #590), with `tier0_initialized` true, so a compile doesn't run `tier0_initialize` at all.
 Expansion is copy and patch:
 
 1. one load of the line;

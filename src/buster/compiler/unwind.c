@@ -33,6 +33,8 @@
 // The encodings are format facts from DWARF call-frame instructions and the AMD64 .eh_frame convention. These
 // templates and both writers are original; no external implementation is included.
 
+#include "baked.h"
+
 #define BUSTER_UNWIND_EVENTS 14
 #define BUSTER_UNWIND_SAVED 6
 #define BUSTER_UNWIND_CIE_BYTES 40
@@ -441,11 +443,11 @@ static const uint8_t unwind_cie[BUSTER_UNWIND_CIE_BYTES] = {
 
 // Each shape's FDE: its bytes, which hole (a byte of the two vectors unwind_function_vector permutes) fills each byte
 // that has one, a bit per such byte, and its size.
-static uint8_t unwind_templates[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
-static uint8_t unwind_indices[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
-static uint64_t unwind_patches[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES / 64];
-static uint32_t unwind_sizes[BUSTER_UNWIND_SHAPES];
-static bool unwind_ready;
+static BUSTER_BAKED_UNIT uint8_t unwind_templates[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint8_t unwind_indices[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
+static BUSTER_BAKED_UNIT uint64_t unwind_patches[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES / 64];
+static BUSTER_BAKED_UNIT uint32_t unwind_sizes[BUSTER_UNWIND_SHAPES];
+static BUSTER_BAKED_UNIT bool unwind_ready;
 
 typedef struct UnwindTemplateBuilder UnwindTemplateBuilder;
 struct UnwindTemplateBuilder

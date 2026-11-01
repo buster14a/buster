@@ -840,7 +840,9 @@ struct LaneGroup
     // barrier.
     _Alignas(BUSTER_LANE_LINE_PAIR_BYTES) uint64_t taken;
     // Whether the group's lanes share CPUs (lane_group_shares_cpus), which a lane that waits for its group reads
-    // (lane_wait): with the barrier's lines written every sync, this one is written as the group starts.
+    // (lane_wait): with the barrier's lines written every sync, this one is written as the group starts. A narrowed
+    // group's lanes each copy the session's answer in as they start (lane_narrow), all the same value, so a read and a
+    // write of it there are atomic.
     bool shares_cpus;
 };
 
@@ -1043,8 +1045,9 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
         current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
     }
     const LaneGroup* group = thread_context.lane.group;
+    const bool shares_cpus = group != 0 && __atomic_load_n(&group->shares_cpus, __ATOMIC_RELAXED);
     // A wait that ended while spinning, as at most syncs, doesn't read the clock (rdtsc is 27 µops on Zen 5).
-    if ((group == 0 || !group->shares_cpus) && (current & ~1u) == value)
+    if (!shares_cpus && (current & ~1u) == value)
     {
         const uint64_t begin = __rdtsc();
         const uint64_t budget = lane_wait_ticks(begin);
@@ -1406,10 +1409,11 @@ static bool lane_narrow(uint32_t lanes)
     if (inside)
     {
         // A narrowed group of several lanes shares the CPUs its session's lanes do, which the session worked out as it
-        // started (LaneGroup.shares_cpus).
+        // started (LaneGroup.shares_cpus). Every inside lane copies it, the same value, as the lanes enter the group.
         if (count > 1)
         {
-            thread_context.session->narrowed[depth].shares_cpus = thread_context.session->group.shares_cpus;
+            __atomic_store_n(&thread_context.session->narrowed[depth].shares_cpus,
+                             __atomic_load_n(&thread_context.session->group.shares_cpus, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
         }
         thread_context.lane = (Lane){
             .index = outer.index,
@@ -2246,7 +2250,7 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
             }
             session->count = started ? lanes : 1;
             session->created = created;
-            session->group.shares_cpus = lane_group_shares_cpus(session->count, session->has_cpus);
+            __atomic_store_n(&session->group.shares_cpus, lane_group_shares_cpus(session->count, session->has_cpus), __ATOMIC_RELAXED);
             lane_publish(&session->gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
             for (uint32_t i = 1; !started && i < created; i += 1)
             {
@@ -2301,7 +2305,7 @@ static uint32_t lane_session_settle(void)
         // Whether the lanes that run share the CPUs they run on, whichever group lane 0 is in as it settles: the
         // session's, or a flow's, which lane 0 began before it settled (lane_flow_begin makes it a group of one, as the C
         // driver's and link-foreign's flows do), and whose rounds then narrow from the session's answer.
-        session->group.shares_cpus = lane_group_shares_cpus(run ? session->count : 1, session->has_cpus);
+        __atomic_store_n(&session->group.shares_cpus, lane_group_shares_cpus(run ? session->count : 1, session->has_cpus), __ATOMIC_RELAXED);
         // The lanes that run: with one per core, fewer than the capacity lane 0 started on.
         if (thread_context.lane.group == &session->group)
         {

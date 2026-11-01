@@ -1553,9 +1553,12 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 
 The stack-protection default follows the compiler building Buster:
 `__SSP_ALL__`, `__SSP_STRONG__` or `__SSP__` selects all, strong or ordinary
-protection, and no such macro selects off. The supported build supplies no
-explicit stack-protector flag, so these macros record that driver's configured
-default.
+protection, and no such macro selects off. The supported build passes
+`-fno-stack-protector` to the compiler's own sources (#916), which would hide
+that driver's configured default, so `build.sh` probes it first and passes it
+as `BUSTER_HOST_SSP_DEFAULT`; these macros still record the host driver's
+default. Explicit `-fstack-protector` takes the stronger of that default and
+its own level.
 
 The options that would make clang predefine or compile something buster doesn't
 follow are refused by name: `-m32`, `-mx32`, `-m16`, `-miamcu`, `-mcpu=`, `-mkernel`,

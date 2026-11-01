@@ -22,7 +22,67 @@ struct CheckTest
     uint64_t checks;
     uint64_t failures;
     uint64_t random;
+    // The coded walk's tokens acted at and left to the walk's visit, by class, over the source fixtures' vector path
+    // (CheckInput.expression_acted and expression_left, #1038), which check_test_expression_coverage requires of each class.
+    uint64_t expression_acted[BUSTER_CHECK_EXPRESSION_CODES];
+    uint64_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
 };
+
+// test-checker --part K/N, as test-checker-driver's (CheckDriverPart): the default run's checks are dealt in turn, in
+// program order, to N parts, and this process runs part K's (index K - 1), so that the correctness list runs the
+// command as N commands. A section deals one unit, and check_test_programs (79 s of the command's 171 s here) one per
+// run of up to 12 consecutive programs: dealing each of its 296 on its own added 2.2 s to the checker unit's compile, the
+// build's longest, and 27 runs add none. The sections that share the run's type table or graph arenas, whose state
+// each leaves to the next, aren't dealt: part 1 runs them all, in their order. Each unit, and each of those sections,
+// starts the run's random numbers (CheckTest.random) afresh from the seed and its place among them
+// (check_test_part_random), so that a part draws for each the numbers the whole run draws, whatever ran before it.
+// Without --part, the one part takes every unit.
+typedef struct CheckTestPart CheckTestPart;
+struct CheckTestPart
+{
+    uint32_t index;
+    uint32_t count;
+    // The units dealt so far, and of them this part's.
+    uint32_t dealt;
+    uint32_t taken;
+    // The sections that share the run's state passed so far, which part 1 runs.
+    uint32_t shared;
+    // The run's seed, and the test whose numbers each unit starts afresh (none outside run_checker_tests' default run).
+    uint64_t seed;
+    CheckTest* test;
+};
+
+static CheckTestPart check_test_part = { .index = 0, .count = 1 };
+
+// The numbers a unit or a shared section starts from: the seed and its place mixed by splitmix64's finalizer.
+static void check_test_part_random(uint64_t place)
+{
+    if (check_test_part.test != 0)
+    {
+        uint64_t mixed = check_test_part.seed + (place + 1) * UINT64_C(0x9e3779b97f4a7c15);
+        mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+        mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94d049bb133111eb);
+        check_test_part.test->random = mixed ^ (mixed >> 31);
+    }
+}
+
+// Whether this part runs the next unit, which it deals.
+static bool check_test_takes(void)
+{
+    const bool taken = check_test_part.dealt % check_test_part.count == check_test_part.index;
+    check_test_part_random(check_test_part.dealt);
+    check_test_part.dealt += 1;
+    check_test_part.taken += taken;
+    return taken;
+}
+
+// Whether this part runs the next of the sections that share the run's type table or graph arenas: part 1 runs them all.
+static bool check_test_shared(void)
+{
+    check_test_part_random((UINT64_C(1) << 32) | check_test_part.shared);
+    check_test_part.shared += 1;
+    return check_test_part.index == 0;
+}
 
 typedef struct CheckTestTypes CheckTestTypes;
 struct CheckTestTypes
@@ -2150,6 +2210,62 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
     arena_pop_to(scratch, mark);
 }
 
+// After every section of a full run: the coded walk (#1038) must have acted by each class's own action somewhere in the
+// source fixtures, and left a token of each class whose action declines valid code to the walk's visit; never acted
+// by CHECK_INPUT_CODE_SCALAR's, nor left a list's, nor met a DROP's (whose tokens its compaction leaves out). Prints
+// each class's counts, among them the tokens no class's action takes.
+static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* test)
+{
+    static const char* const names[BUSTER_CHECK_EXPRESSION_CODES] = {
+        [CHECK_INPUT_CODE_SCALAR] = "scalar",
+        [CHECK_INPUT_CODE_LIST] = "list",
+        [CHECK_INPUT_CODE_DROP] = "drop",
+        [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
+        [CHECK_INPUT_CODE_LITERAL] = "literal",
+        [CHECK_INPUT_CODE_PREFIX] = "prefix",
+        [CHECK_INPUT_CODE_BINARY] = "binary",
+        [CHECK_INPUT_CODE_SEPARATOR] = "separator",
+        [CHECK_INPUT_CODE_GROUP] = "group",
+        [CHECK_INPUT_CODE_CAST] = "cast",
+        [CHECK_INPUT_CODE_TERNARY] = "ternary",
+        [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
+        [CHECK_INPUT_CODE_MEMBER] = "member",
+        [CHECK_INPUT_CODE_POSTFIX] = "postfix",
+        [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
+        [CHECK_INPUT_CODE_CONDITION] = "condition",
+        [CHECK_INPUT_CODE_CALL] = "call",
+    };
+    printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
+    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+    {
+        const bool named = names[code] != NULL;
+        if (named)
+        {
+            printf(" %s %" PRIu64 "/%" PRIu64, names[code], test->expression_acted[code], test->expression_left[code]);
+        }
+        // Only the classes the enum names occur.
+        const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
+        // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
+        // identifiers, a function's name, a label's address, sizeof or alignof, an initializer's assignment or
+        // a builtin, a statement expression's terminators, and builtins', intrinsics' and K&R calls. The others' actions
+        // leave a token only where a child has no value, which no unit the coded walk takes has (their guard keeps the
+        // walk's refusal), and a list's takes every token; DROP's tokens never reach an action.
+        const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
+                              code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_TERMINATOR || code == CHECK_INPUT_CODE_CALL;
+        const bool expected = !named                            ? !counted
+                              : code == CHECK_INPUT_CODE_SCALAR ? test->expression_acted[code] == 0
+                              : code == CHECK_INPUT_CODE_DROP   ? !counted
+                              : code == CHECK_INPUT_CODE_LIST   ? test->expression_acted[code] != 0 && test->expression_left[code] == 0
+                                                                : test->expression_acted[code] != 0 && (!declines || test->expression_left[code] != 0);
+        char message[192];
+        snprintf(message, sizeof(message), "the coded walk's class %u (%s) acted at %" PRIu64 " tokens and left %" PRIu64 " to the walk's visit", code,
+                 named ? names[code] : "unnamed", test->expression_acted[code], test->expression_left[code]);
+        check_test_expect(test, expected, message);
+    }
+    printf("\n");
+    check_test_expect(test, test->expression_left[CHECK_INPUT_CODE_SCALAR] != 0, "the coded walk leaves the scalar class's tokens to the walk's visit");
+}
+
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
 {
     static InternTable identifiers;
@@ -2228,6 +2344,11 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
             }
+            for (uint32_t code = 0; p == 1 && code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+            {
+                test->expression_acted[code] += input[p].expression_acted[code];
+                test->expression_left[code] += input[p].expression_left[code];
+            }
             char resource_message[256];
             snprintf(resource_message, sizeof(resource_message), "%s: %s source adapter exhausted fixture resources", fixture->name, p == 0 ? "scalar" : "vector");
             check_test_expect(test, !input[p].resource, resource_message);
@@ -2241,6 +2362,15 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                          fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
                 const bool visits = input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits;
                 check_test_expect(test, visits, resource_message);
+                // The coded walk acts by class (#1038) at tokens of every unit whose features it takes, and the scalar walk at none.
+                const uint32_t classed = check_input_expression_classed(&input[1]);
+                const uint32_t scalar_counted = check_input_expression_classed(&input[0]) + check_input_expression_declined(&input[0]) +
+                                                input[0].expression_left[CHECK_INPUT_CODE_SCALAR];
+                snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
+                         fixture->name, classed, input[1].expression_visits, scalar_counted);
+                const bool coded = input[1].overload_heads != NULL || input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
+                                   (classed != 0 && classed <= input[1].expression_visits);
+                check_test_expect(test, coded && scalar_counted == 0, resource_message);
             }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;
@@ -5811,13 +5941,29 @@ static int run_checker_tests(int argc, char** argv)
             clang = argv[++i];
             options = *clang != 0;
         }
+        else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc)
+        {
+            unsigned index = 0;
+            unsigned count = 0;
+            int used = 0;
+            const char* text = argv[++i];
+            options = sscanf(text, "%u/%u%n", &index, &count, &used) == 2 && text[used] == 0 && index >= 1 && index <= count && count <= 64;
+            check_test_part = (CheckTestPart){ .index = options ? index - 1 : 0, .count = options ? count : 1 };
+        }
         else
         {
             options = false;
         }
     }
+    // Each unit of the default run starts its numbers afresh from the seed (check_test_takes).
+    check_test_part.seed = test.random;
+    check_test_part.test = &test;
+    // The selections run their own checks whole: --part deals the default run's.
+    options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
+                                                           program_bits || program_align || program_float_constants || program_overloads ||
+                                                           program_library || embed_initializers || sizeof_only));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5886,127 +6032,455 @@ static int run_checker_tests(int argc, char** argv)
         }
         else if (initialized)
         {
-            check_test_action_fixtures(&test, &types.table);
-            check_test_action_constraints(&test, &types.table);
-            check_test_action_regressions(&test, &types.table);
-            check_test_update_actions(&test, &types.table);
-            check_test_integer_float_rounding(&test, &types.table);
-            check_test_action_oracles(&test, clang);
-            check_test_actions_batch(&test, &types.table);
-            check_test_warning_events(&test);
-            check_test_const_values(&test);
-            check_test_warning_deferred(&test);
-            check_test_warning_set(&test);
-            check_test_warning_policy(&test);
-            check_test_warning_render(&test);
-            check_test_warning_reader(&test);
-            check_test_warning_graph(&test);
-            check_test_warning_initializers(&test);
-            check_test_warning_undefined(&test);
-            check_test_const_sources(&test, clang);
-            check_test_const_alias_sources(&test, clang);
-            check_test_const_programs(&test, clang);
+            if (check_test_shared())
+            {
+                check_test_action_fixtures(&test, &types.table);
+            }
+            if (check_test_shared())
+            {
+                check_test_action_constraints(&test, &types.table);
+            }
+            if (check_test_shared())
+            {
+                check_test_action_regressions(&test, &types.table);
+            }
+            if (check_test_shared())
+            {
+                check_test_update_actions(&test, &types.table);
+            }
+            if (check_test_shared())
+            {
+                check_test_integer_float_rounding(&test, &types.table);
+            }
+            if (check_test_takes())
+            {
+                check_test_action_oracles(&test, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_actions_batch(&test, &types.table);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_events(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_const_values(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_deferred(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_set(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_policy(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_render(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_reader(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_graph(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_initializers(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_undefined(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_const_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_const_alias_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_const_programs(&test, clang);
+            }
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
-            check_test_literals(&test, &scratch);
-            check_test_literal_warnings(&test, &scratch);
-            check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
-            check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
-            check_test_graph_recorded(&test, &types.table, &storage, &output, &scratch);
-            check_test_graph_limits(&test, &types.table, &storage, &output, &scratch);
-            check_test_graph_type_order(&test, &storage, &output, &scratch);
-            check_test_graph_arguments(&test, &types.table, &storage, &output, &scratch);
-            check_test_graph_guarded(&test, &types.table, &output, &scratch);
-            check_test_graph_regressions(&test, &types.table, &storage, &output, &scratch);
+            if (check_test_shared())
+            {
+                check_test_literals(&test, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_literal_warnings(&test, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_recorded(&test, &types.table, &storage, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_limits(&test, &types.table, &storage, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_type_order(&test, &storage, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_arguments(&test, &types.table, &storage, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_guarded(&test, &types.table, &output, &scratch);
+            }
+            if (check_test_shared())
+            {
+                check_test_graph_regressions(&test, &types.table, &storage, &output, &scratch);
+            }
             arena_release(&scratch);
             arena_release(&output);
             arena_release(&storage);
-            check_test_sources(&test, clang);
-            check_test_typeof_compounds(&test, clang);
-            check_test_constraints(&test, clang);
-            check_test_initializer_nesting(&test, clang);
-            check_test_member_scaling(&test, clang);
-            check_test_source_extensions(&test, clang);
-            check_test_record_names(&test);
-            check_test_overloads(&test, clang);
-            check_test_overload_sources(&test, clang);
-            check_test_overload_addresses(&test, clang);
-            check_test_function_abis(&test, clang);
-            check_test_constant_sources(&test, clang);
-            check_test_generic_index(&test);
-            check_test_generic_sources(&test, clang);
-            check_test_enum_sources(&test, clang);
-            check_test_vla_sources(&test, clang);
-            check_test_type_capacity(&test);
-            check_test_stream_columns(&test);
-            check_test_fresh_output(&test);
-            check_test_target_options(&test);
-            check_test_bindings(&test);
-            check_test_builtin_graph(&test, &types.table, clang);
-            check_test_builtin_capacity(&test);
-            check_test_input_scans(&test);
-            check_test_selection_positions(&test);
-            check_test_asm_label_kernels(&test);
-            check_test_expression_commas(&test);
-            check_test_warning_ranges(&test);
-            check_test_selection_roots(&test);
-            check_test_varargs_graph(&test, &types.table);
-            check_test_special_graph(&test, &types.table, clang);
-            check_test_builtin_vector_graph(&test, &types.table, clang);
-            check_test_x86_graph(&test, &types.table, clang);
-            check_test_environments(&test);
-            check_test_body_binding_guards(&test);
-            check_test_body_binding_exit_points(&test);
-            check_test_data(&test, &types.table, clang);
-            check_test_actions_extra(&test, &types.table, clang);
-            check_test_transparent_calls(&test, &types.table, clang);
-            check_test_transparent_types(&test, clang);
-            check_test_complex(&test, &types.table, clang);
-            check_test_integer_extensions(&test, clang);
-            check_test_sizeof_scaling(&test);
-            check_test_integer_policy(&test, &types.table, clang);
-            check_test_fp_actions(&test, &types.table);
-            check_test_query_runtime(&test, &types.table, clang);
-            check_test_vectors(&test, &types.table, clang);
-            check_test_vector_graph(&test, &types.table);
-            check_test_function_names(&test, clang);
-            check_test_pragmas(&test, clang);
-            check_test_diagnostic_policy(&test);
-            check_test_lazy(&test);
-            check_test_intrinsic_inputs(&test, clang);
-            check_test_x86_diagnostics(&test, &types.table, clang);
-            check_test_initializers(&test, clang);
-            check_test_embed_initializers(&test, clang);
-            check_test_data_sources(&test);
-            check_test_attributes(&test, clang);
-            check_test_attribute_sources(&test, clang);
+            if (check_test_takes())
+            {
+                check_test_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_typeof_compounds(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_constraints(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_initializer_nesting(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_member_scaling(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_source_extensions(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_record_names(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_overloads(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_overload_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_overload_addresses(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_function_abis(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_constant_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_generic_index(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_generic_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_enum_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_vla_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_type_capacity(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_stream_columns(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_fresh_output(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_target_options(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_bindings(&test);
+            }
+            if (check_test_shared())
+            {
+                check_test_builtin_graph(&test, &types.table, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_builtin_capacity(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_input_scans(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_selection_positions(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_asm_label_kernels(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_expression_commas(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_warning_ranges(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_selection_roots(&test);
+            }
+            if (check_test_shared())
+            {
+                check_test_varargs_graph(&test, &types.table);
+            }
+            if (check_test_shared())
+            {
+                check_test_special_graph(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_builtin_vector_graph(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_x86_graph(&test, &types.table, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_environments(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_body_binding_guards(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_body_binding_exit_points(&test);
+            }
+            if (check_test_shared())
+            {
+                check_test_data(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_actions_extra(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_transparent_calls(&test, &types.table, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_transparent_types(&test, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_complex(&test, &types.table, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_integer_extensions(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_sizeof_scaling(&test);
+            }
+            if (check_test_shared())
+            {
+                check_test_integer_policy(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_fp_actions(&test, &types.table);
+            }
+            if (check_test_shared())
+            {
+                check_test_query_runtime(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_vectors(&test, &types.table, clang);
+            }
+            if (check_test_shared())
+            {
+                check_test_vector_graph(&test, &types.table);
+            }
+            if (check_test_takes())
+            {
+                check_test_function_names(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_pragmas(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_diagnostic_policy(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_lazy(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_intrinsic_inputs(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_x86_diagnostics(&test, &types.table, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_initializers(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_embed_initializers(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_data_sources(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_attributes(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_attribute_sources(&test, clang);
+            }
+            // Deals its programs itself.
             check_test_programs(&test, clang);
-            check_test_cleanups(&test, clang);
-            check_test_musttails(&test, clang);
-            check_test_bits(&test, clang);
-            check_test_align(&test, clang);
-            check_test_program_initializers(&test, clang);
-            check_test_library(&test, clang);
-            check_test_classify(&test, clang);
-            check_test_float_constants(&test, clang);
-            check_test_prefixes(&test, clang);
-            check_test_repairs(&test, clang);
-            check_test_mutations(&test, clang);
-            check_test_source_benchmark(&test);
-            check_test_lowering_source_benchmark(&test);
-            check_test_backend_source_benchmark(&test);
-            check_test_check_lanes_benchmark(&test);
-            check_test_corpus_symbol_reasons(&test, clang);
+            if (check_test_takes())
+            {
+                check_test_cleanups(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_musttails(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_bits(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_align(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_program_initializers(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_library(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_classify(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_float_constants(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_prefixes(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_repairs(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_mutations(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_source_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_lowering_source_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_backend_source_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_check_lanes_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_corpus_symbol_reasons(&test, clang);
+            }
+            // The coded walk's classes (#1038) need every source fixture's counts: a part has only its own.
+            if (check_test_part.count == 1)
+            {
+                check_test_expression_coverage(&test);
+            }
         }
         // The program harness's build directory, which the sections' programs share: removed after the last of them,
         // whichever sections ran.
         check_test_program_build_release();
         check_test_types_close(&types);
     }
+    check_test_expect(&test, check_test_part.count == 1 || check_test_part.taken != 0, "the checker test's part runs some of its checks");
     oracle_cache_report(oracle, "test-checker");
+    if (check_test_part.count > 1)
+    {
+        printf("test-checker: part %u of %u: %u of the %u units dealt\n", check_test_part.index + 1, check_test_part.count, check_test_part.taken,
+               check_test_part.dealt);
+    }
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;
+    check_test_part.test = 0;
     oracle_epoch_end(epoch);
     return returned;
 }
