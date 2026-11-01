@@ -7,7 +7,8 @@
 // p2 arrives in rdx, where it lives past both divisions, and is itself the second's dividend. The CFG consumer takes a
 // loop's digit sum, s += n op c, n = n op' c while n != 0, then s + p1, its phis' values wherever the allocation puts
 // them. Each runs at both widths, by both paths, with constants rematerialized and not, and with every register and
-// with the parameters' and rax alone, against an oracle of C's own division that reads only the inputs.
+// with the parameters' and rax alone, against an oracle of C's own division that reads only the inputs, in a bounded
+// child (tier1_divide_tests).
 
 #define BUSTER_TIER1_DIVIDE_SAMPLES 40u
 
@@ -239,7 +240,7 @@ static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase*
     return saved;
 }
 
-static void tier1_divide_tests(Tier1EmitTest* test)
+static void tier1_divide_cases(Tier1EmitTest* test)
 {
     // Unsigned and signed divisors and remainders: a multiplier of N bits and of N + 1 (7), an even divisor's pre-shift
     // (10 and 12), negative ones, and ends past an imm32 (whose remainders' multiplications take a register).
@@ -277,4 +278,50 @@ static void tier1_divide_tests(Tier1EmitTest* test)
         }
     }
     tier1_emit_test_expect(test, straight_saves != 0 && loop_saves != 0, "both consumers save values that live past a reciprocal's fixed registers");
+}
+
+// The cases in a bounded child, as tier1_call_tests runs its own: a wrong quotient can keep the loop's dividend from ever
+// reaching zero (-1 / 7 as -1), which must fail this suite, not hang it. The counter page survives a normal exit.
+static void tier1_divide_tests(Tier1EmitTest* test)
+{
+    uint64_t* report = mmap(0, 3 * sizeof(uint64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    const pid_t child = report != MAP_FAILED ? fork() : -1;
+    if (child == 0)
+    {
+        signal(SIGALRM, SIG_DFL);
+        alarm(60);
+        const uint64_t checks = test->checks;
+        const uint64_t failures = test->failures;
+        tier1_divide_cases(test);
+        report[0] = test->checks - checks;
+        report[1] = test->failures - failures;
+        report[2] = UINT64_C(0xd1d1de0f0e5ec0de);
+        fflush(0);
+        _exit(report[1] != 0);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    if (child > 0)
+    {
+        do
+        {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+    }
+    const bool finished = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) <= 1 && report[2] == UINT64_C(0xd1d1de0f0e5ec0de);
+    tier1_emit_test_expect(test, finished, "bounded division child completes without signal or timeout");
+    if (finished)
+    {
+        test->checks += report[0];
+        test->failures += report[1];
+        tier1_emit_test_expect(test, WEXITSTATUS(status) == (report[1] != 0), "division child status agrees with shared test counters");
+    }
+    else
+    {
+        fprintf(stderr, "tier1 division child failed (status=%d)\n", status);
+    }
+    if (report != MAP_FAILED)
+    {
+        munmap(report, 3 * sizeof(uint64_t));
+    }
 }
