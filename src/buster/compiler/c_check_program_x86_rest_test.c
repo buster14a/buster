@@ -378,6 +378,49 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             0,
             true,
         },
+        {
+            // AVX-512's arithmetic by the rounding its last argument asks for (#148): the 64-byte vectors' sums, differences,
+            // products, quotients and square roots, the scalar ones under masks of some and all, the conversions of integers
+            // to floats and of floats to doubles under masks, the scalar conversions to integers and from them, and the FMAs merged into a,
+            // zeroed and merged into c, each at the current mode (4) and at each embedded rounding (8 to 11; the widening
+            // conversion's exceptions' suppression, 8), of inexact values.
+            "x86-rest-rounded-arithmetic",
+            "#define R5(F,...) F(4,__VA_ARGS__)F(8,__VA_ARGS__)F(9,__VA_ARGS__)F(10,__VA_ARGS__)F(11,__VA_ARGS__)\n"
+            "#define A2(r,N,a,b) __builtin_ia32_##N(a,b,r),\n"
+            "#define A1(r,N,a) __builtin_ia32_##N(a,r),\n"
+            "#define A4(r,N,a,b,c,k) __builtin_ia32_##N(a,b,c,k,r),\n"
+            "#define A3(r,N,a,b,k) __builtin_ia32_##N(a,b,k,r),\n"
+            "#define B(N,T,a,b) {T r[]={R5(A2,N,a,b)};FOLD(r);}\n"
+            "#define U(N,T,a) {T r[]={R5(A1,N,a)};FOLD(r);}\n"
+            "#define S(N,T,a,b,w,k) {T r[]={R5(A4,N,a,b,w,k)};FOLD(r);}\n"
+            "#define C(N,T,a,w,k) {T r[]={R5(A3,N,a,w,k)};FOLD(r);}\n"
+            "#define I(N,T,a) {T r[]={R5(A1,N,a)};FOLD(r);}\n"
+            "#define F(N,T,a,b,c,k) {T r[]={R5(A4,N,a,b,c,k)};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v16sf a16,b16,c16;v8df p8,q8,s8;v4sf a4,b4,w4;v2df p2,q2,w2;v16si i16;v8di l8;v8sf f8;\n"
+            "for(int i=0;i<16;i++){a16[i]=(float)(n*7+i)/3.0f;b16[i]=(float)(i*13-n)/7.0f;c16[i]=(float)(n+i*i)/11.0f;i16[i]=(n+i)*0x3fffff7+i;"
+            "if(i<8){p8[i]=(double)(n*5+i)/3.0;q8[i]=(double)(i*11-n)/7.0;s8[i]=(double)(n-i*3)/13.0;l8[i]=(long long)(n+i)*0x1fffffffffff3ll;"
+            "f8[i]=(float)(n*3+i)/9.0f;}if(i<4){a4[i]=(float)(n+i)/3.0f;b4[i]=(float)(i-n)/7.0f;w4[i]=(float)i;}if(i<2){p2[i]=(double)(n+i)/3.0;"
+            "q2[i]=(double)(i-n*3)/7.0;w2[i]=(double)i+0.5;}}\n"
+            "unsigned long long m=mask(n);unsigned char k8=(unsigned char)m;unsigned short k16=(unsigned short)(m>>8);\n"
+            "B(addpd512,v8df,p8,q8)B(addps512,v16sf,a16,b16)B(subpd512,v8df,p8,q8)B(subps512,v16sf,a16,b16)B(mulpd512,v8df,p8,q8)"
+            "B(mulps512,v16sf,a16,b16)B(divpd512,v8df,p8,q8)B(divps512,v16sf,a16,b16)U(sqrtpd512,v8df,p8)U(sqrtps512,v16sf,a16)\n"
+            "S(addsd_round_mask,v2df,p2,q2,w2,k8)S(addss_round_mask,v4sf,a4,b4,w4,k8)S(subsd_round_mask,v2df,p2,q2,w2,0xff)"
+            "S(subss_round_mask,v4sf,a4,b4,w4,0xff)S(mulsd_round_mask,v2df,p2,q2,w2,k8)S(mulss_round_mask,v4sf,a4,b4,w4,k8)"
+            "S(divsd_round_mask,v2df,p2,q2,w2,0xff)S(divss_round_mask,v4sf,a4,b4,w4,k8)S(divss_round_mask,v4sf,a4,b4,w4,0)\n"
+            "C(cvtdq2ps512_mask,v16sf,i16,a16,k16)C(cvtdq2ps512_mask,v16sf,i16,a16,0xffff)C(cvtudq2ps512_mask,v16sf,i16,b16,k16)"
+            "C(cvtqq2pd512_mask,v8df,l8,p8,k8)C(cvtqq2pd512_mask,v8df,l8,p8,0xff)C(cvtuqq2pd512_mask,v8df,l8,q8,k8)\n"
+            "{v8df r[]={__builtin_ia32_cvtps2pd512_mask(f8,p8,k8,4),__builtin_ia32_cvtps2pd512_mask(f8,q8,0xff,8)};FOLD(r);}\n"
+            "I(vcvtsd2si32,int,p2)I(vcvtsd2si64,long long,q2)I(vcvtss2si32,int,a4)I(vcvtss2si64,long long,b4)\n"
+            "F(vfmaddpd512_mask,v8df,p8,q8,s8,k8)F(vfmaddpd512_maskz,v8df,p8,q8,s8,k8)F(vfmaddpd512_mask3,v8df,p8,q8,s8,k8)"
+            "F(vfmsubpd512_mask3,v8df,p8,q8,s8,k8)F(vfmaddps512_mask,v16sf,a16,b16,c16,k16)F(vfmaddps512_maskz,v16sf,a16,b16,c16,0xffff)"
+            "F(vfmaddps512_mask3,v16sf,a16,b16,c16,k16)F(vfmsubps512_mask3,v16sf,a16,b16,c16,k16)\n"
+            "long long ll=(long long)n*0x1fffffffffff7ll+3;unsigned long long ul=0x8000000000000001ull*(unsigned)(n|1)+0xfff;int ii=n*0x3fffff7+5;"
+            "unsigned ui=0x80000001u*(unsigned)n+0x1ff;B(cvtsi2sd64,v2df,p2,ll)B(cvtsi2ss32,v4sf,a4,ii)B(cvtsi2ss64,v4sf,a4,ll)"
+            "B(cvtusi2sd64,v2df,q2,ul)B(cvtusi2ss32,v4sf,b4,ui)B(cvtusi2ss64,v4sf,b4,ul)\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

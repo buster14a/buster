@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 450 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 491 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -484,6 +484,47 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_vpshrdw128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 877 },
     { "__builtin_ia32_vpshrdw256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 878 },
     { "__builtin_ia32_vpshrdw512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 879 },
+    { "__builtin_ia32_addpd512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 176 },
+    { "__builtin_ia32_addps512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 177 },
+    { "__builtin_ia32_addsd_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 235 },
+    { "__builtin_ia32_addss_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 234 },
+    { "__builtin_ia32_cvtdq2ps512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 3856, 197 },
+    { "__builtin_ia32_cvtps2pd512_mask", CHECK_BUILTIN_X86_CONSTRAINT_SAE, 3, 0, 0, 4368, 69 },
+    { "__builtin_ia32_cvtqq2pd512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 3856, 210 },
+    { "__builtin_ia32_cvtudq2ps512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 3856, 198 },
+    { "__builtin_ia32_cvtuqq2pd512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 3856, 212 },
+    { "__builtin_ia32_divpd512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 178 },
+    { "__builtin_ia32_divps512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 179 },
+    { "__builtin_ia32_divsd_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 238 },
+    { "__builtin_ia32_divss_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 237 },
+    { "__builtin_ia32_mulpd512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 180 },
+    { "__builtin_ia32_mulps512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 181 },
+    { "__builtin_ia32_mulsd_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 241 },
+    { "__builtin_ia32_mulss_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 240 },
+    { "__builtin_ia32_sqrtpd512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 1, 0, 0, 3856, 166 },
+    { "__builtin_ia32_sqrtps512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 1, 0, 0, 3856, 167 },
+    { "__builtin_ia32_subpd512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 182 },
+    { "__builtin_ia32_subps512", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 183 },
+    { "__builtin_ia32_subsd_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 244 },
+    { "__builtin_ia32_subss_round_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 243 },
+    { "__builtin_ia32_vcvtsd2si32", CHECK_BUILTIN_X86_CONSTRAINT_RC, 1, 0, 0, 3856, 155 },
+    { "__builtin_ia32_vcvtsd2si64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 1, 0, 0, 3856, 154 },
+    { "__builtin_ia32_vcvtss2si32", CHECK_BUILTIN_X86_CONSTRAINT_RC, 1, 0, 0, 3856, 158 },
+    { "__builtin_ia32_vcvtss2si64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 1, 0, 0, 3856, 159 },
+    { "__builtin_ia32_vfmaddpd512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 266 },
+    { "__builtin_ia32_vfmaddpd512_mask3", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 268 },
+    { "__builtin_ia32_vfmaddpd512_maskz", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 267 },
+    { "__builtin_ia32_vfmaddps512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 270 },
+    { "__builtin_ia32_vfmaddps512_mask3", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 272 },
+    { "__builtin_ia32_vfmaddps512_maskz", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 271 },
+    { "__builtin_ia32_vfmsubpd512_mask3", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 269 },
+    { "__builtin_ia32_vfmsubps512_mask3", CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 3856, 273 },
+    { "__builtin_ia32_cvtsi2sd64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 184 },
+    { "__builtin_ia32_cvtsi2ss32", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 185 },
+    { "__builtin_ia32_cvtsi2ss64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 186 },
+    { "__builtin_ia32_cvtusi2sd64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 187 },
+    { "__builtin_ia32_cvtusi2ss32", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 188 },
+    { "__builtin_ia32_cvtusi2ss64", CHECK_BUILTIN_X86_CONSTRAINT_RC, 2, 0, 0, 3856, 189 },
 };
 
 static bool check_builtin_x86_test_expect(CheckBuiltinX86Test* test, bool condition, const char* description, uint32_t item)
@@ -548,7 +589,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 450, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 491, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];

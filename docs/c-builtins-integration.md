@@ -1115,10 +1115,10 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 450 audited SemaX86 constraint facts for 422
+`c_check_builtin_x86.c` adds 491 audited SemaX86 constraint facts for 463
 affected names in the frozen 1,492-name own-main target-builtin scope and the
-supplementary scope: 87
-rounding sets, 90 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+supplementary scope: 127
+rounding sets, 91 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
 error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
@@ -1251,6 +1251,21 @@ the existing families or of new ones:
   one's predicate is the immediate's whole byte, as clang's code passes it
   (`vcomiss`'s and `vcomisd`'s its low 5 bits, as `vcomish`'s, all the
   instruction reads), with the exceptions' suppression it asks for.
+- AVX-512's arithmetic by a rounding control: the 64-byte vectors' sums,
+  differences, products, quotients and square roots (`addpd512` to `divps512`,
+  `sqrtpd512`, `sqrtps512`), the scalar ones into w under a mask
+  (`addsd_round_mask` to `divss_round_mask`), the conversions of integers to
+  floats and of floats to doubles under a mask (`cvtdq2ps512_mask`,
+  `cvtudq2ps512_mask`, `cvtqq2pd512_mask`, `cvtuqq2pd512_mask`,
+  `cvtps2pd512_mask`, which takes the exceptions' suppression), the scalar
+  conversions to integers (`vcvtsd2si32` to `vcvtss2si64`) and from them into a
+  vector's low element (`cvtsi2sd64` to `cvtusi2ss64`, a family of their own,
+  `CHECK_X86_LOWER_INT_CONVERT`), and the 64-byte FMAs merged into a, zeroed or
+  merged into c (`vfmaddpd512_mask` to `vfmsubps512_mask3`). The current mode
+  (4) takes the plain form; 8 to 11 take the embedded rounding's form with its
+  direction. `x86_semantics.c` gained the effects of the forms these reach that
+  it lacked: VSUBSS, VSUBSD, VDIVSS and VDIVSD's EVEX forms, the 231 FMAs' and
+  FMSUBs' 64-byte forms and the EVEX integer-to-float conversions.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

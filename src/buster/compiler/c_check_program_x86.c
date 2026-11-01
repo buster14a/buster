@@ -58,6 +58,9 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_MASK_VECTOR,
     // (vector a): the form's integer of a's low element, a truncating conversion (VCVTTSD2SI, VCVTTSS2SI).
     CHECK_X86_LOWER_CONVERT,
+    // (vector a, T b, int rounding): b, an integer of `other` bytes (signed, or unsigned with `is_signed` false), converted
+    // into a's low element by its rounding, a's others kept (VCVTSI2SD, VCVTUSI2SS).
+    CHECK_X86_LOWER_INT_CONVERT,
     // (vector a, int index, vector w, mask m): the form's lane of a at the index, an immediate, merged into w under m
     // (VEXTRACTI32X4, VEXTRACTI64X4), of `other` bytes.
     CHECK_X86_LOWER_EXTRACT_LANE,
@@ -905,6 +908,17 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             row->operand_bytes[0] = rule->bytes;
             row->result_class = rule->other == 8 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
             row->result_bytes = 0;
+        }
+        else if (rule->family == CHECK_X86_LOWER_INT_CONVERT)
+        {
+            row->records[0] = check_x86_lower_record(rule->form, v0, v0, BUSTER_TIER0_ROLE_INTEGER(1));
+            check_x86_lower_round(rule, round, &row->records[0]);
+            row->record_count = 1;
+            row->operand_count = 2;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = rule->other == 8 ? (rule->is_signed ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64) :
+                                                         (rule->is_signed ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U32);
         }
         else if (rule->family == CHECK_X86_LOWER_EXTRACT_LANE || rule->family == CHECK_X86_LOWER_TRUNCATE)
         {
