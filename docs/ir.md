@@ -37,10 +37,12 @@ no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
 with `IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c` checks actual C
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
-transactional refusal by the still-scalar SSA promoter, not successful
-promotion; ordinary corpus mode continues to require promotion. The shared
+the SSA promoter's transactional refusal of a function with vectors, not
+successful promotion, and promotion of one whose only SIMD values are masks,
+which the promoter takes (#179); ordinary corpus mode continues to require
+promotion. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
 vector/mask calls remain unsupported. Native selection of vectors is
