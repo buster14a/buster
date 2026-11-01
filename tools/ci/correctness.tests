@@ -55,6 +55,26 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-files --flat src
 == Test the link representation [8 CPUs]
 ./build/compiler test-link
+== Compile c-testsuite's programs as the units of one command [8 CPUs]
+# #152: every program at once with -c by 8 lanes, each one's object and diagnostics its own alone, in order.
+# The heading is the parallel runner's scheduling budget, not an affinity mask: the command's children each take up
+# to eight lanes, so declaring two CPUs let the runner co-schedule other two-CPU commands on the same cores.
+./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
+== Test the driver's commands of several source files [8 CPUs]
+# #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
+# that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
+# and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
+# lanes that don't start.
+# Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
+./build/compiler test-check-units
+== Test mixed-tier single- and multi-file determinism [8 CPUs]
+# #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
+# Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
+# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
+./build/test-driver-multicore ./build/compiler
 == Test c-testsuite's programs end to end [4 CPUs]
 # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
 # the scalar twins, these with the identifiers' ids in another order (#153's --id-order), into the same bytes,
@@ -92,15 +112,6 @@ unset CPATH C_INCLUDE_PATH
 # in its three forms at once (all locals in memory, and each path's SSA), which must agree with each other and with
 # the program's expected output.
 ./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
-== Compile c-testsuite's programs as the units of one command [2 CPUs]
-# #152: every program at once with -c by 8 lanes, each one's object and diagnostics its own alone, in order.
-./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
-== Test the driver's commands of several source files [2 CPUs]
-# #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
-# that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
-# and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
-# lanes that don't start.
-./build/compiler test-check-units
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 ./build/compiler test-unwind --cross-check
 == Test the parser's snippets against clang
@@ -431,7 +442,7 @@ corpus=$BUSTER_CORPUS
 == Test generated-code ISA selection and native records
 ./build/compiler test-x86-target-selection
 == Test binding
-# --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
+# --cross-check also links each bound program's objects with ld.lld and ld.bfd and runs them, and compares what binding
 # found with lld's link of the programs' own objects.
 ./build/compiler test-bind --cross-check
 == Test the corpus oracle's accounting and process failures
