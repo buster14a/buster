@@ -127,16 +127,26 @@ Agent session: [private session](https://provider.example/private/session)
 Model: Provider / exact model identifier
 ```
 
-The session URL must be a **stable, authentication-gated permalink** to the
-actual agent session, not a public transcript or an `anyone with the link`
-share link. The URL text itself will be visible to readers of the public
-GitHub issue or PR; privacy must come from the provider's access controls.
-Do not include credentials, signed access URLs, API tokens, private logs,
-or conversation contents. Record the exact provider and model name/version
-the session reports; do not invent model details or a URL. If the agent
-environment does not expose a suitable private session link, obtain one
-before posting rather than silently omitting attribution or publishing an
-unsafe link.
+Where the provider exposes no shareable session URL, give its session
+identifier and say that no URL is exposed instead:
+
+```text
+---
+Agent session: ses_0123456789abcdef (Provider session ID; no share URL is exposed)
+Model: Provider / exact model identifier
+```
+
+A session URL, where one exists, must be a **stable, authentication-gated
+permalink** to the actual agent session, not a public transcript or an
+`anyone with the link` share link. The URL text itself will be visible to
+readers of the public GitHub issue or PR; privacy must come from the
+provider's access controls. Do not include credentials, signed access URLs,
+API tokens, private logs, or conversation contents. Record the exact
+provider and model name/version the session reports; do not invent model
+details. If the agent environment exposes a session identifier but no
+suitable private session link, post the identifier with a note that no
+share URL is exposed rather than silently omitting attribution or
+publishing an unsafe link.
 
 For posts involving several agent sessions, attribute each session and
 its model when it contributed to that post. After a handoff, new comments,
