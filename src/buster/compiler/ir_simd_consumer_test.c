@@ -9,7 +9,10 @@ static uint64_t ir_simd_native_boundary(void)
 
 // ir_function_has_simd's vector path against its scalar twin and the expected answer: an operation and a type column of
 // every length to 200, each ending at a PROT_NONE page, with no vector or mask in them, then with one at each place (a
-// vector type, and each vector operation on a scalar type, which the scan must take too).
+// vector type, and each vector operation on a scalar type, which the scan must take too). ir_function_has_vectors' two
+// paths the same way: each vector marker a vector, and a mask at each place (#179, each width) SIMD but no vector. Then
+// the metadata the scans read past the columns: a mask's type as a parameter's, a call's argument's and result's and a
+// slot's is no vector, and a vector's in each is one.
 static void ir_simd_scan_test(IrTestTally* tally)
 {
     const long page_result = sysconf(_SC_PAGESIZE);
@@ -36,6 +39,7 @@ static void ir_simd_scan_test(IrTestTally* tally)
         memset(type, IR_I32, count);
         const IrFunction function = { .op = op, .type = type, .instruction_count = count };
         ir_test_expect(tally, !ir_function_has_simd(&function) && !ir_function_has_simd_scalar(&function), "a scalar function's columns hold no vector or mask");
+        ir_test_expect(tally, !ir_function_has_vectors_path(&function, true) && !ir_function_has_vectors_path(&function, false), "a scalar function's columns hold no vector");
         for (uint32_t place = 0; place < count; place += 1)
         {
             for (uint32_t m = 0; m < 4; m += 1)
@@ -43,6 +47,18 @@ static void ir_simd_scan_test(IrTestTally* tally)
                 op[place] = markers[m][0];
                 type[place] = markers[m][1];
                 ir_test_expect(tally, ir_function_has_simd(&function) && ir_function_has_simd_scalar(&function), "a vector type or operation at any place, the tail's last among them");
+                ir_test_expect(tally, ir_function_has_vectors_path(&function, true) && ir_function_has_vectors_path(&function, false),
+                               "a vector type or operation at any place is a vector, by both paths");
+                op[place] = IR_ADD;
+                type[place] = IR_I32;
+            }
+            for (uint32_t w = 0; w < 4; w += 1)
+            {
+                op[place] = IR_NOT;
+                type[place] = (uint8_t)(IR_M8 + w);
+                ir_test_expect(tally, ir_function_has_simd(&function) && ir_function_has_simd_scalar(&function) && !ir_function_has_vectors_path(&function, true) &&
+                                          !ir_function_has_vectors_path(&function, false),
+                               "a mask at any place is SIMD but no vector, by both paths");
                 op[place] = IR_ADD;
                 type[place] = IR_I32;
             }
@@ -53,6 +69,44 @@ static void ir_simd_scan_test(IrTestTally* tally)
         if (columns[k] != MAP_FAILED)
         {
             munmap(columns[k], page * 2);
+        }
+    }
+    // The metadata: each place a type can be outside the columns, a mask's (no vector) and a vector's (one), by both paths.
+    static const uint8_t metadata_types[2] = { IR_M16, IR_V8I32 };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        for (uint32_t where = 0; where < 4; where += 1)
+        {
+            uint8_t op_column[1] = { IR_RET };
+            uint8_t type_column[1] = { IR_VOID };
+            uint8_t parameter_types[2] = { IR_PTR, IR_I32 };
+            uint8_t call_types[2] = { IR_I64, IR_PTR };
+            IrCall calls[1];
+            IrSlot slots[1];
+            memset(calls, 0, sizeof(calls));
+            memset(slots, 0, sizeof(slots));
+            calls[0].result_type = IR_I32;
+            slots[0].type = IR_I64;
+            parameter_types[1] = where == 0 ? metadata_types[t] : parameter_types[1];
+            call_types[1] = where == 1 ? metadata_types[t] : call_types[1];
+            calls[0].result_type = where == 2 ? metadata_types[t] : calls[0].result_type;
+            slots[0].type = where == 3 ? metadata_types[t] : slots[0].type;
+            const IrFunction function = {
+                .op = op_column,
+                .type = type_column,
+                .instruction_count = 1,
+                .parameter_types = parameter_types,
+                .parameter_count = 2,
+                .call_types = call_types,
+                .call_type_count = 2,
+                .calls = calls,
+                .call_count = 1,
+                .slots = slots,
+                .slot_count = 1,
+            };
+            const bool vector = t == 1;
+            ir_test_expect(tally, ir_function_has_vectors_path(&function, true) == vector && ir_function_has_vectors_path(&function, false) == vector,
+                           "a mask's type as a parameter's, a call's argument's or result's or a slot's is no vector, and a vector's is one");
         }
     }
 }
