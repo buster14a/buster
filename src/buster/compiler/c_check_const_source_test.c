@@ -76,6 +76,8 @@ static const CheckSourceFixture check_const_source_fixtures[] =
     {
         .name = "sparse const arrays do not materialize their declared extent",
         .source = "const int a[268435456]={[134217728]=7};enum{E=a[134217728],Z=a[268435455]};_Static_assert(E==7 && Z==0,\"sparse\");\n",
+        // The same extent, a designated element and a read through the zero fill, which clang evaluates in milliseconds.
+        .oracle = "const int a[268435456]={[65536]=7};enum{E=a[65536],Z=a[268435455]};_Static_assert(E==7 && Z==0,\"sparse\");\n",
     },
     {
         .name = "automatic const array retains a source-only address path",
@@ -361,7 +363,8 @@ static void check_test_const_sources(CheckTest* test, const char* clang)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
         pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], check_const_source_fixtures[i].source, strlen(check_const_source_fixtures[i].source));
+        const char* text = check_const_source_fixtures[i].oracle != NULL ? check_const_source_fixtures[i].oracle : check_const_source_fixtures[i].source;
+        ready = parse_test_write(paths[i], text, strlen(text));
     }
     const char* arguments[] = { "-std=gnu17" };
     ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);

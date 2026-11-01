@@ -2114,6 +2114,12 @@ struct CheckSourceFixture
     const TypeCapacity* capacity;
     // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
     double* check_seconds;
+    // The text clang checks in place of `source`, with `source`'s outcome, for a fixture whose own text costs clang
+    // minutes and gigabytes where this checker's cost doesn't grow (null for `source` itself). Clang's constant
+    // evaluator materializes a designated array's elements up to the designator: 134 million values for the sparse
+    // array fixture, 67 s and 48 s of it the kernel's page faults, alone on a 4-CPU VM, where `[65536]` takes 42 ms.
+    // Only the tables whose writers read it set it (check_test_const_sources).
+    const char* oracle;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
