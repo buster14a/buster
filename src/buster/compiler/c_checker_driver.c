@@ -646,8 +646,8 @@ static const char* check_driver_pointer_sign_message(Preprocessor* pp, const Che
     {
         const uint32_t left = stream->graph->operand0[node];
         const uint32_t right = stream->graph->operand1[node];
-        const String8 left_name = left < stream->count ? check_driver_warning_type(pp, types, scratch, stream->values[left].type) : (String8){ 0 };
-        const String8 right_name = right < stream->count ? check_driver_warning_type(pp, types, scratch, stream->values[right].type) : (String8){ 0 };
+        const String8 left_name = left < stream->count ? check_driver_warning_type(pp, types, scratch, check_stream_type(stream, left)) : (String8){ 0 };
+        const String8 right_name = right < stream->count ? check_driver_warning_type(pp, types, scratch, check_stream_type(stream, right)) : (String8){ 0 };
         if (left_name.length != 0 && right_name.length != 0)
         {
             result = check_warning_text(scratch, "assigning to '%.*s' from '%.*s' converts between pointers to integer types with different sign",
