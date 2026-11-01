@@ -292,12 +292,14 @@ is the form's own without a memory operand, as `build_mode_template` makes it.
 The other modes' tables build all three, since their overrides interact with
 other positions (a `67`, REX2's payload, the decorations' override).
 `test-x86-encoder` and `test-x86-target-selection` compare every entry and its
-marked copy with `build_mode_template`'s. Each entry's marked copy is written as
-the entry is completed, rather than by one 1.6 MB copy afterwards.
+marked copy with `build_mode_template`'s. Each entry's marked copy is written in
+the same per-entry pass that writes its halves the other way around, rather
+than by one 1.6 MB copy afterwards.
 
-Before building a table, `x86_templates_prepare` asks for transparent huge
-pages (`MADV_HUGEPAGE`) and commits the ranges the build writes
-(`MADV_POPULATE_WRITE`), one call each. The templates and their marked copies
+Before building a table, `x86_templates_prepare` commits the ranges the build
+writes (`MADV_POPULATE_WRITE`), one call per range, both ends rounded out to
+pages. For `x86_encode`'s table, which every compile builds, it first asks for
+transparent huge pages (`MADV_HUGEPAGE`). The templates and their marked copies
 are 2 MB apart (`BUSTER_X86_FORM_FIXUP` is 2 MB of entries), so they fall in two
 or three 2 MB pages, depending on where the link places the table.
 - **Which pages.** `x86_templates_huge_pages` picks those the table fills at
@@ -308,9 +310,13 @@ or three 2 MB pages, depending on where the link places the table.
 - **Where.** A huge page's margin on either side keeps those pages in the
   table's own storage. The storage isn't aligned to a huge page, because wild
   0.10, which links CI's builds, refuses alignments past 64 KB.
+- **The other tables.** Tests, the disassembler and the other modes' entry
+  points build the other modes' tables. Those keep their size, without margins
+  or huge pages, because the benchmarks' units have copies of them all.
 - **Faults.** Where huge pages come, that is a fault per huge page, and the
-  rest base pages without a fault each. Where none come (`never`, or none
-  free), all are base pages without a fault each.
+  rest base pages committed in one call per range. Where none come (`never`,
+  or none free), all are base pages committed so. The kernel still counts
+  each such page as a minor fault, but none is taken one at a time.
 - **Why.** On a kernel whose transparent huge pages are only `madvise`d
   (Ubuntu's, Debian's and Fedora's default), `.bss`'s 3.2 MB had faulted in 788
   base pages, half of a small file's compile. The 9700X's kernel uses

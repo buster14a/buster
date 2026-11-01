@@ -886,20 +886,22 @@ What changed:
   both from the form's template and the counts its build kept, and refuses
   where the build would. Every entry is compared with the builder's
   ([the encoder's design](x86-64-encoder.md), "Templates and the canonical
-  slot"). Each entry's marked copy is written as the entry is completed.
-- **The template tables get huge pages.** Before the build, the encoder asks
-  for huge pages (`MADV_HUGEPAGE`) and commits the ranges it writes
-  (`MADV_POPULATE_WRITE`).
+  slot"). Each entry's marked copy is written in the same per-entry pass
+  that writes its halves the other way around.
+- **`x86_encode`'s template table gets huge pages.** Before the build, the
+  encoder asks for huge pages (`MADV_HUGEPAGE`) and commits the ranges it
+  writes (`MADV_POPULATE_WRITE`, one call per range).
   - It asks only for the 2 MB pages the table fills at least 750 KB of
     (`lane.c`'s measured break-even). Its bytes fall in two or three, and that
     is usually two of them.
   - That is a fault per huge page where huge pages come, and base pages
-    committed in one call each for the rest, or where none come.
-  - A 2 MB margin on either side keeps them in the table's own storage, adding
-    address space, not memory.
-  - The storage isn't aligned to a huge page, because wild 0.10, which links
-    CI's builds, refuses alignments past 64 KB.
-- **Tier 0 commits its tables' pages in one call per array**
+    committed in one call per range for the rest, or where none come.
+  - A 2 MB margin on either side keeps them in the table's own storage. The
+    storage isn't aligned to a huge page, because wild 0.10, which links CI's
+    builds, refuses alignments past 64 KB.
+  - The other modes' tables (32-bit addresses, APX, 32- and 16-bit modes),
+    which no compile builds, keep their size. They get only the commit.
+- **Tier 0 commits its nine tables' pages in one call per array**
   (`tier0_prepare_tables`). One structure of them, in a huge page of its own,
   ran 2.2 times as many instructions, because LLVM no longer knew the tables
   apart ([Tier 0](tier0.md)).
@@ -928,12 +930,23 @@ both builds. The encoder's loops are unchanged. Measured on the same VM against
   with none taken one at a time.
 - **Peak RSS.** With huge pages, peak RSS grows by 1.2 MB (28.0 to 29.3 MB):
   the kernel clears the table's huge pages whole.
+- **Address space.** `size build/compiler` gives `.bss` as 191,385,484 bytes
+  before and 258,553,052 after: 16 copies of `x86_encode`'s table, one per
+  unit that includes the encoder (`main.c`'s units share one), each with its
+  4 MB of margins. That is address space, not memory or file size: the `.bss`
+  segment has no file bytes.
 - **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 is several
   times the median.
 - **Where it stands against tcc.** c-testsuite's programs still take 3.7
   times tcc's time, against 4.4 times before. What remains of
   `backend-setup` (2.1 to 2.7 ms here) is mostly the encoder's build and its
   pages' clearing, Tier 0's build, and semantics and unwind.
+- **The 9700X, not measured.** There `backend-setup` was 0.779 ms (the
+  table above), and its kernel's `always` already gave the tables huge pages.
+  So most of this change's gain there should be the FS and GS templates no
+  longer built: about half of the encoder's 0.667 ms build
+  (#590's figure, from `benchmark-x86-encoder`), perhaps 0.3 ms. This session had no access to
+  the 9700X.
 - **Not done.** Building the tables ahead of time, into a snapshot or
   read-only data, would take their build and clearing out of a compile. That
   needs an identity and staleness scheme like the runtime snapshot's. It

@@ -1442,7 +1442,7 @@ static bool x86_check_templates(void)
     for (uint32_t p = 0; p < huge_pages; p += 1)
     {
         aligned = aligned && pages[p] % BUSTER_X86_TEMPLATE_HUGE_PAGE == 0 && pages[p] >= (uintptr_t)x86_template_storage &&
-                  pages[p] + BUSTER_X86_TEMPLATE_HUGE_PAGE <= (uintptr_t)(x86_template_storage + BUSTER_X86_TEMPLATE_STORAGE);
+                  pages[p] + BUSTER_X86_TEMPLATE_HUGE_PAGE <= (uintptr_t)(x86_template_storage + BUSTER_ARRAY_LENGTH(x86_template_storage));
     }
     printf("templates against the builder: %u entries and their marked copies, %u differ; %u huge pages, %s\n", (unsigned)BUSTER_X86_FORM_TEMPLATES, derived_differ,
            huge_pages, aligned ? "all in the table's storage" : "NOT ALL IN THE TABLE'S STORAGE");
