@@ -48,145 +48,102 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
-// One publication pass's anonymous-tag spellings (#992): a `file:line:col` text by tag index, built on first need
-// inside a rendered type. Its scratch rows cannot outlive a rendered event's mark, so the pass rebuilds them
-// there whenever a later type needs them again.
+// One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
+// the unit has unnamed tags, a `file:line:col` or typedef-name text by tag index. Both are built once before the
+// pass's events take their marks, so per-event release cannot invalidate them; `anonymous` stays empty where
+// the unit's tags are all named or the input keeps no declaration columns.
 typedef struct CheckWarningSpelling CheckWarningSpelling;
 struct CheckWarningSpelling
 {
+    const uint8_t** bytes;
+    uint32_t* lengths;
+    uint32_t count;
     String8* anonymous;
     uint32_t anonymous_count;
-    // 0 = unbuilt; 1 = built; 2 = the table holds no unnamed tag at all, so no later type can need the scan.
-    uint8_t built;
 };
 
-// Whether `type` reaches an unnamed tag through bases and parameters (#992): where `type_print` would otherwise
-// print `(unnamed)` without a location. `visited` is a caller bitset over the type indices, so the worklist stays
-// linear in what it reaches; a full one says "maybe" rather than walking deeper than its slots.
-static bool check_driver_type_anonymous(const TypeTable* types, TypeId type, uint64_t* visited)
-{
-    TypeId worklist[64];
-    uint32_t depth = 0;
-    worklist[depth++] = type;
-    bool result = false;
-    bool full = false;
-    while (!result && depth != 0)
-    {
-        const TypeId current = type_unqualified(type_strip_aligned(types, worklist[--depth]));
-        const uint32_t index = type_index(current);
-        if (!type_is_valid(types, current) || index >= types->types.count || (visited[index / 64] & ((uint64_t)1 << (index & 63))) != 0)
-        {
-            continue;
-        }
-        visited[index / 64] |= (uint64_t)1 << (index & 63);
-        const uint8_t kind = type_kind(types, current);
-        result = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM) &&
-                 types->types.index[index] < types->tags.count && types->tags.name[types->types.index[index]] == 0;
-        const TypeId base = type_is_valid(types, current) ? types->types.base[index] : 0;
-        if (!result && base != 0)
-        {
-            full |= depth == sizeof(worklist) / sizeof(worklist[0]);
-            if (depth < sizeof(worklist) / sizeof(worklist[0]))
-            {
-                worklist[depth++] = base;
-            }
-        }
-        if (!result && kind == BUSTER_TYPE_KIND_FUNCTION)
-        {
-            uint32_t count = 0;
-            const TypeId* parameters = type_parameters(types, current, &count);
-            for (uint32_t p = 0; p < count; p += 1)
-            {
-                full |= depth == sizeof(worklist) / sizeof(worklist[0]);
-                if (depth < sizeof(worklist) / sizeof(worklist[0]))
-                {
-                    worklist[depth++] = parameters[p];
-                }
-            }
-        }
-    }
-    return result || full;
-}
-
 // Each unnamed tag's diagnostic name (#992): the first typedef naming it, as clang's `T`/`T *` and `T2 *`'s
-// `T *` aka do, else `(unnamed at file:line:col)` at its own declaration. One scan of the input's tag- and
-// typedef-kind declarations on first need in a publication pass; the rows' arena is the caller's scratch.
-static void check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+// `T *` aka do, else `(unnamed at file:line:col)` where the declaration was written — the expansion's own
+// location for a macro body's tag, as clang's expansion-point answer is (#992). One scan of the input's tag-
+// and typedef-kind declarations per publication pass; the rows sit under the pass's event marks in the
+// caller's scratch, so they survive until the pass ends. Returns false on an allocation failure, which the
+// caller reports like the renderer's other allocations rather than dropping the spelling.
+static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                         CheckWarningSpelling* spell, Arena* scratch)
 {
-    const uint32_t tag_count = types->tags.count;
-    bool any = false;
-    for (uint32_t t = 1; t < tag_count; t += 1)
+    bool valid = true;
+    if (input != NULL && input->declaration_kinds != NULL && input->declared_types != NULL)
     {
-        any |= types->tags.name[t] == 0;
-    }
-    const uint32_t named_words = tag_count / 64 + 1;
-    uint64_t* named = any ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, named_words) : NULL;
-    String8* anonymous = named != NULL && input != NULL && input->declaration_kinds != NULL && input->declared_types != NULL ?
-        BUSTER_ARENA_PUSH_ARRAY(scratch, String8, tag_count) : NULL;
-    if (anonymous != NULL)
-    {
-        memset(named, 0, (uint64_t)named_words * sizeof(*named));
-        memset(anonymous, 0, (uint64_t)tag_count * sizeof(*anonymous));
-        const uint32_t count = input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
-        for (uint32_t i = 0; i < count; i += 1)
+        const uint32_t tag_count = types->tags.count;
+        const uint32_t named_words = tag_count / 64 + 1;
+        uint64_t* named = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, named_words);
+        String8* anonymous = named != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, tag_count) : NULL;
+        valid = anonymous != NULL;
+        if (anonymous != NULL)
         {
-            const uint8_t binding = input->declaration_kinds[i];
-            if (binding == C_BINDING_TAG_KIND || binding == C_BINDING_TYPEDEF)
+            // The history is already ensured for the diagnostic the pass is about to publish; an expanded
+            // tag's location is the expansion's then, not the definition's (#992).
+            const bool history = pp_history_ensure(pp);
+            memset(named, 0, (uint64_t)named_words * sizeof(*named));
+            memset(anonymous, 0, (uint64_t)tag_count * sizeof(*anonymous));
+            const uint32_t count = input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
+            for (uint32_t i = 0; valid && i < count; i += 1)
             {
-                const TypeId declared = type_unqualified(type_strip_aligned(types, input->declared_types[i]));
-                const uint32_t index = type_is_valid(types, declared) ? type_index(declared) : types->types.count;
-                if (index < types->types.count)
+                const uint8_t binding = input->declaration_kinds[i];
+                if (binding == C_BINDING_TAG_KIND || binding == C_BINDING_TYPEDEF)
                 {
-                    const uint8_t kind = type_kind(types, declared);
-                    const uint32_t tag = types->types.index[index];
-                    if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM) &&
-                        tag < tag_count && types->tags.name[tag] == 0)
+                    const TypeId declared = type_unqualified(type_strip_aligned(types, input->declared_types[i]));
+                    const uint32_t index = type_is_valid(types, declared) ? type_index(declared) : types->types.count;
+                    if (index < types->types.count)
                     {
-                        if (binding == C_BINDING_TYPEDEF)
+                        const uint8_t kind = type_kind(types, declared);
+                        const uint32_t tag = types->types.index[index];
+                        if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM) &&
+                            tag < tag_count && types->tags.name[tag] == 0)
                         {
-                            // The typedef is the anonymous record's canonical name; its first one wins.
-                            if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0)
+                            if (binding == C_BINDING_TYPEDEF)
                             {
-                                named[tag / 64] |= (uint64_t)1 << (tag & 63);
-                                const uint32_t name = parser->tokens.names[i];
-                                if (name < pp->table->count)
+                                // The typedef is the anonymous record's canonical name; its first one wins.
+                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0)
                                 {
-                                    anonymous[tag] = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+                                    named[tag / 64] |= (uint64_t)1 << (tag & 63);
+                                    const uint32_t name = parser->tokens.names[i];
+                                    if (name < pp->table->count)
+                                    {
+                                        anonymous[tag] = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+                                    }
                                 }
                             }
-                        }
-                        else if (anonymous[tag].length == 0)
-                        {
-                            const uint32_t source = parser->tokens.sources[i];
-                            const uint32_t location = source < pp->output.count ? pp->output.locations[source] : 0;
-                            const char* file = NULL;
-                            uint32_t file_length = 0;
-                            const uint32_t line = pp_presumed(pp, location, &file, &file_length);
-                            const uint32_t range = pp_find_range(pp, location);
-                            uint32_t column = 1;
-                            if (range != BUSTER_PP_NONE)
+                            else if (anonymous[tag].length == 0)
                             {
-                                (void)pp_line_of(pp, range, location, &column);
-                            }
-                            const char* text = check_warning_text(scratch, "(unnamed at %.*s:%u:%u)", (int)file_length, file, line, column);
-                            if (text != NULL)
-                            {
-                                anonymous[tag] = (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) };
+                                const uint32_t source = parser->tokens.sources[i];
+                                const uint32_t origin = history ? pp_history_at(pp, source) : 0;
+                                const uint32_t location = source < pp->output.count ? pp_expansion_location(pp, source, origin) : 0;
+                                const char* file = NULL;
+                                uint32_t file_length = 0;
+                                const uint32_t line = pp_presumed(pp, location, &file, &file_length);
+                                const uint32_t range = pp_find_range(pp, location);
+                                uint32_t column = 1;
+                                if (range != BUSTER_PP_NONE)
+                                {
+                                    (void)pp_line_of(pp, range, location, &column);
+                                }
+                                const char* text = check_warning_text(scratch, "(unnamed at %.*s:%u:%u)", (int)file_length, file, line, column);
+                                valid = text != NULL;
+                                if (valid)
+                                {
+                                    anonymous[tag] = (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) };
+                                }
                             }
                         }
                     }
                 }
             }
+            spell->anonymous = anonymous;
+            spell->anonymous_count = tag_count;
         }
-        spell->anonymous = anonymous;
-        spell->anonymous_count = tag_count;
-        spell->built = 1;
     }
-    else
-    {
-        spell->built = 2;
-    }
+    return valid;
 }
 
 static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* input, const CheckWarningEvents* view, const CheckRepair* repair)
@@ -212,52 +169,16 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
     if (type != 0 && type_is_valid(types, type))
     {
         // Only diagnostic rendering needs these spelling arrays; clean checking retains no identifier-sized view.
-        const uint32_t count = pp->table->count;
-        const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, count);
-        uint32_t* lengths = bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
-        if (lengths != NULL)
+        // The pass's columns live in `spell`, built before the events' marks (#992).
+        if (spell->bytes != NULL)
         {
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                bytes[i] = intern_bytes(pp->table, i);
-                lengths[i] = intern_length(pp->table, i);
-            }
-            TypeNames names = { .bytes = bytes, .lengths = lengths, .count = count };
-            if (spell->built == 0)
-            {
-                // The scan pays for itself only where the printed type can reach an unnamed tag (#992).
-                bool any = false;
-                for (uint32_t t = 1; t < types->tags.count; t += 1)
-                {
-                    any |= types->tags.name[t] == 0;
-                }
-                if (any)
-                {
-                    const uint32_t words = types->types.count / 64 + 1;
-                    uint64_t* visited = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words);
-                    if (visited != NULL)
-                    {
-                        memset(visited, 0, (uint64_t)words * sizeof(*visited));
-                        if (check_driver_type_anonymous(types, type, visited))
-                        {
-                            check_driver_spelling_build(parser, pp, input, types, spell, scratch);
-                        }
-                    }
-                    else
-                    {
-                        spell->built = 2;
-                    }
-                }
-                else
-                {
-                    spell->built = 2;
-                }
-            }
-            if (spell->built == 1)
-            {
-                names.anonymous = spell->anonymous;
-                names.anonymous_count = spell->anonymous_count;
-            }
+            TypeNames names = {
+                .bytes = spell->bytes,
+                .lengths = spell->lengths,
+                .count = spell->count,
+                .anonymous = spell->anonymous,
+                .anonymous_count = spell->anonymous_count,
+            };
             TypeId alias_type = 0;
             String8 alias_name = { 0 };
             if (spelling == BUSTER_CHECK_NONE)
@@ -268,8 +189,8 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
                 const TypeId declared = input->declared_types[spelling];
-                const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : count;
-                if (type_is_valid(types, declared) && name < count)
+                const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
+                if (type_is_valid(types, declared) && name < spell->count)
                 {
                     alias_type = declared;
                     alias_name = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
@@ -416,8 +337,31 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                             const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch)
 {
     bool valid = view != NULL && (view->count == 0 || view->events != NULL) && (view->note_count == 0 || view->notes != NULL);
-    // One pass's anonymous-tag spellings; its rows are per-event scratch, rebuilt when a later type needs them.
-    CheckWarningSpelling spell = { 0 };
+    // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks: every
+    // event's mark then sits above them, so per-event release keeps them, and each event's rendered type pays
+    // nothing for what the pass already scanned. A unit with no unnamed tag skips the spelling rows entirely.
+    const uint64_t spelling_mark = scratch->length;
+    CheckWarningSpelling spell = { .count = pp->table->count };
+    spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+    spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+    if (valid && spell.count != 0)
+    {
+        valid = spell.lengths != NULL;
+    }
+    for (uint32_t i = 0; valid && i < spell.count; i += 1)
+    {
+        spell.bytes[i] = intern_bytes(pp->table, i);
+        spell.lengths[i] = intern_length(pp->table, i);
+    }
+    bool unnamed = false;
+    for (uint32_t t = 1; types != NULL && t < types->tags.count; t += 1)
+    {
+        unnamed |= types->tags.name[t] == 0;
+    }
+    if (valid && unnamed)
+    {
+        valid = check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+    }
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
@@ -472,13 +416,10 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     valid = !pp->diagnostic_collection_failed;
                 }
                 arena_pop_to(scratch, mark);
-                // The spelling rows' arena was inside the mark's span; a later type rebuilds them (#992).
-                spell.built = 0;
-                spell.anonymous = NULL;
-                spell.anonymous_count = 0;
             }
         }
     }
+    arena_pop_to(scratch, spelling_mark);
     return valid;
 }
 

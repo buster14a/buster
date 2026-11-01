@@ -1169,6 +1169,7 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
 static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
 {
     const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
     uint32_t result = 0;
     if (node < graph->count)
     {
@@ -1179,8 +1180,32 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
         else
         {
             const uint32_t token = graph->tokens[node];
-            result = token < reader->output->token_count && reader->output->declarations != 0 ?
-                     check_input_typedef_spelling(reader->output, reader->parser, reader->output->declarations[token]) : 0;
+            if (graph->ops[node] == CHECK_OP_CAST && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+            {
+                // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself
+                // the typedef-name use, so its resolution is the specifier's declaration — no declaration to
+                // scan back from as a named object's would.
+                uint32_t open = token;
+                while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
+                {
+                    open -= 1;
+                }
+                for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
+                {
+                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && reader->output->declarations != 0 ?
+                                              reader->output->declarations[type_name] : 0;
+                    if (resolved != 0 && resolved < reader->output->token_count && reader->output->declaration_kinds != 0 &&
+                        reader->output->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+                    {
+                        result = resolved;
+                    }
+                }
+            }
+            else
+            {
+                result = token < reader->output->token_count && reader->output->declarations != 0 ?
+                         check_input_typedef_spelling(reader->output, reader->parser, reader->output->declarations[token]) : 0;
+            }
         }
     }
     return result;
