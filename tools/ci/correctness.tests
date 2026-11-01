@@ -289,8 +289,10 @@ fi
 # (#153's --id-order).
 unset CPATH C_INCLUDE_PATH
 ./build/compiler test-checker-corpus --clang clang --deferred 8 --id-order 153 build/c-testsuite/tests/single-exec
-== Compile c-testsuite's programs as the units of one command [2 CPUs]
+== Compile c-testsuite's programs as the units of one command [8 CPUs]
 # #152: every program at once with -c by 8 lanes, each one's object and diagnostics its own alone, in order.
+# The heading is the parallel runner's scheduling budget, not an affinity mask: the command's children each take up
+# to eight lanes, so declaring two CPUs let the runner co-schedule other two-CPU commands on the same cores.
 ./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
 == Test the x86-64 encoder
 ./build/compiler test-x86-encoder
@@ -326,7 +328,7 @@ clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o "$corpus/corpus.o"
 objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
 ./build/compiler test-x86-disassembler --objdump --file "$corpus/corpus.text"
 == Test binding
-# --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
+# --cross-check also links each bound program's objects with ld.lld and ld.bfd and runs them, and compares what binding
 # found with lld's link of the programs' own objects.
 ./build/compiler test-bind --cross-check
 == Test token refinement
@@ -455,11 +457,12 @@ awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR
 ./build/compiler test-x86-target
 == Test generated-code ISA selection and native records
 ./build/compiler test-x86-target-selection
-== Test the driver's commands of several source files [2 CPUs]
+== Test the driver's commands of several source files [8 CPUs]
 # #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
 # and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
 # lanes that don't start.
+# Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
 ./build/compiler test-check-units
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 ./build/compiler test-unwind --cross-check
@@ -532,3 +535,11 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 ./build/compiler test-dataflow
 == Test the partial Zen 5 model and instruction harness
 ./build/compiler test-x86-zen5
+== Test mixed-tier single- and multi-file determinism [8 CPUs]
+# #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
+# Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
+# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
+./build/test-driver-multicore ./build/compiler

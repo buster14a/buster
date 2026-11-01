@@ -48,7 +48,7 @@ static __attribute__((noinline)) __m512i check_lower_batch_classify(CheckLowerWr
 #pragma clang loop vectorize(disable) unroll_count(4)
         for (uint32_t i = 0; i < count; i += 1)
         {
-            const uint32_t index = type_index(stream->values[first + i].type);
+            const uint32_t index = type_index(check_stream_type(stream, first + i));
             metadata[i] = index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
         }
         const __mmask8 active = (__mmask8)((1u << count) - 1);
@@ -63,9 +63,18 @@ static __attribute__((noinline)) __m512i check_lower_batch_classify(CheckLowerWr
     else
     {
         const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
-        const __m512i types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->values + first, 1);
+        // The stream's type column (#628), or a hand-built stream's whole values', 96 bytes apart.
+        __m512i types;
+        if (stream->dense_values == NULL)
+        {
+            types = _mm512_maskz_loadu_epi32(active, stream->value_types + first);
+        }
+        else
+        {
+            const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+            const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
+            types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->dense_values + first, 1);
+        }
         const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
         const __mmask16 typed = active & _mm512_cmplt_epu32_mask(indices, _mm512_set1_epi32((int)writer->type_count));
         const __m512i metadata = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), typed, indices, writer->type_templates, 4);
@@ -96,13 +105,13 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const CheckOp op = graph->ops[node];
     const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
     const bool truth = op == CHECK_OP_NOT || op == CHECK_OP_CONDITION;
-    const bool plain = (wrapper || truth) && stream->values[node].constant_kind == CHECK_CONSTANT_NONE;
+    const bool plain = (wrapper || truth) && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE;
     if (plain)
     {
         writer->token = graph->tokens[node];
         if (wrapper)
         {
-            check_lower_operand(writer, node, 0, op == CHECK_OP_SELECT && address, op == CHECK_OP_SELECT ? 0 : stream->values[node].type);
+            check_lower_operand(writer, node, 0, op == CHECK_OP_SELECT && address, op == CHECK_OP_SELECT ? 0 : check_stream_type(stream, node));
         }
         else
         {
@@ -119,7 +128,8 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
 static inline __attribute__((always_inline)) bool check_lower_value_payload(const CheckLowerWriter* writer, uint32_t node, uint32_t metadata, bool initialized, uint8_t* kind, uint64_t* bits)
 {
     const CheckProgram* program = writer->program;
-    const CheckValue* value = program->stream->values + node;
+    const CheckValue checked_value = check_stream_value(program->stream, node);
+    const CheckValue* value = &checked_value;
     const CheckOp op = program->input->graph.ops[node];
     const uint8_t class = (uint8_t)metadata;
     const uint32_t object = value->object;
@@ -192,7 +202,8 @@ static void check_lower_batch_write(CheckLowerWriter* writer, uint32_t kinds, ui
 static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized)
 {
     const CheckProgram* program = writer->program;
-    const CheckValue* value = program->stream->values + node;
+    const CheckValue checked_value = check_stream_value(program->stream, node);
+    const CheckValue* value = &checked_value;
     bool valid = false;
     const CheckOp op = program->input->graph.ops[node];
     if (op == CHECK_OP_VALUE || (!address && check_lower_batch_proof(value, op)))
@@ -227,7 +238,8 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckValue* value = program->stream->values + node;
+    const CheckValue checked_value = check_stream_value(program->stream, node);
+    const CheckValue* value = &checked_value;
     const CheckOp op = graph->ops[node];
     const uint8_t recipe = op < 64 ? check_lower_batch_ops[op] : 0;
     const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR;
@@ -245,10 +257,10 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
         const TypeId left = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ? value->type :
                             op == CHECK_OP_SELECT ? 0 : program->stream->conversions[node].operands[0].type;
         const TypeId right = binary ? program->stream->conversions[node].operands[1].type : 0;
-        valid = (graph->ops[a] == CHECK_OP_VALUE || program->stream->values[a].constant_kind == CHECK_CONSTANT_INTEGER) &&
-                (!binary || graph->ops[b] == CHECK_OP_VALUE || program->stream->values[b].constant_kind == CHECK_CONSTANT_INTEGER) &&
-                (left == 0 || left == program->stream->values[a].type || check_lower_conversion_empty(writer, program->stream->values[a].type, left)) &&
-                (!binary || right == 0 || right == program->stream->values[b].type || check_lower_conversion_empty(writer, program->stream->values[b].type, right)) &&
+        valid = (graph->ops[a] == CHECK_OP_VALUE || check_stream_constant_kind(program->stream, a) == CHECK_CONSTANT_INTEGER) &&
+                (!binary || graph->ops[b] == CHECK_OP_VALUE || check_stream_constant_kind(program->stream, b) == CHECK_CONSTANT_INTEGER) &&
+                (left == 0 || left == check_stream_type(program->stream, a) || check_lower_conversion_empty(writer, check_stream_type(program->stream, a), left)) &&
+                (!binary || right == 0 || right == check_stream_type(program->stream, b) || check_lower_conversion_empty(writer, check_stream_type(program->stream, b), right)) &&
                 check_lower_batch_target(writer, left, pointer) && (!binary || check_lower_batch_target(writer, right, pointer));
         if (valid)
         {

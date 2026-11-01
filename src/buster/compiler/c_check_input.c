@@ -1387,6 +1387,15 @@ static uint64_t check_input_scan_nonzero(const uint8_t* column, uint32_t first, 
     return _mm512_mask_test_epi8_mask(lanes, bytes, bytes);
 }
 
+// Of the 64 tokens from `line`, those from `first` on, before `count`, whose byte in `column` isn't 0: the bytes outside
+// them aren't read.
+static uint64_t check_input_scan_nonzero_from(const uint8_t* column, uint32_t line, uint32_t first, uint32_t count)
+{
+    const __mmask64 lanes = check_input_scan_all(line, count) & (UINT64_MAX << (first - line));
+    const __m512i bytes = _mm512_maskz_loadu_epi8(lanes, column + line);
+    return _mm512_mask_test_epi8_mask(lanes, bytes, bytes);
+}
+
 // Of the next 16, the tokens whose 32-bit value in `column` isn't 0.
 static uint32_t check_input_scan_nonzero32(const uint32_t* column, uint32_t first, uint32_t count)
 {
@@ -5469,19 +5478,25 @@ static bool check_input_visit_of(const Parser* parser, uint8_t syntax, uint32_t 
 // every token, and on the vector path the next one marked (CheckInputReader.visits), 64 at a time, or the pragma's
 // position the walk stops at (CheckInputReader.resolve_limit), or `end`. The tokens between are those at which the walk
 // does nothing: its own writes mark each token at which they make it act (check_input_visit).
+//
+// The scan loads the aligned 64 bytes that hold the next token, with the bytes below it and from `stop` on masked off:
+// `visits` starts on a cache line, so no load crosses one, as a load from the next token did for nearly every visit, and
+// none reads past the column (#529).
 static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_t token, uint32_t end)
 {
     const uint32_t stop = reader->resolve_limit > token && reader->resolve_limit < end ? reader->resolve_limit : end;
     uint32_t next = token + 1;
     if (!reader->parser->options.scalar && next < stop)
     {
-        uint64_t marked = check_input_scan_nonzero(reader->visits, next, stop);
-        while (marked == 0 && stop - next > 64)
+        const uint8_t* const visits = reader->visits;
+        uint32_t line = next & ~63u;
+        uint64_t marked = check_input_scan_nonzero_from(visits, line, next, stop);
+        while (marked == 0 && stop - line > 64)
         {
-            next += 64;
-            marked = check_input_scan_nonzero(reader->visits, next, stop);
+            line += 64;
+            marked = check_input_scan_nonzero(visits, line, stop);
         }
-        next = marked != 0 ? next + (uint32_t)__builtin_ctzll(marked) : stop;
+        next = marked != 0 ? line + (uint32_t)__builtin_ctzll(marked) : stop;
     }
     return next;
 }
@@ -7504,8 +7519,14 @@ static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* op
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
-                            CheckDeferred* deferred, bool environment, bool literal_tables)
+                            CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
 {
+    // The output columns whose empty value is zero need no clearing where `arena`'s bytes past its length are as the kernel
+    // mapped them (arena_untouched), which a caller that knows no copy of the arena pushed past its length says with
+    // `fresh_output` (check_input_compile, #628): the reader then writes no zeros there, and a column it writes nowhere, as
+    // most of sqlite3.c's byte columns, takes no memory, its pages the kernel's zero page wherever a later pass reads them.
+    // Everything pushed below comes after its length, and the reader pops nothing of the arena before it clears them.
+    const bool output_zero = fresh_output && arena_untouched(arena);
     *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
@@ -7758,9 +7779,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // writes it: where the walk only reads it, the kernel maps its zero page. In the scratch, which the later stages take
     // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
     // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
-    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, are in
-    // base pages at the arena's start. Where more than one lane reads the deferred bodies of a large unit, the arena is
-    // base pages throughout (check_input_sparse_arena, #764, #847).
+    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, and the
+    // binding table, whose events the walk appends and reads no further than the last, are in base pages at the arena's
+    // start. Where more than one lane reads the deferred bodies of a large unit, the arena is base pages throughout
+    // (check_input_sparse_arena, #764, #847).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
@@ -7800,13 +7822,19 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(tag_types, TypeId) \
     X(tag_ends, uint32_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
-    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
-    const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + c_bindings_bytes(pp->table->count, count * 4 + 1);
+    const uint64_t binding_bytes = c_bindings_bytes(pp->table->count, count * 4 + 1);
+    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + binding_bytes + BUSTER_ARENA_PAGE_BYTES - 1) &
+                                  ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
 #undef BUSTER_CHECK_SPARSE_BYTES
     input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
     Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
 #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+    // The binding table in the base pages too (#628): each of its nine event columns has room for four events a token, of
+    // which the walk writes a prefix (sqlite3.c's 167,456 of 2.86 million) and reads no further, so that in huge pages each
+    // column's first touch cleared one or two 2 MB pages for a few hundred kilobytes, 11 of the arena's 34 huge pages.
+    valid = valid && c_bindings_initialize(&reader.bindings, &sparse, pp->table->count, count * 4 + 1);
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
 #undef BUSTER_CHECK_SPARSE_ARRAY
     reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
@@ -7864,7 +7892,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             memset(reader.transparent_unions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         }
     }
-    valid &= c_bindings_initialize(&reader.bindings, &sparse, pp->table->count, count * 4 + 1);
     // The traversal's temporaries, last on the scratch and popped once it is derived, so that the passes after it take
     // their pages.
     const uint64_t traversal_mark = scratch->length;
@@ -7873,30 +7900,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     uint32_t* const starts = sizes != 0 && temporaries != 0 ? temporaries + (traversal != 0 ? 2 * slots : 0) : 0;
     valid &= temporary_columns == 0 || temporaries != 0;
 
-    if (valid)
+    if (valid && !output_zero)
     {
+        // The output arena's columns whose empty value is zero, where its pages may hold what something wrote before.
         memset(reader.declared_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.query_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.return_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.declaration_kinds, 0, (uint64_t)count + 1);
-        memset(reader.conditions, 0, (uint64_t)count + 1);
-        memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
-        input->constant_warnings_prepared = true;
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
-        if (input->deferred_tokens != 0 && deferred == 0)
-        {
-            // A lazily deferred body is ignored by every phase; #113's deferred bodies are read later instead.
-            memcpy(reader.ignored, input->deferred_tokens, (uint64_t)count + 1);
-        }
-        else
-        {
-            memset(reader.ignored, 0, (uint64_t)count + 1);
-        }
         memset(reader.defined, 0, (uint64_t)count + 1);
-        memset(reader.definition_origins, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->tentative, 0, (uint64_t)count + 1);
         memset(reader.static_objects, 0, (uint64_t)count + 1);
         memset(reader.registers, 0, (uint64_t)count + 1);
@@ -7912,6 +7924,25 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->attributes, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
         memset(reader.linkage, 0, (uint64_t)count + 1);
         memset(reader.objects, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+    }
+    if (valid)
+    {
+        input->constant_warnings_prepared = true;
+        memset(reader.query_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
+        memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(reader.return_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
+        memset(reader.conditions, 0, (uint64_t)count + 1);
+        memset(reader.constant_contexts, 0, (uint64_t)count + 1);
+        if (input->deferred_tokens != 0 && deferred == 0)
+        {
+            // A lazily deferred body is ignored by every phase; #113's deferred bodies are read later instead.
+            memcpy(reader.ignored, input->deferred_tokens, (uint64_t)count + 1);
+        }
+        else
+        {
+            memset(reader.ignored, 0, (uint64_t)count + 1);
+        }
+        memset(reader.definition_origins, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.parameter_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.member_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.linked_declarations, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
@@ -8232,13 +8263,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }
 
 // Exact source oracle for the compact literal-table producer: retain ordinary per-expression checking/planning.
 static __attribute__((unused)) bool check_input_tables_reference(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false, false);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -8246,7 +8277,7 @@ static __attribute__((unused)) bool check_input_tables_reference(CheckInput* inp
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true, false);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -8255,14 +8286,14 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }
 
 // The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
@@ -8272,7 +8303,7 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
     return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
-                           false, true);
+                           false, true, true);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -8280,5 +8311,5 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }

@@ -909,9 +909,11 @@ designs and the compilers already built this way.
   `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
   (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret);
   and a `--tier1 --verify` fixture's Tier 1 frames (#177: spill slots alone,
-  pushes, two returns, an open frame, a realigned one, a red-zone leaf, the
-  shapes `--tier1-report`'s counts show), walked by `backtrace()` by each path
-  and linked by GNU ld and lld, and by gdb at every instruction.
+  pushes, two returns, an open frame, a realigned one, open and with two
+  returns too, a red-zone leaf, the shapes `--tier1-report`'s counts show and
+  each function's FDE rows, by `readelf -wF`), walked by `backtrace()` by each
+  path, by `--lanes 1` and 8 into one lane's bytes and linked by GNU ld and lld,
+  and by gdb at every instruction.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -5024,8 +5026,8 @@ The exact commands, pinned inputs and raw reports for the #117 acceptance
 refresh are in [the measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md).
 Its invocation scripts take a separate normal shared-host lock for each command.
 
-`./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+`./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
+vectorized|scalar] [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
@@ -5079,6 +5081,22 @@ library corpus.
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
 without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
 output's tokens must be the same (#120).
+
+`--markers` runs and prints as `-E` without `-P` does: with the expansion starts
+the line markers read and the history deferred (`PPOptions.expansion_starts` and
+`defer_history`, as the `-E` driver sets them), the printing timed with its line
+markers and reported as `-E with printing`; of the controls it takes
+`--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
+vectorized kernels with the printer's spellings by `pp_print_spellings`
+(`spellings`) and by its general loop for every chunk (`per-token`,
+`PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
+warm-up print, with markers or without, must give the same bytes, whatever the
+implementation and the read limit. With line markers the
+general loop prints in the time the printer before #649 took; with `-P`, it
+printed 7–17% slower than that printer on an AVX-512 Xeon and 6% slower a
+token on the 9700X, so `main.c`'s `-P` history is `-P`'s before. The 9700X
+job runs both, with and without `--markers`, on `main.c` and the frozen
+`sqlite3.c` where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under
@@ -5611,7 +5629,12 @@ it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
 each alone, and with `--generate DIR` it writes a program of synth's shape
 (512 units of 200 functions by default) for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
-measurements.
+measurements. The end-to-end single- and multi-unit contract, with the
+mixed-tier and actual command-team receipts, is
+[the multicore acceptance guide](docs/multicore-acceptance.md);
+`tests/driver/multicore.c` runs it in the shared correctness suite. What
+#149's remaining whole-process performance acceptance still needs is there
+too.
 
 ## Selective lowering
 

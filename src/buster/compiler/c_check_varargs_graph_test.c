@@ -158,13 +158,13 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
                           "varargs calls retain one compact descriptor each without overflow store records");
         if (checked)
         {
-            check_test_expect(test, expected.values[start].type == BUSTER_TYPE_VOID && expected.values[start].fault == CHECK_FAULT_NONE &&
+            check_test_expect(test, check_stream_type(&expected, start) == BUSTER_TYPE_VOID && check_stream_value(&expected, start).fault == CHECK_FAULT_NONE &&
                                    expected.conversions[start].operands[1].type == 0 && expected.varargs[0].node == start &&
                                    expected.varargs[0].evaluated_operands == 1 && expected.varargs[0].mutates_list &&
                                    expected.varargs[0].warnings == BUSTER_CHECK_VARARGS_WARN_LAST_PARAMETER,
                               "va_start typechecks its source context but does not evaluate the second operand's fault/effect");
-            check_test_expect(test, expected.values[wide].type == BUSTER_TYPE_INT128 && expected.varargs[1].requested_type == BUSTER_TYPE_INT128 &&
-                                   expected.values[narrow].type == BUSTER_TYPE_UCHAR &&
+            check_test_expect(test, check_stream_type(&expected, wide) == BUSTER_TYPE_INT128 && expected.varargs[1].requested_type == BUSTER_TYPE_INT128 &&
+                                   check_stream_type(&expected, narrow) == BUSTER_TYPE_UCHAR &&
                                    expected.varargs[2].warnings == BUSTER_CHECK_VARARGS_WARN_ARGUMENT_PROMOTION,
                               "semantic va_arg accepts wide types independently of backend class and retains promotion warning");
             check_test_expect(test, expected.varargs[3].node == copy && expected.varargs[3].evaluated_operands == 3 && expected.varargs[3].mutates_list &&
@@ -204,7 +204,7 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
             CheckStream failed;
             const bool accepted = check_graph_run(table, &graph, &bounded, &scratch, &scalar, &failed);
             check_test_expect(test, !accepted && failed.status == CHECK_STATUS_RESOURCE && failed.varargs == NULL && failed.varargs_count == 0 &&
-                                   failed.values == NULL && failed.warnings == NULL && bounded.length == 7 && scratch.length == 0 &&
+                                   !check_stream_has_values(&failed) && failed.warnings == NULL && bounded.length == 7 && scratch.length == 0 &&
                                    check_test_graph_canary(bytes, 0, 7) && check_test_graph_canary(bytes, limit, limit + 16),
                               "every partial varargs descriptor allocation rolls back without crossing output guards");
         }

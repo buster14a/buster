@@ -772,7 +772,8 @@ static bool check_init_index(CheckInitWalker* walker, uint32_t begin, uint32_t e
         }
         else
         {
-            const CheckValue* value = &walker->stream->values[node];
+            const CheckValue checked_value = check_stream_value(walker->stream, node);
+            const CheckValue* value = &checked_value;
             uint32_t width = 0;
             bool is_signed = false;
             valid = value->constant_kind == CHECK_CONSTANT_INTEGER && (value->flags & BUSTER_CHECK_ICE) != 0 &&
@@ -1094,7 +1095,8 @@ static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_
     uint32_t object = 0;
     if (node != BUSTER_CHECK_NONE)
     {
-        const CheckValue* value = &walker->stream->values[node];
+        const CheckValue checked_value = check_stream_value(walker->stream, node);
+        const CheckValue* value = &checked_value;
         if (type_kind(walker->types, type_strip_aligned(walker->types, value->type)) == BUSTER_TYPE_KIND_ARRAY && value->offset == 0)
         {
             object = value->object;
@@ -1147,7 +1149,7 @@ static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSele
     {
         const CheckAction action = {
             .op = CHECK_OP_INITIALIZE,
-            .operands = { walker->stream->values[node] },
+            .operands = { check_stream_value(walker->stream, node) },
             .type = destination,
             .node = node,
             .extensions = check_init_extensions(walker, begin),
@@ -1163,7 +1165,7 @@ static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSele
     // initializer as GNU C does: the walk copies its body's parts, each of which the static destination requires to be
     // constant (`static const S g[] = { (S){ "a", 1 } };` in a function, but not `(S){ n }`).
     if (walker->result->status == CHECK_INIT_OK && !walker->infer && walker->constants == NULL && walker->static_storage && record && node != BUSTER_CHECK_NONE &&
-        walker->stream->values[node].category == CHECK_LVALUE)
+        check_stream_category(walker->stream, node) == CHECK_LVALUE)
     {
         for (uint32_t token = begin; token < end && opener == BUSTER_CHECK_NONE; token += 1)
         {
@@ -1171,7 +1173,8 @@ static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSele
             {
                 const uint32_t close = walker->parser->tree.parents[token];
                 const uint32_t root = close > token && close < end ? check_init_node(walker, close, close + 1) : BUSTER_CHECK_NONE;
-                const CheckValue* value = walker->stream->values + node;
+                const CheckValue checked_value = check_stream_value(walker->stream, node);
+                const CheckValue* value = &checked_value;
                 bool member_path = root != BUSTER_CHECK_NONE;
                 for (uint32_t tail = close + 1; member_path && tail < end;)
                 {
@@ -1189,9 +1192,9 @@ static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSele
                         member_path = false;
                     }
                 }
-                if (member_path && walker->stream->values[root].object == value->object && value->offset >= 0)
+                if (member_path && check_stream_object(walker->stream, root) == value->object && value->offset >= 0)
                 {
-                    const TypeId type = walker->stream->values[root].type;
+                    const TypeId type = check_stream_type(walker->stream, root);
                     const uint64_t size = type_size(walker->types, type);
                     const uint64_t selected_size = type_size(walker->types, selected->type);
                     if ((uint64_t)value->offset <= size && selected_size <= size - (uint64_t)value->offset && size <= UINT64_MAX / 8)
@@ -1699,7 +1702,7 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
     }
     if (!whole && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
     {
-        TypeId source = node != BUSTER_CHECK_NONE ? walker->stream->values[node].type : 0;
+        TypeId source = node != BUSTER_CHECK_NONE ? check_stream_type(walker->stream, node) : 0;
         const TypeId root = walker->infer ? check_init_root_type(walker, begin, end) : 0;
         source = root != 0 ? root : source;
         if (walker->infer && walker->expression_types != 0 && root == 0)
@@ -1711,7 +1714,7 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
         }
         if (type_is_valid(walker->types, source))
         {
-            if (walker->stream != NULL && node < walker->stream->count && walker->stream->values[node].category == CHECK_LVALUE &&
+            if (walker->stream != NULL && node < walker->stream->count && check_stream_category(walker->stream, node) == CHECK_LVALUE &&
                 type_kind(walker->types, type_strip_aligned(walker->types, source)) == BUSTER_TYPE_KIND_ATOMIC)
             {
                 source = type_conversion_operand(walker->types, source);
@@ -1729,7 +1732,7 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
     }
     if (!whole && check_vector_type(walker->types, type))
     {
-        TypeId source = node != BUSTER_CHECK_NONE ? walker->stream->values[node].type : 0;
+        TypeId source = node != BUSTER_CHECK_NONE ? check_stream_type(walker->stream, node) : 0;
         const TypeId root = walker->infer ? check_init_root_type(walker, begin, end) : 0;
         source = root != 0 ? root : source;
         if (walker->infer && walker->expression_types != NULL && root == 0)
@@ -1760,13 +1763,13 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
     bool bitcast = false;
     const CheckGraph* graph = walker->graph;
     while (graph != NULL && source_node < graph->count && graph->ops[source_node] == CHECK_OP_CAST && graph->operand0[source_node] < source_node &&
-           check_vector_type(walker->types, walker->stream->values[source_node].type))
+           check_vector_type(walker->types, check_stream_type(walker->stream, source_node)))
     {
-        splat_type = walker->stream->values[source_node].type;
+        splat_type = check_stream_type(walker->stream, source_node);
         source_node = graph->operand0[source_node];
         bitcast = check_action_kind(walker->types, splat_type) == BUSTER_TYPE_KIND_VECTOR;
     }
-    const CheckValue source = walker->stream->values[source_node];
+    const CheckValue source = check_stream_value(walker->stream, source_node);
     const bool scalar = check_vector_real(walker->types, source.type);
     const uint8_t* constant = check_init_constant_bytes(walker, node);
     if (walker->static_storage && constant != NULL)
@@ -1819,7 +1822,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
     {
         const CheckAction action = {
             .op = CHECK_OP_INITIALIZE,
-            .operands = { walker->stream->values[node] },
+            .operands = { check_stream_value(walker->stream, node) },
             .type = destination,
             .node = node,
         };
@@ -1861,7 +1864,7 @@ static bool check_init_overload_source(const CheckInitWalker* walker, uint32_t l
         const CheckOp op = (CheckOp)graph->ops[current];
         const uint32_t child = graph->operand0[current];
         if ((op != CHECK_OP_SELECT && op != CHECK_OP_ADDRESS) || child >= current ||
-            walker->stream->values[child].overload_head != head)
+            check_stream_overload_head(walker->stream, child) != head)
         {
             break;
         }
@@ -1915,7 +1918,7 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
 // union read, and a sparse CLEAR run must stay sparse even when the object is a very large array.
 static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node)
 {
-    const CheckValue source = node < walker->stream->count ? walker->stream->values[node] : (CheckValue){ 0 };
+    const CheckValue source = node < walker->stream->count ? check_stream_value(walker->stream, node) : (CheckValue){ 0 };
     const CheckConstValues* owner = NULL;
     const CheckConstObject* object = walker->const_values != NULL ? check_const_find(walker->const_values, source.object, walker->source_position, &owner) : NULL;
     bool valid = object != NULL && owner != NULL && source.category == CHECK_LVALUE && source.constant_kind == CHECK_CONSTANT_ADDRESS &&
@@ -2032,8 +2035,8 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     const CheckInitConstants* previous_constants = walker->constants;
     CheckInitConstants constants = { 0 };
     if (!walker->infer && walker->static_storage && node < walker->stream->count && walker->graph != NULL && walker->constants == NULL &&
-        (walker->stream->values[node].constant_kind == CHECK_CONSTANT_NONE ||
-         (check_vector_type(walker->types, walker->stream->values[node].type) && check_init_constant_bytes(walker, node) == NULL)))
+        (check_stream_constant_kind(walker->stream, node) == CHECK_CONSTANT_NONE ||
+         (check_vector_type(walker->types, check_stream_type(walker->stream, node)) && check_init_constant_bytes(walker, node) == NULL)))
     {
         check_init_constants(walker, token, end, node, &constants);
         walker->constants = &constants;
@@ -2096,11 +2099,11 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             check_init_fail(walker, CHECK_INIT_CHECK_FAILED, token);
         }
         else if (walker->const_values != NULL && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
-                 walker->stream->values[node].category == CHECK_LVALUE && walker->stream->values[node].constant_kind == CHECK_CONSTANT_ADDRESS &&
-                 walker->stream->values[node].fault == CHECK_FAULT_NONE &&
-                 (walker->stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
-                 (type_qualifiers(walker->stream->values[node].type) & BUSTER_TYPE_VOLATILE) == 0 &&
-                 check_const_find(walker->const_values, walker->stream->values[node].object, walker->source_position, NULL) != NULL)
+                 check_stream_category(walker->stream, node) == CHECK_LVALUE && check_stream_constant_kind(walker->stream, node) == CHECK_CONSTANT_ADDRESS &&
+                 check_stream_value(walker->stream, node).fault == CHECK_FAULT_NONE &&
+                 (check_stream_flags(walker->stream, node) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                 (type_qualifiers(check_stream_type(walker->stream, node)) & BUSTER_TYPE_VOLATILE) == 0 &&
+                 check_const_find(walker->const_values, check_stream_object(walker->stream, node), walker->source_position, NULL) != NULL)
         {
             check_init_const_copy(walker, selected, token, node);
         }
@@ -2159,7 +2162,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     {
                         const uint32_t leaf = walker->token_nodes[use];
                         if (walker->parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && leaf < walker->stream->count &&
-                            walker->stream->values[leaf].overload_head == overload_head &&
+                            check_stream_overload_head(walker->stream, leaf) == overload_head &&
                             check_init_overload_source(walker, leaf, node, overload_head))
                         {
                             const CheckWarningEvent witness = {
@@ -2403,7 +2406,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     else
                     {
                         if (!frame->wrapper && frame->next == 0 && check_vector_type(walker->types, frame->type) && node != BUSTER_CHECK_NONE &&
-                            check_vector_type(walker->types, walker->stream->values[node].type))
+                            check_vector_type(walker->types, check_stream_type(walker->stream, node)))
                         {
                             selected = (CheckInitSelection){ .type = frame->type, .offset = frame->offset };
                             selected.history = frame->history;
@@ -2524,7 +2527,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
     const uint64_t scratch_start = scratch != 0 ? scratch->length : 0;
     bool valid = types != 0 && parser != 0 && token_nodes != 0 && stream != 0 && output != 0 && scratch != 0 &&
                  output != scratch && type_is_valid(types, type) && begin < end && end <= parser->tokens.count &&
-                 (string_count == 0 || (strings != 0 && string_ids != 0)) && (stream->count == 0 || (stream->values != 0 && stream->diagnostics != 0));
+                 (string_count == 0 || (strings != 0 && string_ids != 0)) && (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != 0));
     valid = valid && (graph == NULL || (graph->count == stream->count && (graph->count == 0 ||
             (graph->ops != NULL && graph->tokens != NULL && graph->operand0 != NULL && graph->operand1 != NULL && graph->operand2 != NULL))));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
