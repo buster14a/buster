@@ -859,6 +859,17 @@ jobs:
               taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
           done
 
+      - name: Benchmark dominator analysis on synthetic and exported source CFGs
+        # The --cfg run is #174's real-function importer smoke: test-ir-source --dominators-cfg writes the
+        # qualified CFGs of the focused fixture and benchmark-dominators --cfg reads them back, checks all three
+        # paths' agreement and times the scalar, vector and AUTO selections by block-count bucket.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',dominators,')
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler test-ir-source --dominators-cfg build/dominators-fixture.cfg tests/ir-source/dominators.c
+          taskset -c "$cpu" ./build/compiler benchmark-dominators
+          taskset -c "$cpu" ./build/compiler benchmark-dominators --cfg build/dominators-fixture.cfg
+
       - name: Benchmark the preprocessor fuzz harness
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor-fuzz,')
         run: |
