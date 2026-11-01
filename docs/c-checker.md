@@ -3438,6 +3438,30 @@ they do per token where little of it was per declaration or expression:
   (+3.9% of `sqlite3.c`'s instructions) accumulates over that range's later
   checker features (#927, #966, #968 and #1002 among them), outside this
   change.
+- **Store-to-load round trips in the receipts and the liveness walk (#873).**
+  Samples of `ls_bad_status2.stli_other` on the 9700X and the 7940HS placed
+  loads that can't take an older store's data in both. `check_const_append`
+  wrote each trie node's new child into a stack copy of the node with a 4-byte
+  store and reread the copy with an 8-byte load, at each of the 32 depths, and
+  copied its object and its buffer out with wide loads right after narrower
+  stores into them. `check_initializer_live_writes`'s radix sort zeroed its
+  1 KiB of counts with vector stores and read them back with 4-byte loads, in
+  each of its eight passes. Now each new node is its old node's two children as
+  one 64-bit word, the object is copied before its places are written into the
+  array, and the capacities that the storage calls grow are locals, so that the
+  buffer stays in registers. The sort runs a pass only over a digit in which
+  some offset differs from the first point's, and none when the points are in
+  order already, as a single write's two ends are. Both are exact: the frozen
+  `sqlite3.c`'s `-c` objects (both paths, `-g`, `--lower-all`) and diagnostics,
+  1,337 musl sources' objects and c-testsuite's 220 programs' are main's, byte
+  for byte. On that `sqlite3.c`'s `-c`, the 4,231 liveness walks (4,023 of
+  them a single write) run 158 of the 33,848 passes that main ran, and the
+  2,006 appends' trie loop no longer touches the stack. Callgrind on a baseline
+  (`BUSTER_HOST_ARCH=x86-64`) build counts 38.3M fewer instructions of 5,964M
+  (−0.64%): the walk's 43.9M became 5.3M, and the appends' 4.01M became 4.29M,
+  a few more instructions per depth for no stack round trip. Neither count is
+  the 9700X's: its A/B of `stli_other`, cycles and the checker stages' time is
+  still to be run.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
 index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
