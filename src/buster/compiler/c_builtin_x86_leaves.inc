@@ -21,6 +21,17 @@
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_LDMXCSR, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_ldmxcsr", 1, false, cbuiltin_x86_helper_ldmxcsr, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_STMXCSR, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_stmxcsr", 0, true, cbuiltin_x86_helper_stmxcsr, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XSETBV, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_xsetbv", 2, false, cbuiltin_x86_helper_xsetbv, BUSTER_X86_FEATURE(XSAVE)))
+    // The header builtins (#148): the names <xmmintrin.h>, <emmintrin.h> and <prfchwintrin.h> declare, which clang's
+    // code compiles as the builtins they are.
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_LFENCE, BUSTER_CBUILTIN_X86_HELPER("_mm_lfence", 0, false, cbuiltin_x86_helper_lfence, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_MFENCE, BUSTER_CBUILTIN_X86_HELPER("_mm_mfence", 0, false, cbuiltin_x86_helper_mfence, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_SFENCE, BUSTER_CBUILTIN_X86_HELPER("_mm_sfence", 0, false, cbuiltin_x86_helper_sfence, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_PAUSE, BUSTER_CBUILTIN_X86_HELPER("_mm_pause", 0, false, cbuiltin_x86_helper_pause, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_CLFLUSH, BUSTER_CBUILTIN_X86_HELPER("_mm_clflush", 1, false, cbuiltin_x86_helper_clflush, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_GETCSR, BUSTER_CBUILTIN_X86_HELPER("_mm_getcsr", 0, true, cbuiltin_x86_helper_stmxcsr, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_SETCSR, BUSTER_CBUILTIN_X86_HELPER("_mm_setcsr", 1, false, cbuiltin_x86_helper_ldmxcsr, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_M_PREFETCH, BUSTER_CBUILTIN_X86_HELPER("_m_prefetch", 1, false, cbuiltin_x86_helper_prefetch, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_M_PREFETCHW, BUSTER_CBUILTIN_X86_HELPER("_m_prefetchw", 1, false, cbuiltin_x86_helper_prefetchw, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_PAUSE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XGETBV, "__builtin_ia32_xgetbv", sizeof("__builtin_ia32_xgetbv") - 1, 1, true, cbuiltin_x86_helper_xgetbv,
                                      BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false, false)

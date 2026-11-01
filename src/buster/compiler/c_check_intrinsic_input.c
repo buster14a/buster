@@ -270,7 +270,25 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
     const bool operand = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_IDENTIFIER &&
                          parser->tree.roles[keyword] == PARSE_ROLE_OPERAND && (output->deferred_tokens == 0 || !output->deferred_tokens[keyword]);
     const uint32_t name = operand ? parser->tokens.names[keyword] : 0;
-    if (operand && reader->intrinsic_names != 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0)
+    // A builtin this compiler implements that isn't a library function's (#148: no 'f' attribute) stays the builtin under a
+    // file-scope declaration of it, as clang keeps it: the names <xmmintrin.h>, <emmintrin.h> and <prfchwintrin.h>
+    // declare (_mm_sfence, _m_prefetch). Any other binding, a local one's, hides it.
+    const uint32_t bound = operand ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+    const bool declared = bound != 0 && reader->bindings.kind[bound - 1] == C_BINDING_FUNCTION && reader->bindings.depth[bound - 1] == 0;
+    const uint32_t hinted = declared && reader->intrinsic_names != 0 ? reader->intrinsic_names[name] : 0;
+    const BuiltinIntrinsicInfo* header = NULL;
+    if (hinted != 0)
+    {
+        const InternSpan span = reader->pp->table->spans[name];
+        const uint8_t* spelling = reader->pp->table->records + span.offset;
+        const BuiltinIntrinsicInfo* info = (hinted & UINT32_C(0x80000000)) == 0 ? output->intrinsic_declarations[hinted - 1].info :
+                                           hinted == UINT32_MAX ? builtin_intrinsic_lookup((const char*)spelling, span.length) :
+                                                                  builtin_intrinsic_at(hinted & UINT32_C(0x7fffffff));
+        // A name no row has is no intrinsic's anywhere, which the cache remembers, as the lookup below does.
+        reader->intrinsic_names[name] = info == NULL ? 0 : hinted;
+        header = info != NULL && memchr(info->attributes, 'f', info->attributes_length) == NULL && cbuiltin_source_intrinsic(spelling, span.length) ? info : NULL;
+    }
+    if (operand && reader->intrinsic_names != 0 && (bound == 0 || header != NULL))
     {
         const uint32_t cached = reader->intrinsic_names[name];
         const bool fresh = (cached & UINT32_C(0x80000000)) != 0;

@@ -1290,6 +1290,15 @@ the existing families or of new ones:
   `mfence`, `sfence`), `clflush`, `ldmxcsr` and `stmxcsr` (through the leaf's
   red zone) and `xsetbv`, which only the kernel may run and whose fixture only
   compiles and links.
+- the header builtins, leaves too: the names `<xmmintrin.h>`, `<emmintrin.h>`
+  and `<prfchwintrin.h>` declare (`_mm_lfence`, `_mm_mfence`, `_mm_sfence`,
+  `_mm_pause`, `_mm_clflush`, `_mm_getcsr`, `_mm_setcsr`, `_m_prefetch` and
+  `_m_prefetchw`), whose calls were calls of undefined functions. A builtin this
+  compiler implements that isn't a library function's (no `f` attribute) stays
+  the builtin under a file-scope declaration of it, as clang keeps it
+  (`check_input_intrinsic_prepare`); a local binding of its name hides it.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
+  modes, and stays out of the scope.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

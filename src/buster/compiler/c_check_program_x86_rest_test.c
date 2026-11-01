@@ -513,6 +513,16 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             false,
         },
         {
+            // A builtin under the program's own file-scope declarations, which keep it the builtin as clang keeps it,
+            // and a local variable of one's name, which hides it.
+            "x86-rest-declared-builtins",
+            "void _mm_pause(void);unsigned _mm_getcsr(void);void _mm_lfence(void);\n"
+            "int tested(int n){unsigned h=2166136261u;_mm_pause();_mm_lfence();unsigned c=_mm_getcsr()&0xffc0u;FOLD(c);"
+            "{int _mm_lfence=n*7;FOLD(_mm_lfence);}return (int)h;}",
+            0,
+            false,
+        },
+        {
             // xsetbv, which only the kernel may run: compiled and linked against clang's build of the same.
             "x86-rest-xsetbv",
             "int tested(int n){if(n==12345)__builtin_ia32_xsetbv((unsigned)n,(unsigned long long)n<<33|7);return n;}",
@@ -531,6 +541,17 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
         }
         check_test_program_x86_source(test, clang, target, run, programs[i].name, programs[i].body);
     }
+    // The header builtins (#148): the names <xmmintrin.h>, <emmintrin.h> and <prfchwintrin.h> declare, which stay builtins
+    // under their declarations, as clang keeps them: the fences, pause, a flushed and prefetched line read back, and MXCSR
+    // stored, its rounding changed, an inexact sum rounded by it, and restored. The headers' search is -c's.
+    check_test_program_includes = true;
+    check_test_program_x86_source(test, clang, target, run_native, "x86-rest-header-builtins",
+                                  "#include <x86intrin.h>\n"
+            "int tested(int n){unsigned h=2166136261u;static int line[16];line[n&15]=n*3;_mm_lfence();_mm_mfence();_mm_sfence();_mm_pause();"
+            "_mm_clflush(line);_m_prefetch(line);_m_prefetchw(line);int back=line[n&15];FOLD(back);unsigned csr=_mm_getcsr();unsigned bits=csr&0xffc0u;"
+            "FOLD(bits);volatile float a=1.0f,b=(float)(n|1)*1e-8f;for(unsigned mode=0;mode<4;mode++){_mm_setcsr((csr&~0x6000u)|mode<<13);"
+            "float s=a+b;FOLD(s);}_mm_setcsr(csr);return (int)h;}");
+    check_test_program_includes = false;
 }
 
 // The rest's programs at znver5's target, where the host runs what its features allow (check_test_program_x86's rule).
