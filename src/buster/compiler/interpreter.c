@@ -414,6 +414,80 @@ static uint64_t interpreter_typed_convert(uint32_t to, uint32_t from, uint64_t v
     return result;
 }
 
+// A mask's entry (#179), its bits in a value's low word (zeros past its width) and its bytes in its high word: a
+// conversion to a mask (the integer's bits, as C converts it to the unsigned integer of the mask's width) or from one (as
+// C converts that unsigned integer to the class), LOAD, STORE and SET of the mask's bytes at an address, and AND, OR, XOR
+// and NOT of masks of one width; `value` the mask's bytes, which the operands have. The stack's top is *top, with room
+// for the entry's operands, which the caller checked. Returns the status.
+static InterpreterStatus interpreter_typed_mask(uint32_t kind, uint32_t class, uint64_t value, InterpreterValue* stack, uint8_t* classes, uint32_t* top,
+                                                InterpreterRuntime* runtime)
+{
+    const uint64_t bits = value >= 8 ? UINT64_MAX : (UINT64_C(1) << (8 * value)) - 1;
+    InterpreterStatus status = tier0_mask_bytes_valid(value) ? INTERPRETER_OK : INTERPRETER_INVALID;
+    uint32_t t = *top;
+    const bool binary = kind == BUSTER_TYPED_AND || kind == BUSTER_TYPED_OR || kind == BUSTER_TYPED_XOR;
+    if (status != INTERPRETER_OK)
+    {
+    }
+    else if (kind == BUSTER_TYPED_CONVERT && class == BUSTER_TYPED_CLASS_MASK)
+    {
+        status = tier0_class_integer(classes[t - 1]) ? INTERPRETER_OK : INTERPRETER_INVALID;
+        stack[t - 1] = (InterpreterValue){ .low = stack[t - 1].low & bits, .high = value };
+        classes[t - 1] = BUSTER_TYPED_CLASS_MASK;
+    }
+    else if (kind == BUSTER_TYPED_CONVERT)
+    {
+        status = tier0_class_integer(class) && stack[t - 1].high == value ? INTERPRETER_OK : INTERPRETER_INVALID;
+        stack[t - 1] = (InterpreterValue){ .low = interpreter_typed_normalize(class, stack[t - 1].low) };
+        classes[t - 1] = (uint8_t)class;
+    }
+    else if (kind == BUSTER_TYPED_LOAD)
+    {
+        const uint64_t address = stack[t - 1].low;
+        status = classes[t - 1] == BUSTER_TYPED_CLASS_U64 ? interpreter_memory_access(runtime, address, value, false) : INTERPRETER_INVALID;
+        uint64_t loaded = 0;
+        if (status == INTERPRETER_OK)
+        {
+            memcpy(&loaded, (const void*)(uintptr_t)address, value);
+        }
+        stack[t - 1] = (InterpreterValue){ .low = loaded, .high = value };
+        classes[t - 1] = BUSTER_TYPED_CLASS_MASK;
+    }
+    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
+    {
+        const uint64_t address = stack[t - 2].low;
+        const bool shaped = classes[t - 2] == BUSTER_TYPED_CLASS_U64 && classes[t - 1] == BUSTER_TYPED_CLASS_MASK && stack[t - 1].high == value;
+        status = shaped ? interpreter_memory_access(runtime, address, value, true) : INTERPRETER_INVALID;
+        if (status == INTERPRETER_OK)
+        {
+            memcpy((void*)(uintptr_t)address, &stack[t - 1].low, value);
+        }
+        stack[t - 2] = stack[t - 1];
+        classes[t - 2] = BUSTER_TYPED_CLASS_MASK;
+        t -= kind == BUSTER_TYPED_STORE ? 1 : 2;
+    }
+    else if (binary)
+    {
+        const bool shaped = classes[t - 2] == BUSTER_TYPED_CLASS_MASK && classes[t - 1] == BUSTER_TYPED_CLASS_MASK && stack[t - 2].high == value && stack[t - 1].high == value;
+        status = shaped ? INTERPRETER_OK : INTERPRETER_INVALID;
+        const uint64_t a = stack[t - 2].low;
+        const uint64_t b = stack[t - 1].low;
+        stack[t - 2].low = kind == BUSTER_TYPED_AND ? a & b : kind == BUSTER_TYPED_OR ? a | b : a ^ b;
+        t -= 1;
+    }
+    else if (kind == BUSTER_TYPED_NOT)
+    {
+        status = classes[t - 1] == BUSTER_TYPED_CLASS_MASK && stack[t - 1].high == value ? INTERPRETER_OK : INTERPRETER_INVALID;
+        stack[t - 1].low = ~stack[t - 1].low & bits;
+    }
+    else
+    {
+        status = INTERPRETER_INVALID;
+    }
+    *top = t;
+    return status;
+}
+
 static uint64_t interpreter_typed_binary(uint32_t kind, uint32_t class, uint64_t a, uint64_t b, InterpreterStatus* status)
 {
     uint64_t result = 0;
@@ -891,7 +965,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         // interpreted function has no code at, and a machine operation (#136), a frame's address (#148) and a tail call
         // (#147), whose return address and caller's frame an interpreted function hasn't, have no model here.
         if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86 ||
-            kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || class >= BUSTER_TYPED_CLASS_F80)
+            kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class >= BUSTER_TYPED_CLASS_F80 && class != BUSTER_TYPED_CLASS_MASK))
         {
             result->status = INTERPRETER_INVALID;
             break;
@@ -934,6 +1008,14 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         {
             result->status = INTERPRETER_INVALID;
             break;
+        }
+        // A mask's own entries (#179), apart from the shapes below; DUP, DISCARD and JUMP_VALUE of a mask are every class's.
+        const bool mask = class == BUSTER_TYPED_CLASS_MASK ? kind != BUSTER_TYPED_DUP && kind != BUSTER_TYPED_DISCARD && kind != BUSTER_TYPED_JUMP_VALUE
+                                                           : kind == BUSTER_TYPED_CONVERT && classes[top - 1] == BUSTER_TYPED_CLASS_MASK;
+        if (mask)
+        {
+            result->status = interpreter_typed_mask(kind, class, value, stack, classes, &top, &runtime);
+            continue;
         }
         bool shape = true;
         if (kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE)

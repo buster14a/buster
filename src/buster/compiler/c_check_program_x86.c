@@ -1518,3 +1518,196 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
     }
     return reason;
 }
+
+// Whether a record names opmask register `k` (1 to 7): in an opmask field (reg, vvvv, or a register's rm), a pair's
+// second register among them (VP2INTERSECT's), or as its EVEX opmask decoration.
+static bool check_x86_lower_names_mask(const X86Instruction* record, uint32_t k)
+{
+    const X86FormDescription* description = x86_form_description(record->form);
+    const uint16_t operands[3] = { description->reg, description->vvvv, record->mode == BUSTER_X86_REGISTER_DIRECT ? description->rm : (uint16_t)0 };
+    const uint8_t fields[3] = { record->reg, record->vvvv, record->rm };
+    bool named = (record->decorations & BUSTER_X86_DECORATION_MASK) == k;
+    for (uint32_t f = 0; f < 3; f += 1)
+    {
+        const bool opmask = (operands[f] & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_OPMASK;
+        named |= opmask && (fields[f] == k || (operands[f] == BUSTER_X86_OPERAND_KP && fields[f] + 1u == k));
+    }
+    return named;
+}
+
+// Whether a record names role `role` in a general register's field (reg, vvvv, rm, a memory operand's base or index).
+static bool check_x86_lower_names_role(const X86Instruction* record, uint8_t role)
+{
+    const X86FormDescription* description = x86_form_description(record->form);
+    const uint16_t operands[3] = { description->reg, description->vvvv, description->rm };
+    const uint8_t fields[3] = { record->reg, record->vvvv, record->rm };
+    bool named = record->mode != BUSTER_X86_REGISTER_DIRECT && (record->rm == role || ((record->mode & BUSTER_X86_MODE_INDEX) != 0 && record->index == role));
+    for (uint32_t f = 0; f < 3; f += 1)
+    {
+        const uint32_t class = operands[f] & BUSTER_X86_OPERAND_CLASS;
+        const bool general = class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+        named |= general && fields[f] == role && (f != 2 || record->mode == BUSTER_X86_REGISTER_DIRECT);
+    }
+    return named;
+}
+
+// A row's masks moved into Tier 0's mask class (#179), the first real user of it: each mask operand that a record moves
+// into an opmask register from its integer (check_x86_lower_mask_in's kmov from INTEGER(j)) becomes a MASK operand, taken
+// in that register by role, MASK(j); a mask result that a record moves out of one (check_x86_lower_mask_out's kmov into
+// INTEGER_RESULT) becomes a MASK result, left in it, MASK_RESULT; the other opmask registers the records name become
+// scratch roles. So a mask stays in an opmask register from the row that makes it to the one that takes it, and the
+// moves to and from C's integer mask types are Tier 0's conversions (check_lower_x86_row_builtin's). MASK_RESULT is the
+// first mask operand's register: where the result is in another operand's register, or in a scratch register written
+// before that first operand's last read, the row moves it there last (kmovq). Returns false, the row unchanged, where
+// the target lacks AVX-512 F, VL, BW or DQ (Tier 0's EVEX path, and its masks' kmovq and kmovb), and where the registers
+// don't map onto roles: a mask operand's integer read by another record, a pair of registers (VP2INTERSECT's), a
+// result's register as a decoration, more scratch registers than BUSTER_TIER0_SCRATCH, more records than a row has, or
+// a row tier0_operation_valid refuses.
+static bool check_x86_lower_masks(Tier0Operation* row, const X86Target* target)
+{
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
+    bool valid = (target->features & needed) == needed;
+    int32_t operand_of[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+    bool dropped[BUSTER_TIER0_OPERATION_RECORDS] = { false };
+    uint32_t result = 0;
+    uint32_t converted = 0;
+    for (uint32_t r = 0; valid && r < row->record_count; r += 1)
+    {
+        const X86Instruction* record = &row->records[r];
+        const uint32_t form = record->form;
+        const bool in = form == X86_FORM_KMOVW_K_R32 || form == X86_FORM_KMOVD_K_R32 || form == X86_FORM_KMOVQ_K_R64;
+        const bool out = form == X86_FORM_KMOVW_R32_K || form == X86_FORM_KMOVD_R32_K || form == X86_FORM_KMOVQ_R64_K;
+        const uint32_t j = (uint32_t)record->rm - BUSTER_TIER0_ROLE_INTEGER(0);
+        bool named_before = false;
+        for (uint32_t s = 0; in && s < r; s += 1)
+        {
+            named_before |= check_x86_lower_names_mask(&row->records[s], record->reg);
+        }
+        if (in && record->rm >= BUSTER_TIER0_ROLE_INTEGER(0) && j < row->operand_count && tier0_class_integer(row->operand_classes[j]) && record->reg >= 1 &&
+            record->reg < 8 && operand_of[record->reg] < 0 && !named_before && (converted >> j & 1) == 0)
+        {
+            operand_of[record->reg] = (int32_t)j;
+            converted |= 1u << j;
+            dropped[r] = true;
+        }
+        else if (out && record->reg == BUSTER_TIER0_ROLE_INTEGER_RESULT && record->rm >= 1 && record->rm < 8 && r + 1 == row->record_count &&
+                 tier0_class_integer(row->result_class))
+        {
+            result = record->rm;
+            dropped[r] = true;
+        }
+    }
+    // The integers the dropped moves read and wrote, which no other record may.
+    for (uint32_t r = 0; valid && r < row->record_count; r += 1)
+    {
+        for (uint32_t j = 0; !dropped[r] && j < row->operand_count; j += 1)
+        {
+            valid &= (converted >> j & 1) == 0 || !check_x86_lower_names_role(&row->records[r], BUSTER_TIER0_ROLE_INTEGER(j));
+        }
+        valid &= dropped[r] || result == 0 || !check_x86_lower_names_role(&row->records[r], BUSTER_TIER0_ROLE_INTEGER_RESULT);
+    }
+    valid &= converted != 0 || result != 0;
+    // The first mask operand's register, which MASK_RESULT is, and whether the result is left elsewhere: in another
+    // operand's register, or in a register written while the first operand's is still read after.
+    uint32_t first = 0;
+    for (uint32_t k = 1; k < 8; k += 1)
+    {
+        first = operand_of[k] >= 0 && (first == 0 || operand_of[k] < operand_of[first]) ? k : first;
+    }
+    bool moved = false;
+    if (valid && result != 0 && first != 0 && result != first)
+    {
+        moved = operand_of[result] >= 0;
+        uint32_t written = row->record_count;
+        for (uint32_t r = 0; r < row->record_count; r += 1)
+        {
+            written = !dropped[r] && written == row->record_count && check_x86_lower_names_mask(&row->records[r], result) ? r : written;
+        }
+        for (uint32_t r = written + 1; r < row->record_count; r += 1)
+        {
+            moved |= !dropped[r] && check_x86_lower_names_mask(&row->records[r], first);
+        }
+    }
+    // Each opmask register's role, a scratch one's in its first naming's order.
+    uint8_t roles[8] = { 0 };
+    uint32_t scratch = 0;
+    for (uint32_t k = 1; valid && k < 8; k += 1)
+    {
+        bool named = false;
+        for (uint32_t r = 0; r < row->record_count; r += 1)
+        {
+            named |= !dropped[r] && check_x86_lower_names_mask(&row->records[r], k);
+        }
+        if (operand_of[k] >= 0)
+        {
+            roles[k] = BUSTER_TIER0_ROLE_MASK(operand_of[k]);
+        }
+        else if (k == result && !moved)
+        {
+            roles[k] = BUSTER_TIER0_ROLE_MASK_RESULT;
+        }
+        else if (named || k == result)
+        {
+            valid = scratch < BUSTER_TIER0_SCRATCH;
+            roles[k] = (uint8_t)BUSTER_TIER0_ROLE_MASK_SCRATCH(scratch);
+            scratch += 1;
+        }
+    }
+    Tier0Operation candidate = *row;
+    candidate.record_count = 0;
+    for (uint32_t r = 0; valid && r < row->record_count; r += 1)
+    {
+        if (!dropped[r])
+        {
+            X86Instruction record = row->records[r];
+            const X86FormDescription* description = x86_form_description(record.form);
+            const uint16_t operands[3] = { description->reg, description->vvvv, record.mode == BUSTER_X86_REGISTER_DIRECT ? description->rm : (uint16_t)0 };
+            uint8_t* fields[3] = { &record.reg, &record.vvvv, &record.rm };
+            for (uint32_t f = 0; f < 3; f += 1)
+            {
+                if ((operands[f] & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_OPMASK && *fields[f] >= 1 && *fields[f] < 8)
+                {
+                    valid &= operands[f] != BUSTER_X86_OPERAND_KP;
+                    *fields[f] = roles[*fields[f]];
+                }
+            }
+            const uint32_t k = record.decorations & BUSTER_X86_DECORATION_MASK;
+            const uint8_t role = roles[k];
+            if (k != 0)
+            {
+                // A decoration takes an operand's role or a scratch one (BUSTER_TIER0_DECORATION_*), not the result's.
+                valid &= role != BUSTER_TIER0_ROLE_MASK_RESULT;
+                const uint8_t decoration = role >= BUSTER_TIER0_ROLE_MASK_SCRATCH(0) ? (uint8_t)BUSTER_TIER0_DECORATION_MASK_SCRATCH(role & 3) :
+                                                                                       (uint8_t)BUSTER_TIER0_DECORATION_MASK(role & 7);
+                record.decorations = (uint8_t)((record.decorations & ~BUSTER_X86_DECORATION_MASK) | decoration);
+            }
+            candidate.records[candidate.record_count] = record;
+            candidate.record_count += 1;
+        }
+    }
+    if (valid && moved)
+    {
+        valid = candidate.record_count < BUSTER_TIER0_OPERATION_RECORDS;
+        candidate.records[candidate.record_count] = check_x86_lower_record(X86_FORM_KMOVQ_K_K, BUSTER_TIER0_ROLE_MASK_RESULT, 0, roles[result]);
+        candidate.record_count += valid ? 1 : 0;
+    }
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        if ((converted >> j & 1) != 0)
+        {
+            candidate.operand_bytes[j] = (uint8_t)tier0_class_bytes(row->operand_classes[j]);
+            candidate.operand_classes[j] = BUSTER_TYPED_CLASS_MASK;
+        }
+    }
+    if (result != 0)
+    {
+        candidate.result_bytes = (uint8_t)tier0_class_bytes(row->result_class);
+        candidate.result_class = BUSTER_TYPED_CLASS_MASK;
+    }
+    valid = valid && tier0_operation_valid(&candidate);
+    if (valid)
+    {
+        *row = candidate;
+    }
+    return valid;
+}

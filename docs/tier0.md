@@ -440,10 +440,10 @@ of the classes in a function without `int128`. `interpreter.c` and `ir_lower.c` 
 GNU C's vector types and the intrinsics' (`__m64`, `__m128`, `__m256i`, `__m512d` and the rest) are one class, VECTOR
 (`BUSTER_TYPED_CLASS_VECTOR`, 14), of 4, 8, 16, 32 or 64 bytes. Like the memory classes, a value takes an integer depth and
 lives in that depth's slot (`Tier0Frame.vector_area`, 64 bytes per depth), its bytes from the slot's first, so that
-calls and the arms of `?:` need nothing of their own for it. The class doesn't carry the width (one class was left
-below the vector path's 16): each entry that makes or moves one has its own, and `tier0_validate` follows each depth's
-width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than an entry's is refused, not
-miscompiled.
+calls and the arms of `?:` need nothing of their own for it. The class doesn't carry the width (no class number is
+left below the vector path's 16: the masks took the last, below): each entry that makes or moves one has its own, and
+`tier0_validate` follows each depth's width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than
+an entry's is refused, not miscompiled.
 
 - **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
   `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,
@@ -486,7 +486,11 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
   result's, and up to four free ones, the depth registers past the entry's. An operand's is in a field no wider than its
   class, whose register's bits past the class's are unspecified: a base or an index a 64-bit integer's, a 32-bit field a
   32- or 64-bit one's, so a front end extends a narrower operand first (`CONVERT`);
-- the opmask registers by number, k0 to k7, which no value keeps between entries.
+- `MASK(j)`, `MASK_RESULT` and `MASK_SCRATCH(k)` in an opmask register's field, and as an EVEX opmask decoration
+  (`BUSTER_TIER0_DECORATION_MASK(j)` and `_MASK_SCRATCH(k)`, by decorations' bits 3 and 4, which a placed record has
+  zero): a mask operand's register, the mask result's and up to four free ones, on the mask stack ("Masks", below);
+- or the opmask registers by number, k0 to k7, in a row without masks, around which Tier 0 saves the masks that the
+  registers it names hold.
 
 `tier0_operation_valid` checks each row: VEX and EVEX forms, their operands in their fields (no implicit register:
 `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of registers but
@@ -511,6 +515,95 @@ the operations, of another class than its row's result or of an operand of anoth
 `?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a
 vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
 conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
+
+## Masks (#179)
+
+AVX-512's opmasks are a class of their own, MASK (`BUSTER_TYPED_CLASS_MASK`, 15, the last one below the vector path's
+16), of 1, 2, 4 or 8 bytes (8, 16, 32 or 64 bits), the width each entry's, which `tier0_validate` follows from depth to
+depth as a vector's (`tier0_stack_mask`). Unlike a vector, a mask lives in a register: it takes a depth of a third stack,
+the mask stack, beside the integer and the floating ones, whose depths 0 to 6 are k1 to k7 (`tier0_mask_register`, the
+opmask registers an EVEX form may take as a write mask) and whose deeper ones live in their 8-byte frame slots
+(`Tier0Frame.mask_area`), its bits in the low bits and zeros past them, in a register or a slot.
+
+- **The depths.** A mask takes neither the integer nor the floating stack (`tier0_stack`'s 0), so that those stacks'
+  effects and depths don't change; its own stack's depth before each entry is a column of its own
+  (`Tier0Entries.mask_depths`), each entry's effect from its shape's operands and result of the class or its row's
+  (`tier0_mask_effect`), their exclusive prefix sums 64 entries at a time (`tier0_vector_mask_depths`, an `X86` entry's
+  effect from its row, as the calls' are) with the scalar twin `tier0_mask_depths_scalar`, made only for a function
+  that says it has masks. No mask entry absorbs or is absorbed: no template of the class has a fused variant. The stack
+  is bounded as the others are (`BUSTER_TIER0_MAX_DEPTH`): both paths refuse a function an entry of which finds 240
+  masks or more on it (`TIER0_ERROR_DEPTH`, which the C driver reports as more values live at once than Tier 0's deep
+  slots take), since the column is of bytes. The vector path's sums are bytes too, the depths modulo 256 (a block's own
+  sum among them, which rows of many mask operands take past an int8's range), exact below 256; and as an entry pushes
+  one mask at most, the first entry past the bound finds it exactly, so that the highest byte refuses what the twin
+  refuses.
+- **The kinds:** `CONVERT` to a mask from an integer class (its value's low bits, as C converts it to the unsigned
+  integer of the mask's width: a narrower one extended first by its signedness, `tier0_mask_extension`) and from one to
+  an integer class (as C converts that unsigned integer), `value` the mask's bytes either way; `LOAD`, `STORE` and `SET`
+  (`value` the bytes); `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of an object of the mask's size; `AND`, `OR`, `XOR` and
+  `NOT` (`value` their masks' bytes); `DUP`, `DISCARD` and `JUMP_VALUE`; and `X86` entries' operands and results. A
+  constant is an integer's `CONST` converted. Nothing passes or returns one: the convention passes nothing in the opmask
+  registers.
+- **Their code,** every entry deferred (`tier0_emit_mask`, counted by `tier0_count_mask`) but `DISCARD` and
+  `JUMP_VALUE`, whose masks stay where their depths are: `kmov` of the mask's width between its register and a general
+  register or memory (`kmovb`, `kmovw`, `kmovd`, `kmovq`, each of which zeroes the register past it), `kand`, `kor`,
+  `kxor` and `knot` of its width, `kmovq` between registers. A mask past k7 is computed in k0, the class's scratch, which
+  no value takes, and moved from or to its slot whole; `AND`, `OR` and `XOR` of two masks in their slots take k1 too,
+  saved into slot 0 and loaded back around them.
+- **Calls save them.** Every opmask register is caller-saved, so a call (and a deep one, `tier0_emit_deep_call`) saves
+  each mask in a register into its slot and loads it back after (`tier0_saved_masks`); the masks past k7 are in their
+  slots already.
+- **Rows take them by role.** An `X86` row's mask operands, result and scratch registers are `MASK(j)`, `MASK_RESULT` and
+  `MASK_SCRATCH(k)`, placed by `tier0_operation_mask_plan` from the mask stack's depth m before it: its n mask operands at
+  depths m − n to m − 1, the result at the first one's depth (m with none, as `INTEGER_RESULT` is placed), its scratch
+  registers past them. Where all of those are k1 to k7 each is its depth's register and the row needs nothing more;
+  past them the row borrows the stack's first registers (its operands from k1 on, its result k1, its scratch past them),
+  saving their masks into their slots before it and loading them back after, with its operands moved in first and its
+  result moved to its place last (`tier0_emit_operation_masks`). A row without masks may name opmask registers by number
+  as its scratch, and Tier 0 saves the masks those registers hold around it; a row with masks names k1 to k7 by role
+  alone. A row's mask result must have zeros past its bytes, as the forms that write a width give. In EVEX's opmask
+  decoration, the roles are bits 3 and 4 beside the index (`BUSTER_TIER0_DECORATION_MASK(j)` and
+  `BUSTER_TIER0_DECORATION_MASK_SCRATCH(k)`), which every 64-bit-mode record has zero: only the 16- and 32-bit modes put
+  a segment override in bits 3 to 5 (`BUSTER_X86_DECORATION_SEGMENT`), and 64-bit mode's FS and GS overrides are a
+  form's (`BUSTER_X86_FORM_FS` and `_GS`), which no row takes. Placing a record clears the role's bits and keeps the rest,
+  zeroing and an `_ER` form's rounding in bits 5 and 6, so that what a 32-bit record would read as FS's override
+  (0x28) is `MASK(0)` rounding down.
+- **A function says whether it has masks** (`Tier0Function.masks`), which gives it the mask stack's column and its
+  slots (as many as the stack reaches, and at least one per register, which a borrowing row saves); it has `vectors`
+  too, on the EVEX path (`vector_bytes` 0): its records' `kmovb` and `kmovq` need AVX-512 DQ and BW.
+
+`tier0_validate` refuses a mask entry in a function without `masks`, masks without `vectors` or on a vector transport
+without AVX-512, a local of the class that isn't an object, a `LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an
+object of 1, 2, 4 or 8 bytes, a `LOAD`, `STORE` or `SET` of other bytes or of a mask of other bytes, logic of masks of
+other bytes than its value's, a conversion to a mask from anything but an integer and from one to anything but an
+integer or of other bytes than its value, a mask's constant, call, return, branch or compare, an integer's entry of
+a mask (`ADD` among them), a row's operand of another width, and the arms of a `?:` of two widths; and in a row
+(`tier0_operation_valid`), a mask role of an operand that isn't a mask, `MASK_RESULT` without a mask result, a
+decoration's role of another kind (both of its bits) or past the scratch registers, opmask registers by number in a row
+with masks, and mask operands and scratch registers past the seven a borrowing row has (and, as in any row, a form with
+a segment override). `interpreter.c` runs mask entries (but rows and objects, which it doesn't model), each mask's bits
+in its value's low word and its bytes in the high word;
+`ir_lower.c` refuses a function with masks, since the IR's `m8` to `m64` have no conversion to or from an integer
+(`docs/ir-simd.md`), so that `--tier1` leaves it to Tier 0.
+
+The front end's AVX-512 builtins are the class's first user (`check_x86_lower_masks`, `c_check_program_x86.c`): a row
+whose mask operands its records move into opmask registers from their integers, and whose mask result one moves out,
+takes and gives them in the class instead, the moves Tier 0's conversions at C's integer boundary
+(`check_lower_x86_row_builtin`), where the unit's target has AVX-512 BW and DQ.
+
+`test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over the class natively, on both paths and both
+encoders, linked with a callee whose masks fill k1 to k7, against a stack machine of its own and, for the programs
+without rows or objects, the typed interpreter: masks of every width loaded, converted from every integer class and
+from calls' results and back, in frame objects, under `DUP`, `STORE`'s kept value and `?:`, chains past k7 (where the
+logic meets masks in their slots, the stack up to 32 deep), calls with masks live and past k7, rows by role (with
+scratch registers, from and to integers, past k7) and by number. A zero-masked vector move whose decoration is a role,
+and a `vaddps` rounding down beside `MASK(0)` (the decoration 0xa8, FS's override and zeroing in a 32-bit record), run
+under no live mask and under seven, against C. At the bound, 239 masks live at once compile alike and run against C
+and the interpreter, 240, 256 and 257 are refused alike, and 239 summed by rows of seven mask operands, one block of 64
+entries of which ends 182 masks below its start (past an int8's range), compile alike and run against C. And each of
+the class's rules is refused, with
+its valid neighbours taken: the 16- and 32-bit modes' six segment overrides' bits as decorations, and 64-bit mode's FS
+and GS forms, among them, with the encoder's rule that no form a row may have takes bits 3 or 4 in 64-bit mode.
 
 ## Conversions between U64 and floating values (#136's item 5)
 

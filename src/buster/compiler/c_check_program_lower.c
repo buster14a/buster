@@ -640,6 +640,8 @@ struct CheckLowerWriter
     // values may all be integers (an opmask's).
     bool int128;
     bool vectors;
+    // Whether the function's x86 builtins take or give masks in Tier 0's mask class (Tier0Function.masks, #179).
+    bool masks;
     // The function's machine operations (Tier0Function.operations), each X86 entry's row by its index: the vector
     // operators' (check_vector_lower_row), each distinct row once, and the room for them.
     Tier0Operation* operations;
@@ -7628,13 +7630,16 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     {
         check_x86_lower_reduce_row(rule, &tail);
     }
+    // Its masks in Tier 0's mask class where the target has what that takes (check_x86_lower_masks, #179).
+    const bool masks = reason == NULL && !reduce && check_x86_lower_masks(&row, &writer->target);
     // The row's operands, the arguments but the immediates, each integer one of its argument's class, widened.
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
         const uint8_t class = check_lower_x86_bits_class(writer, stream->argument_conversions[first + a].type);
         const bool taken = a != skipped && a != rounded;
-        if (taken && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
+        if (taken && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR &&
+            row.operand_classes[operand] != BUSTER_TYPED_CLASS_MASK)
         {
             row.operand_classes[operand] = check_lower_x86_operand_class(class);
         }
@@ -7654,32 +7659,47 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         const uint32_t last = reduce ? check_lower_operation_index(writer, &tail) : index;
         const uint8_t result_class = reduce ? tail.result_class : row.result_class;
         const TypeId result = check_lower_x86_bits_type(writer, stream->values[node].type);
-        // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
+        // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type. A mask result's
+        // integer is the unsigned one of its bytes, which Tier 0's conversion from the mask gives.
         const bool zero_test = rule->zero_test;
-        if (result_class != BUSTER_TYPED_CLASS_VOID && result_class != BUSTER_TYPED_CLASS_VECTOR)
+        const uint8_t integer = result_class == BUSTER_TYPED_CLASS_MASK ? check_x86_lower_mask_class(8u * row.result_bytes) : result_class;
+        if (integer != BUSTER_TYPED_CLASS_VOID && integer != BUSTER_TYPED_CLASS_VECTOR)
         {
-            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(result_class), result);
+            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(integer), result);
         }
         if (zero_test)
         {
-            check_lower_truth(writer, check_lower_class_type(row.result_class), true);
+            check_lower_truth(writer, check_lower_class_type(integer), true);
+        }
+        if (result_class == BUSTER_TYPED_CLASS_MASK)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, integer, row.result_bytes);
         }
         if (reduce)
         {
             check_lower_instruction(writer, BUSTER_TYPED_X86, tail.result_class, last);
         }
         check_lower_instruction(writer, BUSTER_TYPED_X86, row.result_class, index);
-        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
+        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes, and
+        // one of masks too where its row takes or gives them.
         writer->vectors = true;
+        writer->masks = writer->masks || masks;
+        uint32_t taken = operand;
         for (uint32_t a = count; a-- > 0;)
         {
             if (a != skipped && a != rounded)
             {
-                // The argument at its prototype's type, then widened (the tasks run in the reverse of their pushes).
+                // The argument at its prototype's type, then widened, or a mask's converted to the mask class (the tasks
+                // run in the reverse of their pushes).
+                taken -= 1;
                 const TypeId type = stream->argument_conversions[first + a].type;
                 const uint8_t class = check_lower_x86_bits_class(writer, type);
                 const uint8_t widened = check_lower_x86_operand_class(class);
-                if (widened != class)
+                if (masks && taken < row.operand_count && row.operand_classes[taken] == BUSTER_TYPED_CLASS_MASK)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[taken]);
+                }
+                else if (widened != class)
                 {
                     check_lower_convert(writer, check_lower_x86_bits_type(writer, type), check_lower_class_type(widened));
                 }
@@ -11377,6 +11397,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->x87 = check_lower_x87(writer, result);
         writer->int128 = false;
         writer->vectors = false;
+        writer->masks = false;
         writer->operation_count = 0;
         writer->vector_constant_count = 0;
         writer->result_object = BUSTER_CHECK_NONE;
@@ -11817,6 +11838,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         function->int128 = writer->int128;
         function->vectors = writer->vectors;
+        function->masks = writer->masks;
         if (writer->vectors)
         {
             const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
