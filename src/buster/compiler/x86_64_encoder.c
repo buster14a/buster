@@ -5573,49 +5573,57 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // marked form's are a copy at BUSTER_X86_FORM_FIXUP and up, so that the vectorized encoder looks the form up as the
 // record has it: taking the flag off each form cost the loop 2.4% on Zen 5.
 #define BUSTER_X86_TEMPLATE_PADDING 1
-// Each table is two transparent huge pages, each aligned to one: the forms' templates (1.6 MB) in the first and their
-// marked copies (BUSTER_X86_FORM_FIXUP is 2 MB of entries) in the second. A table is written whole when it is built, so
-// x86_templates_prepare asks for those huge pages before it is, and commits the pages it writes in one call each where
-// none come (#590): a kernel whose transparent huge pages are only `madvise`d (Ubuntu's, Debian's and Fedora's) gave
-// .bss's 3.2 MB of them 788 base pages' faults, half of a small file's compile.
+// A table is written whole when it is built, so x86_templates_prepare asks for transparent huge pages over it before it
+// is, and commits the pages it writes in one call each where none come (#590): a kernel whose transparent huge pages are
+// only `madvise`d (Ubuntu's, Debian's and Fedora's) gave .bss's 3.2 MB of them 788 base pages' faults, half of a small
+// file's compile. The huge pages are the 2 MB ones the table's bytes fall in, two or three as the link places it, which
+// a kernel that uses them `always` gives it anyway; a huge page's margin on either side of the table keeps them all in
+// its own storage. The storage isn't aligned to a huge page: wild 0.10, which links the CI's builds, refuses alignments
+// past 64 KB.
 #define BUSTER_X86_TEMPLATE_HUGE_PAGE (2u << 20)
-#define BUSTER_X86_TEMPLATE_STORAGE (2 * BUSTER_X86_TEMPLATE_HUGE_PAGE / sizeof(X86TemplateEntry))
-_Static_assert(BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry) == BUSTER_X86_TEMPLATE_HUGE_PAGE, "the marked copies start at the second huge page");
-_Static_assert(BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING <= BUSTER_X86_TEMPLATE_STORAGE,
-               "a table and its padding fit in its two huge pages");
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
-static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
+#define BUSTER_X86_TEMPLATE_MARGIN (BUSTER_X86_TEMPLATE_HUGE_PAGE / sizeof(X86TemplateEntry))
+#define BUSTER_X86_TEMPLATE_STORAGE \
+    (BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_TEMPLATE_MARGIN)
+#define BUSTER_X86_TEMPLATE_ALIGNMENT 4096
+_Static_assert(BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry) == BUSTER_X86_TEMPLATE_HUGE_PAGE, "the marked copies are a huge page after the forms'");
+_Static_assert(BUSTER_X86_TEMPLATE_MARGIN * sizeof(X86TemplateEntry) % BUSTER_X86_TEMPLATE_ALIGNMENT == 0, "a table starts on a page");
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
+static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
 BUSTER_X86_SHARED bool x86_encoder_initialized;
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
-static X86TemplateEntry* const x86_templates_address32 = x86_template_storage_address32 + BUSTER_X86_TEMPLATE_PADDING;
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
+static X86TemplateEntry* const x86_templates_address32 = x86_template_storage_address32 + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
 BUSTER_X86_SHARED bool x86_encoder_initialized_address32;
 // The same for APX (x86_encode_apx): the templates of the legacy forms of maps 0 and 1 have REX2's positions.
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_apx[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
-static X86TemplateEntry* const x86_templates_apx = x86_template_storage_apx + BUSTER_X86_TEMPLATE_PADDING;
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_apx[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
+static X86TemplateEntry* const x86_templates_apx = x86_template_storage_apx + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
 BUSTER_X86_SHARED bool x86_encoder_initialized_apx;
 // The same for 32-bit and 16-bit modes (x86_encode_mode32 and x86_encode_mode16): the mode's prefixes, a position for
 // the decorations' segment override and one for BUSTER_X86_MODE_ADDRESS_SIZE's 67, and no REX (see build_template).
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_32[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
-static X86TemplateEntry* const x86_templates_32 = x86_template_storage_32 + BUSTER_X86_TEMPLATE_PADDING;
-BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_16[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_HUGE_PAGE)));
-static X86TemplateEntry* const x86_templates_16 = x86_template_storage_16 + BUSTER_X86_TEMPLATE_PADDING;
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_32[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
+static X86TemplateEntry* const x86_templates_32 = x86_template_storage_32 + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_16[BUSTER_X86_TEMPLATE_STORAGE] __attribute__((aligned(BUSTER_X86_TEMPLATE_ALIGNMENT)));
+static X86TemplateEntry* const x86_templates_16 = x86_template_storage_16 + BUSTER_X86_TEMPLATE_MARGIN + BUSTER_X86_TEMPLATE_PADDING;
 
 // Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name.
 #define BUSTER_X86_MADV_POPULATE_WRITE 23
 
-// Before a table's first build, asks for its two huge pages (MADV_HUGEPAGE), and commits the bytes the build writes, the
-// templates and their marked copies, in one call each (MADV_POPULATE_WRITE): where huge pages come, two faults; where
-// they don't (`never`, or none free), base pages without a fault each, which took a kernel without transparent huge
-// pages from 1.39 to 0.88 ms for the table on a Xeon VM. Either call failing (an older kernel) leaves the pages to their
-// faults, as before. `templates` is the table (its storage plus the padding).
+// Before a table's first build, asks for the huge pages its bytes fall in (MADV_HUGEPAGE), and commits the bytes the
+// build writes, the templates and their marked copies, in one call each (MADV_POPULATE_WRITE): where huge pages come, a
+// fault each; where they don't (`never`, or none free), base pages without a fault each, which took a kernel without
+// transparent huge pages from 1.39 to 0.88 ms for the table on a Xeon VM. Either call failing (an older kernel) leaves
+// the pages to their faults, as before. `templates` is the table (past its storage's margin and padding).
 static void x86_templates_prepare(X86TemplateEntry* templates)
 {
-    X86TemplateEntry* const storage = templates - BUSTER_X86_TEMPLATE_PADDING;
-    const size_t written = (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry);
-    madvise(storage, BUSTER_X86_TEMPLATE_STORAGE * sizeof(X86TemplateEntry), MADV_HUGEPAGE);
-    madvise(storage, written, BUSTER_X86_MADV_POPULATE_WRITE);
-    madvise(storage + BUSTER_X86_FORM_FIXUP, written, BUSTER_X86_MADV_POPULATE_WRITE);
+    const uintptr_t huge = BUSTER_X86_TEMPLATE_HUGE_PAGE;
+    const uintptr_t written = (BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry);
+    const uintptr_t forms = (uintptr_t)(templates - BUSTER_X86_TEMPLATE_PADDING);
+    const uintptr_t marked = forms + BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry);
+    const uintptr_t first = forms & ~(huge - 1);
+    const uintptr_t last = (marked + written + huge - 1) & ~(huge - 1);
+    madvise((void*)first, last - first, MADV_HUGEPAGE);
+    madvise((void*)forms, written, BUSTER_X86_MADV_POPULATE_WRITE);
+    madvise((void*)marked, written, BUSTER_X86_MADV_POPULATE_WRITE);
 }
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general

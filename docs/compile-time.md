@@ -887,12 +887,16 @@ What changed:
   where the build would. Every entry is compared with the builder's
   ([the encoder's design](x86-64-encoder.md), "Templates and the canonical
   slot"). Each entry's marked copy is written as the entry is completed.
-- **Each template table is two 2 MB huge pages, aligned to them.** Before the
-  build, the encoder asks for them and commits the ranges it writes
-  (`MADV_HUGEPAGE`, then `MADV_POPULATE_WRITE`). That is two faults where huge
-  pages come, and base pages committed in one call each where they don't.
-  `.bss` grows by up to 2 MB of alignment per table, which is address space,
-  not memory.
+- **The template tables get huge pages.** Before the build, the encoder asks
+  for huge pages over the two or three 2 MB pages a table's bytes fall in
+  (`MADV_HUGEPAGE`) and commits the ranges it writes (`MADV_POPULATE_WRITE`).
+  That is a fault per huge page where huge pages come, and base pages
+  committed in one call each where they don't.
+  - These are the pages a kernel that uses huge pages `always` gives the table.
+  - A 2 MB margin on either side keeps them in the table's own storage, adding
+    address space, not memory.
+  - The storage isn't aligned to a huge page, because wild 0.10, which links
+    CI's builds, refuses alignments past 64 KB.
 - **Tier 0 commits its tables' pages in one call per array**
   (`tier0_prepare_tables`). One structure of them, in a huge page of its own,
   ran 2.2 times as many instructions, because LLVM no longer knew the tables
@@ -920,7 +924,7 @@ both builds. The encoder's loops are unchanged. Measured on the same VM against
   counts `MADV_POPULATE_WRITE`'s pages as minor faults: 1,136 of them there,
   with none taken one at a time.
 - **Peak RSS.** With huge pages, peak RSS grows by 1.2 MB (26.8 to 28.0 MB):
-  the kernel clears a table's two pages whole.
+  the kernel clears the table's huge pages whole.
 - **Noise.** The VM is noisy: rounds vary by 1 ms, and a run in 31 is several
   times the median.
 - **Where it stands against tcc.** A small file still takes 3.1 to 3.6 times

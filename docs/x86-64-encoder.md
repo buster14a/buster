@@ -295,19 +295,23 @@ other positions (a `67`, REX2's payload, the decorations' override).
 marked copy with `build_mode_template`'s. Each entry's marked copy is written as
 the entry is completed, rather than by one 1.6 MB copy afterwards.
 
-A table is two 2 MB transparent huge pages, each aligned to one: the templates
-in the first and their marked copies in the second (`BUSTER_X86_FORM_FIXUP` is
-2 MB of entries). Before building a table, `x86_templates_prepare` asks for
-those pages (`MADV_HUGEPAGE`) and commits the ranges the build writes
-(`MADV_POPULATE_WRITE`), one call each. Where huge pages come, that is two
-faults. Where they don't (`never`, or none free), it is base pages without a
-fault each. On a kernel whose transparent huge pages are only `madvise`d
-(Ubuntu's, Debian's and Fedora's default), `.bss`'s 3.2 MB had faulted in 788
-base pages, half of a small file's compile. The 9700X's kernel uses `always`,
-which already gave `.bss` huge pages, so it hid the cost. On a 2.1 GHz Xeon VM
-with `madvise`, a process's first `x86_encoder_initialize` fell from a median
-of 2.32–2.39 ms with 788 faults to 0.85–1.0 ms with 4. Its work without faults
-fell from 0.94 to 0.53 ms.
+Before building a table, `x86_templates_prepare` asks for transparent huge
+pages (`MADV_HUGEPAGE`) over the 2 MB pages its bytes fall in, and commits the
+ranges the build writes (`MADV_POPULATE_WRITE`), one call each. The templates
+and their marked copies are 2 MB apart (`BUSTER_X86_FORM_FIXUP` is 2 MB of
+entries), so they fall in two or three huge pages, depending on where the link
+places the table. A huge page's margin on either side keeps those pages in the
+table's own storage. The storage isn't aligned to a huge page, because wild
+0.10, which links CI's builds, refuses alignments past 64 KB.
+- **Faults.** Where huge pages come, that is a fault per huge page. Where they
+  don't (`never`, or none free), it is base pages without a fault each.
+- **Why.** On a kernel whose transparent huge pages are only `madvise`d
+  (Ubuntu's, Debian's and Fedora's default), `.bss`'s 3.2 MB had faulted in 788
+  base pages, half of a small file's compile. The 9700X's kernel uses
+  `always`, which already gave `.bss` huge pages, so it hid the cost.
+- **Measured.** On a 2.1 GHz Xeon VM with `madvise`, a process's first
+  `x86_encoder_initialize` fell from a median of 1.8–2.6 ms with 788 faults to
+  1.0–1.1 ms with 3 or 4. Its work without faults fell from 0.94 to 0.53 ms.
 
 ### VEX and EVEX
 
