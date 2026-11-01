@@ -1445,6 +1445,41 @@ leaves call metadata untouched and restores scratch. Differential fixtures
 exercise both driver schedules, nested selections, dead statements, unevaluated
 contexts and pragma/`-w` policy; storage tests cover every allocation cut.
 
+For #1066, a call whose hard immediate constraint fails is reported as clang
+reports it. A nonconstant immediate, one of the prototype's `I` arguments or
+one a SemaX86 rule constrains, gives `argument to 'NAME' must be a constant
+integer`, where clang's `BuiltinConstantArg` says it. An invalid rounding or
+SAE control gives `invalid rounding argument`, and an invalid gather or
+scatter scale `scale argument must be 1, 2, 4, or 8`. Each is placed at the
+call's begin, the builtin's name, with the notes of the macros it comes from.
+The checker still records them as `CHECK_DIAG_INCOMPATIBLE` on the call's node,
+and its effect keeps the failed constraint. The call's value has no type, so
+that an enclosing call or operator inherits the error rather than reports
+another, as clang checks no call whose arguments hold an error. The driver and the corpus check
+find that effect by node (`check_diagnostic_x86_hard`), a search per error
+reported, since the stream keeps the effects in their nodes' order. The report
+keeps the call's `)` as its token, so its order among the unit's other
+diagnostics, and the cutoffs that read it, are as before: clang reports the call
+after its arguments' own diagnostics. `-fsyntax-only` and `-c` print it alike.
+`test-checker` (`check_test_x86_hard_errors`) compares hand-written fixtures
+with clang, line for line: the k-shifts, a call over two lines, two calls on one
+line, nested calls, macros, constants that are integer constant expressions and
+ones that aren't, rounding, SAE and scale controls, and errors in the arguments
+(an undeclared one, failed calls inside calls and operators, and failed calls in
+a conditional's arms, which each report). Each runs by both paths, with
+`-fsyntax-only` and `-c`. `check_test_x86_hard_corpus` runs the corpus check on
+a call over two lines, in a unit that parses and in one whose later syntax
+error sends it through the repair. Its first error must be clang's line,
+column and message. `check_test_x86_hard_every` generates a unit with one
+call for every in-scope x86 builtin and each of its integer constant arguments,
+that argument a parameter, and compares it with clang the same four ways. It
+also checks that every lowering row's immediate and rounding control is such
+an argument, so the lowering never refuses a nonconstant one that the checker
+let through. It also checks that every x86 builtin's message fits
+`BUSTER_CHECK_DIAGNOSTIC_X86_TEXT`, and that it generated every call it counted.
+Its coverage may not fall below the tree's: 588 calls of 555 builtins, and 555
+lowering rows.
+
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
 shuffle, conversion, nondeterministic and nontemporal spellings, and the 52
 other generic vector builtins of clang 23 (#148), at catalog identities from
