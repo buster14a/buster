@@ -363,16 +363,21 @@ a derived metric has the advertised meaning. Admit a metric only after qualifyin
 
 Preserve the formula's intended collection domain. Ordinary user-process core metrics may use user-only collection;
 a formula that explicitly separates user, kernel, hypervisor, host or guest events must retain those distinctions.
-Do not apply a blanket `--all-user` override to it. Retain the effective event attributes from the same invocation's
-`perf stat record` data (`perf evlist -v`), not just event labels or a separate probe. Verify privilege flags,
-descendant inheritance and consistent operand scope. Unsupported system or uncore domains remain unsupported rather
-than becoming process-core measurements by assumption.
+Do not apply a blanket `--all-user` override to it, and keep software events such as `context-switches` in their full
+process domain: a user-only override can silently zero them. Retain the effective event attributes from the same
+invocation: `perf evlist -v` on its `perf stat record` data when the host can read that data, otherwise the
+invocation's `perf stat -vvv` `perf_event_attr` blocks. Not just event labels or a separate probe. Verify privilege
+flags, descendant inheritance and consistent operand scope. Unsupported system or uncore domains remain unsupported
+rather than becoming process-core measurements by assumption.
 
 Every required operand must be present, unambiguous, supported, finite and nonnegative, with verified units and at
 least 99% scheduling duty. Denominators must be positive, including the denominator of a guarded `d_ratio`: a
-fallback zero on division by zero is not a measured zero. In particular, a missing or zero `duration_time` invalidates
-a time-based rate. Python wrapper wall time, which includes orchestration, must not replace it. A separate
-fresh-process monotonic timing control can reject an implausible positive duration, but cannot repair the denominator.
+fallback zero on division by zero is not a measured zero. A missing or zero `duration_time` invalidates a time-based
+rate unless the same invocation printed perf's positive `seconds time elapsed`; the collector then records
+`duration_source=perf-elapsed`, retains the printed value, and still requires the independent timing control. Python
+wrapper wall time, which includes orchestration, must not replace it, and a missing or zero elapsed value invalidates
+the rate. A separate fresh-process monotonic timing control can reject an implausible positive duration, but cannot
+repair a missing denominator.
 
 Recompute accepted values from the retained raw operands and pinned formula inventory with sufficient precision.
 Evaluate dependent formulas before their display scaling, and apply the outer scale exactly once. Keep perf's rounded
@@ -388,10 +393,12 @@ The compile branch-misprediction display `0.0` instead represents `3590833 / 211
 Historical effective attributes were not retained; the addendum explicitly limits historical scope evidence to the
 exact input blobs and collector revision. These are offline qualifications, not new hardware measurements.
 
-Before closing #875, recollect only the affected supported formula families and explicit controls on the locked
-9700X. Keep CPU 2 affinity, governor and SMT state, compiler/source/corpus identities, perf/kernel versions, the
-formula inventory, command, raw records, effective attributes and data hashes. Compare privilege-domain totals with
-an independent raw control over matching domains, and duration rates with positive duration plus an independent
-workload-time control. Take the shared lock per invocation, including controls; do not recursively acquire it in CI
-jobs whose runner hooks already hold it. Permission or PMU failures stay unavailable/unsupported. Save new records
-beside the old evidence; neither overwrite it nor invalidate unrelated counters or top-down formulas wholesale.
+The [2026-11-01 locked-9700X acceptance](https://github.com/buster14a/buster-performance/tree/9be7275237beff40345b072fe0b9bd698b563831/docs/measurements/microarchitecture-2026-10-29/qualification-875)
+recollected the 15 affected supported formulas for preprocess, syntax and compile with CPU 2 affinity and one shared-host
+`exclusive.sh` acquisition per invocation: 42 of 45 records qualify (39 valid, 3 genuine-zero), and the three
+`lpm_l3_accesses` records stay unavailable because their `amd_l3` `max()` operand is refused per thread. The compile
+privilege split is 85.51% user / 14.07% kernel / 0% guest against 85.42 / 14.58 / 0 from an independent raw control;
+syntax and preprocess agree within 0.3 percentage points. Every duration record has a positive captured duration, and
+the fresh-process controls agree within 0.779 to 1.041. The old 50/50 split and doubled total do not reproduce.
+Unsupported system or uncore families remain unrun rather than reinterpreted. New records live beside the old
+evidence; neither overwrites it nor invalidates unrelated counters or top-down formulas wholesale.
