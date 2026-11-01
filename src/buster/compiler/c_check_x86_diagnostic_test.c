@@ -415,10 +415,26 @@ static void check_test_x86_hard_errors(CheckTest* test, const char* clang)
           "I8 a(D8 x,I8 old){return __builtin_ia32_cvtpd2dq512_mask(x,old,255,12);}\n"
           "int b(D2 x){return __builtin_ia32_vcvttsd2si32(x,9);}\n"
           "I16 c(I16 i,const void* p){return __builtin_ia32_gathersiv16si(i,p,i,65535,3);}\n"
-          "F4 d(F4 x,F4 y){return __builtin_ia32_shufps(x,y,(int)2.5)+__builtin_ia32_shufps(x,y,9);}\n",
+          "F4 d(F4 x,F4 y){return __builtin_ia32_shufps(x,y,(int)2.5)+__builtin_ia32_shufps(x,y,9);}\n"
+          "unsigned char e(D8 x,D8 y){return __builtin_ia32_cmppd512_mask(x,y,7,255,9);}\n",
           "8:26: error: invalid rounding argument\n"
           "9:20: error: invalid rounding argument\n"
-          "10:35: error: scale argument must be 1, 2, 4, or 8\n" },
+          "10:35: error: scale argument must be 1, 2, 4, or 8\n"
+          "12:35: error: invalid rounding argument\n" },
+        // Clang checks no call whose arguments hold an error: a failed call is an invalid argument and operand.
+        { "errors in the arguments",
+          "unsigned a(unsigned b){return __builtin_ia32_kshiftlisi(b,undeclared);}\n"
+          "unsigned c(unsigned b,unsigned i){return __builtin_ia32_kshiftlisi(__builtin_ia32_kshiftrisi(b,i),i);}\n"
+          "unsigned d(unsigned b,unsigned i){return __builtin_ia32_kshiftlisi(__builtin_ia32_kshiftrisi(b,i)+1,i)+2;}\n"
+          "unsigned e(unsigned b,unsigned i){return (unsigned)__builtin_ia32_kshiftlisi(b,i)?__builtin_ia32_kshiftrisi(b,i):0;}\n"
+          "unsigned g(unsigned b,unsigned i){return __builtin_ia32_kshiftlisi(b,\n  i)+undeclared2;}\n",
+          "8:59: error: use of undeclared identifier 'undeclared'\n"
+          "9:68: error: argument to '__builtin_ia32_kshiftrisi' must be a constant integer\n"
+          "10:68: error: argument to '__builtin_ia32_kshiftrisi' must be a constant integer\n"
+          "11:52: error: argument to '__builtin_ia32_kshiftlisi' must be a constant integer\n"
+          "11:83: error: argument to '__builtin_ia32_kshiftrisi' must be a constant integer\n"
+          "12:42: error: argument to '__builtin_ia32_kshiftlisi' must be a constant integer\n"
+          "13:6: error: use of undeclared identifier 'undeclared2'\n" },
     };
     char directory[] = "/tmp/buster-x86-hard-XXXXXX";
     const bool ready = mkdtemp(directory) != NULL;
@@ -470,12 +486,90 @@ static void check_test_x86_hard_errors(CheckTest* test, const char* clang)
     }
 }
 
+// The corpus check's first error for an x86 hard immediate's (#1066): a call over two lines, whose name and `)` are on
+// lines of their own, in a unit that parses (check_corpus_check_policy's expression path) and in one that a later syntax
+// error sends through the repair (check_corpus_repair). Each must be clang's first error, its line, column and message, by
+// both paths, with the paths alike.
+static void check_test_x86_hard_corpus(CheckTest* test, const char* clang)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        bool parsed;
+    } fixtures[] =
+    {
+        { "x86 hard error, corpus expression path", "unsigned f(unsigned b,unsigned i)\n{\n    return __builtin_ia32_kshiftlisi(b,\n        i&31?1:0);\n}\n",
+          true },
+        { "x86 hard error, corpus repair path",
+          "unsigned f(unsigned b,unsigned i)\n{\n    return __builtin_ia32_kshiftrihi(b,\n        i);\n}\nint g(void){return 1 +;}\n", false },
+    };
+    const PPOptions options =
+    {
+        .language =
+        {
+            .standard = 2017,
+            .gnu = true,
+        },
+        .no_standard_includes = true,
+        .quiet = true,
+        .clang_features = true,
+        .semantic_pragmas = true,
+    };
+    const char* arguments[] = { "--no-default-config", "--target=x86_64-linux-gnu", "-std=gnu17", "-nostdinc" };
+    char directory[] = "/tmp/buster-x86-corpus-XXXXXX";
+    const bool made = mkdtemp(directory) != NULL;
+    check_test_expect(test, made, "x86 hard error corpus directory");
+    for (uint32_t i = 0; made && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/corpus_%u.c", directory, i);
+        CheckCorpusOracle oracle = { 0 };
+        const bool ready = check_corpus_write(path, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
+        CheckCorpusTally tally = { 0 };
+        CheckCorpusOutcome outcome = { 0 };
+        const bool different = ready && check_corpus_file_outcome(&tally, path, fixtures[i].name, "x86-hard", &options, &oracle, NULL, 64, &outcome);
+        char description[1024];
+        snprintf(description, sizeof(description), "%s: clang's first error %u:%u \"%s\", the checker's %u:%u (%u) \"%s\", parsed %u", fixtures[i].name,
+                 oracle.line, oracle.column, oracle.message, outcome.lines[0], outcome.column, outcome.lines[1], outcome.message, outcome.parsed);
+        check_test_expect(test, ready && !different && oracle.rejected && oracle.line == 3 && outcome.lines[0] == oracle.line && outcome.lines[1] == oracle.line &&
+                               outcome.column == oracle.column && strcmp(outcome.message, oracle.message) == 0 && outcome.parsed == fixtures[i].parsed &&
+                               outcome.equal, description);
+        unlink(path);
+    }
+    check_test_expect(test, !made || rmdir(directory) == 0, "x86 hard error corpus directory removed");
+}
+
+// Appends the formatted text to `buffer` at `*used`, of `capacity` bytes: false, with nothing counted, where it doesn't fit.
+static __attribute__((format(printf, 4, 5))) bool check_test_x86_append(char* buffer, uint32_t capacity, uint32_t* used, const char* format, ...)
+{
+    bool result = false;
+    if (*used < capacity)
+    {
+        va_list arguments;
+        va_start(arguments, format);
+        const int written = vsnprintf(buffer + *used, capacity - *used, format, arguments);
+        va_end(arguments);
+        result = written >= 0 && (uint32_t)written < capacity - *used;
+        *used += result ? (uint32_t)written : 0;
+    }
+    return result;
+}
+
+// The generated unit's coverage on the review's tree (#1066): its calls, their builtins and the lowering's rows with an
+// immediate or a rounding control. A change of the catalog or the decoder that takes some away must lower them knowingly.
+#define BUSTER_CHECK_TEST_X86_HARD_CALLS 588u
+#define BUSTER_CHECK_TEST_X86_HARD_BUILTINS 555u
+#define BUSTER_CHECK_TEST_X86_HARD_ROWS 555u
+
 // Every x86 builtin the checker takes by its prototype and SemaX86's rules (builtin_intrinsic_own_main_prototype_in_scope)
 // called with each argument clang requires to be an integer constant expression (the prototype's `I` ones and the rules'
 // arguments, check_graph_x86_ice_mask) as a parameter, a function each, its other such arguments values the rules take:
 // clang must refuse every call at its builtin's name, naming it, and the driver must give clang's diagnostics (#1066).
 // Before it, every immediate and rounding argument of the lowering's rows (c_builtin_x86_rows.inc) must be such an
-// argument, so that the checker refuses a nonconstant one as clang does, never leaving it to the lowering's refusal.
+// argument, so that the checker refuses a nonconstant one as clang does, never leaving it to the lowering's refusal; and
+// every x86 builtin's message must fit the driver's buffer (BUSTER_CHECK_DIAGNOSTIC_X86_TEXT).
 static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const char* clang)
 {
     uint32_t rows = 0;
@@ -512,9 +606,21 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
         }
     }
     char description[1024];
-    snprintf(description, sizeof(description), "%u x86 lowering rows' immediates and rounding controls are integer constant arguments (%u not, the first %s)", rows,
-             loose, first_loose != NULL ? first_loose : "none");
-    check_test_expect(test, rows != 0 && loose == 0, description);
+    snprintf(description, sizeof(description), "%u x86 lowering rows' immediates and rounding controls are integer constant arguments (%u not, the first %s), "
+             "at least %u", rows, loose, first_loose != NULL ? first_loose : "none", BUSTER_CHECK_TEST_X86_HARD_ROWS);
+    check_test_expect(test, rows >= BUSTER_CHECK_TEST_X86_HARD_ROWS && loose == 0, description);
+    uint32_t longest = 0;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_at(i);
+        if (info->name_length > 15 && memcmp(info->name, "__builtin_ia32_", 15) == 0 && info->name_length > longest)
+        {
+            longest = info->name_length;
+        }
+    }
+    snprintf(description, sizeof(description), "the longest x86 builtin's name, of %u bytes, fits the driver's message of %u bytes", longest,
+             BUSTER_CHECK_DIAGNOSTIC_X86_TEXT);
+    check_test_expect(test, longest + sizeof("argument to '' must be a constant integer") <= BUSTER_CHECK_DIAGNOSTIC_X86_TEXT, description);
     const uint32_t capacity = 1u << 22;
     char* source = malloc(capacity);
     char* expected = malloc(capacity);
@@ -522,14 +628,16 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
     char* other = malloc(capacity);
     Arena names = arena_reserve(UINT64_C(1) << 20);
     char directory[] = "/tmp/buster-x86-every-XXXXXX";
-    bool ready = source != NULL && expected != NULL && text != NULL && other != NULL && names.base != NULL && mkdtemp(directory) != NULL;
+    const bool made = mkdtemp(directory) != NULL;
+    bool ready = source != NULL && expected != NULL && text != NULL && other != NULL && names.base != NULL && made;
     check_test_expect(test, ready, "x86 hard error unit memory and directory");
     uint32_t used = 0;
     uint32_t expected_used = 0;
     uint32_t calls = 0;
+    uint32_t wanted = 0;
     uint32_t builtins = 0;
     uint32_t undecoded = 0;
-    for (uint32_t i = 0; ready && i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
     {
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_at(i);
         const bool x86 = info->name_length > 15 && memcmp(info->name, "__builtin_ia32_", 15) == 0 &&
@@ -549,66 +657,54 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
         }
         const uint64_t required = x86 && types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS ? types.ice_parameters | check_graph_x86_ice_mask(info, false) : 0;
         builtins += required != 0;
-        for (uint32_t argument = 0; ready && argument < types.parameter_count && argument < 64; argument += 1)
+        for (uint32_t argument = 0; argument < types.parameter_count && argument < 64; argument += 1)
         {
             if ((required & (UINT64_C(1) << argument)) != 0)
             {
-                ready = used + 4096 < capacity && expected_used + 256 < capacity;
+                wanted += 1;
                 const uint32_t line = calls + 1;
-                uint32_t column = 0;
-                if (ready)
+                // Each call's function is a line of its own, which starts here.
+                const uint32_t line_start = used;
+                ready = ready && check_test_x86_append(source, capacity, &used, "void f%u(", line);
+                for (uint32_t p = 0; ready && p < types.parameter_count; p += 1)
                 {
-                    used += (uint32_t)snprintf(source + used, capacity - used, "void f%u(", line);
-                    for (uint32_t p = 0; p < types.parameter_count; p += 1)
-                    {
-                        char name[16];
-                        snprintf(name, sizeof(name), "p%u", p);
-                        const String8 printed = type_print(table, &names, types.parameters[p], (String8){ .pointer = name, .length = strlen(name) }, 0, 0);
-                        used += (uint32_t)snprintf(source + used, capacity - used, "%s%.*s", p != 0 ? "," : "", (int)printed.length, printed.pointer);
-                        arena_pop_to(&names, 0);
-                    }
-                    const uint32_t start = used;
-                    used += (uint32_t)snprintf(source + used, capacity - used, "){(void)");
-                    uint32_t line_start = start;
-                    while (line_start != 0 && source[line_start - 1] != '\n')
-                    {
-                        line_start -= 1;
-                    }
-                    column = used - line_start + 1;
-                    used += (uint32_t)snprintf(source + used, capacity - used, "%.*s(", (int)info->name_length, info->name);
-                    for (uint32_t p = 0; p < types.parameter_count; p += 1)
-                    {
-                        // The argument under test is its parameter; another constant argument takes a value its rules
-                        // take (a rounding control's or SAE's 4, a scale's 1, a range's bottom), or 0.
-                        uint32_t value = 0;
-                        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(check_builtin_x86_rules); r += 1)
-                        {
-                            const CheckBuiltinX86Rule* rule = check_builtin_x86_rules + r;
-                            if (rule->argument == p && check_builtin_x86_compare(info->name, info->name_length, rule) == 0)
-                            {
-                                value = rule->kind == CHECK_BUILTIN_X86_CONSTRAINT_RANGE ? rule->low : rule->kind == CHECK_BUILTIN_X86_CONSTRAINT_SCALE ? 1 : 4;
-                            }
-                        }
-                        if (p == argument || (required & (UINT64_C(1) << p)) == 0)
-                        {
-                            used += (uint32_t)snprintf(source + used, capacity - used, "%sp%u", p != 0 ? "," : "", p);
-                        }
-                        else
-                        {
-                            used += (uint32_t)snprintf(source + used, capacity - used, "%s%u", p != 0 ? "," : "", value);
-                        }
-                    }
-                    used += (uint32_t)snprintf(source + used, capacity - used, ");}\n");
-                    expected_used += (uint32_t)snprintf(expected + expected_used, capacity - expected_used,
-                                                        "%u:%u: error: argument to '%.*s' must be a constant integer\n", line, column,
-                                                        (int)info->name_length, info->name);
-                    calls += 1;
+                    char name[16];
+                    snprintf(name, sizeof(name), "p%u", p);
+                    const String8 printed = type_print(table, &names, types.parameters[p], (String8){ .pointer = name, .length = strlen(name) }, 0, 0);
+                    ready = check_test_x86_append(source, capacity, &used, "%s%.*s", p != 0 ? "," : "", (int)printed.length, printed.pointer);
+                    arena_pop_to(&names, 0);
                 }
+                ready = ready && check_test_x86_append(source, capacity, &used, "){(void)");
+                const uint32_t column = used - line_start + 1;
+                ready = ready && check_test_x86_append(source, capacity, &used, "%.*s(", (int)info->name_length, info->name);
+                for (uint32_t p = 0; ready && p < types.parameter_count; p += 1)
+                {
+                    // The argument under test is its parameter; another constant argument takes a value its rules take (a
+                    // rounding control's or SAE's 4, a scale's 1, a range's bottom), or 0.
+                    uint32_t value = 0;
+                    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(check_builtin_x86_rules); r += 1)
+                    {
+                        const CheckBuiltinX86Rule* rule = check_builtin_x86_rules + r;
+                        if (rule->argument == p && check_builtin_x86_compare(info->name, info->name_length, rule) == 0)
+                        {
+                            value = rule->kind == CHECK_BUILTIN_X86_CONSTRAINT_RANGE ? rule->low : rule->kind == CHECK_BUILTIN_X86_CONSTRAINT_SCALE ? 1 : 4;
+                        }
+                    }
+                    const bool parameter = p == argument || (required & (UINT64_C(1) << p)) == 0;
+                    ready = parameter ? check_test_x86_append(source, capacity, &used, "%sp%u", p != 0 ? "," : "", p) :
+                                        check_test_x86_append(source, capacity, &used, "%s%u", p != 0 ? "," : "", value);
+                }
+                ready = ready && check_test_x86_append(source, capacity, &used, ");}\n") &&
+                        check_test_x86_append(expected, capacity, &expected_used, "%u:%u: error: argument to '%.*s' must be a constant integer\n", line,
+                                              column, (int)info->name_length, info->name);
+                calls += ready;
             }
         }
     }
-    snprintf(description, sizeof(description), "x86 hard error unit: %u calls of %u builtins (%u in scope don't decode)", calls, builtins, undecoded);
-    check_test_expect(test, ready && calls != 0 && undecoded == 0, description);
+    snprintf(description, sizeof(description), "x86 hard error unit: %u calls of the %u wanted, at least %u, of %u builtins, at least %u (%u in scope don't "
+             "decode)", calls, wanted, BUSTER_CHECK_TEST_X86_HARD_CALLS, builtins, BUSTER_CHECK_TEST_X86_HARD_BUILTINS, undecoded);
+    check_test_expect(test, ready && calls == wanted && calls >= BUSTER_CHECK_TEST_X86_HARD_CALLS && builtins >= BUSTER_CHECK_TEST_X86_HARD_BUILTINS &&
+                           undecoded == 0, description);
     char path[256];
     char object[256];
     char output[256];
@@ -625,7 +721,7 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
         printf("  x86 hard errors: %u nonconstant arguments of %u builtins against clang, by both paths with -fsyntax-only and -c; %u lowering rows' "
                "immediates and rounding controls among those arguments\n", calls, builtins, rows);
     }
-    if (ready)
+    if (made)
     {
         unlink(path);
         unlink(object);
@@ -643,6 +739,7 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
 static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang)
 {
     check_test_x86_hard_errors(test, clang);
+    check_test_x86_hard_corpus(test, clang);
     check_test_x86_hard_every(test, types, clang);
     check_test_target_feature_builtins(test);
     check_test_x86_diagnostic_storage(test);

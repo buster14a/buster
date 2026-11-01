@@ -240,6 +240,10 @@ static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t nod
     return result;
 }
 
+// The bytes of check_diagnostic_x86_hard's message buffer: the longest x86 builtin's name is 41 bytes, and test-checker
+// checks that every one's message fits (check_test_x86_hard_every).
+#define BUSTER_CHECK_DIAGNOSTIC_X86_TEXT 192u
+
 // An x86 builtin's call whose hard immediate constraint failed, as clang reports it (#1066): Sema's BuiltinConstantArg
 // and SemaX86's rounding and scale checks put the error at the call's begin, the builtin's name, and name the builtin
 // for an immediate that isn't an integer constant expression. The report keeps its own token, the call's `)`, which

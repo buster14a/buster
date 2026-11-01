@@ -638,7 +638,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     if (check_repair_graph_report(repair, &result->input.graph, diagnostic) && diagnostic->token < result->position)
                     {
                         // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
-                        char x86_text[192];
+                        char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
                         const char* x86 = check_diagnostic_x86_hard(&result->input, &result->stream, diagnostic, x86_text, sizeof(x86_text), &result->token);
                         result->position = diagnostic->token;
                         result->pragma = 0;
@@ -909,7 +909,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
-            char x86_text[192];
+            char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
             const char* x86 = check_diagnostic_x86_hard(&path->input, &path->stream, path->stream.reports, x86_text, sizeof(x86_text), &path->token);
             path->phase = "expression";
             path->position = path->stream.reports[0].token;
