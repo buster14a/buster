@@ -6243,7 +6243,9 @@ pinned to one allowed CPU; like the others, its measurements are informational.
 vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
-it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+it, and the definitions `-c` lowers are lowered and emitted for the target its
+options give (`-march`, the `-m` features: #1041), each function with a target
+attribute for the attribute's, outside the time;
 their typed streams, with the symbols' access the emission gave them
 (`check_program_access`), make one corpus with the other files' functions, which
 both paths must agree on before the same medians are reported. A file the
