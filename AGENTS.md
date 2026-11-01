@@ -2813,6 +2813,15 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   20,000 times, pausing together now and then, while lane 0 waits on it with
   `lane_wait` for every advance, sleeping on its futex with more than one lane:
   each value it sees even and larger than the last, and no advance lost;
+- groups that share CPUs (#824): `lane_group_shares_cpus` against this thread's
+  affinity mask — a group of exactly the process's CPUs doesn't share them, one
+  of more does unless every lane is pinned, and one lane never does — and a
+  group of two lanes on one CPU, which the test cuts this thread's mask to: both
+  lanes must read their group as sharing it, and the lane that waited for lane
+  0's stall must have slept, its group's wait leaving `mwaitx` and the spin that
+  takes its place without it at once, since either holds the CPU the late lane
+  needs; two lanes on the process's own CPUs, where it has more than one, read
+  theirs as not sharing them;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
