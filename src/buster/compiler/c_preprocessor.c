@@ -1711,6 +1711,7 @@ static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, ui
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
 
 #include "c_preprocessor_history.c"
 
@@ -1792,6 +1793,15 @@ static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location)
         }
     }
     return pp->range_count != 0 && location >= pp->ranges[low].base && location - pp->ranges[low].base < pp->ranges[low].length ? low : BUSTER_PP_NONE;
+}
+
+// Whether a source location is written in the main file, where Clang gives a file-scope variable's unused warning: it
+// leaves a header's file-scope variables alone, as every unit that includes the header shares them.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location)
+{
+    const uint32_t range = pp_find_range(pp, location);
+    const bool result = range != BUSTER_PP_NONE && pp->ranges[range].file == pp->main_file;
+    return result;
 }
 
 // Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error). A zero byte follows

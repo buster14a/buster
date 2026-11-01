@@ -155,6 +155,15 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
         case CHECK_WARNING_EVENT_STANDALONE_SPECIFIER:
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;
+        case CHECK_WARNING_EVENT_UNUSED_VARIABLE:
+            result = check_warning_text(scratch, "unused variable '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_FUNCTION:
+            result = check_warning_text(scratch, "unused function '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_PARAMETER:
+            result = check_warning_text(scratch, "unused parameter '%.*s'", (int)name.length, name.pointer);
+            break;
         default: break;
     }
     return result;

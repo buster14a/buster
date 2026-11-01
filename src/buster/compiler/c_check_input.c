@@ -211,6 +211,12 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_CODES 32u
 
 typedef struct CheckInput CheckInput;
+typedef struct CheckInputEnumValue CheckInputEnumValue;
+struct CheckInputEnumValue
+{
+    uint32_t token;
+    unsigned __int128 value;
+};
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
 struct CheckInputLiteralTable
 {
@@ -360,6 +366,9 @@ struct CheckInput
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
+    // The unit's enumerator declarations, in source order: their names' tokens and ICE values.
+    CheckInputEnumValue* enum_values;
+    uint32_t enum_value_count;
     uint8_t* function_flags;
     // Named K&R parameters bound the extra entry conversions without inflating ordinary units' reservations.
     uint32_t kr_parameter_count;
@@ -8544,6 +8553,29 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
             input->resource |= !valid;
+        }
+        if (valid && input->declaration_kinds != NULL)
+        {
+            uint32_t enum_count = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                enum_count += input->declaration_kinds[token] == C_BINDING_ENUMERATOR;
+            }
+            if (enum_count != 0)
+            {
+                CheckInputEnumValue* values = arena_push_array(arena, enum_count, sizeof(CheckInputEnumValue), _Alignof(CheckInputEnumValue));
+                valid = values != NULL;
+                for (uint32_t token = 0, at = 0; valid && token < count; token += 1)
+                {
+                    if (input->declaration_kinds[token] == C_BINDING_ENUMERATOR)
+                    {
+                        values[at++] = (CheckInputEnumValue){ .token = token, .value = reader.enum_values[token] };
+                    }
+                }
+                input->enum_values = values;
+                input->enum_value_count = valid ? enum_count : 0;
+                input->resource |= !valid;
+            }
         }
     }
     else

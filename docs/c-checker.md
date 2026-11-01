@@ -19,14 +19,18 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
-The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
-`-Werror` does not guarantee the warnings or build failures Clang gives for the
-same source: some warnings are not produced, and some produced warnings are not
-promoted by `-Werror`. For example, an unused local, an address of a local
-returned from a function, or a mismatched `printf` format can pass with
-`-Wall -Werror`. Use Clang as a separate diagnostic check when those warnings
-matter. The individual supported diagnostics and their boundaries are described
-in this guide; the remaining warning work is tracked in
+The driver gives Clang's common default and `-Wall`/`-Wextra` warnings for
+constant conversions and bounds, shifts and division, parenthesization, unused
+results and names, format calls, returned stack addresses, uninitialized reads
+and enum switches, with Clang's messages, places, notes and
+`#pragma clang diagnostic` policy; `-Werror` and its `=group` and
+`-Wno-error=` forms promote them. The remaining gaps are the full
+`-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
+computed `case` expressions in `-Wswitch`, and several rarer
+`-Wparentheses`/`-Wreturn-stack-address` shapes and `-Wunused-but-set-variable`,
+so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
+their boundaries and their differential tests are described in "Common
+warnings (#823)" below; the remaining work stays tracked in
 [#823](https://github.com/buster14a/buster/issues/823).
 
 `-c` and the direct path lower only the definitions that the unit's roots reach,
@@ -3190,6 +3194,79 @@ result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or
 8, `V` for none, then the intrinsic's name. `--print NAME` prints each object's trace of a
 case, every record it followed with the value it made. The files are removed
 unless `--keep` or a failure.
+
+## Common warnings (#823)
+
+`c_check_common_warnings.c`, included by the driver, reports the expression
+warnings that need the completed graph or the parser's operator tree:
+`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
+`-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
+bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
+`-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
+`-Wdangling-else` and `-Wuninitialized`. `c_check_binding.c` adds
+`-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
+`-Wunused-parameter` as sparse events, with the declaration's body deciding
+the completion, so they follow Clang's after-function order; a redeclaration
+inherits an earlier `unused` or `used` attribute. A file-scope variable's
+unused warning is given only in the main file, as Clang leaves a header's
+file-scope variables alone because every unit that includes the header shares
+them. The graph pass adds `-Wunused-but-set-parameter` for a parameter a
+statement assignment writes and no read uses.
+
+Each uses the shared warning policy, so a default or group option, a
+`#pragma clang diagnostic` change and `-Werror` promotion behave as the other
+sparse warnings do. A token from a system-header macro is suppressed by its
+spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
+for it. The `-Wswitch` check needs a named enum's source definition and literal
+enumerator `case` labels; it compares the enumerators' checked values, so
+aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
+computed case leaves the switch to a full constant evaluator.
+`-Wuninitialized` follows graph evaluation order: a local scalar object read
+before any write and not address-taken warns; a `sizeof` operand (except a
+variably modified type's bound), a void cast, an address computation, an
+unselected `&&`/`||`/`?:` arm, a static selection's unselected arms and
+controlling expression, and an assignment target are not reads, while an
+initializer's value, a compound assignment and an increment are, with the write
+ordered after the read. A variable read in its own initializer gets Clang's
+"within its own initialization" message. An unmodeled write through inline
+assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
+keeps a separate read that is not the target of the same compound assignment or
+increment.
+`-Wformat` checks the four `printf`-family names, a declaration's
+`format(printf, ...)` attribute, exact integer widths for every length modifier
+(`%lld`, `%zd`, `%jd`, `%td`, ...), `%n`'s integer pointer, each `*` field
+width's `int`, extra and insufficient arguments, and wide `%ls`/`%lc` (and
+`%S`/`%C`) arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal
+formats' common conversions and sizes. Its literal-internal diagnostics keep
+Clang's column and the diagnostic collector's source order.
+`-Wunused-value` covers a bare identifier or literal, a parenthesized
+comparison, a cast, a conditional, and a two-operand comma expression as well
+as an unparenthesized comparison.
+`-Warray-bounds` reports a direct array object, including a nested subscript
+such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
+struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
+declaration chain once, at its definition when it has one and otherwise at its
+first declaration; a shadowing local use does not keep a file-scope variable
+used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
+but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
+`else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
+`while` or `?:` condition. The `-Wswitch` definition following the selector's
+tag accepts a fixed underlying type and the nearest shadowing definition. The
+return-flow walk runs for non-aggregate functions only where `-Wreturn-type` is
+enabled.
+
+`test-checker-driver`'s `check_test_driver_common_warnings` compares the
+filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
+`-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
+uninitialized evaluation contexts, static selections, self-initialization,
+read-modify-writes and VLA bounds, wide and width-mismatched formats, enum
+aliases, fixed-underlying and shadowing definitions, zero sign comparisons,
+array-member/nested/zero-length bounds, declaration chains, bare/parenthesized/
+cast/conditional/comma unused values, `for` conditions and returned stack
+addresses line for line against Clang on both check paths. The semantics are also covered by
+`test-checker`'s existing warning and constraint fixtures, and by
+`test-diagnostics` for their ordering.
 
 ## The constraint catalogue
 
