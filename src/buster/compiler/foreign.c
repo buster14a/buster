@@ -122,7 +122,7 @@ typedef enum ForeignError
     // that isn't an object, more objects than a record holds.
     FOREIGN_ERROR_UNSUPPORTED,
     // An input only GCC's or LLVM's LTO plugin could link: an object with a .gnu.lto_* or .llvm.lto section, or raw
-    // LLVM bitcode. ForeignFailure.detail names the section or the bitcode.
+    // LLVM bitcode. ForeignFailure.detail names the section or the bitcode, copied into the failure.
     FOREIGN_ERROR_PLUGIN,
     // An arena couldn't hold what a phase needs.
     FOREIGN_ERROR_MEMORY,
@@ -318,6 +318,9 @@ struct ForeignObject
     // Its SHT_RELA sections, in section order, each for a section of its own.
     uint32_t relocation_count;
     uint32_t* relocations;
+    // The index of its first .gnu.lto_* or .llvm.lto section, which only an LTO plugin can link, or 0 for none. The
+    // header passes find it; the vector one compares the first 16 bytes of each section's name in its section pass.
+    uint32_t lto_section;
     uint8_t* discarded;
 };
 
@@ -509,6 +512,9 @@ typedef enum ForeignPhase
     FOREIGN_PHASES,
 } ForeignPhase;
 
+// The bytes of a FOREIGN_ERROR_PLUGIN detail a failure keeps: the section's name, or "LLVM bitcode".
+#define BUSTER_FOREIGN_FAILURE_DETAIL_BYTES 64
+
 // A failure: what failed, the input (and member plus 1) or object it is about, its position, the reader's result (what
 // is wrong in the file, and where), errno for a file, and the argument for an option.
 typedef struct ForeignFailure ForeignFailure;
@@ -521,9 +527,10 @@ struct ForeignFailure
     ImportResult import;
     int system_error;
     uint32_t argument;
-    // What FOREIGN_ERROR_PLUGIN is about: the section's name in the input's bytes, or a static "LLVM bitcode". Empty
-    // otherwise. The bytes stay mapped through the link, so the name does too.
-    String8 detail;
+    // What FOREIGN_ERROR_PLUGIN is about: the section's name or "LLVM bitcode", copied so that it outlives the input's
+    // mapping (which foreign_release unmaps), detail_length bytes. Empty otherwise.
+    char detail[BUSTER_FOREIGN_FAILURE_DETAIL_BYTES];
+    uint8_t detail_length;
 };
 
 // What each lane owns: its arena (the partitions' tables, its lists), its first failure, the members its partitions
@@ -939,7 +946,12 @@ static bool foreign_bitcode(String8 bytes)
 static void foreign_fail_plugin(ForeignLane* lane, uint64_t position, uint32_t input, uint32_t member, String8 detail)
 {
     ForeignFailure failure = foreign_failure(FOREIGN_ERROR_PLUGIN, position, input, member);
-    failure.detail = detail;
+    const uint64_t length = detail.length < BUSTER_FOREIGN_FAILURE_DETAIL_BYTES - 1 ? detail.length : BUSTER_FOREIGN_FAILURE_DETAIL_BYTES - 1;
+    if (length != 0 && detail.pointer != 0)
+    {
+        memcpy(failure.detail, detail.pointer, length);
+    }
+    failure.detail_length = (uint8_t)length;
     foreign_fail(lane, failure);
 }
 
@@ -1717,6 +1729,28 @@ static ImportResult foreign_check_tables(ForeignObject* object, uint32_t rel_sec
     return result;
 }
 
+// The section names only an LTO plugin can link: GCC's .gnu.lto_* prefix and clang's exact .llvm.lto. The exact path
+// compares their bytes; the vector path compares the first 16 bytes of each section's name with these, the same way its
+// section pass compares the names it classifies.
+#define BUSTER_FOREIGN_LTO_PATTERNS 2
+static const char foreign_lto_patterns[BUSTER_FOREIGN_LTO_PATTERNS][BUSTER_IMPORT_PATTERN_BYTES] = {
+    ".gnu.lto_",
+    ".llvm.lto",
+};
+static const uint8_t foreign_lto_pattern_bytes[BUSTER_FOREIGN_LTO_PATTERNS] = {
+    sizeof(".gnu.lto_") - 1,
+    sizeof(".llvm.lto"),
+};
+
+// Whether a section's name is one only an LTO plugin can link.
+static bool foreign_lto_name(String8 name)
+{
+    const uint64_t gcc = foreign_lto_pattern_bytes[0];
+    const uint64_t llvm = foreign_lto_pattern_bytes[1] - 1;
+    return (name.length >= gcc && memcmp(name.pointer, foreign_lto_patterns[0], gcc) == 0) ||
+           (name.length == llvm && memcmp(name.pointer, foreign_lto_patterns[1], llvm) == 0);
+}
+
 // The exact path: import_elf, import_symbols, a scan for the relocation and group sections, and the checks.
 static ImportResult foreign_headers_exact(ForeignObject* object, Arena* arena)
 {
@@ -1724,6 +1758,7 @@ static ImportResult foreign_headers_exact(ForeignObject* object, Arena* arena)
     object->symbols = (ImportSymbols){ 0 };
     object->group_count = 0;
     object->relocation_count = 0;
+    object->lto_section = 0;
     ImportResult result = import_elf(&object->elf, object->bytes, ET_REL);
     if (result.error == IMPORT_ERROR_NONE)
     {
@@ -1738,7 +1773,16 @@ static ImportResult foreign_headers_exact(ForeignObject* object, Arena* arena)
     uint32_t rel_section = 0;
     for (uint32_t index = 1; result.error == IMPORT_ERROR_NONE && index < count; index += 1)
     {
-        const uint32_t type = import_section_header(&object->elf, index).sh_type;
+        const Elf64_Shdr header = import_section_header(&object->elf, index);
+        const uint32_t type = header.sh_type;
+        if (object->lto_section == 0)
+        {
+            String8 name = { 0 };
+            if (import_section_name(&object->elf, &header, &name) && foreign_lto_name(name))
+            {
+                object->lto_section = index;
+            }
+        }
         if (type == SHT_RELA)
         {
             object->relocations[object->relocation_count] = index;
@@ -1767,6 +1811,7 @@ static bool foreign_headers_vector(ForeignObject* object, Arena* arena)
     object->symbols = (ImportSymbols){ 0 };
     object->group_count = 0;
     object->relocation_count = 0;
+    object->lto_section = 0;
     bool result = import_elf_header(&object->elf, object->bytes, ET_REL, &names).error == IMPORT_ERROR_NONE && import_elf_names(&object->elf, names);
     const ImportElf* elf = &object->elf;
     const uint32_t count = elf->section_count;
@@ -1784,6 +1829,18 @@ static bool foreign_headers_vector(ForeignObject* object, Arena* arena)
     const char* table = elf->bytes.pointer + elf->section_offset;
     const __m512i file_bytes = _mm512_set1_epi64((long long)elf->bytes.length);
     const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    __m512i lto_patterns[BUSTER_FOREIGN_LTO_PATTERNS];
+    __m512i lto_significant[BUSTER_FOREIGN_LTO_PATTERNS];
+    for (uint32_t p = 0; p < BUSTER_FOREIGN_LTO_PATTERNS; p += 1)
+    {
+        lto_patterns[p] = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)foreign_lto_patterns[p]));
+        lto_significant[p] = _mm512_broadcast_i32x4(_mm_maskz_set1_epi8((__mmask16)_bzhi_u32(0xffff, foreign_lto_pattern_bytes[p]), (char)0xff));
+    }
+    const String8 section_names = elf->section_names;
+    // A name's last byte is its NUL only in a table that ends with one; without it, a name at the end has no NUL to
+    // compare, and the exact path reads the object again.
+    const bool names_terminated = section_names.length != 0 && section_names.pointer[section_names.length - 1] == 0;
+    result = result && names_terminated;
     uint32_t rel_section = 0;
     for (uint32_t first = 0; result && first < count; first += BUSTER_IMPORT_BATCH)
     {
@@ -1792,11 +1849,38 @@ static bool foreign_headers_vector(ForeignObject* object, Arena* arena)
         const uint32_t active = import_lane_mask(n) & (first == 0 ? 0xfe : 0xff);
         __m512i rows[BUSTER_IMPORT_BATCH];
         __m512i words[BUSTER_IMPORT_BATCH];
+        __m128i name_rows[BUSTER_IMPORT_BATCH];
         for (uint32_t r = 0; r < BUSTER_IMPORT_BATCH; r += 1)
         {
             rows[r] = _mm512_maskz_loadu_epi64(r < n ? 0xff : 0, table + (uint64_t)(first + r) * sizeof(Elf64_Shdr));
+            // The name's first 16 bytes, none past the table: sh_name is the row's low 32 bits.
+            const uint32_t name = (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(rows[r]));
+            const bool within = (active >> r & 1) != 0 && name < section_names.length;
+            const uint64_t place = within ? name : 0;
+            const uint64_t remaining = section_names.length - place;
+            const __mmask16 loaded = within ? (__mmask16)_bzhi_u32(0xffff, (uint32_t)(remaining < 16 ? remaining : 16)) : 0;
+            name_rows[r] = _mm_maskz_loadu_epi8(loaded, section_names.pointer + place);
         }
         link_transpose_words(rows, words);
+        if (object->lto_section == 0)
+        {
+            __m512i low = _mm512_castsi128_si512(name_rows[0]);
+            __m512i high = _mm512_castsi128_si512(name_rows[4]);
+            low = _mm512_inserti32x4(low, name_rows[1], 1);
+            low = _mm512_inserti32x4(low, name_rows[2], 2);
+            low = _mm512_inserti32x4(low, name_rows[3], 3);
+            high = _mm512_inserti32x4(high, name_rows[5], 1);
+            high = _mm512_inserti32x4(high, name_rows[6], 2);
+            high = _mm512_inserti32x4(high, name_rows[7], 3);
+            for (uint32_t p = 0; p < BUSTER_FOREIGN_LTO_PATTERNS && object->lto_section == 0; p += 1)
+            {
+                const uint32_t matches = active & import_match_names(low, high, lto_patterns[p], lto_significant[p]);
+                if (matches != 0)
+                {
+                    object->lto_section = first + (uint32_t)__builtin_ctz(matches);
+                }
+            }
+        }
         // Elf64_Shdr's words: sh_name and sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link and sh_info,
         // sh_addralign, sh_entsize.
         const __m512i type = _mm512_srli_epi64(words[0], 32);
@@ -1824,26 +1908,6 @@ static bool foreign_headers_vector(ForeignObject* object, Arena* arena)
     object->relocation_count = found.relocation_count;
     result = result && foreign_check_tables(object, rel_section, scratch.arena).error == IMPORT_ERROR_NONE;
     scratch_end(scratch);
-    return result;
-}
-
-// The name of the first section that only an LTO plugin can link (GCC's .gnu.lto_* or clang's .llvm.lto), or empty.
-static String8 foreign_lto_section(const ImportElf* elf)
-{
-    static const char gcc[] = ".gnu.lto_";
-    static const char llvm[] = ".llvm.lto";
-    String8 result = { 0 };
-    for (uint32_t index = 1; result.length == 0 && index < elf->section_count; index += 1)
-    {
-        const Elf64_Shdr header = import_section_header(elf, index);
-        String8 name = { 0 };
-        if (import_section_name(elf, &header, &name))
-        {
-            const bool gcc_lto = name.length >= sizeof(gcc) - 1 && memcmp(name.pointer, gcc, sizeof(gcc) - 1) == 0;
-            const bool llvm_lto = name.length == sizeof(llvm) - 1 && memcmp(name.pointer, llvm, sizeof(llvm) - 1) == 0;
-            result = gcc_lto || llvm_lto ? name : result;
-        }
-    }
     return result;
 }
 
@@ -1891,13 +1955,12 @@ static void foreign_object_headers(Foreign* foreign, uint32_t id, ForeignLane* l
                 foreign_fail(lane, foreign_import_failure(read, object->position, object->input, object->member));
             }
         }
-        if (headers)
+        if (headers && object->lto_section != 0)
         {
-            const String8 lto = foreign_lto_section(&object->elf);
-            if (lto.length != 0)
-            {
-                foreign_fail_plugin(lane, object->position, object->input, object->member, lto);
-            }
+            const Elf64_Shdr header = import_section_header(&object->elf, object->lto_section);
+            String8 lto = { 0 };
+            const bool named = import_section_name(&object->elf, &header, &lto);
+            foreign_fail_plugin(lane, object->position, object->input, object->member, named ? lto : foreign_string("LTO section"));
         }
     }
 }

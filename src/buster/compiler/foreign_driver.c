@@ -830,9 +830,9 @@ static int foreign_driver_link(ForeignDriverRun* run)
             };
             const uint32_t error = (uint32_t)foreign.failure.error;
             fprintf(stderr, "link-foreign: %s", error < BUSTER_ARRAY_LENGTH(messages) ? messages[error] : "input resolution failed");
-            if (foreign.failure.error == FOREIGN_ERROR_PLUGIN && foreign.failure.detail.length != 0)
+            if (foreign.failure.error == FOREIGN_ERROR_PLUGIN && foreign.failure.detail_length != 0)
             {
-                fprintf(stderr, ": %.*s", (int)foreign.failure.detail.length, foreign.failure.detail.pointer);
+                fprintf(stderr, ": %.*s", (int)foreign.failure.detail_length, foreign.failure.detail);
             }
             if (foreign.failure.input < foreign.input_count)
             {

@@ -91,8 +91,10 @@ for a PIE, `-static`, `-static -pie` and `-shared` for the others. GCC's
 `--plugin PATH`, joined as `-plugin=PATH` too) when PATH names GCC's
 `liblto_plugin.so` (or a versioned `liblto_plugin.so.N`) or LLVM's
 `LLVMgold.so`, and `-plugin-opt=...` (or `-plugin-opt VALUE`), which change
-nothing when no input needs the plugin. Any other plugin may transform
-ordinary inputs, which this command doesn't run, so it is refused by name. An
+nothing when no input needs the plugin. An accepted plugin is identified by
+its basename and never opened, so a missing file, or different content under
+that name, is ignored. Any other plugin may transform ordinary inputs, which
+this command doesn't run, so it is refused by name. An
 input that does need the plugin is refused too, naming the input, archive
 member and section: a relocatable object or loaded archive member with a
 `.gnu.lto_*` or `.llvm.lto` section, or raw LLVM bitcode. An archive member
@@ -396,7 +398,10 @@ can be written with `-s`.
 `test-foreign --cross-check` includes command parsing/defaults, ordered
 archive and DSO search, entry extraction, failures, dynamic CRT execution,
 exact/vector and 1/2/3/8-lane output identity, and GC and CIE option toggles
-with retained unwind records. Named-symbol fixtures independently inspect
+with retained unwind records. It also covers the LTO plugin options' accepted
+and refused forms, `.gnu.lto_*` and `.llvm.lto` objects by both paths, raw
+and wrapper bitcode, lazy, thin and whole archives, and a refusal on several
+lanes. Named-symbol fixtures independently inspect
 sizes, type, binding, visibility, final addresses, local ordering and imported
 definitions, and the temporary labels' filter on every tail and split through
 65 entries and at a `PROT_NONE` page. Both strip spellings must omit the

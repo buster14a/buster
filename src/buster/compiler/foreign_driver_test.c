@@ -2147,17 +2147,26 @@ static String8 foreign_driver_test_diagnostic(ForeignTestTally* tally, const cha
 static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     ForeignTestPath plugin;
+    ForeignTestPath versioned_plugin;
+    ForeignTestPath bad_plugin;
     ForeignTestPath llvm_plugin;
     ForeignTestPath other_plugin;
     ForeignTestPath bitcode;
+    ForeignTestPath wrapper;
     snprintf(plugin, sizeof(plugin), "%s/liblto_plugin.so", directory);
+    snprintf(versioned_plugin, sizeof(versioned_plugin), "%s/liblto_plugin.so.7", directory);
+    snprintf(bad_plugin, sizeof(bad_plugin), "%s/liblto_plugin.so.bad", directory);
     snprintf(llvm_plugin, sizeof(llvm_plugin), "%s/LLVMgold.so", directory);
     snprintf(other_plugin, sizeof(other_plugin), "%s/other_plugin.so", directory);
     snprintf(bitcode, sizeof(bitcode), "%s/fdriver_input.bc", directory);
+    snprintf(wrapper, sizeof(wrapper), "%s/fdriver_wrapper.bc", directory);
     static const char plugin_bytes[] = "not a plugin this command reads";
     static const unsigned char bitcode_bytes[] = { 0x42, 0x43, 0xc0, 0xde, 0x00 };
-    const bool ready = foreign_test_write(plugin, plugin_bytes, sizeof(plugin_bytes)) && foreign_test_write(llvm_plugin, plugin_bytes, sizeof(plugin_bytes)) &&
-                       foreign_test_write(other_plugin, plugin_bytes, sizeof(plugin_bytes)) && foreign_test_write(bitcode, bitcode_bytes, sizeof(bitcode_bytes));
+    static const unsigned char wrapper_bytes[] = { 0xde, 0xc0, 0x17, 0x0b, 0x00 };
+    const bool ready = foreign_test_write(plugin, plugin_bytes, sizeof(plugin_bytes)) && foreign_test_write(versioned_plugin, plugin_bytes, sizeof(plugin_bytes)) &&
+                       foreign_test_write(bad_plugin, plugin_bytes, sizeof(plugin_bytes)) && foreign_test_write(llvm_plugin, plugin_bytes, sizeof(plugin_bytes)) &&
+                       foreign_test_write(other_plugin, plugin_bytes, sizeof(plugin_bytes)) && foreign_test_write(bitcode, bitcode_bytes, sizeof(bitcode_bytes)) &&
+                       foreign_test_write(wrapper, wrapper_bytes, sizeof(wrapper_bytes));
     foreign_test_expect(tally, ready, "write plugin and bitcode fixtures", 0);
     if (!ready)
     {
@@ -2198,25 +2207,48 @@ static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* dire
     {
         char* arguments[] = {
             (char*)"-plugin",
+            versioned_plugin,
+            files->objects[FOREIGN_DRIVER_TEST_START],
+        };
+        foreign_driver_test_invoke(tally, directory, "plugin_versioned", "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 42, arena);
+    }
+    {
+        char* arguments[] = {
+            (char*)"-plugin",
             other_plugin,
             files->objects[FOREIGN_DRIVER_TEST_START],
         };
         const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_other", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
-        foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "liblto_plugin.so"), "an arbitrary plugin is refused by name", diagnostic.pointer);
+        foreign_test_expect(tally,
+                            foreign_driver_test_contains(diagnostic, "unsupported plugin:") && foreign_driver_test_contains(diagnostic, other_plugin),
+                            "an arbitrary plugin is refused by name", diagnostic.pointer);
+    }
+    {
+        char* arguments[] = {
+            (char*)"-plugin",
+            bad_plugin,
+            files->objects[FOREIGN_DRIVER_TEST_START],
+        };
+        const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_bad_version", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
+        foreign_test_expect(tally,
+                            foreign_driver_test_contains(diagnostic, "unsupported plugin:") && foreign_driver_test_contains(diagnostic, bad_plugin),
+                            "a version suffix that isn't numeric is refused", diagnostic.pointer);
     }
     {
         char* arguments[] = {
             (char*)"-plugin",
         };
         const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_missing", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
-        foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "-plugin"), "a plugin without its path is refused", diagnostic.pointer);
+        foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "invalid or missing value for -plugin"),
+                            "a plugin without its path is refused", diagnostic.pointer);
     }
     {
         char* arguments[] = {
             (char*)"-plugin-opt",
         };
         const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_opt_missing", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
-        foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "-plugin-opt"), "a plugin option without its value is refused", diagnostic.pointer);
+        foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "invalid or missing value for -plugin-opt"),
+                            "a plugin option without its value is refused", diagnostic.pointer);
     }
     {
         char* arguments[] = {
@@ -2229,6 +2261,27 @@ static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* dire
         foreign_test_expect(tally,
                             foreign_driver_test_contains(diagnostic, ".gnu.lto_.opts") && foreign_driver_test_contains(diagnostic, files->objects[FOREIGN_DRIVER_TEST_LTO]),
                             "a GCC LTO object is refused by section and input", diagnostic.pointer);
+    }
+    {
+        char* arguments[] = {
+            (char*)"--scalar",
+            files->objects[FOREIGN_DRIVER_TEST_LTO],
+        };
+        const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_lto_direct_scalar", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
+        foreign_test_expect(tally,
+                            foreign_driver_test_contains(diagnostic, ".gnu.lto_.opts") && foreign_driver_test_contains(diagnostic, files->objects[FOREIGN_DRIVER_TEST_LTO]),
+                            "the exact path refuses a GCC LTO object by section and input", diagnostic.pointer);
+    }
+    {
+        char* arguments[] = {
+            (char*)"--lanes",
+            (char*)"8",
+            files->objects[FOREIGN_DRIVER_TEST_LTO],
+        };
+        const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_lto_direct_lanes", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
+        foreign_test_expect(tally,
+                            foreign_driver_test_contains(diagnostic, ".gnu.lto_.opts") && foreign_driver_test_contains(diagnostic, files->objects[FOREIGN_DRIVER_TEST_LTO]),
+                            "a GCC LTO object is refused on several lanes", diagnostic.pointer);
     }
     {
         char* arguments[] = {
@@ -2247,12 +2300,24 @@ static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* dire
         foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "LLVM bitcode") && foreign_driver_test_contains(diagnostic, bitcode),
                             "raw LLVM bitcode is refused by input", diagnostic.pointer);
     }
+    {
+        char* arguments[] = {
+            wrapper,
+        };
+        const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_wrapper", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
+        foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, "LLVM bitcode") && foreign_driver_test_contains(diagnostic, wrapper),
+                            "wrapped LLVM bitcode is refused by input", diagnostic.pointer);
+    }
     const char* members[] = {
         "fdriver_lto_function.o",
     };
+    const char* bitcode_members[] = {
+        "fdriver_input.bc",
+    };
     char* lazy = foreign_test_archive(directory, "libfdriver_lto_lazy.a", members, BUSTER_ARRAY_LENGTH(members), false, arena);
     char* thin = foreign_test_archive(directory, "libfdriver_lto_thin.a", members, BUSTER_ARRAY_LENGTH(members), true, arena);
-    foreign_test_expect(tally, lazy != 0 && thin != 0, "write LTO archives", 0);
+    char* bitcode_archive = foreign_test_archive(directory, "libfdriver_bitcode.a", bitcode_members, BUSTER_ARRAY_LENGTH(bitcode_members), false, arena);
+    foreign_test_expect(tally, lazy != 0 && thin != 0 && bitcode_archive != 0, "write LTO archives", 0);
     if (lazy != 0)
     {
         char* arguments[] = {
@@ -2260,6 +2325,14 @@ static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* dire
             lazy,
         };
         foreign_driver_test_invoke(tally, directory, "plugin_lto_unneeded", "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 42, arena);
+    }
+    if (thin != 0)
+    {
+        char* arguments[] = {
+            files->objects[FOREIGN_DRIVER_TEST_START],
+            thin,
+        };
+        foreign_driver_test_invoke(tally, directory, "plugin_lto_thin_unneeded", "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 42, arena);
     }
     if (lazy != 0)
     {
@@ -2296,6 +2369,20 @@ static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* dire
         const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_lto_whole", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
         foreign_test_expect(tally, foreign_driver_test_contains(diagnostic, ".gnu.lto_.opts") && foreign_driver_test_contains(diagnostic, lazy),
                             "a whole archive's LTO member is refused though nothing calls it", diagnostic.pointer);
+    }
+    if (bitcode_archive != 0)
+    {
+        char* arguments[] = {
+            (char*)"--whole-archive",
+            bitcode_archive,
+            (char*)"--no-whole-archive",
+            files->objects[FOREIGN_DRIVER_TEST_START],
+        };
+        const String8 diagnostic = foreign_driver_test_diagnostic(tally, directory, "plugin_bitcode_whole", arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
+        foreign_test_expect(tally,
+                            foreign_driver_test_contains(diagnostic, "LLVM bitcode") && foreign_driver_test_contains(diagnostic, bitcode_archive) &&
+                                foreign_driver_test_contains(diagnostic, "fdriver_input.bc"),
+                            "a whole archive's bitcode member is refused by archive and member", diagnostic.pointer);
     }
 }
 
