@@ -125,6 +125,11 @@ typedef enum IrOp
     IR_VCONST,
     IR_VCMP,
     IR_VSELECT,
+    // A frame slot's lifetime (#177): `a` the slot, `b` 0 where its object's lifetime starts and 1 where it ends. It
+    // reads and writes nothing: the slot's bytes are indeterminate after a start, and no access may come after an end
+    // until the next start. A slot with no marker lives throughout its function; one with markers is live where some
+    // path from a start reaches without an end, which Tier 1's frame planner colors (tier1_emit_cfg_lifetimes).
+    IR_LIFETIME,
     IR_OP_COUNT,
 } IrOp;
 
@@ -458,6 +463,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "vconst",
     "vcmp",
     "vselect",
+    "lifetime",
 };
 
 static bool ir_integer(uint32_t type)
@@ -659,7 +665,8 @@ typedef enum IrRule
     X(IR_BR_INDIRECT,   1, 7, 1u << IR_VOID, IR_RULE_INDIRECT, 1) \
     X(IR_VCONST,        0, 1, BUSTER_IR_VECTORS, IR_RULE_VECTOR_CONSTANT, 0) \
     X(IR_VCMP,          3, 7, BUSTER_IR_MASKS, IR_RULE_VECTOR_COMPARE, 0) \
-    X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0)
+    X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
+    X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -964,7 +971,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_VECTOR_CONSTANT: valid = a < f->vector_constant_count && ir_simd_value_valid(f->vector_constants + a, ir_simd_shape(type)); break;
             case IR_RULE_VECTOR_COMPARE: valid = ir_vector_type(ta) && ta == tb && c < IR_PREDICATE_COUNT && type == (ta == IR_V16I32 ? IR_M16 : IR_M8); break;
             case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
-            case IR_RULE_SLOT: valid = a < f->slot_count; break;
+            case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -1905,6 +1912,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                     } break;
                     case IR_PARAM: fprintf(output, " %" PRIu32, a); break;
                     case IR_STACK_ADDR: fprintf(output, " $%" PRIu32, a); break;
+                    case IR_LIFETIME: fprintf(output, " $%" PRIu32 " %s", a, b != 0 ? "end" : "start"); break;
                     case IR_SYMBOL_ADDR: fprintf(output, " @%" PRIu32, a); break;
                     case IR_ADDRESS:
                     {

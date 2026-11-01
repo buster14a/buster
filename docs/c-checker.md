@@ -2558,6 +2558,14 @@ What the lowering covers past scalars (#145's programs):
   of 39 fixtures with clang's, its place and its message, on both paths
   (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
   the deferred reader's fixtures and the selection's take a cleanup too.
+- **A block's objects' lifetimes**, for Tier 1's frame (#177, the C driver's
+  `--tier1`, `CheckProgramOptions.lifetimes`): `CHECK_CONTROL_LIFETIME` entries
+  where a block's statements begin and end (after its cleanups) and before each
+  `break`, `continue` or `goto` that leaves it (after the jump's cleanups),
+  which the lowering turns into its locals' events
+  (`Tier0Function.lifetime_entries`). A block a jump can enter past its opening
+  brace has none: [the frame guide](tier1-frame.md)'s "Slot sharing between
+  objects".
 - **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
   emission's attribute pass). A weak declaration's symbol is weak, defined
   or undefined; on a declaration without external linkage it is clang's error

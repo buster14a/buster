@@ -36,7 +36,9 @@ Like the other classes past `F80`, a mask's frame object and machine operations
 without rows or objects through it against their native code.
 
 Dynamic-stack text uses `alloca.ptr %size`, `stack_save.i64` and
-`stack_restore.void %position` with no extra metadata. Both interpreter fronts
+`stack_restore.void %position` with no extra metadata. A slot's lifetime marker
+is `lifetime.void $N start` or `lifetime.void $N end` (#177); both interpreters
+take it as reading and writing nothing. Both interpreter fronts
 execute the [shared dynamic-stack contract](ir.md#dynamic-stack-contract).
 `test-ir-lowering` includes their frame/lifetime, overflow/resource, transformation
 and native-refusal regressions; `test-ir-parse` includes a canonical stack fixture.

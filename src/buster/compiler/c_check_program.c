@@ -35,6 +35,10 @@ typedef enum CheckProgramStatus
 // no node and target BUSTER_CHECK_CONTROL_KEPT, then returns. A for statement's own variables' cleanups come after its
 // end's label, which its break reaches, and a statement expression's block's after its END, which its region counts
 // (CheckProgramRegion.cleanups): its value is computed before them.
+// A block's objects' lifetimes (#177, c_check_program_lifetime.c), in a program asked for them: CHECK_CONTROL_LIFETIME
+// (`target` the block's closing brace, whose locals CheckProgram.lifetime_first lists, `node` 0 for their start and 1 for
+// their end, `token` where) where the block's statements begin, where they end, after its cleanups, and before each
+// break, continue or goto that leaves it, after the jump's cleanups.
 typedef enum CheckControlKind
 {
     CHECK_CONTROL_EVALUATE,
@@ -52,6 +56,7 @@ typedef enum CheckControlKind
     CHECK_CONTROL_JUMP_INDIRECT,
     CHECK_CONTROL_CLEANUP,
     CHECK_CONTROL_RESULT,
+    CHECK_CONTROL_LIFETIME,
     // The kinds from here on go to a label: their `target`.
     CHECK_CONTROL_BRANCH_FALSE,
     CHECK_CONTROL_BRANCH_TRUE,
@@ -133,6 +138,9 @@ struct CheckProgramOptions
     // The options it came from (c_predefines.c), against which a function's target attribute resolves (#180); null leaves
     // every function the unit's target.
     const PredefinesOptions* predefines;
+    // The blocks' objects' lifetimes (#177, c_check_program_lifetime.c): CHECK_CONTROL_LIFETIME entries, which the
+    // lowering turns into its functions' lifetime events, for Tier 1's frame (the C driver's --tier1).
+    bool lifetimes;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -315,6 +323,13 @@ struct CheckProgram
     // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
     // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
     uint8_t* body_eager;
+    // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
+    // lifetime_first (by the block's closing brace, BUSTER_CHECK_NONE for a block without them) through lifetime_next (by
+    // declaration), in token order; null otherwise.
+    uint32_t* lifetime_first;
+    uint32_t* lifetime_next;
+    // The lifetime events the lowering makes of the controls at most: one per local of each LIFETIME control's block.
+    uint32_t lifetime_event_count;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -1020,6 +1035,33 @@ static uint32_t check_control_opening(const CheckControlWriter* writer, uint32_t
     return child;
 }
 
+// The CHECK_CONTROL_LIFETIME ends of a jump at `jump` (#177): one for each block with lifetimes that it leaves. A break or
+// a continue leaves the blocks inside its loop or switch, the ancestor whose label in `targets` (stops or repeats) is its
+// `target`; a goto (`targets` 0) those that don't hold `label`, a token, and every block outside the innermost that holds
+// it holds it too.
+static void check_control_lifetimes_left(CheckControlWriter* writer, uint32_t jump, uint32_t label, const uint32_t* targets, uint32_t target)
+{
+    const Parser* parser = writer->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t* first = writer->program->lifetime_first;
+    bool past = first == NULL;
+    uint32_t steps = 0;
+    for (uint32_t ancestor = past ? count : parser->tree.parents[jump]; !past && ancestor < count && steps < count; ancestor = parser->tree.parents[ancestor])
+    {
+        past = (targets != 0 && targets[ancestor] == target) || ancestor == writer->closing;
+        if (!past && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BLOCK && first[ancestor] != BUSTER_CHECK_NONE)
+        {
+            const uint32_t opening = check_control_opening(writer, ancestor, PARSE_ROLE_OPEN_BLOCK);
+            past = targets == 0 && opening != BUSTER_CHECK_NONE && label > opening && label < ancestor;
+            if (!past)
+            {
+                check_control_entry(writer, CHECK_CONTROL_LIFETIME, jump, 1, ancestor);
+            }
+        }
+        steps += 1;
+    }
+}
+
 static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high);
 
 // The declaration a return at `jump` names alone, in parentheses or not (clang's IgnoreParens), BUSTER_CHECK_NONE for
@@ -1151,6 +1193,12 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         {
             check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
         }
+        // Its objects' lifetimes (#177): their end after its statements and its cleanups, their start before its statements.
+        const bool lifetimes = role == PARSE_ROLE_CLOSE_BLOCK && writer->program->lifetime_first != NULL && writer->program->lifetime_first[token] != BUSTER_CHECK_NONE;
+        if (lifetimes)
+        {
+            check_control_entry(writer, CHECK_CONTROL_LIFETIME, token, 1, token);
+        }
         const uint32_t block = role == PARSE_ROLE_CLOSE_BLOCK && writer->cleanup_count != 0 ? check_control_opening(writer, token, PARSE_ROLE_OPEN_BLOCK) :
                                                                                             BUSTER_CHECK_NONE;
         if (block != BUSTER_CHECK_NONE)
@@ -1163,6 +1211,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             {
                 check_control_statement(writer, child, task.stop, task.repeat);
             }
+        }
+        if (lifetimes)
+        {
+            check_control_entry(writer, CHECK_CONTROL_LIFETIME, token, 0, token);
         }
     }
     else if (role == PARSE_ROLE_CLOSE_CONDITION)
@@ -1401,6 +1453,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 const uint32_t* targets = stops ? writer->stops : writer->repeats;
                 const uint32_t label = stops ? task.stop : task.repeat;
                 check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, label);
+                check_control_lifetimes_left(writer, jump, BUSTER_CHECK_NONE, targets, label);
                 check_control_leave(writer, jump, BUSTER_CHECK_NONE, targets, label);
                 if (writer->cleanup_count != 0)
                 {
@@ -1425,6 +1478,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 if (target > writer->opening && target < writer->closing && writer->source_labels[target] != BUSTER_CHECK_NONE)
                 {
                     check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, writer->source_labels[target]);
+                    check_control_lifetimes_left(writer, jump, target, 0, BUSTER_CHECK_NONE);
                     check_control_leave(writer, jump, target, 0, BUSTER_CHECK_NONE);
                     check_control_cleanups(writer, jump, target, BUSTER_CHECK_NONE);
                 }
@@ -2814,6 +2868,7 @@ static void check_program_needed_number(const uint8_t* needed, uint32_t objects,
 #include "c_check_x86_diagnostic.c"
 #include "c_check_target_feature.c"
 #include "c_check_program_alias.c"
+#include "c_check_program_lifetime.c"
 
 // The entries that cleanups add at most (#147): a CHECK_CONTROL_CLEANUP at each exit from a variable's scope, its end and
 // each jump inside it (whose keywords have the role RETURN), counted from a running count of those tokens, and a RESULT
@@ -2874,8 +2929,16 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, scratch) : 0;
-    valid = valid && cleanup_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
-    const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room) : 0;
+    // The blocks' objects' lifetimes, asked for (#177): each block's locals, the room their controls take, and the stamps
+    // of the walks that find the blocks a jump enters.
+    const bool lifetimes = valid && options.lifetimes;
+    uint32_t* lifetime_first = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* lifetime_next = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* lifetime_stamps = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    valid = valid && (!lifetimes || (lifetime_first != 0 && lifetime_next != 0 && lifetime_stamps != 0));
+    const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next) : 0;
+    valid = valid && cleanup_room + lifetime_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
+    const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room + lifetime_room) : 0;
     // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
     // takes the labels and the worklist again from their start, and the controls follow each other. They are in an arena
     // of their own, which check_program unmaps when it returns (#572). In the scratch, their starts and the columns pushed
@@ -2967,6 +3030,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         if (addressed != 0)
         {
             check_program_addressed(parser, input, addressed, BUSTER_SCALAR_PATH(options.scalar));
+        }
+        if (lifetime_first != 0)
+        {
+            check_program_lifetime_entered(program, parser, addressed, lifetime_stamps, lifetime_first);
+            program->lifetime_first = lifetime_first;
+            program->lifetime_next = lifetime_next;
         }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
@@ -3238,6 +3307,21 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         if (writer.count != 0)
         {
             memcpy(program->controls, entries, (uint64_t)writer.count * sizeof(CheckControl));
+        }
+        // The lifetime events the lowering makes of the LIFETIME controls at most (#177): one per local of each one's block.
+        uint64_t events = 0;
+        for (uint32_t i = 0; program->lifetime_first != NULL && i < writer.count; i += 1)
+        {
+            for (uint32_t d = entries[i].kind == CHECK_CONTROL_LIFETIME && entries[i].target < count ? program->lifetime_first[entries[i].target] : BUSTER_CHECK_NONE;
+                 d != BUSTER_CHECK_NONE; d = program->lifetime_next[d])
+            {
+                events += 1;
+            }
+        }
+        program->lifetime_event_count = events <= UINT32_MAX - 1 ? (uint32_t)events : UINT32_MAX;
+        if (events > UINT32_MAX - 1)
+        {
+            check_program_fail(program, CHECK_PROGRAM_RESOURCE, BUSTER_CHECK_NONE);
         }
         memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));

@@ -29,7 +29,7 @@ static uint32_t ir_rebuild_values(uint32_t op)
     switch (op)
     {
         case IR_CONST: case IR_UNDEF: case IR_PARAM: case IR_STACK_ADDR: case IR_SYMBOL_ADDR:
-        case IR_CALL: case IR_PHI: case IR_BR: case IR_RET: case IR_UNREACHABLE: case IR_STACK_SAVE: mask = 0; break;
+        case IR_CALL: case IR_PHI: case IR_BR: case IR_RET: case IR_UNREACHABLE: case IR_STACK_SAVE: case IR_LIFETIME: mask = 0; break;
         case IR_COPY: case IR_NEG: case IR_NOT: case IR_FNEG: case IR_TRUNC: case IR_ZEXT: case IR_SEXT:
         case IR_FTRUNC: case IR_FEXT: case IR_SITOFP: case IR_UITOFP: case IR_FPTOSI: case IR_FPTOUI:
         case IR_INTTOPTR: case IR_PTRTOINT: case IR_BITCAST: case IR_ADDRESS: case IR_LOAD:

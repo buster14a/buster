@@ -659,6 +659,157 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
     }
 }
 
+// Frame objects' lifetimes (#177, tier1_emit_cfg_lifetimes), on IR with lifetime markers, each object 64 bytes. Shape 0:
+// two objects whose lifetimes don't meet, which share one frame row; shape 1: two whose lifetimes overlap, which don't;
+// shape 2: an object that one branch ends and the other keeps, read after the join, beside one started there, which may
+// not take its row. Each returns a + b (shape 2 where b isn't zero, the path that keeps the first object) natively.
+static bool tier1_emit_test_lifetime_fixture(Tier1EmitTest* test, uint32_t shape, IrFunction* function)
+{
+    const IrSizes sizes = { .instruction_count = shape == 2 ? 18 : 14, .block_count = shape == 2 ? 3 : 1, .constant_count = shape == 2 ? 1 : 0, .slot_count = 2, .parameter_count = 2 };
+    const bool ok = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ok)
+    {
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->slots[0] = (IrSlot){ .size = 64, .alignment = 8, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function->slots[1] = (IrSlot){ .size = 64, .alignment = 8, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        tier1_emit_test_node(function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+        if (shape == 0)
+        {
+            function->block_offsets[1] = 14;
+            tier1_emit_test_node(function, 2, IR_LIFETIME, IR_VOID, 0, 0);
+            tier1_emit_test_node(function, 3, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 4, IR_STORE, IR_VOID, 3, 0);
+            tier1_emit_test_node(function, 5, IR_LOAD, IR_I64, 3, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6, IR_LIFETIME, IR_VOID, 0, 1);
+            tier1_emit_test_node(function, 7, IR_LIFETIME, IR_VOID, 1, 0);
+            tier1_emit_test_node(function, 8, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 9, IR_STORE, IR_VOID, 8, 1);
+            tier1_emit_test_node(function, 10, IR_LOAD, IR_I64, 8, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 11, IR_LIFETIME, IR_VOID, 1, 1);
+            tier1_emit_test_node(function, 12, IR_ADD, IR_I64, 5, 10);
+            tier1_emit_test_node(function, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE);
+        }
+        else if (shape == 1)
+        {
+            function->block_offsets[1] = 14;
+            tier1_emit_test_node(function, 2, IR_LIFETIME, IR_VOID, 0, 0);
+            tier1_emit_test_node(function, 3, IR_LIFETIME, IR_VOID, 1, 0);
+            tier1_emit_test_node(function, 4, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 5, IR_STORE, IR_VOID, 4, 0);
+            tier1_emit_test_node(function, 6, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 7, IR_STORE, IR_VOID, 6, 1);
+            tier1_emit_test_node(function, 8, IR_LOAD, IR_I64, 4, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 9, IR_LOAD, IR_I64, 6, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 10, IR_LIFETIME, IR_VOID, 0, 1);
+            tier1_emit_test_node(function, 11, IR_LIFETIME, IR_VOID, 1, 1);
+            tier1_emit_test_node(function, 12, IR_ADD, IR_I64, 8, 9);
+            tier1_emit_test_node(function, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE);
+        }
+        else
+        {
+            // b0: the first object started and stored, then to b1 where b is zero and to b2 otherwise; b1 ends it; b2
+            // starts the second, stores b there and reads both.
+            function->block_offsets[1] = 8;
+            function->block_offsets[2] = 10;
+            function->block_offsets[3] = 18;
+            function->constants[0].low = 0;
+            tier1_emit_test_node(function, 2, IR_LIFETIME, IR_VOID, 0, 0);
+            tier1_emit_test_node(function, 3, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 4, IR_STORE, IR_VOID, 3, 0);
+            tier1_emit_test_node(function, 5, IR_CONST, IR_I64, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6, IR_ICMP, IR_I1, 1, 5);
+            function->c[6] = IR_EQ;
+            tier1_emit_test_node(function, 7, IR_CBR, IR_VOID, 6, 1);
+            function->c[7] = 2;
+            tier1_emit_test_node(function, 8, IR_LIFETIME, IR_VOID, 0, 1);
+            tier1_emit_test_node(function, 9, IR_BR, IR_VOID, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 10, IR_LIFETIME, IR_VOID, 1, 0);
+            tier1_emit_test_node(function, 11, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 12, IR_STORE, IR_VOID, 11, 1);
+            tier1_emit_test_node(function, 13, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 14, IR_LOAD, IR_I64, 13, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 15, IR_LOAD, IR_I64, 11, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 16, IR_ADD, IR_I64, 14, 15);
+            tier1_emit_test_node(function, 17, IR_RET, IR_VOID, 16, BUSTER_IR_NONE);
+        }
+    }
+    return ok;
+}
+
+static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
+{
+    for (uint32_t shape = 0; shape < 3; shape += 1)
+    {
+        for (uint32_t vector = 0; vector < 2; vector += 1)
+        {
+            IrFunction function;
+            const bool created = tier1_emit_test_lifetime_fixture(test, shape, &function);
+            tier1_emit_test_expect(test, created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            // Shape 2's dominator tree: the entry block over both of the others, whose values they read.
+            uint32_t dominance_enter[3] = { 0, 1, 2 };
+            uint32_t dominance_leave[3] = { 3, 2, 3 };
+            const IrDominance tree = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 3 };
+            const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, vector != 0, &plan, &node) :
+                                                        TIER1_SELECT_ERROR_INVALID;
+            tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select lifetime IR");
+            if (selected == TIER1_SELECT_OK)
+            {
+                const Tier1EmitOptions options = {
+                    .register_mask = tier1_liveness_register_mask(),
+                    .vector = vector != 0,
+                    .rematerialize = true,
+                };
+                Tier1EmitResult emitted;
+                const uint64_t scratch_mark = test->scratch.length;
+                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+                tier1_emit_test_expect(test, error == TIER1_EMIT_OK && emitted.general, "lifetime markers take the CFG consumer");
+                if (error == TIER1_EMIT_OK)
+                {
+                    int32_t first = 0;
+                    int32_t second = 0;
+                    const bool found = tier1_emit_cfg_object(&emitted, 0, &first) && tier1_emit_cfg_object(&emitted, 1, &second);
+                    tier1_emit_test_expect(test, found && (shape == 0 ? first == second : first != second && (first - second >= 64 || second - first >= 64)),
+                                           shape == 0 ? "objects whose lifetimes don't meet share a frame row" : "objects whose lifetimes meet take rows of their own");
+                    tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "lifetime emission returns scratch");
+                    Tier1SelectCode* code = &emitted.code;
+                    const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
+                    const uint64_t bytes = (capacity + 4095) & ~UINT64_C(4095);
+                    void* executable = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
+                    bool ready = executable != MAP_FAILED && offsets != 0;
+                    if (ready)
+                    {
+                        const BranchSizingCheck checked = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
+                        ready = checked.error == BRANCH_SIZING_OK && size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets).error == BRANCH_SIZING_OK;
+                        ready = ready && x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, executable, capacity, 0, 0) > 0;
+                        ready = ready && mprotect(executable, bytes, PROT_READ | PROT_EXEC) == 0;
+                    }
+                    tier1_emit_test_expect(test, ready, "lifetime fixture encodes and maps");
+                    uint64_t random = UINT64_C(0x5a17e7e5d1ce0001) + shape;
+                    for (uint32_t sample = 0; ready && sample < 32; sample += 1)
+                    {
+                        const uint64_t a = tier1_emit_test_random(&random);
+                        const uint64_t b = tier1_emit_test_random(&random) | 1;
+                        tier1_emit_test_expect(test, tier1_emit_test_call(executable, a, b) == a + b, "native lifetime fixture returns a + b");
+                    }
+                    if (executable != MAP_FAILED)
+                    {
+                        munmap(executable, bytes);
+                    }
+                    free(offsets);
+                }
+            }
+            arena_pop_to(&test->output, 0);
+            arena_pop_to(&test->input, 0);
+        }
+    }
+}
+
 // A walked displacement the frame's object offset pushes past 32 bits: emission refuses the function rather than
 // truncating the displacement.
 static void tier1_emit_test_object_overflow(Tier1EmitTest* test)
@@ -883,6 +1034,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_emit_test_pressure(&test);
             tier1_emit_test_failures(&test);
             tier1_emit_test_objects(&test);
+            tier1_emit_test_lifetimes(&test);
             tier1_emit_test_object_overflow(&test);
             tier1_call_tests(&test);
             tier1_narrow_tests(&test);

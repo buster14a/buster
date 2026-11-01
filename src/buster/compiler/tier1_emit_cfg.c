@@ -83,7 +83,7 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : plan->patterns[node].rule;
         // A mask, and a mask's store, need the opmask class's allocation (#179).
         const bool mask = tier1_select_mask_width(type) != 0 || tier1_select_mask_rule(rule);
-        chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow)) && rule != TIER1_RULE_DIVIDE &&
+        chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_LIFETIME && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow)) && rule != TIER1_RULE_DIVIDE &&
                 rule != TIER1_RULE_SHIFT && !mask;
         prefix &= op == IR_PARAM;
     }
@@ -285,7 +285,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
     // The slots' columns: a value's at its node, the general registers' caller-save rows', the opmask registers' (one
     // per register, whichever the calls save: tier1_emit_cfg_mask_saves), the two temporary slots', then each frame
-    // object's, live throughout (tier1_emit_cfg_object).
+    // object's, live throughout until its lifetime markers say otherwise (tier1_emit_cfg_lifetimes).
     const uint32_t objects = function->slot_count;
     prepared->classes = node_classes;
     prepared->mask_columns = masks != 0 ? 8 : 0;
@@ -634,6 +634,132 @@ static bool tier1_emit_cfg_object(const Tier1EmitResult* emitted, uint32_t objec
     return found;
 }
 
+// Each frame object's lifetime over tier1_cfg's positions (#177), into `starts` and `ends` by slot: its whole function
+// for an object without lifetime markers (IR_LIFETIME), and for one with them the hull of the positions where some path
+// from a start reaches without an end. That forward problem is backward liveness on the reversed CFG, which dataflow.c
+// solves (its vector path or its scalar twin): a block's last marker of the object a use where it starts and a
+// definition where it ends, so that the fixpoint's in row is the object's state after the block and its out row the one
+// before it. The hull takes each block's start where the object is live before it, its end where the object is live
+// after it, and each marker's own position: an access through the object's address, at a node between a start and an
+// end on some path, has its positions inside. Scratch keeps the dataflow's rows; the caller restores it.
+static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const Tier1CfgInput* input, bool vector, Arena* scratch, uint32_t* starts, uint32_t* ends)
+{
+    (void)vector;
+
+    const uint32_t objects = function->slot_count;
+    const uint32_t blocks = input->block_count;
+    const uint32_t added = blocks - function->block_count;
+    bool ok = true;
+    uint32_t* ids = objects != 0 ? ir_allocate(scratch, objects, 4, &ok) : 0;
+    Tier1EmitError error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    uint32_t marked = 0;
+    for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
+    {
+        ids[o] = BUSTER_IR_NONE;
+        starts[o] = 0;
+        ends[o] = input->position_count;
+    }
+    for (uint32_t node = 0; error == TIER1_EMIT_OK && node < function->instruction_count; node += 1)
+    {
+        if (function->op[node] == IR_LIFETIME && ids[function->a[node]] == BUSTER_IR_NONE)
+        {
+            ids[function->a[node]] = marked++;
+        }
+    }
+    Dataflow lifetimes = { 0 };
+    if (error == TIER1_EMIT_OK && marked != 0)
+    {
+        ok = dataflow_create(scratch, blocks, marked, input->edge_count, &lifetimes);
+        if (ok)
+        {
+            memcpy(lifetimes.successor_offsets, input->predecessor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+            if (input->edge_count != 0)
+            {
+                memcpy(lifetimes.successors, input->predecessors, (uint64_t)input->edge_count * sizeof(uint32_t));
+            }
+            ok = dataflow_postorder(&lifetimes, scratch);
+        }
+        error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    }
+    if (error == TIER1_EMIT_OK && marked != 0)
+    {
+        for (uint32_t b = 0; b < function->block_count; b += 1)
+        {
+            uint64_t* use = lifetimes.use + (uint64_t)(b + added) * lifetimes.row_words;
+            uint64_t* def = lifetimes.def + (uint64_t)(b + added) * lifetimes.row_words;
+            for (uint32_t node = function->block_offsets[b]; node < function->block_offsets[b + 1]; node += 1)
+            {
+                if (function->op[node] == IR_LIFETIME)
+                {
+                    const uint32_t id = ids[function->a[node]];
+                    const uint64_t bit = UINT64_C(1) << (id & 63);
+                    const bool start = function->b[node] == 0;
+                    use[id >> 6] = start ? use[id >> 6] | bit : use[id >> 6] & ~bit;
+                    def[id >> 6] = start ? def[id >> 6] & ~bit : def[id >> 6] | bit;
+                }
+            }
+        }
+        if (BUSTER_VECTOR_PATH(vector))
+        {
+            (void)dataflow_liveness_vector(&lifetimes);
+        }
+        else
+        {
+            (void)dataflow_liveness_scalar(&lifetimes);
+        }
+        uint32_t* low = ir_allocate(scratch, marked, 4, &ok);
+        uint32_t* high = ir_allocate(scratch, marked, 4, &ok);
+        error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        for (uint32_t id = 0; error == TIER1_EMIT_OK && id < marked; id += 1)
+        {
+            low[id] = UINT32_MAX;
+            high[id] = 0;
+        }
+        for (uint32_t cb = 0; error == TIER1_EMIT_OK && cb < blocks; cb += 1)
+        {
+            const uint64_t* before = lifetimes.out + (uint64_t)cb * lifetimes.row_words;
+            const uint64_t* after = lifetimes.in + (uint64_t)cb * lifetimes.row_words;
+            for (uint64_t word = 0; word < lifetimes.row_words; word += 1)
+            {
+                for (uint64_t bits = before[word]; bits != 0; bits &= bits - 1)
+                {
+                    const uint32_t id = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits));
+                    low[id] = input->block_starts[cb] < low[id] ? input->block_starts[cb] : low[id];
+                    high[id] = input->block_starts[cb] + 1 > high[id] ? input->block_starts[cb] + 1 : high[id];
+                }
+                for (uint64_t bits = after[word]; bits != 0; bits &= bits - 1)
+                {
+                    const uint32_t id = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits));
+                    high[id] = input->block_starts[cb + 1] > high[id] ? input->block_starts[cb + 1] : high[id];
+                }
+            }
+        }
+        for (uint32_t b = 0; error == TIER1_EMIT_OK && b < function->block_count; b += 1)
+        {
+            for (uint32_t node = function->block_offsets[b]; node < function->block_offsets[b + 1]; node += 1)
+            {
+                if (function->op[node] == IR_LIFETIME)
+                {
+                    const uint32_t id = ids[function->a[node]];
+                    const uint32_t position = input->block_starts[b + added] + 2 * (node - function->block_offsets[b]);
+                    low[id] = function->b[node] == 0 && position < low[id] ? position : low[id];
+                    high[id] = position + 1 > high[id] ? position + 1 : high[id];
+                }
+            }
+        }
+        for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
+        {
+            const uint32_t id = ids[o];
+            if (id != BUSTER_IR_NONE && low[id] < high[id])
+            {
+                starts[o] = low[id];
+                ends[o] = high[id];
+            }
+        }
+    }
+    return error;
+}
+
 // The frame: each spilled value's slot over its intervals' hull (a phi's widened to its predecessors' ends), the general
 // registers' caller-save rows, the opmask registers' a call saves, and each class's temporary slot where a move used
 // it, in that row order, then the frame objects.
@@ -711,6 +837,10 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
     {
         indices[row++] = count + fixed_columns + o;
+    }
+    if (error == TIER1_EMIT_OK)
+    {
+        error = tier1_emit_cfg_lifetimes(plan->function, input, options->vector, scratch, prepared->starts + count + fixed_columns, prepared->ends + count + fixed_columns);
     }
     if (error == TIER1_EMIT_OK)
     {
