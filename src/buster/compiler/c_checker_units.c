@@ -1496,6 +1496,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .board_lane = (uint32_t)(lane - run->lanes),
             .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
             .tier1 = command->tier1,
+            .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_refusals = command->tier1_refusals,
         };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
@@ -1524,7 +1525,10 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->call_stores, unit_report->call_stores, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->call_loads, unit_report->call_loads, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->rematerializations, unit_report->rematerializations, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->dropped_definitions, unit_report->dropped_definitions, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->edge_moves, unit_report->edge_moves, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->spill_slots, unit_report->spill_slots, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->frame_bytes, unit_report->frame_bytes, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };

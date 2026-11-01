@@ -245,11 +245,17 @@ designs and the compilers already built this way.
 
 - `tier1_allocate.c` and `tier1_rematerialize.c` supply bounded interval
   allocation, required-use reload splitting, parallel moves and baseline-x86
-  rematerialization. `test-tier1-allocation` includes native execution and
-  guarded tails; `benchmark-tier1-allocation` measures full preparation and
-  allocation. [The allocation guide](docs/tier1-allocation.md) records producer
-  constraints and pending CFG/corpus emission. Use the shared 9700X lock per
-  build/test/measurement and CPU 2 for timing.
+  rematerialization: constants, symbols' addresses (from rip, or their GOT
+  slots) and frame objects', the recipes' costs from the Zen 5 model where it
+  has them. The CFG consumer recomputes them through the copies the typed
+  stream puts around addresses, and leaves out definitions nothing reads (#178,
+  `tier1_emit_cfg_recipes`). `test-tier1-allocation` includes native execution
+  and guarded tails; `benchmark-tier1-allocation` measures full preparation and
+  allocation; `test-checker-driver`'s Tier 1 fixture runs every recipe through
+  `--tier1` against clang. [The allocation guide](docs/tier1-allocation.md)
+  records producer constraints and the corpora's spills with and without
+  rematerialization. Use the shared 9700X lock per build/test/measurement and
+  CPU 2 for timing.
 
 - `tier1_certificate.c` checks a normalized source/machine-stream allocation
   certificate (#939): block-entry facts, sequential edge edits, simultaneous
@@ -424,7 +430,8 @@ designs and the compilers already built this way.
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, with
   `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` and
-  `--tier1-refusals` say which step refused the others: [the Tier 1
+  `--tier1-refusals` say which step refused the others, and
+  `--tier1-no-rematerialize` compiles them without rematerialization: [the Tier 1
   guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'

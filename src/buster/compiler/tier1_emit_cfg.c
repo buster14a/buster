@@ -7,10 +7,12 @@
 //
 // The plan becomes tier1_cfg.c's problem. Node n's effective uses are at base + 2n and its definition at the next
 // position, with a required use there (the instruction writes a register). A phi is defined at its block's start, its
-// operands in the predecessors' order. Parameters are defined at position 0, in their incoming registers, and
-// constants are rematerializable when the options ask. tier1_cfg's entry has no predecessors, so where the IR's entry
-// has some (a loop's header), an empty block goes before it and base is 2. tier1_cfg_allocate, or its scalar twin,
-// then allocates the selected uses over the CFG.
+// operands in the predecessors' order. Parameters are defined at position 0, in their incoming registers. When the
+// options ask, constants, symbols' addresses and frame objects' addresses are rematerializable (#178): a fragment the
+// allocator takes out of a register recomputes its value where it needs one again, with no slot, no store and no
+// reload; a symbol's copy is one more reference. tier1_cfg's entry has no predecessors, so where the IR's entry has some
+// (a loop's header), an empty block goes before it and base is 2. tier1_cfg_allocate, or its scalar twin, then
+// allocates the selected uses over the CFG.
 //
 // The records, block by block in layout order: the entry's prologue, then at each block's start its single incoming
 // edge's moves where tier1_cfg placed them there; each node as the straight-line consumer emits it (its fragment
@@ -37,6 +39,8 @@
 
 // A pending jump's goal: a block, or with this bit an edge's stub.
 #define BUSTER_TIER1_EMIT_CFG_STUB 0x80000000u
+// The longest chain of copies and constant displacements a recipe is found through (tier1_emit_cfg_recipes).
+#define BUSTER_TIER1_EMIT_CFG_RECIPE_DEPTH 8
 
 // Whether the function is a straight-line chain without phis, the straight-line consumer's: every block but the last
 // jumps to the next, and the last returns, traps or is an empty self-loop.
@@ -93,6 +97,64 @@ static uint16_t tier1_emit_cfg_inverse(uint16_t form)
         inverse = pairs[p][0] == form ? pairs[p][1] : pairs[p][1] == form ? pairs[p][0] : inverse;
     }
     return inverse;
+}
+
+// The values a fragment may recompute rather than reload (#178), by node, into the recipes' columns (zero where none):
+// - a constant;
+// - a symbol's address, from rip or read from its GOT slot as its access says (a thread-local's the consumer refuses);
+// - a frame object's address, from the frame's base, which nothing moves between the prologue and the epilogues
+//   (selection refuses the dynamic stack);
+// - a copy of one of them: a pointer's conversion, which the C driver's typed streams put around every address, their
+//   pointers being 64-bit integers, has its operand's bits (TIER1_RULE_COPY);
+// - a symbol's or a frame object's address plus a constant (a member's, or a constant index's: TIER1_RULE_ADDRESS without
+//   an index), one lea at that displacement, a symbol's its reference's addend; a GOT slot's address takes no constant.
+// A frame object's displacement is the frame's layout's: until tier1_emit_cfg_frame fills it, the recipe's value is the
+// object's slot, and its addend the constant added to it.
+static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, uint8_t* operations, uint8_t* flags, uint64_t* values, int64_t* addends)
+{
+    const uint32_t count = plan->function->instruction_count;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        // The chain's root, through copies and constant displacements, each of them a value of its own (uncovered).
+        uint32_t root = node;
+        int64_t displacement = 0;
+        bool walking = !plan->covered[node];
+        for (uint32_t depth = 0; walking && depth < BUSTER_TIER1_EMIT_CFG_RECIPE_DEPTH; depth += 1)
+        {
+            const Tier1SelectPattern* pattern = &plan->patterns[root];
+            const bool copy = pattern->rule == TIER1_RULE_COPY;
+            const bool offset = pattern->rule == TIER1_RULE_ADDRESS && pattern->values[1] == BUSTER_IR_NONE;
+            const uint32_t next = copy || offset ? pattern->values[0] : BUSTER_IR_NONE;
+            walking = next < count && !plan->covered[next];
+            displacement += walking && offset ? pattern->displacement : 0;
+            root = walking ? next : root;
+        }
+        const Tier1SelectPattern* pattern = &plan->patterns[root];
+        const uint8_t rule = plan->covered[root] ? TIER1_RULE_NONE : pattern->rule;
+        const uint32_t symbol = (uint32_t)pattern->immediate;
+        const uint8_t access = rule == TIER1_RULE_SYMBOL_ADDRESS && symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
+        const bool displaced = displacement != 0;
+        const bool fits = displacement >= INT32_MIN && displacement <= INT32_MAX;
+        if (rule == TIER1_RULE_CONSTANT && !displaced)
+        {
+            operations[node] = BUSTER_TIER1_REMAT_INTEGER;
+            values[node] = pattern->immediate;
+        }
+        else if (rule == TIER1_RULE_SYMBOL_ADDRESS && fits && (access == BUSTER_TIER1_ACCESS_DIRECT || (access == BUSTER_TIER1_ACCESS_GOT && !displaced)))
+        {
+            operations[node] = BUSTER_TIER1_REMAT_SYMBOL;
+            values[node] = symbol;
+            addends[node] = displacement;
+            flags[node] = BUSTER_TIER1_REMAT_STABLE | (access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_TIER1_REMAT_GOT : 0);
+        }
+        else if (rule == TIER1_RULE_STACK_ADDRESS && fits)
+        {
+            operations[node] = BUSTER_TIER1_REMAT_STACK;
+            values[node] = pattern->immediate;
+            addends[node] = displacement;
+            flags[node] = BUSTER_TIER1_REMAT_STABLE;
+        }
+    }
 }
 
 // The plan's allocation problem, in `output`, which the result keeps (see the header), with the maps between nodes and
@@ -172,6 +234,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint8_t* flags = ok ? ir_allocate(output, count, 1, &ok) : 0;
     uint8_t* marks = ok ? ir_allocate(output, count, 1, &ok) : 0;
     uint64_t* constants = ok ? ir_allocate(output, count, 8, &ok) : 0;
+    int64_t* addends = ok ? ir_allocate(output, count, 8, &ok) : 0;
+    uint16_t* costs = ok ? ir_allocate(output, count, 2, &ok) : 0;
+    uint16_t* reload_costs = ok ? ir_allocate(output, count, 2, &ok) : 0;
     uint32_t* prospective = ok ? ir_allocate(scratch, (uint64_t)value_count + call_slots + 1 + objects, 4, &ok) : 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK)
@@ -194,20 +259,25 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             widths[node] = (uint8_t)tier1_select_width(function->type[node]);
             prepared->sizes[node] = widths[node] != 0 ? widths[node] : 8;
             prepared->alignments[node] = prepared->sizes[node];
-            if (options->rematerialize && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_CONSTANT)
-            {
-                operations[node] = BUSTER_TIER1_REMAT_INTEGER;
-                constants[node] = plan->patterns[node].immediate;
-            }
+        }
+        if (options->rematerialize)
+        {
+            tier1_emit_cfg_recipes(plan, emitted, operations, flags, constants, addends);
         }
         prepared->recipes = (Tier1RematerializationInput){
             .operations = operations,
             .widths = widths,
             .flags = flags,
             .values = constants,
+            .addends = addends,
             .count = count,
         };
-        const bool marked = vector ? tier1_rematerialization_marks(&prepared->recipes, marks) : tier1_rematerialization_marks_scalar(&prepared->recipes, marks);
+        prepared->recipe_values = constants;
+        // The model's costs, where it has them, before the marks read them: the frame's base is rsp.
+        const bool costed = tier1_rematerialization_model_costs(&prepared->recipes, X86_REGISTER_RSP, costs, reload_costs, vector);
+        prepared->recipes.costs = costs;
+        prepared->recipes.reload_costs = reload_costs;
+        const bool marked = costed && (vector ? tier1_rematerialization_marks(&prepared->recipes, marks) : tier1_rematerialization_marks_scalar(&prepared->recipes, marks));
         error = marked ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
     }
     // Frame-base reservations before allocation, from every value as a prospective slot, the caller-save rows and the
@@ -438,6 +508,16 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     return error;
 }
 
+// The frame offset of frame object `object`: its row, the last ones (tier1_emit_cfg_frame).
+static bool tier1_emit_cfg_object(const Tier1EmitResult* emitted, uint32_t object, int32_t* offset)
+{
+    const uint32_t temporary = (emitted->cfg.temp_slots & 1u) != 0;
+    const uint32_t row = emitted->cfg.allocation.spill_count + (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask) + temporary + object;
+    const bool found = row < emitted->frame.count;
+    *offset = found ? emitted->frame.offset[row] : 0;
+    return found;
+}
+
 // The frame: each spilled value's slot over its intervals' hull (a phi's widened to its predecessors' ends), the
 // caller-save rows, and the temporary slot where a move used it, in that row order.
 static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
@@ -514,6 +594,17 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
         const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
         error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_FRAME;
     }
+    // A frame object's address's recipe, its displacement from the frame's base now that the layout has the object: its
+    // offset, and the constant added to it (tier1_emit_cfg_recipes), as a 64-bit value tier1_rematerialize checks fits.
+    for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count; node += 1)
+    {
+        int32_t offset = 0;
+        if (prepared->recipes.operations[node] == BUSTER_TIER1_REMAT_STACK)
+        {
+            error = tier1_emit_cfg_object(emitted, (uint32_t)prepared->recipe_values[node], &offset) ? error : TIER1_EMIT_FRAME;
+            prepared->recipe_values[node] = (uint64_t)((int64_t)offset + prepared->recipes.addends[node]);
+        }
+    }
     return error;
 }
 
@@ -524,16 +615,6 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
     const uint32_t index = location - BUSTER_TIER1_CFG_SPILL;
     const uint32_t row = index < spills ? index : spills + (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
     const bool found = location >= BUSTER_TIER1_CFG_SPILL && index <= spills && row < emitted->frame.count;
-    *offset = found ? emitted->frame.offset[row] : 0;
-    return found;
-}
-
-// The frame offset of frame object `object`: its row, the last ones (tier1_emit_cfg_frame).
-static bool tier1_emit_cfg_object(const Tier1EmitResult* emitted, uint32_t object, int32_t* offset)
-{
-    const uint32_t temporary = (emitted->cfg.temp_slots & 1u) != 0;
-    const uint32_t row = emitted->cfg.allocation.spill_count + (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask) + temporary + object;
-    const bool found = row < emitted->frame.count;
     *offset = found ? emitted->frame.offset[row] : 0;
     return found;
 }
@@ -643,8 +724,8 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
     return error;
 }
 
-// Moves [first, end) of tier1_cfg's columns: registers and slots by tier1_cfg's location ids, and recomputations of
-// constants, into a slot through the scratch register.
+// Moves [first, end) of tier1_cfg's columns: registers and slots by tier1_cfg's location ids, and recomputations
+// (tier1_emit_copy, a symbol's with its reference), into a slot through the scratch register.
 static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t first, uint32_t end, Tier1EmitBuffer* buffer)
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
@@ -661,17 +742,15 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
         int32_t offset = 0;
         if (from == BUSTER_TIER1_CFG_REMATERIALIZE)
         {
+            // The copy goes in now, then the store into a slot's destination after it.
             const uint8_t target = to < 16 ? (uint8_t)to : (uint8_t)BUSTER_TIER1_SELECT_SCRATCH;
-            Tier1Rematerialized copy = { 0 };
             const bool placed = to < 16 || tier1_emit_cfg_slot(emitted, to, &offset);
-            const bool made = placed && tier1_rematerialize(&emitted->prepared.recipes, node, target, base, UINT8_MAX, &copy) && copy.symbol == BUSTER_TIER1_REMAT_NO_SYMBOL;
-            error = made ? error : TIER1_EMIT_ALLOCATION;
-            records[record_count++] = copy.instruction;
+            error = placed ? tier1_emit_copy(emitted, &emitted->prepared.recipes, node, target, base, buffer) : TIER1_EMIT_ALLOCATION;
+            emitted->edge_moves += error == TIER1_EMIT_OK;
             if (to >= 16)
             {
                 records[record_count++] = (X86Instruction){ .displacement = offset, .reg = target, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
             }
-            emitted->rematerializations += 1;
         }
         else if (from < 16 && to < 16)
         {
@@ -699,6 +778,34 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
         emitted->edge_moves += error == TIER1_EMIT_OK ? record_count : 0;
     }
     return error;
+}
+
+// Whether value v's definition at `definition` writes a register nothing reads: v is recomputed (#178), and the first
+// fragment of the interval its definition starts serves no use of v but those of definitions left out (`dropped`, by
+// node, decided for every later node first), and ends where a recomputation takes over (the next fragment's) or, as the
+// interval's last, before its block's end, where an edge would read it. Its records can then be left out, the value
+// recomputed where it is used (an edge's move or a fragment's transition takes the recipe rather than the register), as
+// the definition's records only compute a value: a constant, an address or a copy of one. A use at position p > the
+// definition is node (p - base) / 2's.
+static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint32_t v, uint32_t definition, const uint8_t* dropped, uint32_t base)
+{
+    const Tier1CfgAllocation* cfg = &emitted->cfg;
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const Tier1Allocation* allocation = &cfg->allocation;
+    const uint32_t interval = input->rematerializable != 0 && input->rematerializable[v] != 0 ? tier1_cfg_interval_at(cfg, v, definition) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t first = interval != BUSTER_TIER1_CFG_NONE ? allocation->fragment_offsets[interval] : 0;
+    const bool last = interval != BUSTER_TIER1_CFG_NONE && first + 1 == allocation->fragment_offsets[interval + 1];
+    const uint32_t end = interval != BUSTER_TIER1_CFG_NONE ? cfg->intervals.ends[interval] : 0;
+    const bool inside = last && end != input->block_starts[tier1_cfg_block_of(input, end - 1) + 1];
+    bool dead = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
+                (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
+    // Uses are sorted: the definition's own (at its position), then those the first fragment serves, before its end.
+    for (uint32_t u = dead ? input->use_offsets[v] : 0; dead && u < input->use_offsets[v + 1]; u += 1)
+    {
+        const uint32_t position = input->use_positions[u];
+        dead = position <= definition || position >= allocation->ends[first] || dropped[(position - base) / 2] != 0;
+    }
+    return dead;
 }
 
 // A jump of `form` to `goal` (a block, or an edge's stub with BUSTER_TIER1_EMIT_CFG_STUB), resolved once every block's
@@ -804,6 +911,21 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     // which the shared helpers read.
     Tier1EmitTransitions transitions = { 0 };
     Tier1Allocation view = *allocation;
+    // A reference for each recomputed symbol's address too (tier1_emit_copy): a fragment's from recomputation into a
+    // register, and an edge's move that recomputes one.
+    const uint8_t* recipes = emitted->prepared.recipes.operations;
+    for (uint32_t i = 0; error == TIER1_EMIT_OK && i < cfg->intervals.count; i += 1)
+    {
+        const bool symbol = recipes[emitted->value_nodes[cfg->intervals.values[i]]] == BUSTER_TIER1_REMAT_SYMBOL;
+        for (uint32_t f = allocation->fragment_offsets[i] + 1; symbol && f < allocation->fragment_offsets[i + 1]; f += 1)
+        {
+            emitted->reference_capacity += allocation->kinds[f - 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
+        }
+    }
+    for (uint32_t m = 0; error == TIER1_EMIT_OK && m < cfg->move_count; m += 1)
+    {
+        emitted->reference_capacity += cfg->move_sources[m] == BUSTER_TIER1_CFG_REMATERIALIZE && recipes[emitted->value_nodes[cfg->move_values[m]]] == BUSTER_TIER1_REMAT_SYMBOL;
+    }
     bool ok = error == TIER1_EMIT_OK;
     code->records = ok ? ir_allocate(output, capacity, sizeof(X86Instruction), &ok) : 0;
     code->cost_ids = ok ? ir_allocate(output, capacity, 1, &ok) : 0;
@@ -822,6 +944,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     uint32_t* stub_first = ok ? ir_allocate(scratch, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
     uint32_t* pending_branches = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint32_t* pending_goals = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
+    uint8_t* dropped = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     uint32_t* entries = 0;
     uint32_t pending = 0;
@@ -902,6 +1025,15 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 }
             }
         }
+    }
+    // The definitions left out (tier1_emit_cfg_dead_definition), the last first: one that only definitions left out read
+    // is left out too.
+    for (uint32_t k = count; error == TIER1_EMIT_OK && k > 0; k -= 1)
+    {
+        const uint32_t node = k - 1;
+        const uint32_t v = emitted->node_values[node];
+        const bool selected = !plan->covered[node] && function->op[node] != IR_PHI && function->op[node] != IR_PARAM;
+        dropped[node] = selected && v != BUSTER_TIER1_CFG_NONE && tier1_emit_cfg_dead_definition(emitted, v, base + 2 * node + 1, dropped, base);
     }
     if (error == TIER1_EMIT_OK && tier1_frame_emit(&emitted->frame, false, &buffer) != TIER1_FRAME_EMIT_OK)
     {
@@ -1060,6 +1192,11 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 error = tier1_emit_cfg_fixed(emitted, &transitions, &plan->patterns[node], node, use, &holes, &buffer);
             }
+            else if (error == TIER1_EMIT_OK && selected && dropped[node] != 0)
+            {
+                // A recomputed value that nothing reads before its recomputation takes over: no records here.
+                emitted->dropped_definitions += 1;
+            }
             else if (error == TIER1_EMIT_OK && selected)
             {
                 Tier1SelectRecords selected_records = tier1_select_expand(&holes);
@@ -1125,7 +1262,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     tier1_select_requests_add(&requests, &selected_records, record_first, buffer.records);
                 }
             }
-            if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected && tier1_emit_cfg_register(transitions.registers[node]))
+            // A definition left out writes no register, so nothing saves one for it around a call or a fixed sequence.
+            if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected && dropped[node] == 0 && tier1_emit_cfg_register(transitions.registers[node]))
             {
                 transitions.owners[transitions.registers[node]] = node;
             }
