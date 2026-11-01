@@ -9839,7 +9839,13 @@ static bool tier0_operation_decoration_valid(const Tier0Operation* operation, ui
 // roles placed somewhere (VECTOR(j) as register j), a record x86_validate takes.
 static bool tier0_operation_valid(const Tier0Operation* operation)
 {
-    bool valid = operation->record_count <= BUSTER_TIER0_OPERATION_RECORDS && operation->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
+    // A row past the fixed columns is refused before any of them is read: the mask analysis and the sample placement
+    // below index them by the row's counts.
+    if (operation->record_count > BUSTER_TIER0_OPERATION_RECORDS || operation->operand_count > BUSTER_TIER0_OPERATION_OPERANDS)
+    {
+        return false;
+    }
+    bool valid = true;
     for (uint32_t j = 0; valid && j < operation->operand_count; j += 1)
     {
         const uint32_t class = operation->operand_classes[j];
