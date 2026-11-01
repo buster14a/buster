@@ -5683,6 +5683,7 @@ static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang)
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
 static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
+static void check_test_undeclared(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -5934,6 +5935,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_lazy(&test);
             check_test_intrinsic_inputs(&test, clang);
             check_test_x86_diagnostics(&test, clang);
+            check_test_undeclared(&test, clang);
             check_test_initializers(&test, clang);
             check_test_embed_initializers(&test, clang);
             check_test_data_sources(&test);

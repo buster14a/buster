@@ -455,8 +455,10 @@ struct CheckInput
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
-    // Only a rejected unit whose declaration/body resolution completed can have these per-token diagnostic cuts.
-    // Each top-level declaration keeps its original safe prefix; independent declarations retain their full graph.
+    // Only a rejected unit whose declaration/body resolution completed can have these per-token diagnostic cuts
+    // (check_input_diagnostic_recover): each token's is the first report at or after its subtree's first token in its
+    // declaration, so that every construct without a missing name keeps its graph, and declarations without one their
+    // whole graph.
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
     bool diagnostic_graph;
@@ -1250,9 +1252,15 @@ static uint32_t check_input_expression_limit(const CheckInputReader* reader, uin
 }
 
 // Missing ordinary names are found by the binding handoff after the whole ordered declaration walk has completed.
-// That state can check independent declarations without inventing a value for a missing operand. Propagate each
-// report's cut to its top-level root, then back to that declaration's tokens: two bounded forest passes, only on a
-// rejected unit. Other reader failures retain the conservative whole-unit prefix and never enter this recovery.
+// That state can check every expression that doesn't contain a missing name without inventing a value for it, as
+// clang's RecoveryExpr does: it suppresses the diagnostics of the operators, calls and statements that contain the name,
+// and keeps checking their other operands and the statements after them (#1077). A token's limit is the first report at
+// or after its subtree's first token, in its top-level declaration, or the count where there is none: a consumer that
+// compares a position in or at the end of the token's construct with the limit then finds whether the construct up to
+// that position holds a report. Its subtree's first token is a bounded forest pass up the postorder (the subtree is
+// contiguous in token order: check_input_range_root), and each token's next report a backward scan over the tokens that
+// restarts at each declaration's first token. Only a rejected unit pays for these, so they have no vector twin. Other
+// reader failures retain the conservative whole-unit prefix and never enter this recovery.
 static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolved)
 {
     CheckInput* input = reader->output;
@@ -1267,37 +1275,54 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
     }
     if (recoverable)
     {
-        input->diagnostic_limits = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count);
-        input->resource |= input->diagnostic_limits == NULL;
-        if (!input->resource)
+        const uint64_t mark = reader->arena->length;
+        uint32_t* limits = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count);
+        const uint64_t kept = reader->arena->length;
+        // Per token: bit 0 for a declaration's first token, bit 1 for a report's; then the first report at or after it.
+        uint32_t* next = limits != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count) : NULL;
+        input->resource |= next == NULL;
+        if (input->resource)
+        {
+            arena_pop_to(reader->arena, mark);
+        }
+        else
         {
             for (uint32_t token = 0; token < count; token += 1)
             {
-                input->diagnostic_limits[token] = count;
-            }
-            for (uint32_t report = 0; report < input->report_count; report += 1)
-            {
-                const uint32_t token = input->reports[report].token;
-                input->diagnostic_limits[token] = token;
+                limits[token] = token;
+                next[token] = 0;
             }
             for (uint32_t order = 0; order < count; order += 1)
             {
                 const uint32_t token = reader->postorder[order];
                 const uint32_t parent = parser->tree.parents[token];
-                if (parent < count && input->diagnostic_limits[token] < input->diagnostic_limits[parent])
+                if (parent < count && limits[token] < limits[parent])
                 {
-                    input->diagnostic_limits[parent] = input->diagnostic_limits[token];
+                    limits[parent] = limits[token];
+                }
+                else if (parent >= count)
+                {
+                    next[limits[token]] |= 1;
                 }
             }
-            for (uint32_t order = count; order-- > 0;)
+            for (uint32_t report = 0; report < input->report_count; report += 1)
             {
-                const uint32_t token = reader->postorder[order];
-                const uint32_t parent = parser->tree.parents[token];
-                if (parent < count && input->diagnostic_limits[parent] < input->diagnostic_limits[token])
-                {
-                    input->diagnostic_limits[token] = input->diagnostic_limits[parent];
-                }
+                next[input->reports[report].token] |= 2;
             }
+            uint32_t following = count;
+            for (uint32_t token = count; token-- > 0;)
+            {
+                const uint32_t marks = next[token];
+                following = (marks & 2) != 0 ? token : following;
+                next[token] = following;
+                following = (marks & 1) != 0 ? count : following;
+            }
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                limits[token] = next[limits[token]];
+            }
+            arena_pop_to(reader->arena, kept);
+            input->diagnostic_limits = limits;
             input->diagnostic_report_count = input->report_count;
         }
     }
@@ -6002,9 +6027,11 @@ static __attribute__((noinline)) uint32_t check_input_labeled_region(const Check
 
 static uint32_t check_input_expression_end(const CheckInputReader* reader, uint32_t token)
 {
-    // The condition's parser subtree also owns its statement body. Its semantic action depends only on the
-    // expression ending at this parenthesis, so later statements must not extend its visibility or diagnostic cut.
-    return reader->parser->tree.roles[token] == PARSE_ROLE_CLOSE_CONDITION ? token + 1 : reader->ends[token] + 1;
+    // The condition's parser subtree also owns its statement body, and a case label's colon its labeled statement. Their
+    // semantic actions depend only on the expression ending at this parenthesis or colon, so later statements must not
+    // extend their visibility or diagnostic cut: a missing name in a case's statement keeps its value (#1077).
+    const uint8_t role = reader->parser->tree.roles[token];
+    return role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_CASE ? token + 1 : reader->ends[token] + 1;
 }
 
 static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
