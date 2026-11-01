@@ -518,7 +518,7 @@ On the 9700X, the vector path's `--tier1 -c` of each corpus, its units'
 reports summed, at `4851f99d` with and without rematerialization and at main
 `a28f29f`, which recomputed constants alone (and reports neither slots nor
 frames); speedtest1 is the program (`speedtest1-unity.c`), as the run times'
-build compiles it ([the record](https://github.com/buster14a/buster-performance/tree/90fdefc4db8c95dec72be54fe87750c18213613b/docs/measurements/tier1-rematerialization-178-2026-10-31)):
+build compiles it ([the record](https://github.com/buster14a/buster-performance/tree/a17ba43dcf56dbbd24faddf752eab77efdb5c997/docs/measurements/tier1-rematerialization-178-2026-10-31)):
 
 | Corpus | Build | Stores | Reloads | Slots | Frame bytes | Recomputed | Left out |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -567,6 +567,15 @@ printed the same, and 2 more at both tiers where clang's warnings passed the
 harness's capture; the other 17 failed in clang's own steps (12 YARPGen
 programs whose arrays overflow clang `-O0`'s link, 5 Csmith ones that ran past
 the limit at every build). No case's builds disagreed.
+
+At `ca6f9096`, after main's merge, main's #989 puts constants added to an
+index into displacements and #991 makes a canonical narrow value's zero
+extension a copy, so there is less to recompute and fewer spills without it.
+Rematerialization still takes 25% of `sqlite3.c`'s stores (3,296 to 2,473),
+28% of its reloads (3,902 to 2,804) and 22% of its slots (1,092 to 856); 29%,
+34% and 28% of musl's (2,052 to 1,447, 2,456 to 1,614, 649 to 469); and every
+spill of c-testsuite's. speedtest1 runs in 222.3 ms with it and 221.9 ms without
+(5 rounds, the ranges overlapping), with the same hash.
 
 ## Memory and failure contract
 
