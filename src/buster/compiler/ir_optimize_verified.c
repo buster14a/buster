@@ -66,6 +66,8 @@ static __attribute__((unused)) bool ir_verified_current(const IrVerifiedAnalysis
 // On failure neither result nor the analysis arena is published; scratch is restored on every path.
 static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Arena* scratch, bool scalar, IrVerifiedAnalysis* result)
 {
+    (void)scalar;
+
     const uint64_t output_mark = analyses->length;
     const uint64_t scratch_mark = scratch->length;
     IrVerifiedAnalysis candidate = { 0 };
