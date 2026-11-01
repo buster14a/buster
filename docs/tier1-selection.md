@@ -373,7 +373,7 @@ need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
 | `copy` | `TIER1_RULE_MASK_COPY` | `kmov k, k`, none where allocation gave both one register |
 | `and`, `or`, `xor` | `TIER1_RULE_MASK_LOGIC` | `kand`, `kor`, `kxor` `k, k, k` |
 | `not` | `TIER1_RULE_MASK_NOT` | `knot k, k` |
-| `load`, `store` | `TIER1_RULE_MASK_LOAD`, `_STORE`, and their `_ADDRESS` folds | `kmov k, m` and `kmov m, k`, the address folded as an integer access's |
+| `load`, `store` | `TIER1_RULE_MASK_LOAD`, `_STORE`, and their `_ADDRESS` folds | `kmov k, m` and `kmov m, k`, the address folded as an integer access's, a frame object's among them |
 | `phi` | `TIER1_RULE_PHI` | none: its operands are its edges' moves |
 
 The opmask instructions of a width leave the bits past it zero, as the IR's masks
@@ -421,7 +421,11 @@ store writes among them, must be the shared IR interpreter's. The fixtures:
 - masks live across two calls, and a mask phi across a call in a loop, of a helper
   that sets every opmask register (`kxnorq` into k0 to k7) before it returns its
   argument plus one: generated code beside the function, where the interpreter
-  calls a C function that returns the same.
+  calls a C function that returns the same;
+- masks of every width stored into a frame object and loaded back, each access's
+  object folded into its `kmov`'s memory operand, the frame's base at the object's
+  offset, as an integer access's is (`stack_object`): the test checks each such
+  node's `kmov` there.
 
 And the refusals, on both paths: a vector at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone

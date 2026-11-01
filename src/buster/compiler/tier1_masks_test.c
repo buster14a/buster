@@ -16,12 +16,13 @@
 // The fixtures: and, or, xor, not and copies at the four widths; constants (zero, every bit and others); a loop whose
 // mask phis swap, a cycle through k0, beside a mask accumulated from the buffer; more masks live at once than k1 to k7
 // hold, so that some are spilled and reloaded at their widths; and masks live across calls, outside a loop and in one,
-// of a helper that clobbers every opmask register before it returns its argument plus one. The helper is generated
-// code too, beside the function: the interpreter calls a C function that returns the same. And the refusals: a vector
-// (#141's), a mask's select, a target without AVX-512 (no opmask form), and one with AVX512F alone (kmovw and kandw,
-// but no kandb or kmovq); and the selector's vector scan by both paths, which must take masks and refuse a vector at
-// any place, its columns ending at a PROT_NONE page. --print prints each fixture's records by the vector path, as GNU
-// as reads them.
+// of a helper that clobbers every opmask register before it returns its argument plus one; and masks of every width
+// stored into a frame object and loaded back, each access's object folded into its kmov's memory operand. The helper is
+// generated code too, beside the function: the interpreter calls a C function that returns the same. And the refusals:
+// a vector (#141's), a mask's select, a target without AVX-512 (no opmask form), and one with AVX512F alone (kmovw and
+// kandw, but no kandb or kmovq); and the selector's vector scan by both paths, which must take masks and refuse a
+// vector at any place, its columns ending at a PROT_NONE page. --print prints each fixture's records by the vector
+// path, as GNU as reads them.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -60,6 +61,7 @@ struct Tier1MasksTest
     uint64_t mask_moves;
     uint64_t scratch_moves;
     uint64_t records;
+    uint64_t frame_accesses;
     uint32_t refused;
 };
 
@@ -73,6 +75,8 @@ struct Tier1MasksFixture
     bool spills;
     bool calls;
     bool cycle;
+    // The masks' loads and stores whose address is a frame object's, folded into the kmov's memory operand.
+    uint32_t frame_accesses;
 };
 
 static bool tier1_masks_test_expect(Tier1MasksTest* test, bool condition, const char* message)
@@ -369,6 +373,60 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .count = 9,
         .calls = true,
     },
+    {
+        // Each access's frame object folded into its kmov's memory operand: the frame's base at the object's offset.
+        .name = "masks through a frame object",
+        .text = "function (ptr) -> void {\n"
+                "  slot $0 size=16 align=8 type=void flags=0x01\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.m8 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=2\n"
+                "  %3 = load.m16 %2 align=2\n"
+                "  %4 = address.ptr %0 offset=4\n"
+                "  %5 = load.m32 %4 align=4\n"
+                "  %6 = address.ptr %0 offset=8\n"
+                "  %7 = load.m64 %6 align=8\n"
+                "  %8 = stack_addr.ptr $0\n"
+                "  %9 = store.void %8, %7 align=8\n"
+                "  %10 = stack_addr.ptr $0\n"
+                "  %11 = address.ptr %10 offset=8\n"
+                "  %12 = store.void %11, %1 align=1\n"
+                "  %13 = stack_addr.ptr $0\n"
+                "  %14 = address.ptr %13 offset=10\n"
+                "  %15 = store.void %14, %3 align=2\n"
+                "  %16 = stack_addr.ptr $0\n"
+                "  %17 = address.ptr %16 offset=12\n"
+                "  %18 = store.void %17, %5 align=4\n"
+                "  %19 = stack_addr.ptr $0\n"
+                "  %20 = load.m64 %19 align=8\n"
+                "  %21 = stack_addr.ptr $0\n"
+                "  %22 = address.ptr %21 offset=8\n"
+                "  %23 = load.m8 %22 align=1\n"
+                "  %24 = stack_addr.ptr $0\n"
+                "  %25 = address.ptr %24 offset=10\n"
+                "  %26 = load.m16 %25 align=2\n"
+                "  %27 = stack_addr.ptr $0\n"
+                "  %28 = address.ptr %27 offset=12\n"
+                "  %29 = load.m32 %28 align=4\n"
+                "  %30 = not.m64 %20\n"
+                "  %31 = xor.m8 %23, %1\n"
+                "  %32 = not.m16 %26\n"
+                "  %33 = xor.m32 %29, %5\n"
+                "  %34 = address.ptr %0 offset=128\n"
+                "  %35 = store.void %34, %30 align=8\n"
+                "  %36 = address.ptr %0 offset=136\n"
+                "  %37 = store.void %36, %31 align=1\n"
+                "  %38 = address.ptr %0 offset=138\n"
+                "  %39 = store.void %38, %32 align=2\n"
+                "  %40 = address.ptr %0 offset=140\n"
+                "  %41 = store.void %40, %33 align=4\n"
+                "  %42 = address.ptr %0 offset=144\n"
+                "  %43 = store.void %42, %26 align=2\n"
+                "  %44 = ret.void\n"
+                "}\n",
+        .frame_accesses = 8,
+    },
 };
 
 // Refusals: a vector, a mask's select.
@@ -618,6 +676,24 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_expect(test, !fixture->cycle || scratch_moves != 0, "the swap's cycle goes through k0");
         tier1_masks_test_expect(test, !fixture->spills || (emitted.spill_stores != 0 && emitted.spill_loads != 0), "masks past k1 to k7 are spilled and reloaded");
         tier1_masks_test_expect(test, !fixture->calls || (emitted.call_stores != 0 && emitted.call_loads != 0), "masks live across a call are saved and reloaded");
+        // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
+        // frame's base, as the object's lea's.
+        uint32_t frame_accesses = 0;
+        uint32_t frame_records = 0;
+        for (uint32_t n = 0; n < function->instruction_count; n += 1)
+        {
+            const Tier1SelectPattern* pattern = &plan.patterns[n];
+            const bool store = pattern->rule == TIER1_RULE_MASK_STORE_ADDRESS;
+            const bool folded = plan.covered[n] == 0 && (pattern->rule == TIER1_RULE_MASK_LOAD_ADDRESS || store) && pattern->stack_object != BUSTER_IR_NONE;
+            const uint32_t first = emitted.code.node_first[n];
+            const uint32_t end = emitted.code.node_first[n + 1];
+            const X86Instruction* record = folded && end > first ? &emitted.code.records[end - 1] : 0;
+            const Tier1SelectMaskForms* forms = tier1_select_mask_forms(pattern->width);
+            frame_accesses += folded;
+            frame_records += record != 0 && record->form == (store ? forms->store : forms->load) && record->rm == (uint8_t)emitted.frame.base_register && record->mode == BUSTER_X86_MEMORY_BASE;
+        }
+        tier1_masks_test_expect(test, frame_accesses == fixture->frame_accesses && frame_records == frame_accesses, "masks through a frame object fold it into their kmov's memory operand");
+        test->frame_accesses += frame_accesses;
         test->mask_stores += emitted.spill_stores;
         test->mask_loads += emitted.spill_loads;
         test->call_saves += emitted.call_stores;
@@ -904,8 +980,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.native_runs == expected_runs, "every fixture runs natively on every input by both paths, where the host can");
             tier1_masks_test_expect(&test, test.refused == 8, "every refusal on both paths");
         }
-        printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls; %u refusals (seed=%" PRIu64 ")\n",
-               test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.refused, seed);
+        printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls, %" PRIu64 " through frame objects; %u refusals (seed=%" PRIu64 ")\n",
+               test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.frame_accesses,
+               test.refused, seed);
         result = test.failures == 0 ? 0 : 1;
         arena_release(&test.execution);
         arena_release(&test.scratch);
