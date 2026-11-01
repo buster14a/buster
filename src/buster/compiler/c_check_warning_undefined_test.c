@@ -107,6 +107,9 @@ static const CheckTestUndefinedFixture check_test_undefined_fixtures[] =
     { "static int missing(int)__attribute__((overloadable));static long missing(double)__attribute__((overloadable));"
       "int(*p)(int)=_Generic(missing(1.0),long:_Generic(0,int:missing,default:missing(1.0)),default:missing(1));\n",
       { "missing", "missing" }, { 4, 5 }, { 1, 0 } },
+    // Declarations and uses in later 64-token blocks of the scans.
+    { "static void missing(void);int a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15,a16,a17,a18,a19,a20,a21,a22,a23,a24,a25,a26,a27,"
+      "a28,a29,a30,a31,a32,a33,a34,a35,a36,a37,a38,a39;static int late(void);int f(void){missing();return late()+a0;}\n", { "missing", "late" } },
 };
 
 static uint32_t check_test_undefined_token(const Parser* parser, const Preprocessor* pp, const char* name, uint32_t occurrence)
