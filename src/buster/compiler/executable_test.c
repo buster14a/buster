@@ -2560,8 +2560,9 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     executable_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "its program runs", 0);
     executable_test_link_end(&absent);
 
-    // TLS blocks: exactly 2 GB fits, and more doesn't, from atoms of at most 2 GB each; nor does one atom over 2 GB, of
-    // .tbss or of .bss, nor one whose size its alignment would wrap. A refused link leaves no output.
+    // TLS blocks: exactly 2 GB fits, and more doesn't, from atoms of at most 2 GB each; nor does one .tbss atom over
+    // 2 GB, nor one whose size its alignment would wrap. A .bss atom past 2 GB fits: it needs address space only, and
+    // the program maps it. A refused link leaves no output.
     static const struct
     {
         const char* name;
@@ -2574,7 +2575,8 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
         { "a TLS block of 2 GB", BUSTER_LINK_CLASS_TBSS, { (1ull << 31) - 16, 16 }, 2, true, false },
         { "a TLS block past 2 GB", BUSTER_LINK_CLASS_TBSS, { (1ull << 31) - 8, 16 }, 2, false, false },
         { "a .tbss atom of 3 GB", BUSTER_LINK_CLASS_TBSS, { 3ull << 30, 0 }, 1, false, true },
-        { "a .bss atom past 2 GB", BUSTER_LINK_CLASS_BSS, { (1ull << 31) + 8, 0 }, 1, false, true },
+        { "a .bss atom of exactly 2 GB", BUSTER_LINK_CLASS_BSS, { 1ull << 31, 0 }, 1, true, false },
+        { "a .bss atom past 2 GB", BUSTER_LINK_CLASS_BSS, { (1ull << 31) + 8, 0 }, 1, true, false },
         { "a .bss atom whose padding wraps", BUSTER_LINK_CLASS_BSS, { UINT64_MAX - 3, 0 }, 1, false, true },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)

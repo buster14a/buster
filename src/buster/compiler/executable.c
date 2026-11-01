@@ -197,10 +197,17 @@
 #define BUSTER_EXECUTABLE_PAGE_LOG2 12
 // The image's end, as an address: every image offset and PC-relative value fits in int32 below it.
 #define BUSTER_EXECUTABLE_MAX_ADDRESS (1ull << 31)
+// The image's largest end, as an address. A zero-fill atom may extend the image past the 32-bit reference reach above,
+// since it needs address space but no bytes; its fixups, and every symbol a fixup names, are then checked against the
+// 32-bit reach, as GNU ld and lld allow a large .bss in the small code model. The image still stays inside x86-64's
+// 47-bit user address space.
+#define BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS (1ull << 47)
 // The largest atom, and the largest TLS block: every offset from the thread pointer, from minus the block's size up to
-// 0, fits in int32. .tbss takes no address space, so the image's limit doesn't bound the block.
+// 0, fits in int32. .tbss takes no address space, so the image's limit doesn't bound the block. A zero-fill .bss atom may
+// be larger, up to the image's bound: its size needs no address reach of its own, only room after the image.
 #define BUSTER_EXECUTABLE_MAX_ATOM_BYTES (1ull << 31)
 #define BUSTER_EXECUTABLE_MAX_TLS_BYTES (1ull << 31)
+#define BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES (1ull << 47)
 // Functions start on 16 bytes and are padded with int3, as lld pads them.
 #define BUSTER_EXECUTABLE_FUNCTION_ALIGNMENT_LOG2 4
 #define BUSTER_EXECUTABLE_INT3 0xcc
@@ -348,12 +355,13 @@ typedef enum ExecutableError
     EXECUTABLE_ERROR_NONE,
     // Scratch memory ran out.
     EXECUTABLE_ERROR_MEMORY,
-    // The image doesn't fit below BUSTER_EXECUTABLE_MAX_ADDRESS or the TLS block in BUSTER_EXECUTABLE_MAX_TLS_BYTES, or
-    // an atom is larger than BUSTER_EXECUTABLE_MAX_ATOM_BYTES or aligned past a page, an INIT_ARRAY or FINI_ARRAY atom
-    // isn't whole 8-byte entries aligned to at most 8, an atom of an ordered class (EH_FRAME, and a dynamic PIE's INIT
-    // and FINI) doesn't land on its alignment where the one before it ends, or in a static executable an atom is of one
-    // of the C runtime's classes (INIT and FINI), which an executable without libc has no section for
-    // (ExecutableResult.atom).
+    // The image doesn't fit below BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS or the TLS block in BUSTER_EXECUTABLE_MAX_TLS_BYTES,
+    // or an atom is larger than its class's limit (BUSTER_EXECUTABLE_MAX_ATOM_BYTES, or for .bss the image's) or aligned
+    // past a page, an INIT_ARRAY or FINI_ARRAY atom isn't whole 8-byte entries aligned to at most 8, an atom of an
+    // ordered class (EH_FRAME, and a dynamic PIE's INIT and FINI) doesn't land on its alignment where the one before it
+    // ends, in a static executable an atom is of one of the C runtime's classes (INIT and FINI), which an executable
+    // without libc has no section for, or a fixup names an atom or linker symbol past the 32-bit references' reach
+    // (ExecutableResult.atom, .symbol and .cause).
     EXECUTABLE_ERROR_LAYOUT,
     // A symbol defined nowhere that isn't weak (ExecutableResult.symbol).
     EXECUTABLE_ERROR_UNDEFINED,
@@ -376,6 +384,64 @@ typedef enum ExecutableError
     // than its table's int32 reaches (see "Unwind tables"; ExecutableResult.atom).
     EXECUTABLE_ERROR_UNWIND,
 } ExecutableError;
+
+// The specific cause of an ExecutableError, where its class has several: a layout refusal names the atom's limit, an
+// unwind refusal says whether the atom's size or one of its FDEs failed, and a relocation refusal says why the writer
+// can't relocate the fixup. The driver prints it, so that a link's refusal names what to change.
+typedef enum ExecutableCause
+{
+    EXECUTABLE_CAUSE_NONE,
+    // EXECUTABLE_ERROR_MEMORY: the allocation that ran out, by phase (ExecutableResult.phase), or the shared state's
+    // before any phase.
+    EXECUTABLE_CAUSE_MEMORY_SHARED,
+    EXECUTABLE_CAUSE_MEMORY_COUNT,
+    EXECUTABLE_CAUSE_MEMORY_LAYOUT,
+    EXECUTABLE_CAUSE_MEMORY_DYNAMIC,
+    EXECUTABLE_CAUSE_MEMORY_OPEN,
+    EXECUTABLE_CAUSE_MEMORY_CHUNKS,
+    // EXECUTABLE_ERROR_LAYOUT, with an atom (ExecutableResult.atom): its size, its alignment, an init or fini array's
+    // shape, a class this executable has no section for, an ordered class's alignment, or an atom whose start the
+    // image's 32-bit references can't hold.
+    EXECUTABLE_CAUSE_ATOM_TOO_LARGE,
+    EXECUTABLE_CAUSE_ATOM_ALIGNMENT,
+    EXECUTABLE_CAUSE_ATOM_ARRAY_ENTRY,
+    EXECUTABLE_CAUSE_ATOM_CLASS,
+    EXECUTABLE_CAUSE_ATOM_ORDER,
+    // A fixup names an atom, or a linker-defined symbol, that starts past the 32-bit references' reach; or the atoms'
+    // sizes overflow the image's address space.
+    EXECUTABLE_CAUSE_ATOM_FAR,
+    EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE,
+    EXECUTABLE_CAUSE_SYMBOL_FAR,
+    // EXECUTABLE_ERROR_LAYOUT, without an atom: the image's end, the TLS block, or the section-name table.
+    EXECUTABLE_CAUSE_IMAGE_TOO_LARGE,
+    EXECUTABLE_CAUSE_TLS_TOO_LARGE,
+    EXECUTABLE_CAUSE_SECTION_NAMES_TOO_LARGE,
+    // EXECUTABLE_ERROR_UNWIND: the atom is larger than the atom limit, its records are malformed, or an FDE's initial
+    // location is outside the table's int32 range.
+    EXECUTABLE_CAUSE_UNWIND_ATOM_TOO_LARGE,
+    EXECUTABLE_CAUSE_UNWIND_ATOM_MALFORMED,
+    EXECUTABLE_CAUSE_UNWIND_RANGE,
+    // EXECUTABLE_ERROR_ENTRY: the symbol isn't defined, or it is defined in an atom that isn't TEXT.
+    EXECUTABLE_CAUSE_ENTRY_UNDEFINED,
+    EXECUTABLE_CAUSE_ENTRY_NOT_TEXT,
+    // EXECUTABLE_ERROR_UNSUPPORTED: an unknown symbol version, debug information, a symbol table, __tls_get_addr
+    // called outside a TLS access, a thread-local without its empty section, or a string table over 4 GB.
+    EXECUTABLE_CAUSE_UNSUPPORTED_VERSION,
+    EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG,
+    EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG_SYMBOL,
+    EXECUTABLE_CAUSE_UNSUPPORTED_SYMBOLS,
+    EXECUTABLE_CAUSE_UNSUPPORTED_TLS_CALL,
+    EXECUTABLE_CAUSE_UNSUPPORTED_TLS_SECTION,
+    EXECUTABLE_CAUSE_UNSUPPORTED_STRING_TABLE,
+    // EXECUTABLE_ERROR_RELOCATION: a text relocation, a 32-bit absolute value that needs a load address, an
+    // unrelocatable use of a dynamic symbol, address 0, an absolute symbol, or a shared library's rule.
+    EXECUTABLE_CAUSE_RELOCATION_TEXT,
+    EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE32,
+    EXECUTABLE_CAUSE_RELOCATION_DYNAMIC,
+    EXECUTABLE_CAUSE_RELOCATION_ZERO,
+    EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE,
+    EXECUTABLE_CAUSE_RELOCATION_SHARED,
+} ExecutableCause;
 
 // How the output was written.
 typedef enum ExecutableWrite
@@ -537,6 +603,12 @@ struct ExecutableResult
     AtomId atom;
     SymbolId symbol;
     FixupId fixup;
+    // What the error is specifically (ExecutableCause), and the value and limit it compares, or the phase that failed
+    // for EXECUTABLE_ERROR_MEMORY.
+    ExecutableCause cause;
+    ExecutablePhase phase;
+    uint64_t value;
+    uint64_t limit;
     // For EXECUTABLE_ERROR_FILE: the call that failed, and its errno.
     const char* call;
     int system_error;
@@ -1594,7 +1666,11 @@ static const uint8_t executable_linker_before[EXECUTABLE_SECTION_COUNT] = {
 };
 
 #define BUSTER_EXECUTABLE_ALIGNMENTS (BUSTER_EXECUTABLE_PAGE_LOG2 + 1)
-#define BUSTER_EXECUTABLE_BUCKETS ((BUSTER_LINK_CLASS_COUNT - 1) * BUSTER_EXECUTABLE_ALIGNMENTS)
+#define BUSTER_EXECUTABLE_NORMAL_BUCKETS ((BUSTER_LINK_CLASS_COUNT - 1) * BUSTER_EXECUTABLE_ALIGNMENTS)
+// A .bss atom large enough to carry the image past the 32-bit references' reach goes after the ordinary .bss buckets,
+// in a bucket per alignment of its own: it needs address space but no bytes, and the atoms before it (the runtime's, at
+// ordinary sizes) must stay in that reach.
+#define BUSTER_EXECUTABLE_BUCKETS (BUSTER_EXECUTABLE_NORMAL_BUCKETS + BUSTER_EXECUTABLE_ALIGNMENTS)
 #define BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 3
 
 // The section each class's atoms go to: in a static executable without the C runtime, EXECUTABLE_SECTION_COUNT for the
@@ -1678,6 +1754,61 @@ static uint32_t executable_bucket(uint8_t class, uint32_t alignment_log2)
     return (uint32_t)(class - 1) * BUSTER_EXECUTABLE_ALIGNMENTS + (BUSTER_EXECUTABLE_PAGE_LOG2 - alignment_log2);
 }
 
+// Whether a .bss atom is large enough to place after the ordinary .bss buckets: one that by itself can carry the image
+// past the 32-bit references' reach. Smaller atoms stay with the data, where the runtime's atoms keep their reach.
+static bool executable_bss_oversized(uint64_t size)
+{
+    return size > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE;
+}
+
+// An atom's bucket: the ordinary one, or for a .bss atom large enough to carry the image past the references' reach, one
+// of the oversized .bss buckets after every ordinary one, by its alignment.
+static uint32_t executable_bucket_for(uint8_t class, uint32_t alignment_log2, uint64_t size)
+{
+    return class == BUSTER_LINK_CLASS_BSS && executable_bss_oversized(size) ? BUSTER_EXECUTABLE_NORMAL_BUCKETS + (BUSTER_EXECUTABLE_PAGE_LOG2 - alignment_log2)
+                                                                           : executable_bucket(class, alignment_log2);
+}
+
+// The largest size an atom of `class` may have: zero-fill .bss atoms may need more address space than a 32-bit
+// reference reaches, but no bytes, while .tbss still has to fit the TLS block. A non-zero-fill atom's bytes and the
+// offsets code reaches in it fit int32.
+static uint64_t executable_atom_limit(uint8_t class)
+{
+    return class == BUSTER_LINK_CLASS_BSS ? BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES
+           : class == BUSTER_LINK_CLASS_TBSS ? BUSTER_EXECUTABLE_MAX_TLS_BYTES
+                                             : BUSTER_EXECUTABLE_MAX_ATOM_BYTES;
+}
+
+// Why an atom the layout refuses can't be placed, for EXECUTABLE_ERROR_LAYOUT: its cause and the value and limit it
+// compares. The atom must have failed executable_alignment_log2 or the atom-size check.
+static ExecutableCause executable_atom_layout_cause(const LinkAtoms* atoms, AtomId atom, bool crt, uint64_t* value, uint64_t* limit)
+{
+    const uint8_t class = atoms->class[atom];
+    const uint64_t size = atoms->size[atom];
+    const uint32_t alignment_log2 = atoms->alignment_log2[atom];
+    *value = size;
+    *limit = executable_atom_limit(class);
+    if (size > *limit)
+    {
+        return EXECUTABLE_CAUSE_ATOM_TOO_LARGE;
+    }
+    if (class == BUSTER_LINK_CLASS_INIT_ARRAY || class == BUSTER_LINK_CLASS_FINI_ARRAY)
+    {
+        *value = alignment_log2 <= BUSTER_LINK_MAX_ALIGNMENT_LOG2 ? 1ull << alignment_log2 : 0;
+        *limit = 1ull << BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2;
+        return EXECUTABLE_CAUSE_ATOM_ARRAY_ENTRY;
+    }
+    if (executable_class_section(class, crt) == EXECUTABLE_SECTION_COUNT)
+    {
+        *value = class;
+        *limit = BUSTER_LINK_CLASS_COUNT;
+        return EXECUTABLE_CAUSE_ATOM_CLASS;
+    }
+    *value = alignment_log2 <= BUSTER_LINK_MAX_ALIGNMENT_LOG2 ? 1ull << alignment_log2 : 0;
+    *limit = BUSTER_EXECUTABLE_PAGE_BYTES;
+    return EXECUTABLE_CAUSE_ATOM_ALIGNMENT;
+}
+
 // Whether an atom's bytes go in the file, from its class and size: it has some, and isn't zero-fill.
 static bool executable_in_file(uint8_t class, uint64_t size)
 {
@@ -1748,8 +1879,13 @@ static ExecutableAtomBlock executable_atom_block(const LinkAtoms* atoms, AtomId 
     const __m512i log2 = _mm512_mask_max_epu32(alignments, text, alignments, _mm512_set1_epi32(BUSTER_EXECUTABLE_FUNCTION_ALIGNMENT_LOG2));
     const __mmask16 aligned = _mm512_mask_cmple_epu32_mask(lanes, log2, _mm512_set1_epi32(BUSTER_EXECUTABLE_PAGE_LOG2));
     const __m512i largest = _mm512_set1_epi64((long long)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
-    const __mmask16 small = (__mmask16)(_mm512_mask_cmple_epu64_mask((__mmask8)lanes, sizes[0], largest) |
-                                        (uint32_t)_mm512_mask_cmple_epu64_mask((__mmask8)(lanes >> 8), sizes[1], largest) << 8);
+    const __m512i bss_largest = _mm512_set1_epi64((long long)(BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE));
+    const __mmask16 bss = _mm512_mask_cmpeq_epi32_mask(lanes, classes, _mm512_set1_epi32(BUSTER_LINK_CLASS_BSS));
+    const __mmask16 oversized_bss = bss & (__mmask16)(_mm512_mask_cmpgt_epu64_mask((__mmask8)lanes, sizes[0], bss_largest) |
+                                                      (uint32_t)_mm512_mask_cmpgt_epu64_mask((__mmask8)(lanes >> 8), sizes[1], bss_largest) << 8);
+    const __mmask16 small = ((__mmask16)(_mm512_mask_cmple_epu64_mask((__mmask8)lanes, sizes[0], largest) |
+                                         (uint32_t)_mm512_mask_cmple_epu64_mask((__mmask8)(lanes >> 8), sizes[1], largest) << 8)) &
+                             (__mmask16)~oversized_bss;
     // executable_bucket's, and whether every lane's is lane 0's.
     const __m512i buckets = _mm512_add_epi32(_mm512_mullo_epi32(_mm512_sub_epi32(classes, _mm512_set1_epi32(1)), _mm512_set1_epi32(BUSTER_EXECUTABLE_ALIGNMENTS)),
                                              _mm512_sub_epi32(_mm512_set1_epi32(BUSTER_EXECUTABLE_PAGE_LOG2), log2));
@@ -1924,6 +2060,10 @@ struct ExecutableLayout
     uint64_t image_size;
     uint64_t file_size;
     uint64_t chunk_count;
+    // Why executable_lay_out returned false, for EXECUTABLE_ERROR_LAYOUT without an atom.
+    ExecutableCause failure_cause;
+    uint64_t failure_value;
+    uint64_t failure_limit;
 };
 
 // A section's name in this executable: the stubs of the static runtime (a static executable's with the C runtime, or a
@@ -1951,10 +2091,11 @@ struct ExecutableCounts
 
 // Places the sections, from every lane's counts, the GOT's slots and the sizes of the linker's other sections
 // (`linker_bytes`, by section, or 0 for none: a static executable's without the C runtime): the buckets one after
-// another within their sections, each section at its alignment, and the segments 4 KB-congruent from the next page.
-// Returns false if the image reaches BUSTER_EXECUTABLE_MAX_ADDRESS or the TLS block is larger than
-// BUSTER_EXECUTABLE_MAX_TLS_BYTES. The atoms are at most BUSTER_EXECUTABLE_MAX_ATOM_BYTES each, so no sum of their
-// sizes wraps.
+// another within their sections, each section at its alignment, the oversized .bss buckets last, and the segments
+// 4 KB-congruent from the next page. Returns false if the image reaches BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS or the TLS
+// block is larger than BUSTER_EXECUTABLE_MAX_TLS_BYTES. An ordinary atom is at most BUSTER_EXECUTABLE_MAX_ATOM_BYTES
+// and an oversized .bss atom at most BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES, so no sum of their sizes wraps without the
+// checks below.
 static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts* counts, uint32_t lanes, uint64_t got_slots, bool dynamic, bool crt, bool runtime,
                                const uint64_t* linker_bytes, const uint64_t* linker_alignments)
 {
@@ -1968,16 +2109,21 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     uint8_t ordered_log2[BUSTER_LINK_CLASS_COUNT] = { 0 };
     uint64_t prioritized_bytes[2] = { 0 };
     uint64_t prioritized_pieces[2] = { 0 };
+    bool overflow = false;
     for (uint32_t lane = 0; lane < lanes; lane += 1)
     {
         for (uint32_t bucket = 0; bucket < BUSTER_EXECUTABLE_BUCKETS; bucket += 1)
         {
-            bytes[bucket] += counts[lane].bytes[bucket];
+            uint64_t total = 0;
+            overflow = __builtin_add_overflow(bytes[bucket], counts[lane].bytes[bucket], &total) || overflow;
+            bytes[bucket] = total;
             pieces[bucket] += counts[lane].pieces[bucket];
         }
         for (uint32_t array = 0; array < 2; array += 1)
         {
-            prioritized_bytes[array] += counts[lane].prioritized_bytes[array];
+            uint64_t total = 0;
+            overflow = __builtin_add_overflow(prioritized_bytes[array], counts[lane].prioritized_bytes[array], &total) || overflow;
+            prioritized_bytes[array] = total;
             prioritized_pieces[array] += counts[lane].prioritized_pieces[array];
         }
         for (uint8_t class = 0; class < BUSTER_LINK_CLASS_COUNT; class += 1)
@@ -2011,7 +2157,23 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
         {
             const uint32_t bucket = executable_bucket(class, log2);
             class_alignment = class_alignment == 0 && bytes[bucket] != 0 ? 1ull << log2 : class_alignment;
-            class_bytes += bytes[bucket];
+            uint64_t total = 0;
+            overflow = __builtin_add_overflow(class_bytes, bytes[bucket], &total) || overflow;
+            class_bytes = total;
+        }
+        // The oversized .bss atoms follow the ordinary ones, largest alignment first, each bucket aligned as its atoms
+        // require.
+        for (uint32_t log2 = BUSTER_EXECUTABLE_PAGE_LOG2 + 1; class == BUSTER_LINK_CLASS_BSS && log2-- > 0;)
+        {
+            const uint32_t bucket = BUSTER_EXECUTABLE_NORMAL_BUCKETS + (BUSTER_EXECUTABLE_PAGE_LOG2 - log2);
+            if (bytes[bucket] != 0)
+            {
+                class_alignment = 1ull << log2 > class_alignment ? 1ull << log2 : class_alignment;
+                class_bytes = executable_align(class_bytes, 1ull << log2);
+                uint64_t total = 0;
+                overflow = __builtin_add_overflow(class_bytes, bytes[bucket], &total) || overflow;
+                class_bytes = total;
+            }
         }
         class_alignment = class_alignment == 0 && class_bytes != 0 ? 1ull << BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 : class_alignment;
         class_alignment = class_alignment != 0 && executable_class_is_ordered(class, crt) ? 1ull << ordered_log2[class] : class_alignment;
@@ -2019,7 +2181,9 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
         {
             const uint64_t start = executable_align(section_bytes[section], class_alignment);
             strings_start = class == BUSTER_LINK_CLASS_STRINGS ? start : strings_start;
-            section_bytes[section] = start + class_bytes;
+            uint64_t total = 0;
+            overflow = __builtin_add_overflow(start, class_bytes, &total) || overflow;
+            section_bytes[section] = total;
             section_alignment[section] = class_alignment > section_alignment[section] ? class_alignment : section_alignment[section];
         }
     }
@@ -2150,6 +2314,15 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
             cursor += bytes[bucket];
             piece += pieces[bucket];
         }
+        for (uint32_t log2 = BUSTER_EXECUTABLE_PAGE_LOG2 + 1; class == BUSTER_LINK_CLASS_BSS && log2-- > 0;)
+        {
+            const uint32_t bucket = BUSTER_EXECUTABLE_NORMAL_BUCKETS + (BUSTER_EXECUTABLE_PAGE_LOG2 - log2);
+            cursor = bytes[bucket] != 0 ? executable_align(cursor, 1ull << log2) : cursor;
+            layout->bucket_address[bucket] = cursor;
+            layout->bucket_piece[bucket] = piece;
+            cursor += bytes[bucket];
+            piece += pieces[bucket];
+        }
     }
     layout->got_slots = got_slots;
     // Debug bytes are ordinary pieces after every loaded segment. Their section addresses and flags remain zero;
@@ -2180,7 +2353,14 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     layout->file_size = layout->section_headers_offset + layout->section_header_count * sizeof(Elf64_Shdr);
     layout->piece_count = piece + 2;
     layout->chunk_count = (layout->file_size + BUSTER_EXECUTABLE_CHUNK_BYTES - 1) / BUSTER_EXECUTABLE_CHUNK_BYTES;
-    return layout->base + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS && tls_fits && layout->shstrtab_size <= BUSTER_EXECUTABLE_SHSTRTAB_BYTES;
+    const bool image_fits = !overflow && layout->base <= BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS && layout->image_size <= BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS - layout->base;
+    const bool names_fit = layout->shstrtab_size <= BUSTER_EXECUTABLE_SHSTRTAB_BYTES;
+    layout->failure_cause = !image_fits ? EXECUTABLE_CAUSE_IMAGE_TOO_LARGE
+                            : tls_fits  ? (names_fit ? EXECUTABLE_CAUSE_NONE : EXECUTABLE_CAUSE_SECTION_NAMES_TOO_LARGE)
+                                        : EXECUTABLE_CAUSE_TLS_TOO_LARGE;
+    layout->failure_value = !image_fits ? (overflow ? UINT64_MAX : layout->base + layout->image_size) : (tls_fits ? layout->shstrtab_size : layout->tls_block);
+    layout->failure_limit = !image_fits ? BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS : (tls_fits ? BUSTER_EXECUTABLE_SHSTRTAB_BYTES : BUSTER_EXECUTABLE_MAX_TLS_BYTES);
+    return image_fits && tls_fits && names_fit;
 }
 
 // The file offset of an image offset in a section: sections keep their offset's place in a page.
@@ -2921,6 +3101,10 @@ struct ExecutableLaneError
     AtomId atom;
     SymbolId symbol;
     FixupId fixup;
+    // The specific cause, and the value and limit it compares (ExecutableCause).
+    ExecutableCause cause;
+    uint64_t value;
+    uint64_t limit;
     // For EXECUTABLE_ERROR_FILE: the write's errno.
     int system_error;
 };
@@ -3159,6 +3343,41 @@ static void executable_lane_fail(ExecutableLaneError* error, ExecutableError kin
     }
 }
 
+// Records this lane's first failure, with its specific cause and the value and limit it compares.
+static void executable_lane_fail_detail(ExecutableLaneError* error, ExecutableError kind, ExecutableCause cause, uint64_t value, uint64_t limit, AtomId atom, SymbolId symbol,
+                                        FixupId fixup)
+{
+    if (error->error == EXECUTABLE_ERROR_NONE)
+    {
+        *error = (ExecutableLaneError){
+            .error = kind,
+            .atom = atom,
+            .symbol = symbol,
+            .fixup = fixup,
+            .cause = cause,
+            .value = value,
+            .limit = limit,
+        };
+    }
+}
+
+// Adds a run's bytes and pieces to its bucket's counts, failing the phase if their sum would wrap. A run is flushed
+// when the bucket changes, and the largest run is bounded by the atom limit unless a zero-fill atom extends it; a
+// wrapped sum would make the layout place the image at the wrong address.
+static void executable_count_run(ExecutableCounts* counts, ExecutableLaneError* error, uint32_t bucket, uint64_t bytes, uint64_t pieces)
+{
+    uint64_t total = 0;
+    if (__builtin_add_overflow(counts->bytes[bucket], bytes, &total))
+    {
+        executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE, UINT64_MAX, BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES, 0, 0, 0);
+    }
+    else
+    {
+        counts->bytes[bucket] = total;
+        counts->pieces[bucket] += pieces;
+    }
+}
+
 // This lane's error slot in a phase's row.
 static ExecutableLaneError* executable_error(ExecutableShared* shared, ExecutablePhase phase, uint32_t lane, uint32_t lanes)
 {
@@ -3263,6 +3482,17 @@ static void executable_linker_values(const ExecutableLayout* layout, uint64_t* v
     memcpy(values, computed, sizeof(computed));
 }
 
+// The index of `symbol` among executable_linker_names, or their count: a linker-defined symbol's name.
+static uint32_t executable_linker_index(const Link* link, SymbolId symbol)
+{
+    uint32_t found = BUSTER_ARRAY_LENGTH(executable_linker_names);
+    for (uint32_t i = 0; found == BUSTER_ARRAY_LENGTH(executable_linker_names) && i < BUSTER_ARRAY_LENGTH(executable_linker_names); i += 1)
+    {
+        found = executable_named(link, symbol, executable_linker_names[i]) ? i : found;
+    }
+    return found;
+}
+
 // A symbol's reference (see the orientation comment), or the error it gets. A dynamic PIE's imports, and the symbols
 // that its stubs stand for, get theirs from executable_resolve and executable_place, and so do a static executable's
 // IFUNCs with stubs.
@@ -3293,11 +3523,7 @@ static ExecutableError executable_reference(const Link* link, const ExecutableLa
     {
         uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
         executable_linker_values(layout, values);
-        uint32_t found = BUSTER_ARRAY_LENGTH(executable_linker_names);
-        for (uint32_t i = 0; found == BUSTER_ARRAY_LENGTH(executable_linker_names) && i < BUSTER_ARRAY_LENGTH(executable_linker_names); i += 1)
-        {
-            found = executable_named(link, symbol, executable_linker_names[i]) ? i : found;
-        }
+        const uint32_t found = executable_linker_index(link, symbol);
         *reference = found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? (uint32_t)values[found] : 0;
         result = found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_UNSUPPORTED;
     }
@@ -3915,7 +4141,11 @@ static void executable_count_frames(const Link* link, ExecutableShared* shared, 
                 const uint32_t count = executable_eh_frame(link, atom, shared->exact, &walked);
                 if (count == UINT32_MAX)
                 {
-                    executable_lane_fail(error, EXECUTABLE_ERROR_UNWIND, atom, 0, 0);
+                    const uint64_t size = link->atoms.size[atom];
+                    const bool too_large = size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES;
+                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_UNWIND,
+                                                too_large ? EXECUTABLE_CAUSE_UNWIND_ATOM_TOO_LARGE : EXECUTABLE_CAUSE_UNWIND_ATOM_MALFORMED, size,
+                                                BUSTER_EXECUTABLE_MAX_ATOM_BYTES, atom, 0, 0);
                 }
                 frames->atoms[frames->count] = atom;
                 frames->fdes[frames->count] = (count != UINT32_MAX ? count : 0) | (walked ? BUSTER_EXECUTABLE_FRAMES_WALKED : 0);
@@ -3967,8 +4197,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         {
             if (taken.bucket != run)
             {
-                counts->bytes[run] += run_bytes;
-                counts->pieces[run] += run_pieces;
+                executable_count_run(counts, error, run, run_bytes, run_pieces);
                 run = taken.bucket;
                 run_bytes = 0;
                 run_pieces = 0;
@@ -3984,9 +4213,13 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             const bool prioritized = priority < priorities->count && priorities->atom[priority] == atom;
             priority += prioritized ? 1 : 0;
             // Bounded before its padding is added, which could wrap: up to 2^32 atoms of 2 GB each sum to at most 2^63.
-            if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS || size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
+            const uint64_t atom_limit = executable_atom_limit(class);
+            if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS || size > atom_limit)
             {
-                executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
+                uint64_t value = 0;
+                uint64_t limit = 0;
+                const ExecutableCause cause = executable_atom_layout_cause(atoms, atom, shared->crt, &value, &limit);
+                executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, cause, value, limit, atom, 0, 0);
             }
             else if (prioritized)
             {
@@ -3996,16 +4229,19 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             }
             else
             {
-                const uint32_t bucket = executable_bucket(class, log2);
+                const uint32_t bucket = executable_bucket_for(class, log2, size);
                 if (bucket != run)
                 {
-                    counts->bytes[run] += run_bytes;
-                    counts->pieces[run] += run_pieces;
+                    executable_count_run(counts, error, run, run_bytes, run_pieces);
                     run = bucket;
                     run_bytes = 0;
                     run_pieces = 0;
                 }
-                run_bytes += executable_align(size, 1ull << log2);
+                const uint64_t padded = executable_align(size, 1ull << log2);
+                if (__builtin_add_overflow(run_bytes, padded, &run_bytes))
+                {
+                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE, UINT64_MAX, BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES, atom, 0, 0);
+                }
                 run_pieces += executable_in_file(class, size) ? 1 : 0;
                 if (executable_class_is_ordered(class, shared->crt) && alignment_of[atom] > counts->ordered_log2[class])
                 {
@@ -4014,8 +4250,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             }
         }
     }
-    counts->bytes[run] += run_bytes;
-    counts->pieces[run] += run_pieces;
+    executable_count_run(counts, error, run, run_bytes, run_pieces);
 
     const LinkFixups* fixups = &link->fixups;
     uint64_t* marks = shared->got_marks + lane * shared->words_per_lane;
@@ -4621,7 +4856,7 @@ static bool executable_shared_refuses(uint8_t kind)
 // stub, and a TLSGD of a dynamic PIE that relaxes its accesses (`relaxes_tls`), which becomes initial-exec, a PC32 or
 // PC64 to address 0 (executable_is_absolute_zero), or a CALL, PC32 or PC64 to an absolute symbol
 // (executable_refuses_absolute). Every other fixup to an absolute symbol is its value, which needs no relocation.
-static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class, uint8_t scope, bool relaxes_tls)
+static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class, uint8_t scope, bool relaxes_tls, ExecutableCause* cause)
 {
     const uint8_t class = executable_relocation_class(link, target, scope);
     const bool relocated = class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE || class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
@@ -4637,9 +4872,16 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool missing_tls_pair = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_TLSGD &&
                                   link->symbols.atom[target] == 0 && class != BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
-    return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) || (relative && executable_is_absolute_zero(link, target, scope)) ||
-           (absolute && executable_refuses_absolute(kind)) || missing_tls_pair || (scope == BUSTER_EXECUTABLE_SCOPE_SHARED &&
-                                                               (executable_shared_refuses(kind) || (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0)));
+    const bool refused = (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) ||
+                         (relative && executable_is_absolute_zero(link, target, scope)) || (absolute && executable_refuses_absolute(kind)) || missing_tls_pair ||
+                         (scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (executable_shared_refuses(kind) || (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0)));
+    *cause = !refused                          ? EXECUTABLE_CAUSE_NONE :
+             relocated && text                 ? EXECUTABLE_CAUSE_RELOCATION_TEXT :
+             relocated && absolute32           ? EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE32 :
+             direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC ? EXECUTABLE_CAUSE_RELOCATION_DYNAMIC :
+             relative && executable_is_absolute_zero(link, target, scope) ? EXECUTABLE_CAUSE_RELOCATION_ZERO :
+             absolute && executable_refuses_absolute(kind) ? EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE : EXECUTABLE_CAUSE_RELOCATION_SHARED;
+    return refused;
 }
 
 // A PIE's fixups that it can't relocate (executable_is_refused), which the lanes' counts point to and lane 0
@@ -4660,6 +4902,7 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
     const LinkAtoms* atoms = &link->atoms;
     const LinkFixups* fixups = &link->fixups;
     FixupId failed = 0;
+    ExecutableCause cause = EXECUTABLE_CAUSE_NONE;
     for (AtomId atom = 1; (abs64 != written || absolute32 != 0 || refused != 0) && atom < atoms->count; atom += 1)
     {
         const FixupId begin = atoms->fixup_begin[atom];
@@ -4667,12 +4910,18 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
         {
             const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const bool smaller = failed == 0 || fixup < failed;
-            failed = smaller && executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom], shared->scope, shared->relaxes_tls) ? fixup : failed;
+            ExecutableCause current = EXECUTABLE_CAUSE_NONE;
+            const bool refused_here = executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom], shared->scope, shared->relaxes_tls, &current);
+            if (smaller && refused_here)
+            {
+                failed = fixup;
+                cause = current;
+            }
         }
     }
     if (failed != 0)
     {
-        executable_lane_fail(error, EXECUTABLE_ERROR_RELOCATION, 0, 0, failed);
+        executable_lane_fail_detail(error, EXECUTABLE_ERROR_RELOCATION, cause, 0, 0, 0, 0, failed);
     }
 }
 
@@ -5053,7 +5302,7 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
             const uint8_t class = class_of[atom];
             const uint64_t size = size_of[atom];
             const uint32_t log2 = executable_alignment_log2(class, alignment_of[atom], size, layout->crt);
-            const uint32_t bucket = executable_bucket(class, log2);
+            const uint32_t bucket = executable_bucket_for(class, log2, size);
             const bool prioritized = priority < priorities->count && priorities->atom[priority] == atom;
             priority += prioritized ? 1 : 0;
             if (bucket != run && !prioritized)
@@ -5070,7 +5319,7 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
             const uint32_t required = class == BUSTER_LINK_CLASS_EH_FRAME && alignment_of[atom] > 2 ? 2 : alignment_of[atom];
             if (executable_class_is_ordered(class, layout->crt) && (run_address & ((1ull << required) - 1)) != 0)
             {
-                executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
+                executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_ORDER, run_address, 1ull << required, atom, 0, 0);
             }
             if (!prioritized)
             {
@@ -5274,6 +5523,50 @@ static void executable_write_stub(uint8_t* stubs, const ExecutableLayout* layout
     bytes[7] = 0x90;
 }
 
+// A link whose image extends past BUSTER_EXECUTABLE_MAX_ADDRESS, because a zero-fill atom needs more address space
+// than code's 32-bit references reach: every atom, and every linker-defined symbol, that a fixup names must start
+// inside that reach. The image's tail alone may be farther. Lane 0 only, and only for such a link, so an ordinary one
+// pays nothing.
+static void executable_check_far(const Link* link, const ExecutableLayout* layout, ExecutableLaneError* error)
+{
+    if (layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS)
+    {
+        return;
+    }
+    const LinkAtoms* atoms = &link->atoms;
+    uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
+    executable_linker_values(layout, values);
+    for (AtomId atom = 1; atom < atoms->count; atom += 1)
+    {
+        const FixupId begin = atoms->fixup_begin[atom];
+        for (FixupId fixup = begin; fixup < begin + atoms->fixup_count[atom]; fixup += 1)
+        {
+            const SymbolId target = link->fixups.target[fixup];
+            const uint8_t source = link->symbols.source[target];
+            if (source == BUSTER_LINK_SOURCE_LINKER)
+            {
+                const uint32_t found = executable_linker_index(link, target);
+                if (found < BUSTER_ARRAY_LENGTH(executable_linker_names) && values[found] > BUSTER_EXECUTABLE_MAX_ADDRESS - 1)
+                {
+                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_SYMBOL_FAR, values[found], BUSTER_EXECUTABLE_MAX_ADDRESS - 1, 0,
+                                                target, fixup);
+                    return;
+                }
+            }
+            else
+            {
+                const AtomId target_atom = link->symbols.atom[target];
+                if (target_atom != 0 && atoms->address[target_atom] > BUSTER_EXECUTABLE_MAX_ADDRESS - 1)
+                {
+                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_FAR, atoms->address[target_atom],
+                                                BUSTER_EXECUTABLE_MAX_ADDRESS - 1, target_atom, target, fixup);
+                    return;
+                }
+            }
+        }
+    }
+}
+
 // Fills this lane's range of the symbols' references and their GOT slots, and of the chunks' boundaries. Most symbols
 // are in an atom that isn't thread-local, whose reference comes from the columns directly (in locals, which the stores
 // to the references can't alias); executable_reference gives the others', and in a static executable, the lane's
@@ -5288,6 +5581,10 @@ static void executable_write_stub(uint8_t* stubs, const ExecutableLayout* layout
 // `error`.
 static void executable_resolve(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, uint32_t lane, ExecutableLaneError* error)
 {
+    if (lane == 0)
+    {
+        executable_check_far(link, layout, error);
+    }
     LinkSymbols* symbols = &link->symbols;
     const bool dynamic = layout->dynamic;
     const AtomId* atom_of = symbols->atom;
@@ -6310,7 +6607,7 @@ static void executable_eh_frame_table(const Link* link, ExecutableShared* shared
                                                                                     : executable_eh_frame_entries(link, atom, table + 2 * index, header->address, address);
         if (!fits)
         {
-            executable_lane_fail(error, EXECUTABLE_ERROR_UNWIND, atom, 0, 0);
+            executable_lane_fail_detail(error, EXECUTABLE_ERROR_UNWIND, EXECUTABLE_CAUSE_UNWIND_RANGE, header->address, INT32_MAX, atom, 0, 0);
         }
         index += count;
     }
@@ -6695,7 +6992,10 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
         }
         else if (source == BUSTER_LINK_SOURCE_LINKER)
         {
-            const uint64_t offset = link->symbols.reference[symbol];
+            uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
+            executable_linker_values(layout, values);
+            const uint32_t found = executable_linker_index(link, symbol);
+            const uint64_t offset = found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? values[found] : 0;
             address = layout->base + offset;
             section = executable_boundary_section(layout, offset);
         }
@@ -6783,6 +7083,13 @@ static bool executable_debug_value(const Link* link, const ExecutableLayout* lay
     {
         result = link->symbols.value[symbol] + (uint64_t)addend;
     }
+    else if (valid && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER)
+    {
+        uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
+        executable_linker_values(layout, values);
+        const uint32_t found = executable_linker_index(link, symbol);
+        result = layout->base + (found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? values[found] : 0) + (uint64_t)addend;
+    }
     else if (valid)
     {
         result = layout->base + (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] + (uint64_t)addend;
@@ -6810,7 +7117,7 @@ static void executable_debug_relocations(const Link* link, const ExecutableShare
         }
         else
         {
-            executable_lane_fail(error, EXECUTABLE_ERROR_UNSUPPORTED, 0, debug->targets[r], 0);
+            executable_lane_fail_detail(error, EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG_SYMBOL, r, 0, 0, debug->targets[r], 0);
         }
     }
 }
@@ -6909,20 +7216,22 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     const bool library = dynamic && dynamic_options->shared;
     if (ok && lane == 0 && (entry != 0 || !library) && (entry_atom == 0 || link->atoms.class[entry_atom] != BUSTER_LINK_CLASS_TEXT))
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
+        const uint64_t value = entry_atom == 0 ? 0 : link->atoms.class[entry_atom];
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_ENTRY,
+                                    entry_atom == 0 ? EXECUTABLE_CAUSE_ENTRY_UNDEFINED : EXECUTABLE_CAUSE_ENTRY_NOT_TEXT, value, BUSTER_LINK_CLASS_TEXT, 0, entry, 0);
     }
     if (ok && dynamic && shared->dynamic_counts[lane].unknown_version != 0)
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0,
-                             shared->dynamic_counts[lane].unknown_version, 0);
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_VERSION,
+                                    shared->dynamic_counts[lane].unknown_version, 0x8000, 0, shared->dynamic_counts[lane].unknown_version, 0);
     }
     if (ok && lane == 0 && (!executable_debug_valid(link, options->debug) || !executable_debug_sections_valid(options)))
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG, 0, 0, 0, 0, 0);
     }
     if (ok && symbols && !executable_symbols_valid(link, &selected, options->symbols != 0, shared, lane))
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_SYMBOLS, 0, 0, 0, 0, 0);
     }
     ExecutableFrames frames = { 0 };
     if (ok)
@@ -6969,7 +7278,8 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     }
     if (relaxes_tls && lane == 0 && tls_accesses != relaxed_calls)
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, shared->relaxed, 0);
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_TLS_CALL,
+                                    tls_accesses, relaxed_calls, 0, shared->relaxed, 0);
     }
     ExecutableLayout* layout = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableLayout, 1);
     if (ok && layout == 0)
@@ -7042,7 +7352,8 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     }
     if (ok && symbols && symbol_names > UINT32_MAX)
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_STRING_TABLE,
+                                    symbol_names, UINT32_MAX, 0, 0, 0);
         ok = false;
     }
     if (ok && symbols)
@@ -7068,12 +7379,14 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
                                   layout->section_index[EXECUTABLE_SECTION_TBSS] == 0;
         if (lane == 0 && (missing_tdata || missing_tbss))
         {
-            executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
+            executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED,
+                                        EXECUTABLE_CAUSE_UNSUPPORTED_TLS_SECTION, missing_tdata ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_TBSS, 0, 0, 0, 0);
         }
     }
     if (ok && !laid_out)
     {
-        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_LAYOUT, 0, 0, 0);
+        executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_LAYOUT, layout->failure_cause, layout->failure_value,
+                                    layout->failure_limit, 0, 0, 0);
     }
     if (laid_out)
     {
@@ -7264,7 +7577,20 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
                 result->atom = error->atom;
                 result->symbol = error->symbol;
                 result->fixup = error->fixup;
+                result->cause = error->cause;
+                result->phase = (ExecutablePhase)(slot / lanes);
+                result->value = error->value;
+                result->limit = error->limit;
             }
+        }
+        if (result->error == EXECUTABLE_ERROR_MEMORY && result->cause == EXECUTABLE_CAUSE_NONE)
+        {
+            result->cause = shared == 0            ? EXECUTABLE_CAUSE_MEMORY_SHARED
+                            : result->phase == EXECUTABLE_PHASE_COUNT   ? EXECUTABLE_CAUSE_MEMORY_COUNT
+                            : result->phase == EXECUTABLE_PHASE_DYNAMIC ? EXECUTABLE_CAUSE_MEMORY_DYNAMIC
+                            : result->phase == EXECUTABLE_PHASE_OPEN    ? EXECUTABLE_CAUSE_MEMORY_OPEN
+                            : result->phase == EXECUTABLE_PHASE_CHUNKS  ? EXECUTABLE_CAUSE_MEMORY_CHUNKS
+                                                                        : EXECUTABLE_CAUSE_MEMORY_LAYOUT;
         }
         result->error = shared == 0 && result->error == EXECUTABLE_ERROR_NONE ? EXECUTABLE_ERROR_MEMORY : result->error;
         bool written = patched && result->error == EXECUTABLE_ERROR_NONE;
