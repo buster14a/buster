@@ -145,13 +145,14 @@ static bool tier1_select_test_compare(uint32_t condition, uint32_t width, uint64
 static const char* const tier1_select_test_origins[] = {"plan", "expansion", "wrapper"};
 static const char* const tier1_select_test_cost_columns[] = {"gpr_latency", "throughput", "retired_ops", "flags_latency", "load_extra", "executed_uops", "pipes"};
 
-static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruction* records, uint32_t count, uint32_t selected_count, bool plan)
+// The records [selected_first, selected_end) are the selection's, the others the test's wrapper around them.
+static bool tier1_select_test_load_records(Tier1SelectTest* test, const X86Instruction* records, uint32_t count, uint32_t selected_first, uint32_t selected_end, bool plan)
 {
     const uint32_t valid = x86_target_validate(test->allowed, records, count);
     tier1_select_test_expect(test, valid == count, "record valid and eligible for x86-64 baseline");
     for (uint32_t i = 0; i < valid; i += 1)
     {
-        const uint32_t origin = i >= selected_count ? 2 : plan ? 0 : 1;
+        const uint32_t origin = i < selected_first || i >= selected_end ? 2 : plan ? 0 : 1;
         test->emitted_records[origin] += 1;
         const bool covered = x86_effects(records[i].form)->operation != X86_OPERATION_NONE;
         test->uncovered_form = !covered && test->uncovered[0] + test->uncovered[1] + test->uncovered[2] == 0 ? records[i].form : test->uncovered_form;
@@ -188,6 +189,11 @@ static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruct
         ready = false;
     }
     return ready;
+}
+
+static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruction* records, uint32_t count, uint32_t selected_count, bool plan)
+{
+    return tier1_select_test_load_records(test, records, count, 0, selected_count, plan);
 }
 
 // A node's records with its immediate's form chosen, as the emitters' batch chooses it (a batch of one), by both paths,
@@ -2589,6 +2595,154 @@ static void tier1_select_test_division_walk(Tier1SelectTest* test, uint8_t op, u
     arena_pop_to(input, 0);
 }
 
+// A division of a by the constant `divisor` at `width` (#141): its reciprocal (TIER1_RULE_DIVIDE_RECIPROCAL) exactly where
+// tier1_select_reciprocal_divisor takes the divisor's bits, with them and the division's in the pattern and the divisor
+// folded, by both paths alike. The reciprocal's fixed-register records (tier1_select_fixed), which the uniform emitter
+// refuses, run natively from each dividend register (rdi, rsi and rdx, where the arguments arrive, and rax, through a
+// move before them) to each destination (rax, rdx, rcx, r10 and the dividend's own), on the dividend's edges: 0, ±1, the
+// sign bit and its neighbours, the divisor's magnitude and its neighbours, their negations, the largest multiples of it
+// and their neighbours and negations, and random ones, each with random bits past a 32-bit width, against the
+// interpreter. Returns the longest of its sequences.
+static uint32_t tier1_select_test_reciprocal_walk(Tier1SelectTest* test, uint8_t op, uint32_t width, uint64_t divisor, Arena* input, Arena* output, Arena* scratch, uint64_t* random)
+{
+    const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+    const uint32_t bits = width * 8;
+    const uint64_t mask = bits < 64 ? (UINT64_C(1) << bits) - 1 : UINT64_MAX;
+    const uint64_t sign = UINT64_C(1) << (bits - 1);
+    const bool is_signed = op == IR_SDIV || op == IR_SREM;
+    const bool remainder = op == IR_UREM || op == IR_SREM;
+    const uint64_t pattern_divisor = divisor & mask;
+    const bool reciprocal = tier1_select_reciprocal_divisor(pattern_divisor, width, is_signed);
+    const IrSizes sizes =
+    {
+        .instruction_count = 4,
+        .block_count = 1,
+        .constant_count = 1,
+        .parameter_count = 1,
+    };
+    IrFunction function;
+    const bool created = ir_create(input, &sizes, &function) == IR_OK;
+    tier1_select_test_expect(test, created, "create reciprocal fixture");
+    Tier1SelectPlan plans[2];
+    uint32_t longest = 0;
+    if (created)
+    {
+        function.result_type = type;
+        function.parameter_types[0] = type;
+        function.block_offsets[1] = 4;
+        function.constants[0].low = pattern_divisor;
+        tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, op, type, 0, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    if (created && tier1_select_test_walk_plans(test, &function, 0, 2, output, scratch, plans, "reciprocal fixture selects") == 2)
+    {
+        const Tier1SelectPattern* pattern = &plans[0].patterns[2];
+        const uint8_t flags = (uint8_t)((is_signed ? 1u : 0u) | (remainder ? 2u : 0u));
+        tier1_select_test_expect(test, (pattern->rule == TIER1_RULE_DIVIDE_RECIPROCAL) == reciprocal, "a constant divisor takes its reciprocal but where div, idiv or a power of two's rules keep it");
+        tier1_select_test_expect(test, !reciprocal || (pattern->immediate == pattern_divisor && pattern->scale == flags && pattern->values[0] == 0 && pattern->values[1] == BUSTER_IR_NONE && plans[0].covered[1]),
+                                 "a reciprocal's pattern holds the divisor's bits and the division's, its divisor folded");
+        const uint64_t magnitude = is_signed ? tier1_select_magnitude(pattern_divisor, width) : pattern_divisor;
+        const uint64_t largest = (is_signed ? sign - 1 : mask) / (magnitude != 0 ? magnitude : 1) * magnitude;
+        const uint64_t edges[] = { 0, 1, mask, mask - 1, sign, sign - 1, sign + 1, magnitude, magnitude - 1, magnitude + 1, 0 - magnitude, 1 - magnitude, 0 - magnitude - 1,
+                                   largest, largest - 1, largest + 1, 0 - largest, 1 - largest, 0 - largest - 1, largest - magnitude, largest - magnitude - 1, 0 - largest + magnitude + 1 };
+        const uint8_t dividends[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_RAX };
+        const uint8_t destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDX, X86_REGISTER_RCX, X86_REGISTER_R10, BUSTER_TIER1_SELECT_NO_REGISTER };
+        for (uint32_t x = 0; reciprocal && x < BUSTER_ARRAY_LENGTH(dividends); x += 1)
+        {
+            for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
+            {
+                const uint8_t destination = destinations[d] != BUSTER_TIER1_SELECT_NO_REGISTER ? destinations[d] : dividends[x];
+                const uint8_t registers[4] = { dividends[x], 0, destination, 0 };
+                const Tier1SelectHoles holes = tier1_select_holes(&plans[0], registers, 2);
+                X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS + 3];
+                const uint32_t first = dividends[x] == X86_REGISTER_RAX ? 1 : 0;
+                records[0] = tier1_select_move(8, X86_REGISTER_RAX, X86_REGISTER_RDI);
+                const uint32_t sequence = tier1_select_fixed(&holes, records + first);
+                longest = sequence > longest ? sequence : longest;
+                tier1_select_test_expect(test, sequence != 0 && sequence <= BUSTER_TIER1_SELECT_FIXED_RECORDS, "a reciprocal's records fit a fixed-register rule's room");
+                uint32_t count = first + sequence;
+                records[count++] = tier1_select_move(8, X86_REGISTER_RAX, destination);
+                records[count++] = (X86Instruction){ .form = X86_FORM_RET };
+                const uint64_t mark = output->length;
+                if (tier1_select_test_load_records(test, records, count, first, first + sequence, false))
+                {
+                    for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(edges) + 10; sample += 1)
+                    {
+                        const uint64_t junk = tier1_select_test_random(random);
+                        const uint64_t dividend = (sample < BUSTER_ARRAY_LENGTH(edges) ? edges[sample] & mask : tier1_select_test_random(random) & mask) | (width == 4 ? junk << 32 : 0);
+                        const uint64_t a = dividends[x] == X86_REGISTER_RSI || dividends[x] == X86_REGISTER_RDX ? junk : dividend;
+                        const uint64_t b = dividends[x] == X86_REGISTER_RSI ? dividend : junk;
+                        const uint64_t c = dividends[x] == X86_REGISTER_RDX ? dividend : junk;
+                        const uint64_t expected = tier1_select_test_interpret(&function, dividend, 0, 0);
+                        const uint64_t actual = tier1_select_test_call(test, a, b, c);
+                        if (actual != expected && test->failures < 20)
+                        {
+                            fprintf(stderr, "reciprocal op=%u width=%u divisor=%016" PRIx64 " dividend=%u destination=%u n=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", op, width, pattern_divisor,
+                                    dividends[x], destination, dividend, actual, expected);
+                        }
+                        tier1_select_test_expect(test, actual == expected, "a division by a constant's reciprocal divides as C does");
+                    }
+                }
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    arena_pop_to(output, 0);
+    arena_pop_to(input, 0);
+    return longest;
+}
+
+// Two divisions of a and b by one constant `divisor` at `width`, whose constant, used twice, folds into neither as a tree
+// child: both paths must still choose the constant divisor's rule over div and idiv, as the costed cover does
+// (tier1_select_munch), for a power of two's rules and a reciprocal alike.
+static void tier1_select_test_shared_divisor(Tier1SelectTest* test, uint8_t op, uint32_t width, uint64_t divisor, uint8_t rule, Arena* input, Arena* output, Arena* scratch)
+{
+    const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+    const IrSizes sizes =
+    {
+        .instruction_count = 7,
+        .block_count = 1,
+        .constant_count = 1,
+        .parameter_count = 2,
+    };
+    IrFunction function;
+    const bool created = ir_create(input, &sizes, &function) == IR_OK;
+    tier1_select_test_expect(test, created, "create shared divisor fixture");
+    if (created)
+    {
+        function.result_type = type;
+        function.parameter_types[0] = type;
+        function.parameter_types[1] = type;
+        function.block_offsets[1] = 7;
+        function.constants[0].low = width == 4 ? (uint32_t)divisor : divisor;
+        tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, op, type, 0, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 4, op, type, 1, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 5, IR_ADD, type, 3, 4, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        Tier1SelectPlan plans[2];
+        bool planned = true;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            uint32_t failed = 0;
+            planned &= tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed) == TIER1_SELECT_OK;
+        }
+        tier1_select_test_expect(test, planned, "shared divisor fixture selects");
+        for (uint32_t node = 3; planned && node <= 4; node += 1)
+        {
+            tier1_select_test_expect(test, plans[0].patterns[node].rule == rule && plans[1].patterns[node].rule == rule && plans[0].patterns[node].values[1] == BUSTER_IR_NONE &&
+                                               plans[1].patterns[node].values[1] == BUSTER_IR_NONE,
+                                     "both paths choose a shared constant divisor's rule over div and idiv");
+        }
+    }
+    arena_pop_to(output, 0);
+    arena_pop_to(input, 0);
+}
+
 // #977's review: a node's room. Records appended past it write nothing there and mark the node's records overflowed,
 // leaving the fields after the array as they were; the longest sequences, the signed power-of-two remainder's, fit
 // the room at both widths and every shift that takes the immediate's forms.
@@ -2893,9 +3047,10 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, u
 // #140's selection (#141's items): C's truth values through their zero extensions and `icmp ne/eq ..., 0` links back to
 // the comparison they test, as the extension's setcc and the branch's jcc; loads, stores and pointers through the typed
 // stream's conversions, nested addresses, constant indices and additions of constants, in one memory operand or lea; a
-// frame object's address in its users' memory operands, at the object's offset plus the walked displacement (#982); and
-// divisions by powers of two as shifts, masks and the signed sequence. Both paths plan each function and must walk alike,
-// and its code runs natively against the independent interpreter (or, for a branch, the comparison itself).
+// frame object's address in its users' memory operands, at the object's offset plus the walked displacement (#982);
+// divisions by powers of two as shifts, masks and the signed sequence; and divisions by other constants as
+// multiplications by their reciprocals. Both paths plan each function and must walk alike, and its code runs natively
+// against the independent interpreter (or, for a branch, the comparison itself).
 static void tier1_select_test_walks(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -2959,6 +3114,33 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
             }
         }
     }
+    // Divisors by their reciprocals (#141): small ones (a multiplier of N bits, of N + 1, with a pre-shift for an even
+    // divisor), C programs' usual ones, the ends of 32 and 64 bits (whose sequences take the room's 13 records, a remainder
+    // whose divisor is past an imm32), negative ones, and those div, idiv and the powers of two's rules keep: 0, ±1, ±2,
+    // ±4 and the sign bits, which at 32 bits some of the others become too.
+    static const uint64_t divisors[] = { 3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 24, 25, 60, 100, 125, 641, 1000, 3600, 10000, 86400, 65537, 1000000007, 0x55555555, 0x7fffffff, 0x80000001,
+                                         0xc0000001, 0xfffffffd, 0xfffffffe, 0xffffffff, UINT64_C(0x100000001), UINT64_C(0x3333333333333333), UINT64_C(0x5555555555555555),
+                                         UINT64_C(1000000000000000003), UINT64_C(0x7fffffffffffffff), UINT64_C(0x8000000000000001), UINT64_MAX - 2, UINT64_MAX - 1, UINT64_MAX,
+                                         0 - UINT64_C(3), 0 - UINT64_C(7), 0 - UINT64_C(10), 0 - UINT64_C(641), 0 - UINT64_C(1000000007), 0, 1, 2, 4, UINT64_C(1) << 31, UINT64_C(1) << 63,
+                                         0 - UINT64_C(2), 0 - UINT64_C(4) };
+    uint32_t longest = 0;
+    for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(divisions); operation += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(divisors); d += 1)
+            {
+                const uint32_t records = tier1_select_test_reciprocal_walk(test, divisions[operation], width, divisors[d], &input, &output, &scratch, &random);
+                longest = records > longest ? records : longest;
+            }
+        }
+    }
+    tier1_select_test_expect(test, longest == BUSTER_TIER1_SELECT_FIXED_RECORDS, "the longest reciprocal's records fill a fixed-register rule's room");
+    tier1_select_test_shared_divisor(test, IR_UDIV, 4, 10, TIER1_RULE_DIVIDE_RECIPROCAL, &input, &output, &scratch);
+    tier1_select_test_shared_divisor(test, IR_SREM, 8, 0 - UINT64_C(7), TIER1_RULE_DIVIDE_RECIPROCAL, &input, &output, &scratch);
+    tier1_select_test_shared_divisor(test, IR_SDIV, 4, 8, TIER1_RULE_DIVIDE_POWER, &input, &output, &scratch);
+    tier1_select_test_shared_divisor(test, IR_UDIV, 8, 1, TIER1_RULE_COPY, &input, &output, &scratch);
+    tier1_select_test_shared_divisor(test, IR_UREM, 8, 16, TIER1_RULE_IMMEDIATE, &input, &output, &scratch);
     arena_release(&scratch);
     arena_release(&output);
     arena_release(&input);
