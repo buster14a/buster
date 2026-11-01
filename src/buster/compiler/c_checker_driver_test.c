@@ -2562,9 +2562,11 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
     NameId symbol_names[] = { 0, 1 };
     AtomId symbol_atoms[] = { 0, 1 };
     uint64_t sizes[] = { 0, (3ull << 30), (3ull << 30) };
+    uint8_t classes[] = { 0, BUSTER_LINK_CLASS_BSS, BUSTER_LINK_CLASS_BSS };
+    uint8_t alignments[] = { 0, 0, 0 };
     Link link = {
         .names = { .bytes = names, .length = lengths, .count = 2 },
-        .atoms = { .size = sizes, .count = 3 },
+        .atoms = { .class = classes, .alignment_log2 = alignments, .size = sizes, .count = 3 },
         .symbols = { .name = symbol_names, .atom = symbol_atoms, .count = 2 },
     };
     Runtime runtime = { 0 };
@@ -2573,15 +2575,52 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
         ExecutableResult result;
         const char* expected;
     } cases[] = {
-        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1 }, "atom 1 ('large') has 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
-        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 2 }, "atom 2 has 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .cause = EXECUTABLE_CAUSE_ATOM_TOO_LARGE },
+          "atom 1 ('large') is 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 2, .cause = EXECUTABLE_CAUSE_ATOM_TOO_LARGE },
+          "atom 2 is 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .cause = EXECUTABLE_CAUSE_IMAGE_TOO_LARGE, .value = 0x90000000, .limit = 0x80000000 },
+          "the image would end at address 0x90000000; the maximum is 0x80000000" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .cause = EXECUTABLE_CAUSE_TLS_TOO_LARGE, .value = 0x90000000, .limit = 0x80000000 },
+          "the TLS block is 2415919104 bytes; the maximum is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .cause = EXECUTABLE_CAUSE_SECTION_NAMES_TOO_LARGE, .value = 700, .limit = 640 },
+          ".shstrtab is 700 bytes; the maximum is 640 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .cause = EXECUTABLE_CAUSE_ATOM_ALIGNMENT, .value = 8192, .limit = 4096 },
+          "atom 1 ('large') has 8192-byte alignment; the maximum atom alignment is 4096 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .cause = EXECUTABLE_CAUSE_ATOM_ARRAY_ENTRY },
+          "atom 1 ('large') of an init or fini array has 3221225472 bytes; each atom must be whole 8-byte entries aligned to at most 8 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .cause = EXECUTABLE_CAUSE_ATOM_CLASS, .value = BUSTER_LINK_CLASS_INIT },
+          "atom 1 ('large') is a .init atom, which an executable without the C runtime has no section for" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .cause = EXECUTABLE_CAUSE_ATOM_ORDER, .value = 0x408010, .limit = 16 },
+          "atom 1 ('large') is at image offset 0x408010, not aligned to its ordered section's 16-byte alignment" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .symbol = 1, .fixup = 7, .cause = EXECUTABLE_CAUSE_ATOM_FAR, .value = 0x80000010, .limit = 0x7fffffff },
+          "atom 1 ('large') is at image offset 0x80000010, which fixup 7 to 'large' can't reach" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .symbol = 1, .fixup = 7, .cause = EXECUTABLE_CAUSE_FAR_GOT, .value = 0x80000010 },
+          "atom 1 ('large') is far, and fixup 7 to 'large' has no GOT slot" },
         { { .error = EXECUTABLE_ERROR_LAYOUT }, "image, TLS or section-name layout exceeds executable limits" },
-        { { .error = EXECUTABLE_ERROR_MEMORY }, "linker scratch memory exhausted" },
-        { { .error = EXECUTABLE_ERROR_ENTRY, .symbol = 1 }, "entry point 'large' is not defined in code" },
-        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 1 }, "unwind atom 1 ('large') cannot be indexed" },
-        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 99 }, "unwind table cannot be indexed" },
+        { { .error = EXECUTABLE_ERROR_MEMORY, .cause = EXECUTABLE_CAUSE_MEMORY_SHARED }, "linker scratch memory exhausted while allocating the linker's shared state" },
+        { { .error = EXECUTABLE_ERROR_MEMORY, .phase = EXECUTABLE_PHASE_LAYOUT }, "linker scratch memory exhausted while laying out the image" },
+        { { .error = EXECUTABLE_ERROR_ENTRY, .symbol = 1, .cause = EXECUTABLE_CAUSE_ENTRY_UNDEFINED }, "entry point 'large' is not defined" },
+        { { .error = EXECUTABLE_ERROR_ENTRY, .symbol = 1, .cause = EXECUTABLE_CAUSE_ENTRY_NOT_TEXT }, "entry point 'large' is defined in atom 1, which is not a code atom" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 1, .cause = EXECUTABLE_CAUSE_UNWIND_ATOM_MALFORMED },
+          "unwind atom 1 ('large') (size 3221225472 bytes) is not a sequence of CIE and FDE records .eh_frame_hdr can index" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 1, .cause = EXECUTABLE_CAUSE_UNWIND_ATOM_TOO_LARGE },
+          "unwind atom 1 ('large') is 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 1, .cause = EXECUTABLE_CAUSE_UNWIND_RANGE }, "farther than the table's 2147483647-byte range" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 99, .phase = EXECUTABLE_PHASE_DYNAMIC }, "the unwind table can't be indexed while building the dynamic sections and unwind tables" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 1, .cause = EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG_SYMBOL },
+          "debug information refers to unsupported symbol 'large'" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 1, .cause = EXECUTABLE_CAUSE_UNSUPPORTED_TLS_CALL },
+          "large is called outside a general- or local-dynamic TLS access" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 1, .cause = EXECUTABLE_CAUSE_UNSUPPORTED_VERSION, .value = 34 },
+          "symbol 'large' has unavailable version 34" },
         { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 1 }, "unsupported symbol 'large'" },
-        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 99 }, "unsupported executable configuration" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 99, .cause = EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG }, "the debug information is not valid for this executable" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .cause = EXECUTABLE_CAUSE_UNSUPPORTED_TLS_SECTION, .value = BUSTER_LINK_CLASS_TDATA },
+          "a thread-local symbol needs an empty .tdata section, which the link has none of" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .cause = EXECUTABLE_CAUSE_UNSUPPORTED_STRING_TABLE, .value = 0x100000000, .limit = UINT32_MAX },
+          "the symbol names are 4294967296 bytes; the maximum is 4294967295 bytes" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 99, .phase = EXECUTABLE_PHASE_COUNT }, "unsupported executable configuration while counting" },
         { { .error = EXECUTABLE_ERROR_UNDEFINED, .symbol = 1 }, "undefined reference to 'large'" },
         { { .error = EXECUTABLE_ERROR_FILE, .call = "open", .system_error = EACCES }, "can't write out: open:" },
     };
@@ -2604,10 +2643,11 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
     }
 }
 
-// A large BSS atom is refused without writing gigabytes; the driver must explain the writer's atom limit.
+// A large BSS atom is accepted without writing gigabytes; the program maps the zero-fill at run time. Both driver paths
+// must write it.
 static void check_test_driver_link_layout_error(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char source_text[] = "char gbig[3L << 30]; int main(void) { return 0; }\n";
+    static const char source_text[] = "char gbig[3L << 30]; int main(void) { gbig[(3L << 30) - 1] = 42; return gbig[(3L << 30) - 1] != 42; }\n";
     char source[256];
     char output[256];
     snprintf(source, sizeof(source), "%s/large-bss.c", directory);
@@ -2618,10 +2658,33 @@ static void check_test_driver_link_layout_error(CheckTest* test, const char* exe
         char* const vector[] = { (char*)executable, "-o", output, source, NULL };
         char* const scalar_args[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
         char* text = NULL;
+        unlink(output);
         const int status = made ? check_test_driver_spawn(scalar ? scalar_args : vector, &text) : -1;
-        check_test_expect(test, status != 0 && text != NULL && strstr(text, "gbig") != NULL &&
-                                  strstr(text, "3221225472 bytes") != NULL && strstr(text, "maximum atom size is 2147483648 bytes") != NULL,
-                          "a too-large atom's link diagnostic names its symbol, size and limit");
+        char* run_text = NULL;
+        char* const run[] = { output, NULL };
+        const int run_status = status == 0 && access(output, X_OK) == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+        check_test_expect(test, status == 0 && run_status == 0, "a 3 GiB .bss atom links and runs by both driver paths");
+        free(text);
+        free(run_text);
+    }
+    unlink(output);
+    unlink(source);
+    // Two .bss atoms whose first is too large: the second is past the references' reach, and a fixup to it is refused
+    // with the atom and the limit.
+    static const char far_text[] = "char a[3L << 30]; char b[3L << 30]; int main(void) { return b[0]; }\n";
+    snprintf(source, sizeof(source), "%s/far-bss.c", directory);
+    snprintf(output, sizeof(output), "%s/far-bss", directory);
+    const bool far_made = parse_test_write(source, far_text, sizeof(far_text) - 1);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        char* const vector[] = { (char*)executable, "-o", output, source, NULL };
+        char* const scalar_args[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
+        char* text = NULL;
+        unlink(output);
+        const int status = far_made ? check_test_driver_spawn(scalar ? scalar_args : vector, &text) : -1;
+        check_test_expect(test, status != 0 && text != NULL && strstr(text, "fixup to 'b'") != NULL && strstr(text, "does not fit its field") != NULL &&
+                                  access(output, F_OK) != 0,
+                          "a fixup to a .bss atom past the references' reach is refused with its target and reason");
         free(text);
     }
     unlink(output);

@@ -1817,12 +1817,53 @@ static const char* check_driver_atom_name(const Link* link, AtomId atom, char* b
     return check_driver_link_name(link, name, buffer, capacity);
 }
 
-// Describe only the information the writer returned. A layout refusal without an atom can have several causes.
+// The name of a writer phase, for a failure whose cause is the phase.
+static const char* check_driver_executable_phase(ExecutablePhase phase)
+{
+    static const char* const names[EXECUTABLE_PHASES] = {
+        "counting the link's atoms, symbols and fixups",
+        "laying out the image",
+        "filling the symbols and the GOT",
+        "building the dynamic sections and unwind tables",
+        "opening the output",
+        "patching and writing the image",
+        "finishing the output",
+    };
+    return phase < EXECUTABLE_PHASES ? names[phase] : "writing the executable";
+}
+
+// The reason a dynamic PIE can't relocate a fixup, from the writer's cause.
+static const char* check_driver_executable_relocation(ExecutableCause cause)
+{
+    switch (cause)
+    {
+        case EXECUTABLE_CAUSE_RELOCATION_TEXT: return "a pointer in a section the loader doesn't relocate is a text relocation";
+        case EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE32: return "a 32-bit absolute value needs a load address";
+        case EXECUTABLE_CAUSE_RELOCATION_DYNAMIC: return "the fixup can't reach a dynamic symbol";
+        case EXECUTABLE_CAUSE_RELOCATION_ZERO: return "a PC-relative value to address 0 can't be relocated";
+        case EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE: return "a PC-relative or call value to an absolute symbol can't be relocated";
+        case EXECUTABLE_CAUSE_RELOCATION_SHARED: return "a shared library can't relocate the fixup";
+        default: return "the fixup can't be relocated";
+    }
+}
+
+// Describes the writer's refusal, with the cause and the input it names: an atom, symbol or fixup, and the limit the
+// writer compared with.
 static void check_driver_executable_failure(const Link* link, const Runtime* runtime, uint32_t unit_base, const char* path, const ExecutableResult* result, FILE* out)
 {
     char name[256];
+    char label[320];
     const bool atom = result->atom != 0 && result->atom < link->atoms.count;
     const bool symbol = result->symbol != 0 && result->symbol < link->symbols.count;
+    const char* atom_name = atom ? check_driver_atom_name(link, result->atom, name, sizeof(name)) : "";
+    if (atom_name[0])
+    {
+        snprintf(label, sizeof(label), " ('%s')", atom_name);
+    }
+    else
+    {
+        label[0] = 0;
+    }
     if (result->error == EXECUTABLE_ERROR_UNDEFINED && symbol)
     {
         fprintf(out, "error: undefined reference to '%s'\n", check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)));
@@ -1835,55 +1876,181 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
     {
         char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
         fprintf(out, "error: can't link %s: %s: %s\n", path, check_driver_fixup_origin(link, runtime, unit_base, result->fixup, origin, sizeof(origin)),
-                result->error == EXECUTABLE_ERROR_FIXUP ? "relocation value does not fit" : "unsupported relocation");
+                result->error == EXECUTABLE_ERROR_FIXUP ? "the relocation's value does not fit its field" : check_driver_executable_relocation(result->cause));
     }
     else if (result->error == EXECUTABLE_ERROR_LAYOUT && atom)
     {
-        const char* atom_name = check_driver_atom_name(link, result->atom, name, sizeof(name));
         const uint64_t size = link->atoms.size[result->atom];
-        if (size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
+        const uint8_t atom_class = result->cause == EXECUTABLE_CAUSE_ATOM_CLASS && result->value < BUSTER_LINK_CLASS_COUNT ? (uint8_t)result->value
+                                                                                                                          : link->atoms.class[result->atom];
+        switch (result->cause)
         {
-            fprintf(out, "error: can't link %s: atom %u%s%s%s has %" PRIu64 " bytes; the maximum atom size is %" PRIu64 " bytes\n", path,
-                    result->atom, atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "", size,
-                    (uint64_t)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
-        }
-        else
-        {
-            fprintf(out, "error: can't link %s: atom %u%s%s%s has unsupported size, alignment or section layout (size %" PRIu64 " bytes)\n", path,
-                    result->atom, atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "", size);
+            case EXECUTABLE_CAUSE_ATOM_TOO_LARGE:
+                fprintf(out, "error: can't link %s: atom %u%s is %" PRIu64 " bytes; the maximum atom size is %" PRIu64 " bytes\n", path, result->atom, label, size,
+                        result->limit != 0 ? result->limit : (uint64_t)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
+                break;
+            case EXECUTABLE_CAUSE_ATOM_ALIGNMENT:
+                fprintf(out, "error: can't link %s: atom %u%s has %" PRIu64 "-byte alignment; the maximum atom alignment is %" PRIu64 " bytes\n", path, result->atom, label,
+                        result->value, result->limit != 0 ? result->limit : (uint64_t)BUSTER_EXECUTABLE_PAGE_BYTES);
+                break;
+            case EXECUTABLE_CAUSE_ATOM_ARRAY_ENTRY:
+                fprintf(out, "error: can't link %s: atom %u%s of an init or fini array has %" PRIu64 " bytes; each atom must be whole 8-byte entries aligned to at most 8 bytes\n",
+                        path, result->atom, label, size);
+                break;
+            case EXECUTABLE_CAUSE_ATOM_CLASS:
+                if (atom_class == BUSTER_LINK_CLASS_INIT || atom_class == BUSTER_LINK_CLASS_FINI)
+                {
+                    fprintf(out, "error: can't link %s: atom %u%s is a .%s atom, which an executable without the C runtime has no section for\n", path, result->atom, label,
+                            atom_class == BUSTER_LINK_CLASS_INIT ? "init" : "fini");
+                }
+                else
+                {
+                    fprintf(out, "error: can't link %s: atom %u%s is of section class %u, which this executable has no section for\n", path, result->atom, label, atom_class);
+                }
+                break;
+            case EXECUTABLE_CAUSE_ATOM_ORDER:
+                fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", not aligned to its ordered section's %" PRIu64 "-byte alignment\n", path,
+                        result->atom, label, result->value, result->limit);
+                break;
+            case EXECUTABLE_CAUSE_FAR_GOT:
+                fprintf(out, "error: can't link %s: atom %u%s is far, and fixup %u to '%s' has no GOT slot\n", path, result->atom, label, result->fixup,
+                        symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "");
+                break;
+            case EXECUTABLE_CAUSE_ATOM_FAR:
+                if (result->fixup != 0)
+                {
+                    fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", which fixup %u to '%s' can't reach (the maximum is 0x%" PRIx64 ")\n",
+                            path, result->atom, label, result->value, result->fixup,
+                            symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->limit);
+                }
+                else
+                {
+                    fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", which the writer's 32-bit addresses can't hold (the maximum is 0x%" PRIx64 ")\n",
+                            path, result->atom, label, result->value, result->limit);
+                }
+                break;
+            case EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE:
+                fprintf(out, "error: can't link %s: atom %u%s's bucket exceeds the image's address space\n", path, result->atom, label);
+                break;
+            default:
+                fprintf(out, "error: can't link %s: atom %u%s (size %" PRIu64 " bytes) can't be placed in the image\n", path, result->atom, label, size);
+                break;
         }
     }
     else if (result->error == EXECUTABLE_ERROR_LAYOUT)
     {
-        fprintf(out, "error: can't link %s: image, TLS or section-name layout exceeds executable limits (image end: %" PRIu64
-                     " bytes; TLS block: %" PRIu64 " bytes)\n", path, (uint64_t)BUSTER_EXECUTABLE_MAX_ADDRESS, (uint64_t)BUSTER_EXECUTABLE_MAX_TLS_BYTES);
+        switch (result->cause)
+        {
+            case EXECUTABLE_CAUSE_IMAGE_TOO_LARGE:
+                fprintf(out, "error: can't link %s: the image would end at address 0x%" PRIx64 "; the maximum is 0x%" PRIx64 "\n", path, result->value, result->limit);
+                break;
+            case EXECUTABLE_CAUSE_TLS_TOO_LARGE:
+                fprintf(out, "error: can't link %s: the TLS block is %" PRIu64 " bytes; the maximum is %" PRIu64 " bytes\n", path, result->value, result->limit);
+                break;
+            case EXECUTABLE_CAUSE_SECTION_NAMES_TOO_LARGE:
+                fprintf(out, "error: can't link %s: .shstrtab is %" PRIu64 " bytes; the maximum is %" PRIu64 " bytes\n", path, result->value, result->limit);
+                break;
+            case EXECUTABLE_CAUSE_SYMBOL_FAR:
+                fprintf(out, "error: can't link %s: symbol '%s' is at image offset 0x%" PRIx64 ", beyond the 32-bit references' reach (the maximum is 0x%" PRIx64
+                             "); fixup %u refers to it\n",
+                        path, symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->value, result->limit, result->fixup);
+                break;
+            case EXECUTABLE_CAUSE_FAR_GOT:
+                fprintf(out, "error: can't link %s: symbol '%s' is far, and fixup %u has no GOT slot\n", path,
+                        symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->fixup);
+                break;
+            case EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE:
+                fprintf(out, "error: can't link %s: the atoms' combined sizes overflow the image's address space\n", path);
+                break;
+            default:
+                fprintf(out, "error: can't link %s: image, TLS or section-name layout exceeds executable limits (image end at most 0x%" PRIx64
+                             ", TLS block at most %" PRIu64 " bytes, .shstrtab at most %" PRIu64 " bytes)\n",
+                        path, (uint64_t)BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS, (uint64_t)BUSTER_EXECUTABLE_MAX_TLS_BYTES, (uint64_t)BUSTER_EXECUTABLE_SHSTRTAB_BYTES);
+                break;
+        }
     }
     else if (result->error == EXECUTABLE_ERROR_UNWIND && atom)
     {
-        const char* atom_name = check_driver_atom_name(link, result->atom, name, sizeof(name));
-        fprintf(out, "error: can't link %s: unwind atom %u%s%s%s cannot be indexed in the unwind table\n", path, result->atom,
-                atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "");
+        const uint64_t size = link->atoms.size[result->atom];
+        switch (result->cause)
+        {
+            case EXECUTABLE_CAUSE_UNWIND_ATOM_TOO_LARGE:
+                fprintf(out, "error: can't link %s: unwind atom %u%s is %" PRIu64 " bytes; the maximum atom size is %" PRIu64 " bytes\n", path, result->atom, label, size,
+                        result->limit != 0 ? result->limit : (uint64_t)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
+                break;
+            case EXECUTABLE_CAUSE_UNWIND_RANGE:
+                fprintf(out, "error: can't link %s: unwind atom %u%s (size %" PRIu64
+                             " bytes) has an FDE whose initial location is farther than the table's 2147483647-byte range from .eh_frame_hdr\n",
+                        path, result->atom, label, size);
+                break;
+            default:
+                fprintf(out, "error: can't link %s: unwind atom %u%s (size %" PRIu64 " bytes) is not a sequence of CIE and FDE records .eh_frame_hdr can index\n", path,
+                        result->atom, label, size);
+                break;
+        }
+    }
+    else if (result->error == EXECUTABLE_ERROR_UNWIND)
+    {
+        fprintf(out, "error: can't link %s: the unwind table can't be indexed while %s\n", path, check_driver_executable_phase(result->phase));
     }
     else if (result->error == EXECUTABLE_ERROR_ENTRY)
     {
         const char* entry = symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "";
-        fprintf(out, "error: can't link %s: entry point%s%s%s is not defined in code\n", path,
-                entry[0] ? " '" : "", entry[0] ? entry : "", entry[0] ? "'" : "");
+        if (entry[0] && result->cause == EXECUTABLE_CAUSE_ENTRY_NOT_TEXT)
+        {
+            const AtomId entry_atom = link->symbols.atom[result->symbol];
+            fprintf(out, "error: can't link %s: entry point '%s' is defined in atom %u, which is not a code atom\n", path, entry, entry_atom);
+        }
+        else if (entry[0])
+        {
+            fprintf(out, "error: can't link %s: entry point '%s' is not defined\n", path, entry);
+        }
+        else
+        {
+            fprintf(out, "error: can't link %s: the entry point is not defined in code\n", path);
+        }
     }
     else if (result->error == EXECUTABLE_ERROR_UNSUPPORTED && symbol)
     {
-        fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path,
-                check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)));
+        const char* unsupported = check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name));
+        switch (result->cause)
+        {
+            case EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG_SYMBOL: fprintf(out, "error: can't link %s: debug information refers to unsupported symbol '%s'\n", path, unsupported); break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_TLS_CALL:
+                fprintf(out, "error: can't link %s: %s is called outside a general- or local-dynamic TLS access\n", path, unsupported);
+                break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_VERSION:
+                fprintf(out, "error: can't link %s: symbol '%s' has unavailable version %" PRIu64 "\n", path, unsupported, result->value);
+                break;
+            default: fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path, unsupported); break;
+        }
+    }
+    else if (result->error == EXECUTABLE_ERROR_UNSUPPORTED)
+    {
+        switch (result->cause)
+        {
+            case EXECUTABLE_CAUSE_UNSUPPORTED_DEBUG: fprintf(out, "error: can't link %s: the debug information is not valid for this executable\n", path); break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_SYMBOLS: fprintf(out, "error: can't link %s: the requested symbol table is not valid for this executable\n", path); break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_TLS_SECTION:
+                fprintf(out, "error: can't link %s: a thread-local symbol needs an empty %s section, which the link has none of\n", path,
+                        result->value == BUSTER_LINK_CLASS_TDATA ? ".tdata" : ".tbss");
+                break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_STRING_TABLE:
+                fprintf(out, "error: can't link %s: the symbol names are %" PRIu64 " bytes; the maximum is %" PRIu64 " bytes\n", path, result->value, result->limit);
+                break;
+            default:
+                fprintf(out, "error: can't link %s: unsupported executable configuration while %s\n", path, check_driver_executable_phase(result->phase));
+                break;
+        }
+    }
+    else if (result->error == EXECUTABLE_ERROR_MEMORY)
+    {
+        const char* where = result->cause == EXECUTABLE_CAUSE_MEMORY_SHARED ? "allocating the linker's shared state" : check_driver_executable_phase(result->phase);
+        fprintf(out, "error: can't link %s: linker scratch memory exhausted while %s\n", path, where);
     }
     else
     {
-        const char* reason = result->error == EXECUTABLE_ERROR_MEMORY ? "linker scratch memory exhausted" :
-                             result->error == EXECUTABLE_ERROR_UNWIND ? "unwind table cannot be indexed" :
-                             result->error == EXECUTABLE_ERROR_UNSUPPORTED ? "unsupported executable configuration" :
-                             result->error == EXECUTABLE_ERROR_UNDEFINED ? "undefined symbol" :
-                             result->error == EXECUTABLE_ERROR_RELOCATION ? "unsupported relocation" :
-                             result->error == EXECUTABLE_ERROR_FIXUP ? "relocation value does not fit" : "executable write failed";
-        fprintf(out, "error: can't link %s: %s (executable error %u)\n", path, reason, (uint32_t)result->error);
+        fprintf(out, "error: can't link %s: the executable writer failed while %s\n", path, check_driver_executable_phase(result->phase));
     }
 }
 

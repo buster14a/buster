@@ -3777,8 +3777,11 @@ like the others, its measurements are informational.
   that fails while writing beside the output leaves the output, its other
   link, and nothing beside them;
 - limits: a weak thread-local symbol defined nowhere (offset 0 in its field
-  and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
-  and one whose padding wraps (refused); a bad entry point, the first of two
+  and its GOT slot); TLS blocks of 2 GB (linked) and past it, a `.tbss` atom
+  past 2 GB and a `.bss` atom whose padding wraps (refused), and `.bss` atoms
+  of exactly 2 GB and past it (linked and run by every lane count, with their
+  `.bss` and writable segment sizes and an `ABS64` to a symbol at the atom's
+  last byte checked); a bad entry point, the first of two
   symbols defined nowhere in different lanes' ranges, the smallest failing
   fixup, an atom aligned past a page, a bad init array atom and an atom of
   each of the C runtime's classes (`.init` and `.fini`), which step 4's
@@ -3969,7 +3972,10 @@ created destination when a first publication fails.
 runtime against this system's static runtime (`runtime_import_static`), then
 its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
 directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
-which it removes unless `--keep`. Each program is bound by `bind.c` and
+which it removes unless `--keep`. One libc program has a 3 GiB `.bss` atom and
+an `ABS64` pointer to its last byte, in both the static executable and the
+static PIE, written by every lane count and exact twin. Each program is bound
+by `bind.c` and
 written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
 relaxation and the GOT relaxation rewrite them), with zeroed fields over the
