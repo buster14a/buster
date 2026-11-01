@@ -560,8 +560,10 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (event->default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
                     severity == CHECK_WARNING_ERROR ? (event->default_error ?
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
+                // Clang's warn_argument_invalid_range is an error by default, so its printer never adds `-Werror,`: the
+                // option alone, whether it is a warning, an error or a fatal error (#1079).
                 pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase,
-                                   "argument value %s is outside the valid range [%u, %u]", text, event->low, event->high);
+                                   "argument value %s is outside the valid range [%u, %u] [-Wargument-outside-range]", text, event->low, event->high);
             }
         }
     }
