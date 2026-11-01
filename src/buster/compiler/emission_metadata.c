@@ -41,6 +41,7 @@ typedef enum EmissionError
 
 typedef enum EmissionPart
 {
+    EMISSION_NONE,
     EMISSION_DESCRIPTOR,
     EMISSION_LAYOUT,
     EMISSION_SOURCE,
@@ -48,6 +49,8 @@ typedef enum EmissionPart
     EMISSION_DESTINATION,
 } EmissionPart;
 
+// On success, part is EMISSION_NONE and index is 0. Descriptor and destination errors report index 0; layout, source
+// and frame errors report the first failing record or event, and an unbalanced final state stack reports frame_count.
 typedef struct EmissionCheck EmissionCheck;
 struct EmissionCheck
 {
@@ -190,6 +193,7 @@ static EmissionCheck emission_layout_check_scalar(const EmissionLayout* layout)
         const uint32_t* const ends = layout->ends;
         uint32_t previous = 0;
         check.error = EMISSION_OK;
+        check.part = EMISSION_NONE;
         for (uint32_t i = 0; check.error == EMISSION_OK && i < count; i += 1)
         {
             const uint32_t start = starts[i];
@@ -197,6 +201,7 @@ static EmissionCheck emission_layout_check_scalar(const EmissionLayout* layout)
             if (start < previous || end < start || end > size)
             {
                 check.error = EMISSION_INVALID;
+                check.part = EMISSION_LAYOUT;
                 check.index = i;
             }
             previous = end;
@@ -225,7 +230,7 @@ static EmissionCheck emission_layout_check(const EmissionLayout* layout, bool sc
         uint32_t previous = 0;
         check = (EmissionCheck){
             .error = EMISSION_OK,
-            .part = EMISSION_LAYOUT,
+            .part = EMISSION_NONE,
         };
         for (uint64_t base = 0; check.error == EMISSION_OK && base < count; base += BUSTER_EMISSION_LAYOUT_LANES)
         {
@@ -240,9 +245,13 @@ static EmissionCheck emission_layout_check(const EmissionLayout* layout, bool sc
             if (bad != 0)
             {
                 check.error = EMISSION_INVALID;
+                check.part = EMISSION_LAYOUT;
                 check.index = (uint32_t)base + (uint32_t)__builtin_ctz((uint32_t)bad);
             }
-            previous = ends[base + take - 1];
+            else
+            {
+                previous = ends[base + take - 1];
+            }
         }
     }
 #else
@@ -373,6 +382,10 @@ static EmissionCheck emission_metadata_check(const EmissionMetadata* metadata, c
                     .part = EMISSION_FRAME,
                     .index = frames,
                 };
+            }
+            if (check.error == EMISSION_OK)
+            {
+                check.part = EMISSION_NONE;
             }
         }
     }
