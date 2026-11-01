@@ -647,6 +647,7 @@ static uint64_t static_test_fields(StaticTestTally* tally, const Link* link, con
     const uint64_t length = arena->length;
     uint8_t* targets = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, link->symbols.count);
     const Elf64_Shdr* got = executable_test_section(image, ".got");
+    const bool far_possible = executable_test_far_possible(link);
     bool slots = targets != 0;
     if (slots)
     {
@@ -655,7 +656,7 @@ static uint64_t static_test_fields(StaticTestTally* tally, const Link* link, con
         {
             const SymbolId target = link->fixups.target[fixup];
             const bool relaxes = executable_test_relaxes(link, fixup);
-            targets[target] |= static_test_reads_slot(link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) && target != tls_get_addr && !relaxes ? 1 : 0;
+            targets[target] |= static_test_reads_slot(link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) && target != tls_get_addr && (!relaxes || far_possible) ? 1 : 0;
         }
     }
     // The slots of their own come first, then the stubs': an IFUNC whose stub only calls reach reads its stub's slot
@@ -1067,6 +1068,66 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
             bind_test_release(&bound);
         }
     }
+    return static_test_report(&tally);
+}
+
+// A libc program with one 3 GiB .bss atom, a symbol at its last byte, and a pointer to that symbol in DATA: the runtime's
+// own .bss atoms stay below the oversized bucket, the pointer's ABS64 is patched with the far symbol's full address, and
+// the program runs. It is written as the static executable and the static PIE, with every lane count and exact twin.
+static bool static_test_large_bss(const ExecutableTestDirectory* directory, const Runtime* runtime, uint64_t seed)
+{
+    StaticTestTally tally = {
+        .check = static_test_pie(runtime) ? "large .bss, static PIEs" : "large .bss",
+    };
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, seed, 1);
+    BindTestProgram bound = { 0 };
+    uint64_t name_bytes = 0;
+    uint64_t atom_bytes = 0;
+    LinkCapacity extra = bind_capacity(runtime, &name_bytes, &atom_bytes);
+    extra.names += 1;
+    extra.atoms += 2;
+    extra.symbols += 1;
+    extra.fixups += 1;
+    extra.wide_addends += 1;
+    bound.arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
+    bool built = bound.arena.base != 0 && link_program_generate_begin(&bound.program, options[5], extra, name_bytes + 16, atom_bytes + 16);
+    built = built && bind_begin(&bound.bind, &bound.program.link, runtime, BIND_PATH_VECTOR, &bound.program.bytes, options[5].units, &bound.arena);
+    built = built && link_program_generate_atoms(&bound.program);
+    Link* link = &bound.program.link;
+    const uint64_t bytes = 3ull << 30;
+    const AtomId big = built ? link_add_atom(link, BUSTER_LINK_CLASS_BSS, 3, bytes, 0, 0) : 0;
+    const NameId name = big != 0 ? link_add_name(link, (const uint8_t*)"big", 3) : 0;
+    const SymbolId symbol = name != 0 ? link_add_symbol(link, name, big, 0, bytes, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    uint8_t* pointer = built ? BUSTER_ARENA_PUSH_ARRAY(&bound.program.bytes, uint8_t, 8) : 0;
+    if (pointer != 0)
+    {
+        memset(pointer, 0, 8);
+    }
+    const AtomId data = pointer != 0 ? link_add_atom(link, BUSTER_LINK_CLASS_DATA, 3, 8, pointer, 0) : 0;
+    built = built && symbol != 0 && data != 0 && link_add_fixup(link, data, 0, BUSTER_LINK_FIXUP_ABS64, symbol, (int64_t)bytes - 1) != 0;
+    built = built && bind_end(&bound.bind, link);
+    built = built && link_program_generate_end(&bound.program);
+    static_test_expect(&tally, built, "the link bound", 0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, static_test_pie(runtime) ? "large-bss-pie" : "large-bss", path_bytes);
+    Scratch scratch = scratch_begin(0);
+    ExecutableResult result = { 0 };
+    String8 file = { 0 };
+    const bool written = built && static_test_lanes(&tally, link, &bound.bind, runtime, path, "large .bss", &result, &file, directory->id_order, scratch.arena);
+    const uint64_t relaxed = written ? static_test_structure(&tally, link, &bound.bind, runtime, file, &result, scratch.arena) : 0;
+    const bool ran = written && executable_test_runs(path.pointer, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
+    static_test_expect(&tally, ran, "the program runs as its model predicts", 0);
+    printf("  large .bss: %u atoms, %u fixups, %llu stubs, %llu relocations (%llu RELATIVE), %llu loads and calls relaxed, %llu GOT slots, %llu FDEs, %llu bytes: %s\n",
+           link->atoms.count - 1, link->fixups.count - 1, (unsigned long long)result.stubs, (unsigned long long)result.relocations,
+           (unsigned long long)result.relative_relocations, (unsigned long long)relaxed, (unsigned long long)result.got_slots, (unsigned long long)result.fdes,
+           (unsigned long long)result.file_size, ran ? "ran" : "didn't run");
+    scratch_end(scratch);
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
+    bind_test_release(&bound);
     return static_test_report(&tally);
 }
 
@@ -2127,6 +2188,7 @@ static int run_static_tests(int argc, char** argv)
         {
             const Runtime* tested = kind == 0 ? &runtime : &pie;
             passed = static_test_programs(&directory, tested, seed, (uint32_t)functions) && passed;
+            passed = static_test_large_bss(&directory, tested, seed) && passed;
             passed = static_test_compiled(&directory, tested, cross_check) && passed;
             passed = static_test_refused(&directory, tested) && passed;
         }

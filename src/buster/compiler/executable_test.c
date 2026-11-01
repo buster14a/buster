@@ -736,12 +736,26 @@ static bool executable_test_is_ifunc(const Link* link, SymbolId symbol)
 // Whether a fixup reaches its target directly, as GNU ld and lld relax it in an executable of any kind, by the test's
 // own rule: a CALL_GOT or LOAD_GOT with the addend -4 to a symbol of the image's (executable_test_in_image) that isn't
 // an IFUNC.
+// Whether the link's atoms may put the image past a signed 32-bit image offset: the writer then gives every GOT kind's
+// target a slot, so that a far candidate can use one instead of relaxing.
+static bool executable_test_far_possible(const Link* link)
+{
+    uint64_t total = 0;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        total += executable_align(link->atoms.size[atom], 1ull << link->atoms.alignment_log2[atom]);
+    }
+    return total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE;
+}
+
 static bool executable_test_relaxes(const Link* link, FixupId fixup)
 {
     const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
     const SymbolId target = link->fixups.target[fixup];
     const bool loads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
-    return loads && link_fixup_addend(link, fixup) == -4 && executable_test_in_image(link, target) && !executable_test_is_ifunc(link, target);
+    const AtomId atom = link->symbols.atom[target];
+    const bool far = atom != 0 && link->atoms.address[atom] + link->symbols.value[target] > (uint64_t)INT32_MAX;
+    return loads && link_fixup_addend(link, fixup) == -4 && !far && executable_test_in_image(link, target) && !executable_test_is_ifunc(link, target);
 }
 
 // The 6 bytes that a relaxed load or call (executable_test_relaxes), fixup `fixup` of `holder`, leaves from 2 bytes
@@ -890,6 +904,7 @@ static uint64_t executable_test_fields(ExecutableTestTally* tally, const Link* l
     Scratch scratch = scratch_begin(0);
     uint8_t* targets = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, link->symbols.count);
     const Elf64_Shdr* got = executable_test_section(&image, ".got");
+    const bool far_possible = executable_test_far_possible(link);
     bool slots = targets != 0;
     if (slots)
     {
@@ -898,7 +913,7 @@ static uint64_t executable_test_fields(ExecutableTestTally* tally, const Link* l
         {
             const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const bool reads_slot = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
-            targets[link->fixups.target[fixup]] |= reads_slot && !executable_test_relaxes(link, fixup) ? 1 : 0;
+            targets[link->fixups.target[fixup]] |= reads_slot && (far_possible || !executable_test_relaxes(link, fixup)) ? 1 : 0;
         }
     }
     uint32_t next = 1;
@@ -2438,7 +2453,8 @@ static bool executable_test_absent_tls(ExecutableTestLink* test, SymbolId* start
 }
 
 // A program that exits 0, with zero-fill atoms of `class` and the given sizes, aligned to 8, and a table with a TPOFF32
-// (for TBSS) or an ABS64 (otherwise) to the first one's start. *first gets that atom.
+// (for TBSS) or an ABS64 (otherwise) to the first one's start. A .bss atom also gets a symbol at its last byte and a
+// second ABS64, so that a symbol past the 32-bit references' reach is patched as its full address. *first gets that atom.
 static bool executable_test_zero_fill(ExecutableTestLink* test, SymbolId* start, uint8_t class, const uint64_t* sizes, uint32_t count, AtomId* first)
 {
     bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
@@ -2446,7 +2462,8 @@ static bool executable_test_zero_fill(ExecutableTestLink* test, SymbolId* start,
     const bool tls = class == BUSTER_LINK_CLASS_TBSS;
     *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
     const SymbolId variable = result ? executable_test_symbol(link, "variable", BUSTER_LINK_SYMBOL_GLOBAL | (tls ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT)) : 0;
-    result = result && *start != 0 && variable != 0;
+    const SymbolId last = result && !tls ? executable_test_symbol(link, "variable_last", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT) : 0;
+    result = result && *start != 0 && variable != 0 && (tls || last != 0);
     ExecutableTestCode code = { 0 };
     executable_test_exit(&code, 0);
     result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
@@ -2458,9 +2475,85 @@ static bool executable_test_zero_fill(ExecutableTestLink* test, SymbolId* start,
         result = atom != 0;
     }
     result = result && link_define_symbol(link, variable, *first, 0, 8);
-    const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    result = result && (tls || link_define_symbol(link, last, *first, sizes[0] - 1, 1));
+    const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, tls ? 8 : 16, 0, 0) : 0;
     result = result && table != 0 && link_add_fixup(link, table, 0, tls ? BUSTER_LINK_FIXUP_TPOFF32 : BUSTER_LINK_FIXUP_ABS64, variable, 0) != 0;
+    result = result && (tls || link_add_fixup(link, table, 8, BUSTER_LINK_FIXUP_ABS64, last, 0) != 0);
     return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+// The file of a zero-fill link, read back: its .bss section and the writable segment it is in cover `size`, and the
+// second table field, an ABS64 to `variable_last` at the atom's last byte, holds that symbol's full address. A .tbss
+// link's TLS segment covers `size` instead.
+static bool executable_test_zero_fill_file(const Link* link, String8 file, uint64_t size, bool tls)
+{
+    const ExecutableTestImage image = executable_test_image(file);
+    bool result = image.valid;
+    if (result && tls)
+    {
+        const Elf64_Phdr* segment = executable_test_segment(&image, PT_TLS);
+        result = segment != 0 && segment->p_memsz >= size;
+    }
+    else if (result)
+    {
+        const Elf64_Shdr* bss = executable_test_section(&image, ".bss");
+        const Elf64_Phdr* writable = 0;
+        for (uint32_t ph = 0; ph < image.header->e_phnum; ph += 1)
+        {
+            const Elf64_Phdr* segment = image.program_headers + ph;
+            writable = segment->p_type == PT_LOAD && (segment->p_flags & PF_W) != 0 && (writable == 0 || segment->p_vaddr > writable->p_vaddr) ? segment : writable;
+        }
+        result = bss != 0 && bss->sh_size >= size && writable != 0 && writable->p_vaddr <= bss->sh_addr &&
+                 bss->sh_addr + bss->sh_size <= writable->p_vaddr + writable->p_memsz;
+        SymbolId last = 0;
+        for (SymbolId symbol = 1; result && symbol < link->symbols.count; symbol += 1)
+        {
+            last = executable_named(link, symbol, "variable_last") ? symbol : last;
+        }
+        const AtomId last_atom = last != 0 ? link->symbols.atom[last] : 0;
+        FixupId field = 0;
+        AtomId holder = 0;
+        for (AtomId atom = 1; result && atom < link->atoms.count; atom += 1)
+        {
+            const FixupId begin = link->atoms.fixup_begin[atom];
+            for (FixupId fixup = begin; fixup < begin + link->atoms.fixup_count[atom]; fixup += 1)
+            {
+                const bool found = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64 && link->fixups.target[fixup] == last;
+                field = found && field == 0 ? fixup : field;
+                holder = found && holder == 0 ? atom : holder;
+            }
+        }
+        uint64_t expected = 0;
+        const bool known = last_atom != 0 && field != 0 && executable_test_symbol_value(link, &image, last, &expected, BUSTER_EXECUTABLE_BASE);
+        const uint64_t offset = known ? executable_test_file_offset(&image, BUSTER_EXECUTABLE_BASE + link->atoms.address[holder]) + link->fixups.offset[field] : 0;
+        uint64_t actual = 0;
+        const bool readable = known && offset + sizeof(actual) <= file.length;
+        if (readable)
+        {
+            memcpy(&actual, file.pointer + offset, sizeof(actual));
+        }
+        result = known && readable && actual == expected;
+    }
+    return result;
+}
+
+// A program whose 3 GiB .bss atom makes `_end` far, with a PC32 fixup to it: the writer refuses the fixup as SYMBOL_FAR,
+// naming the linker symbol. *end gets the symbol and *field the fixup.
+static bool executable_test_far_linker(ExecutableTestLink* test, SymbolId* start, SymbolId* end, FixupId* field)
+{
+    bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    result = result && *start != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    const AtomId bss = result ? link_add_atom(link, BUSTER_LINK_CLASS_BSS, 3, 3ull << 30, 0, 0) : 0;
+    const NameId name = bss != 0 ? link_add_name(link, (const uint8_t*)"_end", 4) : 0;
+    *end = name != 0 ? link_add_symbol(link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_LINKER) : 0;
+    const AtomId table = *end != 0 ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    *field = table != 0 ? link_add_fixup(link, table, 0, BUSTER_LINK_FIXUP_PC32, *end, 0) : 0;
+    return result && bss != 0 && *end != 0 && table != 0 && *field != 0 && link_check(link) == LINK_ERROR_NONE;
 }
 
 // A program that exits 0, with a table of `atom_class` at `alignment_log2` of `size` bytes (zeros), and `failures` ABS32
@@ -2585,14 +2678,47 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
         SymbolId zero_fill_start = 0;
         AtomId first = 0;
         built = executable_test_zero_fill(&zero_fill, &zero_fill_start, cases[c].class, cases[c].sizes, cases[c].count, &first);
-        unlink(path.pointer);
-        written = built && executable_test_write(&zero_fill.link, zero_fill_start, path, 2, &result, 0, 0);
-        const bool expected = cases[c].fits ? written && executable_test_runs(path.pointer, (const uint8_t*)"", 0)
-                                            : built && !written && result.error == EXECUTABLE_ERROR_LAYOUT && (!cases[c].names_atom || result.atom == first) &&
-                                                  access(path.pointer, F_OK) != 0;
-        executable_test_expect(&tally, expected, cases[c].name, c);
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < cases[c].count; i += 1)
+        {
+            total += executable_align(cases[c].sizes[i], 8);
+        }
+        bool expected = built;
+        for (uint32_t l = 0; cases[c].fits && built && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+        {
+            unlink(path.pointer);
+            written = executable_test_write(&zero_fill.link, zero_fill_start, path, executable_test_lane_counts[l], &result, 0, 0);
+            const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+            expected = expected && written && file.pointer != 0 && executable_test_zero_fill_file(&zero_fill.link, file, total, cases[c].class == BUSTER_LINK_CLASS_TBSS) &&
+                       executable_test_runs(path.pointer, (const uint8_t*)"", 0);
+        }
+        if (cases[c].fits)
+        {
+            executable_test_expect(&tally, expected, cases[c].name, c);
+        }
+        else if (built)
+        {
+            executable_test_refused(&tally, &zero_fill.link, zero_fill_start, path, EXECUTABLE_ERROR_LAYOUT, cases[c].names_atom ? first : 0, 0, 0, cases[c].name);
+        }
+        else
+        {
+            executable_test_expect(&tally, false, cases[c].name, c);
+        }
         executable_test_link_end(&zero_fill);
     }
+
+    // A linker-defined symbol past the reference reach: a PC32 to `_end` is refused as SYMBOL_FAR, with no atom.
+    ExecutableTestLink far_linker;
+    SymbolId far_start = 0;
+    SymbolId far_end = 0;
+    FixupId far_field = 0;
+    built = executable_test_far_linker(&far_linker, &far_start, &far_end, &far_field);
+    executable_test_expect(&tally, built, "the far linker symbol's program", 0);
+    if (built)
+    {
+        executable_test_refused(&tally, &far_linker.link, far_start, path, EXECUTABLE_ERROR_LAYOUT, 0, far_end, far_field, "a fixup to a linker symbol past the references' reach");
+    }
+    executable_test_link_end(&far_linker);
 
     // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with
     // a symbol defined nowhere beside it), the first of two symbols defined nowhere in different lanes' ranges, the

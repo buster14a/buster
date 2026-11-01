@@ -2645,7 +2645,7 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
 // must write it.
 static void check_test_driver_link_layout_error(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char source_text[] = "char gbig[3L << 30]; int main(void) { return 0; }\n";
+    static const char source_text[] = "char gbig[3L << 30]; int main(void) { gbig[(3L << 30) - 1] = 42; return gbig[(3L << 30) - 1] != 42; }\n";
     char source[256];
     char output[256];
     snprintf(source, sizeof(source), "%s/large-bss.c", directory);

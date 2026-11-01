@@ -842,6 +842,9 @@ struct ExecutablePatch
     const uint8_t* kinds;
     const int64_t* wide_addends;
     const uint32_t* reference;
+    // Full addresses of the symbols whose image offset doesn't fit a signed 32-bit reference, for the 64-bit and
+    // GOT-mediated fixups that can reach them; null when no symbol is far.
+    const uint64_t* far_addresses;
     const uint32_t* got_slots;
     // A shared library's TLSGD pairs, indexed by symbol independently of initial-exec slots; null otherwise.
     const uint32_t* tlsgd_slots;
@@ -882,7 +885,8 @@ static void executable_patch_pc32(const ExecutablePatch* patch, uint8_t* bytes, 
 // offset of address 0, for a weak symbol defined nowhere).
 static int64_t executable_address(const ExecutablePatch* patch, SymbolId symbol)
 {
-    return (int64_t)patch->base + (int32_t)patch->reference[symbol];
+    const uint64_t far = patch->far_addresses != 0 ? patch->far_addresses[symbol] : 0;
+    return far != 0 ? (int64_t)far : (int64_t)patch->base + (int32_t)patch->reference[symbol];
 }
 
 // A general- or local-dynamic TLS access (a TLSGD or TLSLD fixup, `fixup`, of the fixups [begin, end) of an atom whose
@@ -957,7 +961,8 @@ static bool executable_relax_tls(const ExecutablePatch* patch, uint8_t* bytes, u
 static bool executable_relaxes(const ExecutablePatch* patch, uint8_t kind, int32_t addend, SymbolId target)
 {
     const bool loads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
-    return patch->relaxable != 0 && loads && addend == -4 && (patch->relaxable[target / 64] >> (target % 64) & 1) != 0;
+    const bool far = patch->far_addresses != 0 && patch->far_addresses[target] != 0;
+    return patch->relaxable != 0 && loads && addend == -4 && !far && (patch->relaxable[target / 64] >> (target % 64) & 1) != 0;
 }
 
 // Whether a relaxing CALL_GOT, its field at `offset` of `bytes`, is a jmp: ff 25, or e9 once relaxed (the forms
@@ -3258,6 +3263,9 @@ struct ExecutableShared
     // Whether the executable relaxes its general- and local-dynamic TLS accesses (with the static runtime, and a dynamic
     // PIE), and its __tls_get_addr (ExecutableRuntime.tls_get_addr, ExecutableDynamic.tls_get_addr), or 0.
     bool relaxes_tls;
+    // Whether the counts may put the image past the 32-bit references' reach, so that a GOT kind's target may be far:
+    // then no candidate relaxes before the layout, and each has a slot the far check can fill.
+    bool far_possible;
     SymbolId relaxed;
     // ExecutableOptions.debug_sections, whose sections' bytes are the pieces of their sections, patched in place.
     const ExecutableDebugSections* debug_sections;
@@ -3320,6 +3328,9 @@ struct ExecutableShared
     // Allocated by lane 0 once the layout is known: the GOT's bytes, the chunks' boundaries (chunk_count + 1) and their
     // hashes, the parts' boundaries, and each lane's order of the parts.
     uint8_t* got;
+    // Full addresses of the symbols whose image offset doesn't fit a signed 32-bit reference, or null: filled before
+    // the symbols' phase and read by GOT slots, dynamic relocations and the patch.
+    uint64_t* far_addresses;
     uint64_t* boundaries;
     uint8_t* hashes;
     uint64_t* part_boundaries;
@@ -4478,7 +4489,11 @@ static uint64_t executable_slots_of_class(const Link* link, const ExecutableShar
 static uint64_t executable_unrelaxed(const Link* link, const ExecutableShared* shared, uint64_t word, uint64_t candidates)
 {
     uint64_t result = 0;
-    if (shared->exact)
+    if (shared->far_possible)
+    {
+        result = candidates;
+    }
+    else if (shared->exact)
     {
         for (uint64_t left = candidates; left != 0; left &= left - 1)
         {
@@ -4504,6 +4519,15 @@ static uint64_t executable_unrelaxed(const Link* link, const ExecutableShared* s
 static void executable_reduce_got(const Link* link, ExecutableShared* shared, uint32_t lane, uint32_t lanes)
 {
     const Range64 words = lane_range(shared->words_per_lane);
+    uint64_t total = 0;
+    for (uint32_t other = 0; other < lanes; other += 1)
+    {
+        for (uint32_t bucket = 0; bucket < BUSTER_EXECUTABLE_BUCKETS; bucket += 1)
+        {
+            total += shared->counts[other].bytes[bucket];
+        }
+    }
+    shared->far_possible = total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE;
     const bool dynamic = shared->dynamic_bits != 0;
     const bool stubbed = dynamic || shared->runtime;
     const bool relr_slots = dynamic && shared->relr;
@@ -5321,6 +5345,10 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
             {
                 executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_ORDER, run_address, 1ull << required, atom, 0, 0);
             }
+            if (!prioritized && executable_in_file(class, size) && run_address > UINT32_MAX)
+            {
+                executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_FAR, run_address, UINT32_MAX, atom, 0, 0);
+            }
             if (!prioritized)
             {
                 address_of[atom] = run_address;
@@ -5523,17 +5551,29 @@ static void executable_write_stub(uint8_t* stubs, const ExecutableLayout* layout
     bytes[7] = 0x90;
 }
 
-// A link whose image extends past BUSTER_EXECUTABLE_MAX_ADDRESS, because a zero-fill atom needs more address space
-// than code's 32-bit references reach: every atom, and every linker-defined symbol, that a fixup names must start
-// inside that reach. The image's tail alone may be farther. Lane 0 only, and only for such a link, so an ordinary one
-// pays nothing.
-static void executable_check_far(const Link* link, const ExecutableLayout* layout, ExecutableLaneError* error)
+// Whether a fixup of `kind` can reach a symbol whose address needs more than a signed 32-bit reference: a 64-bit field,
+// an unsigned 32-bit field that reaches 4 GB, a size, or a GOT slot (which is in the image, and holds the symbol's full
+// address). The other kinds (a call or PC32's signed 32-bit distance, an ABS32S, and a thread-local offset) can't.
+static bool executable_far_kind_reaches(uint8_t kind)
 {
-    if (layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS)
+    return kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF ||
+           kind == BUSTER_LINK_FIXUP_ABS64 || kind == BUSTER_LINK_FIXUP_PC64 || kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_SIZE32 ||
+           kind == BUSTER_LINK_FIXUP_SIZE64 || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
+}
+
+// A link whose image extends to or past BUSTER_EXECUTABLE_MAX_ADDRESS, because a zero-fill atom needs more address space
+// than a signed 32-bit reference reaches: each fixup to a symbol farther than INT32_MAX is checked by its kind, and the
+// ones that can reach it get its full address in shared->far_addresses. A GOT slot, a 64-bit field and an unsigned
+// 32-bit field reach; a call, PC32, ABS32S or thread-local offset doesn't. Lane 0 only, and only for such a link, so an
+// ordinary one pays nothing.
+static void executable_check_far(const Link* link, ExecutableShared* shared, const ExecutableLayout* layout, ExecutableLaneError* error)
+{
+    if (layout->image_size < BUSTER_EXECUTABLE_MAX_ADDRESS)
     {
         return;
     }
     const LinkAtoms* atoms = &link->atoms;
+    const LinkSymbols* symbols = &link->symbols;
     uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
     executable_linker_values(layout, values);
     for (AtomId atom = 1; atom < atoms->count; atom += 1)
@@ -5542,27 +5582,39 @@ static void executable_check_far(const Link* link, const ExecutableLayout* layou
         for (FixupId fixup = begin; fixup < begin + atoms->fixup_count[atom]; fixup += 1)
         {
             const SymbolId target = link->fixups.target[fixup];
-            const uint8_t source = link->symbols.source[target];
-            if (source == BUSTER_LINK_SOURCE_LINKER)
+            const AtomId target_atom = symbols->atom[target];
+            const uint8_t source = symbols->source[target];
+            uint64_t address = 0;
+            bool named = false;
+            if (target_atom != 0 && !link_class_is_tls(atoms->class[target_atom]))
+            {
+                address = layout->base + atoms->address[target_atom] + symbols->value[target];
+                named = true;
+            }
+            else if (target_atom == 0 && source == BUSTER_LINK_SOURCE_LINKER)
             {
                 const uint32_t found = executable_linker_index(link, target);
-                if (found < BUSTER_ARRAY_LENGTH(executable_linker_names) && values[found] > BUSTER_EXECUTABLE_MAX_ADDRESS - 1)
-                {
-                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_SYMBOL_FAR, values[found], BUSTER_EXECUTABLE_MAX_ADDRESS - 1, 0,
-                                                target, fixup);
-                    return;
-                }
+                address = layout->base + (found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? values[found] : 0);
+                named = found < BUSTER_ARRAY_LENGTH(executable_linker_names);
             }
-            else
+            if (!named || address <= (uint64_t)INT32_MAX)
             {
-                const AtomId target_atom = link->symbols.atom[target];
-                if (target_atom != 0 && atoms->address[target_atom] > BUSTER_EXECUTABLE_MAX_ADDRESS - 1)
-                {
-                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_FAR, atoms->address[target_atom],
-                                                BUSTER_EXECUTABLE_MAX_ADDRESS - 1, target_atom, target, fixup);
-                    return;
-                }
+                continue;
             }
+            const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            if (!executable_far_kind_reaches(kind))
+            {
+                if (target_atom != 0)
+                {
+                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_FAR, address, INT32_MAX, target_atom, target, fixup);
+                }
+                else
+                {
+                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_SYMBOL_FAR, address, INT32_MAX, 0, target, fixup);
+                }
+                return;
+            }
+            shared->far_addresses[target] = address;
         }
     }
 }
@@ -5581,10 +5633,6 @@ static void executable_check_far(const Link* link, const ExecutableLayout* layou
 // `error`.
 static void executable_resolve(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, uint32_t lane, ExecutableLaneError* error)
 {
-    if (lane == 0)
-    {
-        executable_check_far(link, layout, error);
-    }
     LinkSymbols* symbols = &link->symbols;
     const bool dynamic = layout->dynamic;
     const AtomId* atom_of = symbols->atom;
@@ -5644,7 +5692,8 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
                 for (uint32_t left = slotted; left != 0; left &= left - 1)
                 {
                     const SymbolId symbol = block + (SymbolId)__builtin_ctz(left);
-                    const int64_t value = (int64_t)base + (int32_t)reference_of[symbol];
+                    const uint64_t far = shared->far_addresses != 0 ? shared->far_addresses[symbol] : 0;
+                    const int64_t value = far != 0 ? (int64_t)far : (int64_t)base + (int32_t)reference_of[symbol];
                     memcpy(got + 8 * (uint64_t)slot_of[symbol], &value, sizeof(value));
                 }
                 // The preemptible definitions' stubs, each reading its own slot.
@@ -5703,7 +5752,10 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
                     // relocation's addend repeats; another's its address: in a dynamic PIE, the address at base 0,
                     // which a RELATIVE relocation's addend repeats.
                     const bool tls = !plain && executable_is_tls(link, symbol);
-                    const int64_t value = tls ? (int64_t)(int32_t)reference + (library ? (int64_t)layout->tls_block : 0) : (int64_t)base + (int32_t)reference;
+                    const uint64_t far = shared->far_addresses != 0 ? shared->far_addresses[symbol] : 0;
+                    const int64_t value = tls      ? (int64_t)(int32_t)reference + (library ? (int64_t)layout->tls_block : 0)
+                                          : far != 0 ? (int64_t)far
+                                                     : (int64_t)base + (int32_t)reference;
                     memcpy(got + 8 * (uint64_t)slot, &value, sizeof(value));
                 }
             }
@@ -5877,10 +5929,11 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
         for (uint64_t left = shared->relr ? 0 : executable_slots_of_class(link, shared, word, marks, BUSTER_EXECUTABLE_RELOCATION_RELATIVE); left != 0; left &= left - 1)
         {
             const SymbolId symbol = (SymbolId)(word * 64 + (uint64_t)__builtin_ctzll(left));
+            const uint64_t far = shared->far_addresses != 0 ? shared->far_addresses[symbol] : 0;
             rela[got_relative] = (Elf64_Rela){
                 .r_offset = got + 8 * (uint64_t)symbols->got_slot[symbol],
                 .r_info = ELF64_R_INFO(0, R_X86_64_RELATIVE),
-                .r_addend = (int64_t)layout->base + (int32_t)symbols->reference[symbol],
+                .r_addend = far != 0 ? (int64_t)far : (int64_t)layout->base + (int32_t)symbols->reference[symbol],
             };
             got_relative += 1;
         }
@@ -5985,10 +6038,11 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
                 const uint64_t place = layout->base + atoms->address[atom] + fixups->offset[fixup];
                 if (class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE && !packed)
                 {
+                    const uint64_t far = shared->far_addresses != 0 ? shared->far_addresses[target] : 0;
                     rela[abs64_relative] = (Elf64_Rela){
                         .r_offset = place,
                         .r_info = ELF64_R_INFO(0, R_X86_64_RELATIVE),
-                        .r_addend = (int64_t)layout->base + (int32_t)symbols->reference[target] + addend,
+                        .r_addend = (far != 0 ? (int64_t)far : (int64_t)layout->base + (int32_t)symbols->reference[target]) + addend,
                     };
                     abs64_relative += 1;
                 }
@@ -6413,15 +6467,21 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
 
 // Lane 0's part once the layout is known: the arrays sized by it, the linker's sections' bytes, and the linker's
 // pieces. Returns false if the arena can't hold them.
-static bool executable_prepare(Arena* arena, ExecutableShared* shared, const ExecutableLayout* layout, uint32_t lanes)
+static bool executable_prepare(Arena* arena, ExecutableShared* shared, const ExecutableLayout* layout, uint32_t lanes, uint32_t symbols)
 {
     const uint64_t parts = BUSTER_LANE_PARTS_PER_LANE * (uint64_t)lanes;
     shared->got = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, 8 * (layout->got_slots + 1));
+    shared->far_addresses = layout->image_size >= BUSTER_EXECUTABLE_MAX_ADDRESS ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, symbols) : 0;
+    if (shared->far_addresses != 0)
+    {
+        memset(shared->far_addresses, 0, (uint64_t)symbols * sizeof(*shared->far_addresses));
+    }
     shared->boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, layout->chunk_count + 1);
     shared->hashes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_EXECUTABLE_BUILD_ID_BYTES * layout->chunk_count);
     shared->part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, parts + 1);
     shared->orders = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, parts * lanes);
-    bool result = shared->got != 0 && shared->boundaries != 0 && shared->hashes != 0 && shared->part_boundaries != 0 && shared->orders != 0;
+    bool result = shared->got != 0 && shared->boundaries != 0 && shared->hashes != 0 && shared->part_boundaries != 0 && shared->orders != 0 &&
+                  (layout->image_size < BUSTER_EXECUTABLE_MAX_ADDRESS || shared->far_addresses != 0);
     // The sections of the linker's own that their phases fill, a dynamic PIE's, a static executable's with the C runtime
     // and .eh_frame_hdr: their first entries here.
     for (uint32_t section = 0; result && section < EXECUTABLE_SECTION_COUNT; section += 1)
@@ -7222,8 +7282,9 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     }
     if (ok && dynamic && shared->dynamic_counts[lane].unknown_version != 0)
     {
+        const SymbolId unknown = shared->dynamic_counts[lane].unknown_version;
         executable_lane_fail_detail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, EXECUTABLE_CAUSE_UNSUPPORTED_VERSION,
-                                    shared->dynamic_counts[lane].unknown_version, 0x8000, 0, shared->dynamic_counts[lane].unknown_version, 0);
+                                    link->symbols.version[unknown], 0x8000, 0, unknown, 0);
     }
     if (ok && lane == 0 && (!executable_debug_valid(link, options->debug) || !executable_debug_sections_valid(options)))
     {
@@ -7399,7 +7460,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
     arena_pop_to(scratch.arena, sorted);
-    if (laid_out && lane == 0 && !executable_prepare(scratch.arena, shared, layout, lanes))
+    if (laid_out && lane == 0 && !executable_prepare(scratch.arena, shared, layout, lanes, link->symbols.count))
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
@@ -7408,6 +7469,16 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
     lane_sync();
+    // A link that reaches the 32-bit references' limit: lane 0 checks each fixup to a farther symbol, after every lane
+    // has placed its atoms, and publishes the full addresses the 64-bit and GOT-mediated fixups use.
+    if (ok && laid_out && shared->far_addresses != 0 && layout->image_size >= BUSTER_EXECUTABLE_MAX_ADDRESS)
+    {
+        if (lane == 0)
+        {
+            executable_check_far(link, shared, layout, executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes));
+        }
+        lane_sync();
+    }
     ok = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_LAYOUT, lanes);
     if (lane == 0)
     {
@@ -7525,7 +7596,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         lowest = shared->absolute_bounds[2 * other] < lowest ? shared->absolute_bounds[2 * other] : lowest;
         highest = shared->absolute_bounds[2 * other + 1] > highest ? shared->absolute_bounds[2 * other + 1] : highest;
     }
-    const bool proven = ok && highest + (int64_t)magnitude < (int64_t)BUSTER_EXECUTABLE_MAX_ADDRESS &&
+    const bool proven = ok && layout->image_size < BUSTER_EXECUTABLE_MAX_ADDRESS && highest + (int64_t)magnitude < (int64_t)BUSTER_EXECUTABLE_MAX_ADDRESS &&
                         (int64_t)layout->image_size + (int64_t)magnitude - lowest < (int64_t)BUSTER_EXECUTABLE_MAX_ADDRESS;
     const ExecutablePatch patch = {
         .offsets = link->fixups.offset,
@@ -7534,6 +7605,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         .kinds = link->fixups.kind,
         .wide_addends = link->fixups.wide_addends,
         .reference = link->symbols.reference,
+        .far_addresses = shared != 0 ? shared->far_addresses : 0,
         .got_slots = link->symbols.got_slot,
         .tlsgd_slots = shared != 0 ? shared->tlsgd_slots : 0,
         .tlsld_slot = ok ? layout->tlsld_slot : 0,

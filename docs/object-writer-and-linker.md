@@ -1789,11 +1789,16 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
   image's ordinary limit doesn't bound it). Every atom but a `.bss` one is at
   most 2 GB, checked before its padding is added, so that no sum of sizes
   wraps; a `.bss` atom may need up to the image's bound, since it needs
-  address space but no bytes. A link whose image extends past 2 GB, where
-  code's 32-bit references end, places those oversized `.bss` atoms after the
-  ordinary `.bss` buckets and refuses a fixup to an atom or linker-defined
-  symbol that starts past 2 GB, as GNU ld and lld refuse a truncated PC32 in
-  the small code model. The image's tail alone may be farther.
+  address space but no bytes. A link whose image reaches 2 GB, where a signed
+  32-bit image offset ends, places those oversized `.bss` atoms after the
+  ordinary `.bss` buckets. A symbol's full address there is checked, not just
+  its atom's start: an `ABS64`, `PC64`, `ABS32` (which reaches 4 GB), `SIZE32`,
+  `SIZE64` or GOT-mediated fixup to it carries its full address or size, while
+  a call, `PC32`, `ABS32S` or thread-local offset that can't reach it is
+  refused. The writer's 32-bit reference column still holds only a symbol's
+  image offset, so a 64-bit or GOT-mediated fixup past 2 GB reads the full
+  address from a side column; a symbol inside a large `.bss` atom that a
+  32-bit fixup names is refused. The image's tail alone may be farther.
 - **Errors** don't depend on the lane count: the entry point is checked
   first, each phase reports the first item in id order that fails, and a
   failing fixup is the smallest that does. Each phase's errors go in a row of

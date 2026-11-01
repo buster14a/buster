@@ -1902,9 +1902,17 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
                         result->atom, label, result->value, result->limit);
                 break;
             case EXECUTABLE_CAUSE_ATOM_FAR:
-                fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", which fixup %u to '%s' can't reach (the maximum is 0x%" PRIx64 ")\n",
-                        path, result->atom, label, result->value, result->fixup,
-                        symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->limit);
+                if (result->fixup != 0)
+                {
+                    fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", which fixup %u to '%s' can't reach (the maximum is 0x%" PRIx64 ")\n",
+                            path, result->atom, label, result->value, result->fixup,
+                            symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->limit);
+                }
+                else
+                {
+                    fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", which the writer's 32-bit addresses can't hold (the maximum is 0x%" PRIx64 ")\n",
+                            path, result->atom, label, result->value, result->limit);
+                }
                 break;
             case EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE:
                 fprintf(out, "error: can't link %s: atom %u%s's bucket exceeds the image's address space\n", path, result->atom, label);
