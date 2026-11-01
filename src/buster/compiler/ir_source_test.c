@@ -5,9 +5,11 @@
 // files, by both of ir_lower.c's paths, which must agree column for column and verify, each function then promoted by
 // both of ssa_ir.c's paths, whose results must verify with dominance (#134's use of the verifier). Each lowered and
 // both promoted forms must then round-trip through text by both parsers, preserving structure and canonical bytes
-// (#175). Include after ir_lower_test.c, ir_parse_test.c, ssa_ir.c and tier0_source_benchmark.c.
+// (#175), and must agree on raw-IR dataflow, including phi edges (#143). Include after ir_lower_test.c, ir_parse_test.c,
+// ssa_ir.c, dataflow.c and tier0_source_benchmark.c.
 //
-//   build/compiler test-ir-source [--simd] [--print NAME] [preprocessor options] file...
+//   build/compiler test-ir-source [--simd] [--print NAME] [--dataflow-benchmark] [preprocessor options] file...
+//   build/compiler test-ir-source --dataflow-self-test
 //
 // Each file is checked and its definitions selected and emitted as benchmark-backend-source has them
 // (ir_source_prepare, which benchmark-ir-source shares), their typed streams in an arena that outlives the file's other
@@ -26,6 +28,9 @@
 #include <sys/wait.h>
 
 #include "ir_source_roundtrip.c"
+#include "ir_dataflow.c"
+#include "ir_dataflow_test.c"
+#include "ir_dataflow_benchmark.c"
 
 // ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
 // whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
@@ -324,6 +329,11 @@ struct IrSourceTotals
     // Representations checked through both text parser paths, and representations whose round trip failed.
     uint64_t text_forms;
     uint64_t text_failed;
+    // Every accepted source form, not a selected subset of operations or functions.
+    uint64_t dataflow_forms;
+    uint64_t dataflow_failed;
+    uint64_t dataflow_checks;
+    uint64_t dataflow_benchmark_failed;
 };
 
 static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
@@ -346,7 +356,7 @@ static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
 // per function that fails. `print` names a function to print the IR of, or is null.
 // Each lowering goes into its own arena and each promotion into another, which mustn't hold its input (ssa_ir.c).
 static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, bool allow_simd, Arena* output, Arena* twin_output, Arena* promoted_output,
-                            Arena* text_output, Arena* scratch)
+                            Arena* text_output, Arena* scratch, bool benchmark_dataflow, Tier0BenchmarkCounters counters)
 {
     uint64_t entries = 0;
     uint64_t instructions = 0;
@@ -417,7 +427,27 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
                        check.parsed.check.instruction, check.parsed.check.detail);
             }
         }
-        failures += (!promotes && !simd_refused) || !text_valid;
+        bool dataflow_valid = true;
+        for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
+        {
+            IrDataflowTests checks = { 0 };
+            const bool checked = ir_dataflow_test_function(forms[form], text_output, scratch, false, &checks);
+            totals->dataflow_forms += 1;
+            totals->dataflow_failed += !checked;
+            totals->dataflow_checks += checks.checks;
+            dataflow_valid = dataflow_valid && checked;
+            if (!checked)
+            {
+                printf("ir-source: file=%s function=%s form=%s dataflow_failed=%" PRIu64 "\n", name, source->name, form_names[form], checks.failures);
+            }
+            if (benchmark_dataflow && checked)
+            {
+                const bool measured = ir_dataflow_benchmark_function(forms[form], name, (const char*)source->name, form_names[form], text_output, scratch, counters);
+                totals->dataflow_benchmark_failed += !measured;
+                dataflow_valid = dataflow_valid && measured;
+            }
+        }
+        failures += (!promotes && !simd_refused) || !text_valid || !dataflow_valid;
         if (!promotes && !simd_refused)
         {
             const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
@@ -494,6 +524,9 @@ static int run_ir_source_tests(int count, char** arguments)
 {
     const char* print = 0;
     bool simd = false;
+    bool dataflow_self_test = false;
+    bool benchmark_dataflow = false;
+    Tier0BenchmarkCounters counters = { .cycles = -1, .instructions = -1, .throttle = -1 };
     char** options = calloc((size_t)count + 1, sizeof(char*));
     char** files = calloc((size_t)count + 1, sizeof(char*));
     uint32_t option_count = 0;
@@ -509,6 +542,14 @@ static int run_ir_source_tests(int count, char** arguments)
         else if (strcmp(arguments[i], "--simd") == 0)
         {
             simd = true;
+        }
+        else if (strcmp(arguments[i], "--dataflow-self-test") == 0)
+        {
+            dataflow_self_test = true;
+        }
+        else if (strcmp(arguments[i], "--dataflow-benchmark") == 0)
+        {
+            benchmark_dataflow = true;
         }
         else if (arguments[i][0] != '-')
         {
@@ -526,7 +567,17 @@ static int run_ir_source_tests(int count, char** arguments)
             }
         }
     }
-    valid = valid && file_count != 0;
+    valid = valid && (dataflow_self_test ? file_count == 0 && option_count == 0 && print == NULL && !benchmark_dataflow && !simd : file_count != 0);
+    if (valid && benchmark_dataflow)
+    {
+        counters.cycles = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+        counters.instructions = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+        valid = counters.cycles >= 0 && counters.instructions >= 0;
+        if (!valid)
+        {
+            fprintf(stderr, "ir-dataflow-benchmark: hardware cycles and instructions counters are required\n");
+        }
+    }
     Arena lowered = arena_reserve(UINT64_C(1) << 36);
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     Arena output = arena_reserve(UINT64_C(1) << 34);
@@ -536,9 +587,10 @@ static int run_ir_source_tests(int count, char** arguments)
     Arena scratch = arena_reserve(UINT64_C(1) << 34);
     valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && text_output.base != 0 && scratch.base != 0;
     IrSourceTotals totals = { 0 };
-    const bool text_oracle = valid && ir_source_text_tests(&arena, &output, &twin_output, &text_output, &scratch);
-    const bool exhausted = valid && ir_source_exhausted(files[0], options, option_count, &lowered, &arena);
-    if (valid)
+    const bool dataflow_oracle = valid && (!dataflow_self_test || ir_dataflow_tests(&arena, &text_output, &scratch));
+    const bool text_oracle = valid && (dataflow_self_test || ir_source_text_tests(&arena, &output, &twin_output, &text_output, &scratch));
+    const bool exhausted = valid && (dataflow_self_test || ir_source_exhausted(files[0], options, option_count, &lowered, &arena));
+    if (valid && !dataflow_self_test)
     {
         printf("ir-source: a preparation without memory for its state %s\n", exhausted ? "fails, as it should" : "doesn't fail as it should");
     }
@@ -548,7 +600,7 @@ static int run_ir_source_tests(int count, char** arguments)
         ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
-            ir_source_check(&totals, &file, files[i], print, simd, &output, &twin_output, &promoted, &text_output, &scratch);
+            ir_source_check(&totals, &file, files[i], print, simd, &output, &twin_output, &promoted, &text_output, &scratch, benchmark_dataflow, counters);
         }
         else
         {
@@ -564,14 +616,32 @@ static int run_ir_source_tests(int count, char** arguments)
     {
         printf("ir-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " entries=%" PRIu64 " tokens=%" PRIu64
                " instructions=%" PRIu64 " bytes=%" PRIu64 " (%.2f per token) promoted_instructions=%" PRIu64 " promoted_bytes=%" PRIu64
-               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " simd_refused=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64 "\n",
+               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " simd_refused=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64
+               " dataflow_forms=%" PRIu64 " dataflow_failed=%" PRIu64 " dataflow_checks=%" PRIu64 " dataflow_benchmark_failed=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.entries, totals.tokens, totals.instructions, totals.bytes,
                totals.tokens != 0 ? (double)totals.bytes / (double)totals.tokens : 0.0, totals.promoted_instructions, totals.promoted_bytes, totals.refused,
-               totals.disagreed, totals.unpromoted, totals.simd_refused, totals.text_forms, totals.text_failed);
+               totals.disagreed, totals.unpromoted, totals.simd_refused, totals.text_forms, totals.text_failed, totals.dataflow_forms,
+               totals.dataflow_failed, totals.dataflow_checks, totals.dataflow_benchmark_failed);
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-ir-source [--simd] [--print NAME] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler test-ir-source [--simd] [--print NAME] [--dataflow-benchmark] [preprocessor options] file... | --dataflow-self-test\n");
+    }
+    const bool passed = valid && exhausted && text_oracle && dataflow_oracle && (!simd || (totals.simd_refused != 0 && totals.left_out == 0)) &&
+        totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 &&
+        totals.dataflow_failed == 0 && totals.dataflow_benchmark_failed == 0 && (dataflow_self_test || totals.functions != 0) &&
+        (!benchmark_dataflow || totals.left_out == 0);
+    if (benchmark_dataflow)
+    {
+        printf("ir-dataflow-benchmark: qualified=%u forms=%" PRIu64 " left_out=%" PRIu64 " vector_host=%u\n", passed, totals.dataflow_forms, totals.left_out, BUSTER_HOST_VECTOR);
+    }
+    if (counters.cycles >= 0)
+    {
+        close(counters.cycles);
+    }
+    if (counters.instructions >= 0)
+    {
+        close(counters.instructions);
     }
     arena_release(&scratch);
     arena_release(&text_output);
@@ -582,5 +652,5 @@ static int run_ir_source_tests(int count, char** arguments)
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && exhausted && text_oracle && (!simd || (totals.simd_refused != 0 && totals.left_out == 0)) && totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
+    return passed ? 0 : 1;
 }

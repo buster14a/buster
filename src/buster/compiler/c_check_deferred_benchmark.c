@@ -4,15 +4,18 @@
 // benchmark-checker-deferred: what #113's deferred reader (c_check_deferred.c) costs against source order's check_input,
 // with its position checks apart, beside the parser's time on the same unit.
 //
-//   ./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--base-page-tokens N]
-//                                               [preprocessor options] file...
+//   ./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold]
+//                                               [--base-page-tokens N] [preprocessor options] file...
 //
 // Each file is preprocessed once. Each pass then parses it (parse_translation_unit, the vector path), and checks it with
 // check_input, and with check_input_deferred on one lane and on up to --lanes (8), each time into the same arenas taken
 // back and a fresh table, in one of their six orders, in turn; the deferred runs time their phases
 // (CheckDeferred.timing). The deferred readings share one state, which is released after every reading, so that every
 // reading reserves its memory and faults its pages in afresh, as a process's one reading does; with --warm, the state
-// keeps its memory from one reading to the next, as a process's readings after its first do (c_check_deferred.c). The
+// keeps its memory from one reading to the next, as a process's readings after its first do (c_check_deferred.c). With
+// --cold, every reading also takes fresh caller arenas (released and reserved again, rather than taken back), so that
+// the merge's columns on the caller's scratch are fresh huge pages as in a process's one reading (#874); without it,
+// from the second pass on those pages are already mapped, and no cold reading is measured. The
 // report gives the medians of --passes (24, a multiple of six) passes in nanoseconds per token: the parse, source
 // order's reading, and each deferred one's whole, its top level's walk, the file scope's history (the environment's
 // index), the bodies' walks (summed over the lanes) and their position checks (each body's heads from the history and
@@ -74,14 +77,26 @@ struct CheckDeferredSample
     uint32_t largest_first;
 };
 
+// The caller arenas' capacities, as check_deferred_benchmark_file reserves them: with `cold`, every reading releases
+// and reserves them again, rather than taking them back, so that each reading faults fresh pages (#874).
+static const uint64_t check_deferred_benchmark_capacities[4] = { UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 36, UINT64_C(1) << 36 };
+
 // One check of the parsed unit: source order's (lanes 0) or the deferred reader's, into `arenas` (types, its index,
-// the input and scratch), taken back first. Whether it ran, with the deferred reader's state in `deferred`.
+// the input and scratch), taken back first, or with `cold` released and reserved again. Whether it ran, with the deferred reader's state in `deferred`.
 static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp, Arena* arenas, uint32_t lanes, const uint32_t* cpus, bool every_lane,
-                                         uint32_t base_page_tokens, CheckDeferred* deferred, uint64_t* nanoseconds)
+                                         uint32_t base_page_tokens, CheckDeferred* deferred, uint64_t* nanoseconds, bool cold)
 {
     for (uint32_t i = 0; i < 4; i += 1)
     {
-        arena_pop_to(arenas + i, 0);
+        if (cold)
+        {
+            arena_release(arenas + i);
+            arenas[i] = arena_reserve(check_deferred_benchmark_capacities[i]);
+        }
+        else
+        {
+            arena_pop_to(arenas + i, 0);
+        }
     }
     const uint32_t tokens = parser->tokens.count;
     const TypeCapacity capacity = {
@@ -111,7 +126,7 @@ static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp,
 }
 
 static bool check_deferred_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, uint32_t lanes, const uint32_t* cpus,
-                                          bool every_lane, bool warm, uint32_t base_page_tokens)
+                                          bool every_lane, bool warm, uint32_t base_page_tokens, bool cold)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -163,7 +178,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
             const uint32_t way = check_deferred_benchmark_orders[pass % BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS][step];
             uint64_t time = 0;
             const uint32_t run_lanes = way == 0 ? 0 : way == 1 ? 1 : lanes;
-            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, base_page_tokens, &deferred, &time);
+            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, base_page_tokens, &deferred, &time, cold);
             if (way == 0)
             {
                 sequential[pass] = time;
@@ -291,6 +306,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     uint64_t lanes = 8;
     uint64_t base_page_tokens = 0;
     bool every_lane = false;
+    bool cold = false;
     bool warm = false;
     uint32_t cpus[BUSTER_CHECK_DEFERRED_MAX_LANES];
     uint32_t cpu_count = 0;
@@ -319,6 +335,10 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
         else if (strcmp(arguments[i], "--warm") == 0)
         {
             warm = true;
+        }
+        else if (strcmp(arguments[i], "--cold") == 0)
+        {
+            cold = true;
         }
         else if (strcmp(arguments[i], "--cpus") == 0)
         {
@@ -355,7 +375,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     bool measured = valid && (!cpus_given || pinned);
     for (uint32_t i = 0; measured && i < file_count; i += 1)
     {
-        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0, every_lane, warm, (uint32_t)base_page_tokens);
+        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0, every_lane, warm, (uint32_t)base_page_tokens, cold);
         fflush(stdout);
     }
     if (pinned)
@@ -364,7 +384,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--base-page-tokens N]"
+        fprintf(stderr, "usage: compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold] [--base-page-tokens N]"
                         " [preprocessor options] file...\n"
                         "  --passes: a multiple of %u, the readings' orders, up to %u (24 by default)\n",
                         BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS, BUSTER_CHECK_SOURCE_MAX_PASSES / BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS * BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS);
