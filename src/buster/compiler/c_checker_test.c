@@ -5898,6 +5898,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
             check_test_input_scans(&test);
+            check_test_selection_positions(&test);
+            check_test_asm_label_kernels(&test);
             check_test_expression_commas(&test);
             check_test_warning_ranges(&test);
             check_test_selection_roots(&test);

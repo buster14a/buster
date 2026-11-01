@@ -353,6 +353,9 @@ struct CheckControlWriter
     const uint32_t* initializers;
     const uint32_t* plan_first;
     const uint32_t* plan_next;
+    // Whether the unit may have variable-length arrays' bounds or objects (check_program_variable): only then does it have
+    // vla_first, allocation_first, allocation_next, vla_blocks and vla_saves, which are null otherwise (#877).
+    bool variable;
     const uint32_t* vla_first;
     const uint32_t* vla_next;
     // The variable-length arrays' objects of each statement (by its terminator), in declaration order, and each block's
@@ -362,6 +365,7 @@ struct CheckControlWriter
     const uint32_t* allocation_next;
     const uint32_t* vla_blocks;
     const uint32_t* vla_saves;
+    // Each asm statement's index by its token, or null for a unit without asm statements.
     const uint32_t* asm_statements;
     const uint32_t* case_first;
     const uint32_t* case_next;
@@ -369,6 +373,7 @@ struct CheckControlWriter
     uint32_t* source_labels;
     uint32_t* stops;
     uint32_t* repeats;
+    // Each body's first region (by its opening token) and each region's next, or null for a unit without regions.
     const uint32_t* region_first;
     const uint32_t* region_next;
     // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
@@ -944,7 +949,8 @@ static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint3
     uint32_t left = BUSTER_CHECK_NONE;
     uint32_t steps = 0;
     bool past = false;
-    for (uint32_t ancestor = parser->tree.parents[jump]; ancestor < count && steps < count && !past; ancestor = parser->tree.parents[ancestor])
+    for (uint32_t ancestor = writer->variable ? parser->tree.parents[jump] : count; ancestor < count && steps < count && !past;
+         ancestor = parser->tree.parents[ancestor])
     {
         past = targets != 0 && targets[ancestor] == target;
         const uint32_t saved = writer->vla_saves[ancestor];
@@ -1140,7 +1146,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
     {
         // A block's variable-length arrays are released at its end, after its statements and its cleanups.
-        if (role == PARSE_ROLE_CLOSE_BLOCK && writer->vla_blocks[token] != 0)
+        if (role == PARSE_ROLE_CLOSE_BLOCK && writer->variable && writer->vla_blocks[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
         }
@@ -1557,7 +1563,7 @@ static void check_control_begin(CheckControlWriter* writer, uint32_t opening)
             check_control_statement(writer, child, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         }
     }
-    if (writer->vla_first[opening] != BUSTER_CHECK_NONE)
+    if (writer->variable && writer->vla_first[opening] != BUSTER_CHECK_NONE)
     {
         check_control_token(writer, opening);
     }
@@ -1585,7 +1591,7 @@ static void check_control_drain(CheckControlWriter* writer)
         }
         else if (task.kind == CHECK_CONTROL_TASK_TOKEN)
         {
-            const uint32_t assembly = writer->asm_statements[task.token];
+            const uint32_t assembly = writer->asm_statements != NULL ? writer->asm_statements[task.token] : BUSTER_CHECK_NONE;
             if (assembly != BUSTER_CHECK_NONE)
             {
                 if (writer->count < writer->capacity)
@@ -1599,8 +1605,8 @@ static void check_control_drain(CheckControlWriter* writer)
             }
             const uint32_t plan = writer->plan_first[task.token];
             uint32_t i = plan;
-            uint32_t v = writer->vla_first[task.token];
-            uint32_t a = writer->allocation_first[task.token];
+            uint32_t v = writer->variable ? writer->vla_first[task.token] : BUSTER_CHECK_NONE;
+            uint32_t a = writer->variable ? writer->allocation_first[task.token] : BUSTER_CHECK_NONE;
             // A variably modified typeof's operand (check_input_expressions' evaluation_nodes) is a side effect of the
             // declaration, after its type's variable bounds and before its initializers.
             const uint32_t evaluation = writer->program->input->evaluation_nodes != NULL ?
@@ -1746,7 +1752,8 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     }
     check_control_end(writer, closing);
     writer->entry_count = writer->count - writer->first_entry;
-    for (uint32_t r = writer->region_first[opening]; r != BUSTER_CHECK_NONE && writer->program->status == CHECK_PROGRAM_OK; r = writer->region_next[r])
+    const uint32_t first_region = writer->region_first != NULL ? writer->region_first[opening] : BUSTER_CHECK_NONE;
+    for (uint32_t r = first_region; r != BUSTER_CHECK_NONE && writer->program->status == CHECK_PROGRAM_OK; r = writer->region_next[r])
     {
         const CheckInputRegion* source = input->regions + r;
         CheckProgramRegion* region = writer->program->regions + r;
@@ -2468,6 +2475,15 @@ static void check_program_allocations(CheckProgram* program, const Parser* parse
     }
 }
 
+// Whether the unit may have a variable-length array's bounds or object, of which check_program keeps four token-sized
+// columns and finds the objects by a pass over every token (check_program_allocations): where it has a bound
+// (CheckInput.vlas), or its type table has a variable-length array's type, without which no type has a runtime size
+// (check_action_runtime_size). Most units have neither, and their program none of the columns (#877).
+static bool check_program_variable(const CheckInput* input, const TypeTable* types)
+{
+    return input->vla_count != 0 || memchr(types->types.kind, BUSTER_TYPE_KIND_VARIABLE_ARRAY, types->types.count) != NULL;
+}
+
 // The operators of the builtins the program lists (CheckProgram.builtin_nodes): every one from CHECK_OP_BUILTIN_UNARY on,
 // which check_program_builtins' vector path takes for its candidates.
 static bool check_program_builtin_op(CheckOp op)
@@ -2872,20 +2888,25 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* plan_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* plan_next = valid && options.initializers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)options.initializers->count + 1) : 0;
-    uint32_t* vla_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    // The variable-length arrays' columns, the asm statements' and the regions', only for a unit that may have them: each
+    // is 4 bytes a token, which its fill touched in every unit (#877).
+    const bool variable = valid && check_program_variable(input, types);
+    const bool assemblies = valid && input->asm_count != 0;
+    const bool regions = valid && input->region_count != 0;
+    uint32_t* vla_first = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* vla_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->vla_count + 1) : 0;
-    uint32_t* allocation_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* allocation_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* vla_blocks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* vla_saves = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* asm_statements = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* allocation_first = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* allocation_next = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* vla_blocks = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* vla_saves = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* asm_statements = assemblies ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_map = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* source_labels = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* stops = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* repeats = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* region_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* region_first = regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* region_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->region_count + 1) : 0;
     // Each body's opening brace, in token order: at most one per token, and only the bodies' entries are touched.
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -2906,8 +2927,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
-            stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && openings != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
-            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0 && (input->cleanup_count == 0 || cleanup_parents != 0);
+            stops != 0 && repeats != 0 && (!regions || region_first != 0) && region_next != 0 && openings != 0 && vla_next != 0 && (!assemblies || asm_statements != 0) &&
+            (!variable || (vla_first != 0 && allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0)) &&
+            (input->cleanup_count == 0 || cleanup_parents != 0);
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -2920,17 +2942,23 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(initializers, 0xff, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         memset(plan_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(allocation_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(vla_blocks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(vla_saves, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(asm_statements, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        for (uint32_t i = 0; i < input->asm_count; i += 1)
+        if (variable)
         {
-            const CheckInputAsm* assembly = input->asm_statements + i;
-            if (assembly->body != BUSTER_CHECK_NONE && assembly->statement < count)
+            memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(allocation_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(vla_blocks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(vla_saves, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
+        if (assemblies)
+        {
+            memset(asm_statements, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            for (uint32_t i = 0; i < input->asm_count; i += 1)
             {
-                asm_statements[assembly->statement] = i;
+                const CheckInputAsm* assembly = input->asm_statements + i;
+                if (assembly->body != BUSTER_CHECK_NONE && assembly->statement < count)
+                {
+                    asm_statements[assembly->statement] = i;
+                }
             }
         }
         memset(needed, 0, (uint64_t)count + 1);
@@ -2944,7 +2972,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             *options.return_flow_work += (uint64_t)node_count + 1;
         }
-        memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (regions)
+        {
+            memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         for (uint32_t r = input->region_count; r-- > 0;)
         {
             const uint32_t body = input->regions[r].body;
@@ -3006,7 +3037,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 memset(program->compound_initializers, 0, options.initializers->count);
             }
         }
-        check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, BUSTER_SCALAR_PATH(options.scalar));
+        if (variable)
+        {
+            check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, BUSTER_SCALAR_PATH(options.scalar));
+        }
         for (uint32_t i = input->vla_count; i-- > 0;)
         {
             const CheckInputVla* vla = input->vlas + i;
@@ -3084,6 +3118,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .initializers = initializers,
         .plan_first = plan_first,
         .plan_next = plan_next,
+        .variable = variable,
         .vla_first = vla_first,
         .vla_next = vla_next,
         .allocation_first = allocation_first,

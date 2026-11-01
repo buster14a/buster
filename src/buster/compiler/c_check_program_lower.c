@@ -10838,6 +10838,14 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
     }
 }
 
+// Whether `token` declares a body's own object, which its body's locals' list holds (CheckLowerShared.local_first): the
+// list's links and the clearing of its heads before them test the same tokens.
+static bool check_lower_local_declaration(const CheckInput* input, uint32_t token)
+{
+    return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count &&
+           input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
+}
+
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
@@ -11072,7 +11080,17 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
         memset(shared->local_map, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(shared->switch_locals, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
+        // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
+        // than every token (#877).
+        for (uint32_t c = 0; c < program->case_count; c += 1)
+        {
+            const uint32_t owner = program->cases[c].owner;
+            if (owner <= count)
+            {
+                shared->switch_locals[owner] = BUSTER_CHECK_NONE;
+            }
+        }
         if (input->vla_count != 0)
         {
             memset(shared->vla_identities, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -11085,8 +11103,20 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 }
             }
         }
-        memset(shared->local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         const uint32_t declaring_count = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
+        // Each body's locals' list is empty before the links below, where it is read (each body's, at its opening) and
+        // where it is written (each local's body), rather than at every token (#877).
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            shared->local_first[program->bodies[b].opening] = BUSTER_CHECK_NONE;
+        }
+        for (uint32_t d = 0; d < declaring_count; d += 1)
+        {
+            if (check_lower_local_declaration(input, declaring[d]))
+            {
+                shared->local_first[input->declaration_bodies[declaring[d]]] = BUSTER_CHECK_NONE;
+            }
+        }
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
         for (uint32_t d = declaring_count; d-- > 0;)
         {
@@ -11096,7 +11126,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 shared->initializer_declarations[input->initializer_nodes[token]] = token;
             }
             const uint32_t body = input->declaration_bodies[token];
-            if (input->declarations[token] == token && body < count && input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token])
+            if (check_lower_local_declaration(input, token))
             {
                 shared->local_next[token] = shared->local_first[body];
                 shared->local_first[body] = token;
