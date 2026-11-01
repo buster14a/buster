@@ -2154,7 +2154,7 @@ differ by up to 1% from code placement alone.
 | Pastes (#122) | Two identifiers, or an identifier and a number, interned without lexing | Lexing every paste | `main.c` (66,520 pastes) 16.5 to 15.2 ms |
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
-| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms, before #649's spellings; with them, `-E -P`'s printing of `main.c` 5.54–5.59 to 2.71 ns an output token, and `-E`'s with line markers 59.2 to 43.4 ms on `main.c` and 7.30 to 5.63 ms on `sqlite3.c` against the general loop (below) |
+| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices, with line markers' breaks as gaps up to each line start that needs a marker | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices; token by token, a line start that needs a marker and chunks with a pragma end, an embed or a spelling past 64 bytes | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms, before #649's spellings; with them, `-E -P`'s printing of `main.c` 5.54–5.59 to 2.71 ns an output token, and `-E`'s with line markers 59.2 to 43.4 ms on `main.c` and 7.30 to 5.63 ms on `sqlite3.c` against the general loop (below); the line markers' batches' are pending (on the Xeon, 97.5 to 61.4 ms and 11.4 to 7.09 ms) |
 
 **The directive tables alone** (`benchmark-preprocessor --tables`, the 9700X,
 CPU 2, three runs of 21 passes on the C library corpus: 8,983 files, 13,152,141
@@ -2278,35 +2278,70 @@ buffer, written with `fwrite` as it fills, in three steps:
    lookup in a 5 × 8 table of character classes, with the classes from
    `vpermi2b` lookups and the previous token's class moved up a lane by one
    `vpermb`.
-3. The copies: a line break, a space, and one masked 64-byte store per token,
-   with branches only for line markers (which `-P` doesn't print), a run of
-   blank lines, and spellings longer than 64 bytes.
+3. The copies, in batches: each token's gap (a space, or a line start's
+   breaks) and one masked 64-byte store per token, at offsets from prefix sums
+   (`pp_print_offsets`), so that no store waits for the one before. With line
+   markers, a batch runs up to the first line start that needs a marker (below);
+   that token, and every token of a chunk with a pragma end, an `#embed`, a
+   spelling longer than 64 bytes or, with markers, what `pp_print_moves`, an
+   include exit or an unknown token's line breaks need, goes token by token.
 
 A fast spelling is its bytes as written unless a line splice or, with
 trigraphs, a trigraph is in it. A splice is a backslash, blanks and a line
 break, so only a backslash followed by a blank (any byte up to `' '`), or at a
 token's end, can start one; with trigraphs, so can any `?`. A backslash in an
 escape sequence (`"\n"`) can't, so literals with escapes stay on the fast
-path. The `-P` batch checks this on the bytes its copies load anyway; the
-zeros past a spelling of less than 64 bytes count as blanks. Every other chunk
-is checked before step 3's copies (`pp_print_unspliced`, 64 bytes at a time,
-a backslash in a block's last lane counting too). A chunk that may hold a
-splice is made again by the general loop: its spellings, spaces and copies,
-over the batch's bytes, which aren't counted yet. With `-P`, 376 of `main.c`'s
+path. A batch checks this on the bytes its copies load anyway; the zeros past
+a spelling of less than 64 bytes count as blanks. The tokens that go token by
+token are checked before their copies (`pp_print_unspliced`, 64 bytes at a
+time, a backslash in a block's last lane counting too). A chunk that may hold a
+splice is made again by the general loop: its spellings and spaces, and the
+copies of the tokens not printed yet, over the batch's bytes, which aren't
+counted yet. With `-P`, 376 of `main.c`'s
 103,935 chunks were made again (11 after the batch's copies, 365 of the 5,219
 with a spelling past 64 bytes after `pp_print_unspliced`, most of them for a
 backslash in a block's last lane), and 76 went to the general loop at once for
 a pragma line or an integer; 4 of `sqlite3.c`'s 11,035 were made again.
 
-For `-P`, a batch whose spellings each have 1–64 bytes and which has no pragma
-end or streamed `#embed` computes all output offsets first (#649). Two
-32-word SIMD prefix sums include each spelling and its optional single gap
-byte. The resulting copy addresses are independent; a batch needs at most
-4,160 bytes and is flushed as a whole when necessary. Loads and stores remain
-masked to each spelling's logical length, including a final partial batch.
-Marker output and exceptional batches use the existing per-token route. No
-new output metadata is retained by the preprocessor, and the spelling and
-separation rules are unchanged.
+A batch whose spellings each have 1–64 bytes computes all output offsets
+first (#649). Two 32-word SIMD prefix sums include each spelling and its gap:
+a byte for a space or `-P`'s break (a bit each), and with line markers a line
+start's breaks, 1 to 8 (`BUSTER_PP_PRINT_GAP`, a byte each). The resulting copy
+addresses are independent; a batch needs at most 4,672 bytes and is flushed as
+a whole when necessary. Loads and stores remain masked to each spelling's
+logical length, including a final partial batch; a gap is written as one byte,
+or with markers as 8 breaks or spaces, which the spelling and the next token's
+output write over. No new output metadata is retained by the preprocessor, and
+the spelling and separation rules are unchanged.
+
+**The line markers' batches.** With line markers (`-E` without `-P`), a line
+start's place is its own location, or a macro's token's expansion start, or a
+`#pragma`'s directive, moved back over the line splices right before it; its
+line is counted from the last line the printer asked about (`pp_print_line`).
+In the same range as the line before, past the same line note, a jump of 1 to
+8 lines is that many breaks and no marker (`pp_print_place_common`); anything
+else prints markers (`pp_print_place_marking`). `pp_print_place_lines` places
+a chunk's line starts from the batch's first token in order, in that common
+case only, into their gaps, and stops at the first line start that isn't
+common: the batch prints the tokens before it, that token goes token by token,
+through `pp_print_place`, which writes its markers, and the next batch starts
+after it. A batch that doesn't print, for a spelling past 64 bytes or a
+possible splice, puts the markers' state and the printer's lines back as they
+were before it; the pass's steps for the line start it stopped at (its
+expansion, its line) are ones the token-by-token copy takes again alike. A
+chunk with a pragma end, an `#embed`, an unknown token (whose line breaks the
+printer counts), a token `pp_print_moves` may move or an include exit or a
+silent pragma before its end goes token by token, as before. Of `main.c`'s
+105,167 chunks with markers, 102,997 batches printed, 3,440 line starts went
+token by token for their markers, and 5,879 chunks' rest (for a spelling past
+64 bytes, mostly): 354,486 tokens of 6.73 million. Of `sqlite3.c`'s 11,035,
+13,640 batches printed, 2,783 line starts and 72 chunks' rest went token by
+token: 7,082 tokens of 706,237.
+
+`pp_print_vector` compiles the printer for each value of `markers`
+(`pp_print_vector_mode`): in one copy for both, the line markers' batch cost
+`-P` 8–12% of its printing on the Xeon below, in register pressure and the
+batch's gap counts; compiled apart, `-P`'s code is what it was before.
 
 [The frozen #649 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-649/target)
 compares `123d22ae` with `bc1b4861` on the locked 9700X. Its printing and
@@ -2339,26 +2374,45 @@ against 15.7–17.0 ms on `sqlite3.c`. Unmasked 64-byte copies (each token's
 zeros overwritten by the next) and unmasked stores of the spellings' columns
 were within 1–3% on that host and were left out: Zen 5's power cap makes
 overlapping 512-bit stores a cost to avoid (`docs/coding-style.md`), and the
-9700X hasn't measured them. Compacting a run's source bytes (#649's third
-direction) would replace each token's copy with work per token of about the
-same size (setting its boundary bits), and isn't built; after
-`pp_print_spellings`, the copies are a quarter to a third of printing on that
-host, and the 9700X's numbers decide the next step.
+9700X hasn't measured them.
+
+The line markers' batches, on that host (an in-process harness timing 41 prints
+of one run of each, the old printer compiled beside the new one, `-E`'s
+expansion starts and deferred history, to `/dev/null`): printing with markers
+took 61.4 against 97.5 ms on `main.c` and 7.09 against 11.4 ms on `sqlite3.c`
+(the fastest prints 56.3–57.3 against 89.6–92.6 ms, and 6.9 against
+10.7–11.0); `-P`'s printing is the same on `main.c` (the fastest 36.5–37.7
+against 36.4–37.0 ms) and 2–4% slower on `sqlite3.c`. Of what is left of the
+markers' cost over `-P`, placing the line starts takes about 21 ns each (12 ms of
+`main.c`'s 584,482, 2 ms of `sqlite3.c`'s 93,740), half of it counting their
+lines, which read the whole source once (38 MB and 9.8 MB) a line at a time,
+and the line starts that need markers took 1.3 ms and 2.3 ms token by token
+before the batches went on after them.
+
+Compacting a run's source bytes (#649's third direction) isn't built. On that
+host, the batches' copies and their offsets are 55% of `-P`'s printing: with
+both stubbed out, printing took 18 against 40 ms on `main.c` and 1.5 against
+3.3 ms on `sqlite3.c` (without the copies alone, 25 and 1.7 ms). Compaction
+would replace them with a pass over each run's source bytes and the work to
+mark each token's ends; that is #649's step after the line markers' batches.
 
 The 9700X job times the printer with `pp_print_spellings` against its general
 loop for every chunk (`benchmark-preprocessor --spelling-cost`), on `main.c`
 and the frozen `sqlite3.c`, with `-P` and with line markers (`--markers`, which
 runs and prints as the `-E` driver does), whose printed bytes must be the same.
-With line markers the general loop prints in the time the printer before
-`pp_print_spellings` took (on the Xeon: 145–151 against 146–149 ms on `main.c`,
-16.9–19.0 against 17.5–17.7 ms on `sqlite3.c`). With `-P` it printed 7–17%
-slower than that printer (80–84 against 86–91 ms on `main.c`), the cost of the
-loop's new shape to the rare chunks the general loop takes, so `-P`'s gain over
-it is that much smaller than it reads, and `main.c`'s `-P` history on main is
-the printer's before.
+Both take the printer's own copies, the line markers' batches among them, so
+the comparison is of the spellings alone, and each row's history in the job is
+its before. Before the line markers' batches, with line markers the general
+loop printed in the time the printer before `pp_print_spellings` took (on the
+Xeon: 145–151 against 146–149 ms on `main.c`, 16.9–19.0 against 17.5–17.7 ms on
+`sqlite3.c`). With `-P` it printed 7–17% slower than that printer (80–84
+against 86–91 ms on `main.c`), the cost of the loop's new shape to the rare
+chunks the general loop takes, so `-P`'s gain over it is that much smaller than
+it reads, and `main.c`'s `-P` history on main is the printer's before.
 
-On the 9700X (#1028's run at `8ce011ad`, on the job's first CPU, medians of 21
-passes; the step took 13 s), `pp_print_spellings` against the general loop:
+On the 9700X (#1028's run at `8ce011ad`, before the line markers' batches, on
+the job's first CPU, medians of 21 passes; the step took 13 s),
+`pp_print_spellings` against the general loop:
 
 | | `main.c` printing | `main.c` whole run | `sqlite3.c` printing | `sqlite3.c` whole run |
 | --- | --- | --- | --- | --- |
@@ -2377,11 +2431,13 @@ no history of `-E` with line markers or of `sqlite3.c`'s printing before #649;
 on the Xeon, the general loop with line markers printed in the old printer's
 time. With line markers printing is still 37% of `main.c`'s whole run and 35% of
 `sqlite3.c`'s, against 18% and 15% with `-P`, and `pp_print_spellings` took 27%
-and 23% off it, against 54% and 56%: the line markers' copies, which go a token
-at a time, are what is left of `-E`'s printing.
+and 23% off it, against 54% and 56%: the line markers' copies, which went a
+token at a time, were what was left of `-E`'s printing, which the line markers'
+batches take next.
 
-`test-preprocessor` checks every 0–64-token prefix size with guarded input and
-output tails, arbitrary inactive gap bits, and zero/64/65/large lengths. Full
+`test-preprocessor` checks every 0–64-token prefix size with guarded input,
+gap and output tails, arbitrary inactive gap bits, gaps of a byte and of counts
+0 to 8 with the bits, and zero/64/65/large lengths. Full
 printer fixtures move a pragma end through all 64 alignments, continue into
 ordinary batches, cross the 1 MiB output buffer, and compare marker and `-P`
 bytes with the independent scalar printer. Long literals, line splices,
@@ -2406,6 +2462,17 @@ a blank, stray backslashes, splices in strings, numbers and punctuators and in
 strings of 60 to 136 bytes at their middle, 63 and 64, identifiers past 64
 bytes, pastes, stringizing and trigraphs. Disabling the copies' check makes
 it, seven of the built-in cases and hundreds of fuzz cases fail.
+
+The line markers' batches are checked on random sources at 65 alignments, both
+printers, with markers and with `-P`: lines of 1 to 6 tokens after 0 to 11
+blank lines (jumps of 1 to 12, past the common case's 8), comments over three
+lines, includes of a header with lines, splices and a `#line` of its own,
+`#line` directives with and without a name, invocations over several lines and
+expansions of macros defined over two, line splices before a line's first
+token, pragmas and null directives, and spellings past 64 bytes and with a
+line splice, which stop a batch whose lines are placed. Keeping the markers'
+state after a batch that doesn't print makes it, the batch fixtures and the
+spelling paths fail.
 
 ## The oracle
 
