@@ -3182,6 +3182,168 @@ static void tier1_select_test_indirect_review(Tier1SelectTest* test)
     arena_release(&scratch);
 }
 
+// The value of node `*next`, which the next call defines: the variadic fixture's builder numbers its nodes as it goes.
+static uint32_t tier1_select_test_append(IrFunction* function, uint32_t* next, uint8_t op, uint8_t type, uint32_t a, uint32_t b, uint32_t c)
+{
+    const uint32_t node = *next;
+    tier1_select_test_node(function, node, op, type, a, b, c);
+    *next = node + 1;
+    return node;
+}
+
+#define BUSTER_TIER1_SELECT_TEST_VARIADIC_SHAPES 3
+
+// A variadic definition (#789), f(n, ...), which reads its incoming frame through its anchors as va_start's lowering
+// reaches them: its register save area (slot 0) and its overflow area (slot 1). It folds, as h = h * 31 + v from the
+// first value, the save area's six general slots (rdi's, n, first), the overflow area's first two slots (the first
+// unnamed arguments on the stack) and, for shapes 1 and 2, the low eightbyte of the save area's first vector slot,
+// xmm0's, which the prologue saves where al isn't zero. Shape 2 also stores h into a 64-byte object aligned to 64
+// (slot 2) and returns it from there: its frame is realigned, with a frame pointer, from which the overflow area's
+// address comes. With `records`, it has its own ABI records too (n's location), which selection doesn't take yet.
+static bool tier1_select_test_variadic_function(Arena* input, uint32_t shape, bool records, IrFunction* function)
+{
+    const bool vector = shape != 0;
+    const IrSizes sizes = {
+        .instruction_count = shape == 0 ? 33 : shape == 1 ? 37 : 40,
+        .block_count = 1,
+        .constant_count = 1,
+        .slot_count = shape == 2 ? 3 : 2,
+        .address_count = 7,
+        .parameter_count = 1,
+        .passed_count = records ? 1 : 0,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        if (records)
+        {
+            function->parameter_passed = 1;
+            function->passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
+        }
+        function->block_offsets[1] = (uint32_t)sizes.instruction_count;
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->variadic = true;
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 1 };
+        function->slots[0] = (IrSlot){ .size = BUSTER_ABI_SAVE_AREA_BYTES, .alignment = 16, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_REGISTER_SAVE_AREA };
+        function->slots[1] = (IrSlot){ .size = 0, .alignment = 16, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_OVERFLOW_AREA };
+        if (shape == 2)
+        {
+            function->slots[2] = (IrSlot){ .size = 64, .alignment = 64, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        }
+        function->constants[0].low = 31;
+        for (uint32_t k = 0; k < 5; k += 1)
+        {
+            function->addresses[k] = (IrAddress){ .offset = 8 * (k + 1), .scale = 1 };
+        }
+        function->addresses[5] = (IrAddress){ .offset = 8, .scale = 1 };
+        function->addresses[6] = (IrAddress){ .offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET, .scale = 1 };
+        uint32_t next = 0;
+        uint32_t values[9];
+        uint32_t value_count = 0;
+        tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t save = tier1_select_test_append(function, &next, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t overflow = tier1_select_test_append(function, &next, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, save, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < 5; k += 1)
+        {
+            const uint32_t address = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, save, BUSTER_IR_NONE, k);
+            values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, overflow, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t second = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, overflow, BUSTER_IR_NONE, 5);
+        values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, second, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        if (vector)
+        {
+            const uint32_t slot = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, save, BUSTER_IR_NONE, 6);
+            values[value_count++] = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t multiplier = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t h = values[0];
+        for (uint32_t v = 1; v < value_count; v += 1)
+        {
+            const uint32_t product = tier1_select_test_append(function, &next, IR_MUL, IR_I64, h, multiplier, BUSTER_IR_NONE);
+            h = tier1_select_test_append(function, &next, IR_ADD, IR_I64, product, values[v], BUSTER_IR_NONE);
+        }
+        if (shape == 2)
+        {
+            const uint32_t object = tier1_select_test_append(function, &next, IR_STACK_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_append(function, &next, IR_STORE, IR_VOID, object, h, BUSTER_IR_NONE);
+            h = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, object, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, h, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        assert(next == sizes.instruction_count);
+    }
+    return created;
+}
+
+// tier1_select_test_variadic_function's result for its incoming frame: the six general argument registers (`integers`,
+// n's rdi first), the first two stack arguments past them (`stacked`) and, for shapes 1 and 2, xmm0's low eightbyte.
+static uint64_t tier1_select_test_variadic_oracle(uint32_t shape, const uint64_t* integers, const uint64_t* stacked, uint64_t vector)
+{
+    uint64_t h = integers[0];
+    for (uint32_t k = 1; k < 6; k += 1)
+    {
+        h = h * 31 + integers[k];
+    }
+    h = h * 31 + stacked[0];
+    h = h * 31 + stacked[1];
+    return shape != 0 ? h * 31 + vector : h;
+}
+
+// The variadic definition's plan (#789), by both paths: the overflow area's address a value of its own, its lea
+// (TIER1_RULE_STACK_ADDRESS), never folded into a memory operand, whose base is the frame's; the same plan without the
+// verification; and the uniform-register consumer, which has no frame to save the argument registers in, refusing it.
+// A function with its own ABI records is still refused whole.
+static void tier1_select_test_variadic(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    for (uint32_t shape = 0; shape < BUSTER_TIER1_SELECT_TEST_VARIADIC_SHAPES; shape += 1)
+    {
+        IrFunction function;
+        const bool created = tier1_select_test_variadic_function(&input, shape, false, &function);
+        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the variadic definition's fixture is valid IR");
+        const uint64_t scratch_mark = scratch.length;
+        for (uint32_t path = 0; created && path < 2; path += 1)
+        {
+            Tier1SelectPlan plan;
+            uint32_t failed = 0;
+            const bool planned = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
+            tier1_select_test_expect(test, planned, "a variadic definition selects by both paths");
+            bool folded = false;
+            for (uint32_t node = 0; planned && node < function.instruction_count; node += 1)
+            {
+                folded |= !plan.covered[node] && plan.patterns[node].stack_object == 1;
+            }
+            tier1_select_test_expect(test, planned && plan.patterns[2].rule == TIER1_RULE_STACK_ADDRESS && plan.patterns[2].immediate == 1 && !plan.covered[2] && !folded,
+                                     "the overflow area's address is a lea of its own, in no memory operand");
+            tier1_select_test_expect(test, planned && tier1_select_test_plan_again(&function, 0, &plan, false, &output, &scratch), "the variadic definition's plan without verification is the same");
+            Tier1SelectCode code;
+            const uint64_t mark = output.length;
+            tier1_select_test_expect(test, planned && tier1_select_emit(&plan, (const uint8_t[40]){ 0 }, test->allowed, &output, &code, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED && output.length == mark,
+                                     "the uniform-register consumer refuses a variadic definition");
+        }
+        IrFunction recorded;
+        if (shape == 0 && tier1_select_test_variadic_function(&input, shape, true, &recorded))
+        {
+            // Its own ABI records, which selection doesn't take yet, whatever else it has.
+            Tier1SelectPlan plan;
+            uint32_t failed = 0;
+            const uint64_t mark = output.length;
+            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED &&
+                                               output.length == mark,
+                                     "a function with its own ABI records is refused whole");
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 // #989's review: a node's sequence at its room and past it, in the selector's emitter. Each node of s = a + b, then
 // s < b (unsigned) ? s ^ a : s - b, its branch's comparison folded, takes no-ops before its records
 // (Tier1SelectPattern.nops) up to its room: the function emits, with that many more records, and runs as before. One
@@ -3621,6 +3783,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_overlong(&test);
             tier1_select_test_indirect(&test);
             tier1_select_test_indirect_review(&test);
+            tier1_select_test_variadic(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);

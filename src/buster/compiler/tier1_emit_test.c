@@ -375,6 +375,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 #include "tier1_terminal_test.c"
 #include "tier1_divide_test.c"
 #include "tier1_labels_test.c"
+#include "tier1_variadic_test.c"
 
 // Frame objects' addresses in their users' memory operands (#982): the selected plan's folded loads, stores and
 // addresses take the frame's base register at the object's offset plus the walked displacement, filled at emission as
@@ -631,7 +632,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                                 const uint32_t first = emitted.code.node_first[n];
                                 const uint32_t span = emitted.code.node_first[n + 1] - first;
                                 int32_t offset = 0;
-                                const bool found = span != 0 && tier1_emit_cfg_object(&emitted, pattern->stack_object, &offset);
+                                const bool found = span != 0 && tier1_emit_cfg_object(&function, &emitted, pattern->stack_object, &offset);
                                 int32_t total = 0;
                                 const X86Instruction* record = found && !__builtin_add_overflow(offset, pattern->displacement, &total) ? &emitted.code.records[first + span - 1] : 0;
                                 placed &= record != 0 && record->rm == (uint8_t)emitted.frame.base_register && record->displacement == total;
@@ -889,6 +890,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_terminal_tests(&test);
             tier1_divide_tests(&test);
             tier1_labels_tests(&test);
+            tier1_variadic_tests(&test);
             tier1_emit_test_overlong(&test);
             printf("tier1 fragment emission: %" PRIu64 " checks, %" PRIu64 " failures; stores=%" PRIu64 " reloads=%" PRIu64 " rematerializations=%" PRIu64 "\n", test.checks, test.failures, test.stores, test.loads, test.copies);
             arena_release(&test.input);

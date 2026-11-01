@@ -18,8 +18,9 @@
 // block must branch to the immediately following block. The sink has no values to reconcile and retains its branch.
 // Every other function, general control flow and phis, goes to tier1_emit_cfg.c, which allocates over the CFG and
 // moves values along its edges; numeric fragment order is not a substitute.
-// Indirect/variadic/wide-ABI calls, dynamic/variadic frames and direct register-to-register
-// fragment transitions are explicit unsupported cases. R11 remains reserved for selection and frame probes.
+// Indirect/variadic/wide-ABI calls, dynamic frames and direct register-to-register fragment transitions are explicit
+// unsupported cases here. A variadic definition goes to tier1_emit_cfg.c too, which fills its register save area (#789).
+// R11 remains reserved for selection and frame probes.
 //
 // Borrowed inputs are immutable and may precede allocations in the output arena, but must not overlap either arena's
 // unused capacity. The arenas are disjoint. Failure restores both lengths and preserves the result. All retained
