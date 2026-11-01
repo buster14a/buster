@@ -302,6 +302,14 @@ RETURNs, or for a function none leaves from its declared result
 An indirect call (a calls table's target 0) pops, under its arguments, the
 address it calls: it becomes a `ptr` (`inttoptr`) for `call_indirect`.
 
+A narrow argument (class `I8`, `U8`, `I16` or `U16`: a char's, a short's or a
+`_Bool`'s) crosses its call as an `i32`, extended by its class's signedness
+(`sext` or `zext`), and its call type is `i32`. clang's callers extend such an
+argument to 32 bits, and its callees may rely on that (#141). A narrow parameter
+arrives as an `i32` parameter, truncated to its type before its slot's store, so
+the callee relies on no caller's extension. A call's types still match its
+callee's parameter types.
+
 #148's incoming variadic frame becomes the IR's (`variadic`, `incoming`), and its
 roles' locals slots: a `va_list` (`BUSTER_TYPED_LOCAL_VA_LIST`) its 24 bytes
 (aligned to 8), the register save area and the overflow area the two anchors.

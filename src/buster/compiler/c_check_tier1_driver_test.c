@@ -363,6 +363,54 @@ static const char check_test_tier1_masks_source[] =
     "    return 0;\n"
     "}\n";
 
+// The narrow arguments' fixture (#141): a caller unit whose functions pass chars, shorts and a _Bool, by the driver's
+// --tier1, and a callee unit by clang -O2, whose functions trust their callers' extension to 32 bits (signed or
+// unsigned by each parameter's type: `movl %edi, %eax` for a signed char's return), linked together. A narrow parameter
+// of the caller unit's own, which it truncates, is called there too.
+static const char check_test_tier1_narrow_caller_source[] =
+    "#include <stdio.h>\n"
+    "int tier1_take_s8(signed char c);\n"
+    "int tier1_take_u8(unsigned char c);\n"
+    "int tier1_take_s16(short s);\n"
+    "int tier1_take_u16(unsigned short s);\n"
+    "int tier1_take_bool(_Bool b);\n"
+    "long tier1_take_mixed(signed char a, unsigned short b, short c, unsigned char d);\n"
+    "static int tier1_call_narrow(int x)\n"
+    "{\n"
+    "    signed char a = (signed char)(x * 37);\n"
+    "    unsigned char b = (unsigned char)(x * 53);\n"
+    "    short c = (short)(x * 4099);\n"
+    "    unsigned short d = (unsigned short)(x * 7919);\n"
+    "    _Bool e = (x & 4) != 0;\n"
+    "    return tier1_take_s8(a) + tier1_take_u8(b) * 3 + tier1_take_s16(c) * 5 + tier1_take_u16(d) * 7 + tier1_take_bool(e) * 11;\n"
+    "}\n"
+    "static long tier1_call_mixed(int x)\n"
+    "{\n"
+    "    return tier1_take_mixed((signed char)(x * 3 - 200), (unsigned short)(x * 60001), (short)(x * -12345), (unsigned char)(x + 250));\n"
+    "}\n"
+    "static __attribute__((noinline)) int tier1_narrow_parameters(signed char a, unsigned short b, _Bool c)\n"
+    "{\n"
+    "    return a * 100000 + b + (c ? 7 : 0);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long total = 0;\n"
+    "    for (int x = -300; x < 300; x += 7)\n"
+    "    {\n"
+    "        total = total * 31 + (unsigned long)tier1_call_narrow(x) + (unsigned long)tier1_call_mixed(x) + (unsigned long)tier1_narrow_parameters((signed char)x, (unsigned short)(x * 3), x > 0);\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", total);\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_narrow_callee_source[] =
+    "int tier1_take_s8(signed char c) { return c; }\n"
+    "int tier1_take_u8(unsigned char c) { return c; }\n"
+    "int tier1_take_s16(short s) { return s; }\n"
+    "int tier1_take_u16(unsigned short s) { return s; }\n"
+    "int tier1_take_bool(_Bool b) { return b ? 7 : 3; }\n"
+    "long tier1_take_mixed(signed char a, unsigned short b, short c, unsigned char d) { return a * 1000000L + b * 1000L + c * 10L + d; }\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -1094,5 +1142,60 @@ static void check_test_driver_tier1_masks(CheckTest* test, const char* clang, co
     free(offsets);
     free(types);
     unlink(source);
+    unlink(reference);
+}
+
+// The narrow arguments' fixture (#141): its caller unit by --tier1 -c, by each path with and without rematerialization,
+// every function but main Tier 1's, linked with its callee unit compiled by clang -O2, prints what clang -O0's build of
+// both prints: each narrow argument arrives extended to 32 bits by its parameter's type, as clang's callees trust.
+static void check_test_driver_tier1_narrow(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char caller[512];
+    char callee[512];
+    char callee_object[512];
+    char reference[512];
+    snprintf(caller, sizeof(caller), "%s/tier1-narrow.c", directory);
+    snprintf(callee, sizeof(callee), "%s/tier1-narrow-callee.c", directory);
+    snprintf(callee_object, sizeof(callee_object), "%s/tier1-narrow-callee.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-narrow-clang", directory);
+    const bool written = parse_test_write(caller, check_test_tier1_narrow_caller_source, sizeof(check_test_tier1_narrow_caller_source) - 1) &&
+                         parse_test_write(callee, check_test_tier1_narrow_callee_source, sizeof(check_test_tier1_narrow_callee_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, caller, callee, NULL };
+    char* callee_arguments[] = { (char*)clang, "-O2", "-c", "-o", callee_object, callee, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool callee_built = written && check_test_driver_spawn(callee_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && callee_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the narrow arguments' fixture run");
+    static const char* const names[3] = { "tier1_call_narrow", "tier1_call_mixed", "tier1_narrow_parameters" };
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-narrow-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-narrow-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build_names(executable, caller, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, NULL, &build);
+            check_test_expect(test, compiled, "the narrow arguments' caller unit compiles by --tier1, every caller Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, callee_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[256] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's narrow arguments reach clang -O2's callees extended by their types");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(caller);
+    unlink(callee);
+    unlink(callee_object);
     unlink(reference);
 }

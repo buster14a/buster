@@ -1818,6 +1818,181 @@ struct IrLowerTestStream
     uint32_t count;
 };
 
+// Narrow integers at a call's boundary (#141): f(signed char a, unsigned short b) returns g(a, b, (unsigned char)200,
+// (short)-3). Each narrow parameter arrives as an i32, truncated to its type before its slot's store, and each narrow
+// argument crosses its call as an i32, sign- or zero-extended by its class, with i32 call types, by both lowering paths.
+static void ir_lower_test_narrow(IrLowerTestTally* tally)
+{
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    static const uint8_t kinds[] =
+    {
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_RETURN
+    };
+    static const uint8_t classes[] =
+    {
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_U16,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_I16,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32
+    };
+    static const uint64_t values[] =
+    {
+        0,
+        1,
+        200,
+        0xfffd,
+        0,
+        0
+    };
+    static const uint8_t local_classes[2] =
+    {
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_U16
+    };
+    static const uint8_t local_flags[2] =
+    {
+        0,
+        0
+    };
+    const AbiLocation parameters[2] =
+    {
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI, BUSTER_ABI_REGISTER_NONE }, .flags = BUSTER_ABI_FLAG_SIGN },
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RSI, BUSTER_ABI_REGISTER_NONE }, .flags = BUSTER_ABI_FLAG_ZERO },
+    };
+    const AbiReturn returned =
+    {
+        .kind = BUSTER_ABI_RESULT_REGISTERS,
+        .part_bytes = 8,
+        .registers =
+        {
+            BUSTER_ABI_RAX,
+            BUSTER_ABI_REGISTER_NONE,
+            BUSTER_ABI_REGISTER_NONE,
+            BUSTER_ABI_REGISTER_NONE
+        },
+    };
+    AbiCall calls[1] =
+    {
+        {
+            .stack_alignment_log2 = 4,
+            .integer_registers = 4,
+            .result = returned,
+        },
+    };
+    static const SymbolId call_targets[1] =
+    {
+        1
+    };
+    static const uint32_t call_first[1] =
+    {
+        0
+    };
+    static const uint32_t call_argument_counts[1] =
+    {
+        4
+    };
+    static const uint8_t call_variadic[1] =
+    {
+        0
+    };
+    static const uint8_t argument_classes[4] =
+    {
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_U16,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_I16
+    };
+    AbiLocation argument_locations[4] =
+    {
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI, BUSTER_ABI_REGISTER_NONE }, .flags = BUSTER_ABI_FLAG_SIGN },
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RSI, BUSTER_ABI_REGISTER_NONE }, .flags = BUSTER_ABI_FLAG_ZERO },
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDX, BUSTER_ABI_REGISTER_NONE }, .flags = BUSTER_ABI_FLAG_ZERO },
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RCX, BUSTER_ABI_REGISTER_NONE }, .flags = BUSTER_ABI_FLAG_SIGN },
+    };
+    Tier0Function source =
+    {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 2,
+        .parameter_count = 2,
+        .parameters = parameters,
+        .result = returned,
+        .call_targets = call_targets,
+        .call_first = call_first,
+        .call_argument_counts = call_argument_counts,
+        .call_variadic = call_variadic,
+        .calls = calls,
+        .argument_locations = argument_locations,
+        .argument_classes = argument_classes,
+        .call_count = 1,
+        .argument_count = 4,
+    };
+    const bool ready = output.base != 0 && twin_output.base != 0 && scratch.base != 0;
+    ir_lower_test_expect(tally, ready, "narrow boundary arenas", 0, 0);
+    IrFunction function =
+    {
+        0
+    };
+    if (ready && ir_lower_test_lower(tally, &source, IR_I32, 2, &output, &twin_output, &scratch, &function, 0, 0))
+    {
+        // Each parameter's i32, and the truncation its store reads.
+        uint32_t truncated = 0;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            const uint32_t a = function.a[i];
+            const bool parameter = function.op[i] == IR_TRUNC && a < function.instruction_count && function.op[a] == IR_PARAM && function.type[a] == IR_I32;
+            truncated |= parameter && function.a[a] == 0 && function.type[i] == IR_I8 ? 1u : 0;
+            truncated |= parameter && function.a[a] == 1 && function.type[i] == IR_I16 ? 2u : 0;
+        }
+        ir_lower_test_expect(tally, function.parameter_count == 2 && function.parameter_types[0] == IR_I32 && function.parameter_types[1] == IR_I32 && truncated == 3,
+                             "a narrow parameter arrives as an i32 its callee truncates", 0, 0);
+        uint32_t call = BUSTER_IR_NONE;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            call = function.op[i] == IR_CALL ? i : call;
+        }
+        bool extended = call != BUSTER_IR_NONE && function.calls[function.b[call]].argument_count == 4;
+        static const uint8_t extensions[4] =
+        {
+            IR_SEXT,
+            IR_ZEXT,
+            IR_ZEXT,
+            IR_SEXT
+        };
+        static const uint8_t narrow_types[4] =
+        {
+            IR_I8,
+            IR_I16,
+            IR_I8,
+            IR_I16
+        };
+        for (uint32_t argument = 0; extended && argument < 4; argument += 1)
+        {
+            const IrCall descriptor = function.calls[function.b[call]];
+            const uint32_t value = function.extra[descriptor.argument_first + argument];
+            extended = function.call_types[descriptor.type_first + argument] == IR_I32 && value < function.instruction_count && function.op[value] == extensions[argument] &&
+                       function.type[value] == IR_I32 && function.type[function.a[value]] == narrow_types[argument];
+        }
+        ir_lower_test_expect(tally, extended, "a narrow argument crosses its call as an i32 extended by its class", 0, 0);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&scratch);
+}
+
 static void ir_lower_test_entry(IrLowerTestStream* stream, uint8_t kind, uint8_t class, uint64_t value)
 {
     if (stream->count < 64)
@@ -2843,6 +3018,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);
         ir_lower_test_aggregates(&tally);
+        ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);
         ir_lower_test_stack(&tally);

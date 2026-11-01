@@ -109,10 +109,12 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     for (uint32_t p = 0; p < input->parameter_count; p += 1)
     {
         // An aggregate (an object parameter: a struct, a union, a long double, an __int128) arrives as a ptr to its
-        // bytes, which the preheader copies into its object; any other parameter's value is stored in its local's slot.
+        // bytes, which the preheader copies into its object; any other parameter's value is stored in its local's slot,
+        // a narrow one's truncated from the I32 it arrives as (ir_typed_narrow).
         const bool object = tier0_is_object(input, p);
         const uint8_t class = input->local_classes[p];
-        const IrType type = object ? IR_PTR : (IrType)ir_typed_types[class];
+        const uint8_t arrival = object ? class : ir_typed_boundary_class(class);
+        const IrType type = object ? IR_PTR : (IrType)ir_typed_types[arrival];
         if (output != 0)
         {
             output->parameter_types[p] = (uint8_t)type;
@@ -124,7 +126,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         }
         else
         {
-            ir_typed_emit(&sink, IR_STORE, IR_VOID, p, parameter, BUSTER_IR_NONE, ir_typed_alignment(class));
+            const uint32_t value = ir_typed_convert(&sink, parameter, arrival, class);
+            ir_typed_emit(&sink, IR_STORE, IR_VOID, p, value, BUSTER_IR_NONE, ir_typed_alignment(class));
         }
     }
     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
