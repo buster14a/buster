@@ -550,6 +550,33 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
     unlink(reference);
 }
 
+// `path` as sh reads it between single quotes: each ' closes, escapes and reopens its quote. False if it doesn't fit.
+static bool check_test_tier1_quoted(char* out, size_t size, const char* path)
+{
+    size_t n = 0;
+    for (const char* p = path; *p != 0; p += 1)
+    {
+        const char* piece = *p == '\'' ? "'\\''" : NULL;
+        const size_t length = piece != NULL ? 4 : 1;
+        if (n + length >= size)
+        {
+            out[0] = 0;
+            return false;
+        }
+        if (piece != NULL)
+        {
+            memcpy(out + n, piece, length);
+        }
+        else
+        {
+            out[n] = *p;
+        }
+        n += length;
+    }
+    out[n] = 0;
+    return true;
+}
+
 // --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
 // path, against the same fixture compiled without it. Its function is still Tier 1's and its executable still prints
 // clang's build's output, so the solver's merged values reach Tier 1's code without changing what the program does; and
@@ -607,9 +634,20 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
         // The command runs inside `directory`, so a relative --executable must be resolved first.
         char resolved[4096];
         const char* program = realpath(executable, resolved) != NULL ? resolved : executable;
-        char script[1024];
-        snprintf(script, sizeof(script), "cd '%s' && '%s' --tier1 %s --tier1-report -c '%s' '%s'", directory, program,
-                 gvn != 0 ? "--tier1-gvn" : "", first, second);
+        // Quoted for sh: a --directory with a quote would otherwise break the command.
+        char quoted_directory[4096];
+        char quoted_program[4096];
+        char quoted_first[4096];
+        char quoted_second[4096];
+        char script[16384] = { 0 };
+        const bool quoted = check_test_tier1_quoted(quoted_directory, sizeof(quoted_directory), directory) &&
+                            check_test_tier1_quoted(quoted_program, sizeof(quoted_program), program) &&
+                            check_test_tier1_quoted(quoted_first, sizeof(quoted_first), first) &&
+                            check_test_tier1_quoted(quoted_second, sizeof(quoted_second), second);
+        const int written = quoted ? snprintf(script, sizeof(script), "cd '%s' && '%s' --tier1 %s --tier1-report -c '%s' '%s'", quoted_directory,
+                                              quoted_program, gvn != 0 ? "--tier1-gvn" : "", quoted_first, quoted_second)
+                                   : -1;
+        check_test_expect(test, written > 0 && (size_t)written < sizeof(script), "the gvn two-file command fits its buffer");
         char* arguments[] = { "sh", "-c", script, NULL };
         char* text = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
