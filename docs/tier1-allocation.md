@@ -392,6 +392,27 @@ every program: both encoders' bytes, its loop's instructions, and each mask's
 final value against the chains' arithmetic where the host runs AVX-512. The
 9700X job runs the measurement where its sources change.
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/f43798bc303e26152c60c3f7acaabebe6ecded67/docs/measurements/mask-spills-179-2026-11-01),
+from #997's CI job at `f96a98c8`), every width costs the same:
+
+- A mask's round trip adds 12 cycles through memory and 10 through a general
+  register to the `kadd`'s 1.
+- Seven independent chains pay 1.21 and 1.08 cycles per spill and reload,
+  beyond the `kadd`s' 0.5 per step.
+- Four chains of `vpaddd` beside the masks change neither cost.
+
+So a general register is the cheaper place, by 2 cycles of latency and about
+11% of throughput. Tier 1 keeps its masks' spills in their slots all the same:
+
+- The general register has to be free for as long as the mask is spilled. The
+  loops gave it one for nothing.
+- Across a call it would have to be callee-saved, since every opmask register is
+  caller-saved. The prologue would then save it, and it would compete with the
+  general values for the callee-saved registers.
+- More masks live than k1 to k7 hold is rare, and the measured saving is small.
+
+Spilling to a general register is left to a user whose masks show pressure.
+
 VP2INTERSECT's pair of masks, the first even, is no constraint the allocator
 takes: the IR has no operation that writes one, and Tier 0's X86 rows keep it
 inside a row (docs/tier0.md's "Vectors"). A form that needs one would come
