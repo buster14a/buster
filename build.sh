@@ -29,7 +29,21 @@ case "${BUSTER_FUZZ_AVAILABLE:-0}" in
     *) echo 'build.sh: BUSTER_FUZZ_AVAILABLE must be 0 or 1' >&2; exit 1 ;;
 esac
 sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_checker.c src/buster/compiler/main_unit_check_builtins.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/dominators_benchmark.c src/buster/compiler/tier1_allocate_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/c_checker_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/tier1_frame_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c src/buster/compiler/tier1_schedule_benchmark.c src/buster/compiler/tier1_select_benchmark.c src/buster/compiler/tier1_model_measure.c)
-flags=(-march="${BUSTER_HOST_ARCH:-native}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror)
+# The stack-protector policy is pinned here (#916): a distribution's Clang may default to
+# -fstack-protector-strong while the official release CI stages does not, so the host's configured
+# default would otherwise decide the compiler's code and its measurement. The owner chose no stack
+# protection for now, which matches the official release's default and keeps host and CI builds
+# identical. check_stack_protector below fails a build whose link still references the canary.
+# The compiler's predefined macros still follow the host driver's configured default (c_predefines.c),
+# which -fno-stack-protector would hide, so record that default before adding the flag.
+case "$(clang -dM -E -x c /dev/null)" in
+    *'#define __SSP_ALL__ '*) host_ssp=BUSTER_PREDEFINES_SSP_ALL ;;
+    *'#define __SSP_STRONG__ '*) host_ssp=BUSTER_PREDEFINES_SSP_STRONG ;;
+    *'#define __SSP__ '*) host_ssp=BUSTER_PREDEFINES_SSP_ON ;;
+    *) host_ssp=BUSTER_PREDEFINES_SSP_OFF ;;
+esac
+flags=(-march="${BUSTER_HOST_ARCH:-native}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -fno-stack-protector
+    "-DBUSTER_HOST_SSP_DEFAULT=$host_ssp")
 # The target-query defaults follow the Clang driver used to build this compiler.
 # Keep the triple as a single argument and reject text that cannot be a triple.
 clang_default_target=$(clang -dumpmachine)
@@ -240,6 +254,15 @@ link_program()
     fi
 }
 
+# The linked executable must not reference the stack canary's runtime (#916): -fno-stack-protector
+# above pins the policy, and this checks that the toolchain's configured default didn't add it back.
+check_stack_protector()
+{
+    if nm "$1" | grep -q '__stack_chk_fail'; then
+        echo "build.sh: $1 references __stack_chk_fail; -fno-stack-protector didn't take effect" >&2
+        return 1
+    fi
+}
 # Builds build/compiler from the sources, with the flags in `defines`, and the objects in "$@" after theirs. The sources'
 # objects go in a directory of their own, so that build/ keeps one file besides compile_commands.json, which gets their
 # compile commands in the sources' order. It is linked at a fixed address (-no-pie), from the same code: as a PIE, its
@@ -264,6 +287,7 @@ build_compiler()
         cat "$object_directory/$i.json"
     done > build/compile_commands.json
     link_program build/compiler "${linked[@]}" "$@"
+    check_stack_protector build/compiler
 }
 # Links build_compiler's objects into $1 with $3 bytes of padding in .text before the objects of the source of index
 # $2, an object of its own, in the order build_compiler links them. The padding is a section of its own,
