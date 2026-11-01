@@ -1171,6 +1171,8 @@ static void interpreter_test_text_native(InterpreterTestTally* tally, Arena* scr
     arena_release(&source);
 }
 
+#include "interpreter_copy_test.c"
+
 static int run_interpreter_tests(int argc, char** argv)
 {
     uint64_t seed = 176;
@@ -1212,6 +1214,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);

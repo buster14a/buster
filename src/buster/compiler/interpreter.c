@@ -305,6 +305,80 @@ static InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, 
     return result;
 }
 
+// COPY transports an object representation, not scalar values: checking a source must not diagnose its padding,
+// and checking a destination must not define it before the source map is copied (in particular for self-copy).
+// Like the native copy bridge, unchecked memory admits unknown ranges but cannot escape a known allocation.
+static bool interpreter_typed_copy_range(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write, uint8_t** defined)
+{
+    *defined = 0;
+    bool result = address != 0 && bytes != 0 && bytes <= UINT64_MAX - address;
+    if (result)
+    {
+        const uint32_t count = runtime->memory_count;
+        const InterpreterMemory* memories = runtime->memories;
+        const uint64_t end = address + bytes;
+        bool known = false;
+        bool found = false;
+        // The registry and its byte maps are not changed until both ranges have passed this scan.
+        for (uint32_t i = 0; i < count && !found; i += 1)
+        {
+            const InterpreterMemory* memory = &memories[i];
+            const uint64_t base = (uint64_t)(uintptr_t)memory->bytes;
+            const uint64_t size = memory->size;
+            const uint64_t offset = address - base;
+            known |= (address >= base && offset <= size) || (address < base + size && base < end);
+            if (address >= base && offset <= size && bytes <= size - offset)
+            {
+                found = true;
+                result = !write || memory->writable;
+                *defined = result && memory->defined != 0 ? memory->defined + offset : 0;
+            }
+        }
+        if (!found)
+        {
+            result = !known && !runtime->check_memory;
+        }
+    }
+    return result;
+}
+
+static InterpreterStatus interpreter_typed_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes)
+{
+    InterpreterStatus status = INTERPRETER_INVALID;
+    if (bytes != 0 && bytes <= BUSTER_TIER0_MAX_COPY_BYTES)
+    {
+        uint8_t* source_defined = 0;
+        uint8_t* destination_defined = 0;
+        if (!interpreter_typed_copy_range(runtime, source, bytes, false, &source_defined) ||
+            !interpreter_typed_copy_range(runtime, destination, bytes, true, &destination_defined))
+        {
+            status = INTERPRETER_MEMORY;
+        }
+        // Tier 0's COPY contract admits identical or disjoint ranges, not partial overlap. The range checks above
+        // have proved these additions cannot wrap. A rejected transfer changes neither bytes nor their metadata.
+        else if (destination == source || destination + bytes <= source || source + bytes <= destination)
+        {
+            if (destination != source)
+            {
+                memcpy((void*)(uintptr_t)destination, (const void*)(uintptr_t)source, bytes);
+            }
+            if (destination_defined != 0)
+            {
+                if (source_defined != 0)
+                {
+                    memmove(destination_defined, source_defined, bytes);
+                }
+                else
+                {
+                    memset(destination_defined, 1, bytes);
+                }
+            }
+            status = INTERPRETER_OK;
+        }
+    }
+    return status;
+}
+
 // The typed front keeps signedness in its class column. Values are normalized at every producer, so arithmetic never
 // depends on incidental register extension. Conversions to integers outside C's defined range report arithmetic faults.
 static uint64_t interpreter_typed_normalize(uint32_t class, uint64_t value)
@@ -907,7 +981,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             needed = 1;
             pushed = 1;
         }
-        else if ((kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SET) || kind == BUSTER_TYPED_PTR_ADD)
+        else if ((kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SET) || kind == BUSTER_TYPED_PTR_ADD || kind == BUSTER_TYPED_COPY)
         {
             needed = 2;
         }
@@ -930,7 +1004,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             result->status = needed > top - frame->stack_base ? INTERPRETER_INVALID : INTERPRETER_VALUE_LIMIT;
             break;
         }
-        if (class == BUSTER_TYPED_CLASS_VOID && kind != BUSTER_TYPED_CALL && kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_RETURN)
+        if (class == BUSTER_TYPED_CLASS_VOID && kind != BUSTER_TYPED_CALL && kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_RETURN && kind != BUSTER_TYPED_COPY)
         {
             result->status = INTERPRETER_INVALID;
             break;
@@ -951,6 +1025,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
         {
             shape = classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class;
+        }
+        else if (kind == BUSTER_TYPED_COPY)
+        {
+            shape = class == BUSTER_TYPED_CLASS_VOID && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == BUSTER_TYPED_CLASS_U64 && value != 0 && value <= BUSTER_TIER0_MAX_COPY_BYTES;
         }
         else if (kind == BUSTER_TYPED_PTR_ADD)
         {
@@ -1214,6 +1292,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_DISCARD:
             top -= 1;
             break;
+        case BUSTER_TYPED_COPY:
+            result->status = interpreter_typed_copy(&runtime, stack[top - 2].low, stack[top - 1].low, value);
+            top -= 2;
+            break;
         case BUSTER_TYPED_ALLOCA:
             result->status = interpreter_stack_allocate(&frame->dynamic, stack[top - 1].low, depth, &runtime, scratch, &stack[top - 1].low);
             break;
@@ -1265,10 +1347,22 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             result->value = returned;
             break;
         }
-        default:
+        case BUSTER_TYPED_ADD:
+        case BUSTER_TYPED_SUB:
+        case BUSTER_TYPED_MUL:
+        case BUSTER_TYPED_DIV:
+        case BUSTER_TYPED_MOD:
+        case BUSTER_TYPED_AND:
+        case BUSTER_TYPED_OR:
+        case BUSTER_TYPED_XOR:
+        case BUSTER_TYPED_SHL:
+        case BUSTER_TYPED_SHR:
             stack[top - 2].low = interpreter_typed_binary(kind, class, stack[top - 2].low, stack[top - 1].low, &result->status);
             classes[top - 2] = (uint8_t)class;
             top -= 1;
+            break;
+        default:
+            result->status = INTERPRETER_INVALID;
             break;
         }
     }
