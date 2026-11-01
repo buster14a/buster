@@ -629,6 +629,9 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     lane->input = *top_input;
     CheckInputReader* reader = &lane->reader;
     CheckInput* input = &lane->input;
+    // The top level's memo of declared builtins' verdicts (CheckInputReader.intrinsic_source) is the top reader's alone:
+    // a lane, which no lane's write may reach, keeps none, and its pre-check works each verdict out again.
+    reader->intrinsic_source = NULL;
     reader->output = input;
     reader->types = &lane->types;
     reader->arena = &arenas->output;
@@ -2689,7 +2692,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     deferred->reason = !valid ? "the deferred reader's own memory" : 0;
     // check_deferred_bodies ends the top level's span, which starts here.
     deferred->top_ns = timing ? check_deferred_now() : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true, true);
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true, true, false);
     deferred->top.changes = 0;
     deferred->unsupported |= !valid;
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;

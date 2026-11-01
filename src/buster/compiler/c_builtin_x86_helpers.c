@@ -120,6 +120,24 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_UMWAIT,
     CBUILTIN_X86_HELPER_TPAUSE,
     CBUILTIN_X86_HELPER_XBEGIN,
+    CBUILTIN_X86_HELPER_RDTSC_BUILTIN,
+    CBUILTIN_X86_HELPER_LZCNT16,
+    CBUILTIN_X86_HELPER_LFENCE,
+    CBUILTIN_X86_HELPER_MFENCE,
+    CBUILTIN_X86_HELPER_SFENCE,
+    CBUILTIN_X86_HELPER_CLFLUSH,
+    CBUILTIN_X86_HELPER_LDMXCSR,
+    CBUILTIN_X86_HELPER_STMXCSR,
+    CBUILTIN_X86_HELPER_XSETBV,
+    CBUILTIN_X86_HELPER_MM_LFENCE,
+    CBUILTIN_X86_HELPER_MM_MFENCE,
+    CBUILTIN_X86_HELPER_MM_SFENCE,
+    CBUILTIN_X86_HELPER_MM_PAUSE,
+    CBUILTIN_X86_HELPER_MM_CLFLUSH,
+    CBUILTIN_X86_HELPER_MM_GETCSR,
+    CBUILTIN_X86_HELPER_MM_SETCSR,
+    CBUILTIN_X86_HELPER_M_PREFETCH,
+    CBUILTIN_X86_HELPER_M_PREFETCHW,
     CBUILTIN_X86_HELPER_TILEZERO,
     CBUILTIN_X86_HELPER_TILELOADD,
     CBUILTIN_X86_HELPER_TILELOADDT1,
@@ -160,6 +178,71 @@ static const X86Instruction cbuiltin_x86_helper_rdtsc[] = {
     { .form = X86_FORM_RDTSC },
     { .immediate = 32, .rm = X86_REGISTER_RDX, .form = X86_FORM_SHL_RM64_IMM8 },
     { .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RAX, .form = X86_FORM_OR_RM64_R64 },
+    { .form = X86_FORM_RET },
+};
+
+// lzcnt of a's low 16 bits, 16 for 0: BSR's index of its top bit, xored with 15 (31's for 0, which BSR leaves alone).
+static const X86Instruction cbuiltin_x86_helper_lzcnt16[] = {
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDI, .form = X86_FORM_MOVZX_R32_RM16 },
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RCX, .form = X86_FORM_BSR_R32_RM32 },
+    { .immediate = 31, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .form = X86_FORM_CMOVNE_R32_RM32 },
+    { .immediate = 15, .rm = X86_REGISTER_RAX, .form = X86_FORM_XOR_RM32_IMM8 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_lfence[] = {
+    { .form = X86_FORM_LFENCE },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_mfence[] = {
+    { .form = X86_FORM_MFENCE },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_sfence[] = {
+    { .form = X86_FORM_SFENCE },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_clflush[] = {
+    { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_CLFLUSH_M8 },
+    { .form = X86_FORM_RET },
+};
+
+// LDMXCSR and STMXCSR take memory: the leaf's red zone below rsp, which a leaf may use.
+static const X86Instruction cbuiltin_x86_helper_ldmxcsr[] = {
+    { .reg = X86_REGISTER_RDI, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -4, .form = X86_FORM_MOV_RM32_R32 },
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -4, .form = X86_FORM_LDMXCSR_M32 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_stmxcsr[] = {
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -4, .form = X86_FORM_STMXCSR_M32 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -4, .form = X86_FORM_MOV_R32_RM32 },
+    { .form = X86_FORM_RET },
+};
+
+// _m_prefetch's and _m_prefetchw's lines at p, as clang's code prefetches them: PREFETCHT0 (a read, locality 3) and
+// PREFETCHW.
+static const X86Instruction cbuiltin_x86_helper_prefetch[] = {
+    { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_PREFETCHT0_M8 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_prefetchw[] = {
+    { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_PREFETCHW_M8 },
+    { .form = X86_FORM_RET },
+};
+
+// xsetbv(a, v): XCR a (ecx) set to v's halves, edx:eax.
+static const X86Instruction cbuiltin_x86_helper_xsetbv[] = {
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDI, .form = X86_FORM_MOV_R32_RM32 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSI, .form = X86_FORM_MOV_R64_RM64 },
+    { .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RSI, .form = X86_FORM_MOV_R64_RM64 },
+    { .immediate = 32, .rm = X86_REGISTER_RDX, .form = X86_FORM_SHR_RM64_IMM8 },
+    { .form = X86_FORM_XSETBV },
     { .form = X86_FORM_RET },
 };
 

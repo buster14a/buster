@@ -350,9 +350,16 @@ struct CheckControlWriter
     uint32_t* previous;
     const uint32_t* token_first;
     const uint32_t* node_next;
+    // Each initializer node's declaration token, where `initialized` has the node's bit (check_program_openings), and each
+    // statement's first initializer plan, where `planned` has its token's bit: no other entry is written (#877).
     const uint32_t* initializers;
+    const uint64_t* initialized;
     const uint32_t* plan_first;
+    const uint64_t* planned;
     const uint32_t* plan_next;
+    // Whether the unit may have variable-length arrays' bounds or objects (check_program_variable): only then does it have
+    // vla_first, allocation_first, allocation_next, vla_blocks and vla_saves, which are null otherwise (#877).
+    bool variable;
     const uint32_t* vla_first;
     const uint32_t* vla_next;
     // The variable-length arrays' objects of each statement (by its terminator), in declaration order, and each block's
@@ -362,6 +369,7 @@ struct CheckControlWriter
     const uint32_t* allocation_next;
     const uint32_t* vla_blocks;
     const uint32_t* vla_saves;
+    // Each asm statement's index by its token, or null for a unit without asm statements.
     const uint32_t* asm_statements;
     const uint32_t* case_first;
     const uint32_t* case_next;
@@ -369,6 +377,7 @@ struct CheckControlWriter
     uint32_t* source_labels;
     uint32_t* stops;
     uint32_t* repeats;
+    // Each body's first region (by its opening token) and each region's next, or null for a unit without regions.
     const uint32_t* region_first;
     const uint32_t* region_next;
     // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
@@ -620,7 +629,7 @@ static bool check_program_query_known(const CheckProgram* program, uint32_t node
 static bool check_program_runtime_effects(const CheckProgram* program, uint32_t node)
 {
     const CheckStream* stream = program->stream;
-    bool effects = (stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
+    bool effects = (check_stream_flags(stream, node) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
     if (program->input->graph.ops[node] == CHECK_OP_BUILTIN_QUERY)
     {
         const uint32_t selected = check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), node);
@@ -637,7 +646,8 @@ static bool check_program_runtime_effects(const CheckProgram* program, uint32_t 
 static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
-    const CheckValue* value = program->stream->values + condition;
+    const CheckValue checked_value = check_stream_value(program->stream, condition);
+    const CheckValue* value = &checked_value;
     const bool environment = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
     bool runtime = false;
     bool available = true;
@@ -735,7 +745,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
         const uint32_t condition = input->token_nodes[owner];
         uint32_t width = 0;
         bool sign = false;
-        if (condition >= program->stream->count || !check_action_integer_type(program->types, program->stream->values[condition].type, &width, &sign))
+        if (condition >= program->stream->count || !check_action_integer_type(program->types, check_stream_type(program->stream, condition), &width, &sign))
         {
             check_program_constraint(program, owner);
         }
@@ -747,7 +757,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
         const uint32_t condition = owner < tokens ? input->token_nodes[owner] : BUSTER_CHECK_NONE;
         uint32_t width = 0;
         bool sign = false;
-        if (condition >= program->stream->count || !check_action_integer_type(program->types, program->stream->values[condition].type, &width, &sign))
+        if (condition >= program->stream->count || !check_action_integer_type(program->types, check_stream_type(program->stream, condition), &width, &sign))
         {
             check_program_constraint(program, owner < tokens ? owner : token);
         }
@@ -757,7 +767,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
             CheckProgramCase* item = program->cases + index;
             *item = (CheckProgramCase)
             {
-                .type = program->stream->values[condition].type,
+                .type = check_stream_type(program->stream, condition),
                 .token = token,
                 .owner = owner,
                 .target = BUSTER_CHECK_NONE,
@@ -918,6 +928,18 @@ static void check_control_token(CheckControlWriter* writer, uint32_t token)
     check_control_push(writer, (CheckControlTask){ .kind = CHECK_CONTROL_TASK_TOKEN, .token = token });
 }
 
+// Whether bit `index` of `bits` is set, and setting it: the bitsets that mark which entries of a sparse column were
+// written, so that the column needn't be cleared at every index (#877).
+static bool check_program_bit(const uint64_t* bits, uint32_t index)
+{
+    return ((bits[index / 64] >> (index % 64)) & 1) != 0;
+}
+
+static void check_program_bit_set(uint64_t* bits, uint32_t index)
+{
+    bits[index / 64] |= UINT64_C(1) << (index % 64);
+}
+
 static bool check_control_static(const CheckControlWriter* writer, uint32_t node)
 {
     const CheckInput* input = writer->program->input;
@@ -927,7 +949,8 @@ static bool check_control_static(const CheckControlWriter* writer, uint32_t node
     {
         cursor = graph->operand0[cursor];
     }
-    const uint32_t declaration = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE ? writer->initializers[cursor] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE && check_program_bit(writer->initialized, cursor) ?
+                                 writer->initializers[cursor] : BUSTER_CHECK_NONE;
     return declaration != BUSTER_CHECK_NONE && input->static_objects[declaration];
 }
 
@@ -944,7 +967,8 @@ static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint3
     uint32_t left = BUSTER_CHECK_NONE;
     uint32_t steps = 0;
     bool past = false;
-    for (uint32_t ancestor = parser->tree.parents[jump]; ancestor < count && steps < count && !past; ancestor = parser->tree.parents[ancestor])
+    for (uint32_t ancestor = writer->variable ? parser->tree.parents[jump] : count; ancestor < count && steps < count && !past;
+         ancestor = parser->tree.parents[ancestor])
     {
         past = targets != 0 && targets[ancestor] == target;
         const uint32_t saved = writer->vla_saves[ancestor];
@@ -1140,7 +1164,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
     {
         // A block's variable-length arrays are released at its end, after its statements and its cleanups.
-        if (role == PARSE_ROLE_CLOSE_BLOCK && writer->vla_blocks[token] != 0)
+        if (role == PARSE_ROLE_CLOSE_BLOCK && writer->variable && writer->vla_blocks[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
         }
@@ -1193,7 +1217,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             // condition's node is its truth (CHECK_OP_CONDITION); clang folds the expression's, of an integer type.
             const CheckGraph* graph = &input->graph;
             const uint32_t expression = graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
-            const CheckValue* value = writer->program->stream->values + expression;
+            const CheckValue checked_value = check_stream_value(writer->program->stream, expression);
+            const CheckValue* value = &checked_value;
             uint32_t width = 0;
             bool sign = false;
             bool truth = false;
@@ -1253,7 +1278,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             writer->stops[token] = end;
             uint32_t width = 0;
             bool sign = false;
-            if (!check_action_integer_type(writer->program->types, writer->program->stream->values[condition].type, &width, &sign))
+            if (!check_action_integer_type(writer->program->types, check_stream_type(writer->program->stream, condition), &width, &sign))
             {
                 check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
             }
@@ -1557,7 +1582,7 @@ static void check_control_begin(CheckControlWriter* writer, uint32_t opening)
             check_control_statement(writer, child, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         }
     }
-    if (writer->vla_first[opening] != BUSTER_CHECK_NONE)
+    if (writer->variable && writer->vla_first[opening] != BUSTER_CHECK_NONE)
     {
         check_control_token(writer, opening);
     }
@@ -1585,7 +1610,7 @@ static void check_control_drain(CheckControlWriter* writer)
         }
         else if (task.kind == CHECK_CONTROL_TASK_TOKEN)
         {
-            const uint32_t assembly = writer->asm_statements[task.token];
+            const uint32_t assembly = writer->asm_statements != NULL ? writer->asm_statements[task.token] : BUSTER_CHECK_NONE;
             if (assembly != BUSTER_CHECK_NONE)
             {
                 if (writer->count < writer->capacity)
@@ -1597,10 +1622,10 @@ static void check_control_drain(CheckControlWriter* writer)
                     check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
                 }
             }
-            const uint32_t plan = writer->plan_first[task.token];
+            const uint32_t plan = check_program_bit(writer->planned, task.token) ? writer->plan_first[task.token] : BUSTER_CHECK_NONE;
             uint32_t i = plan;
-            uint32_t v = writer->vla_first[task.token];
-            uint32_t a = writer->allocation_first[task.token];
+            uint32_t v = writer->variable ? writer->vla_first[task.token] : BUSTER_CHECK_NONE;
+            uint32_t a = writer->variable ? writer->allocation_first[task.token] : BUSTER_CHECK_NONE;
             // A variably modified typeof's operand (check_input_expressions' evaluation_nodes) is a side effect of the
             // declaration, after its type's variable bounds and before its initializers.
             const uint32_t evaluation = writer->program->input->evaluation_nodes != NULL ?
@@ -1746,7 +1771,8 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     }
     check_control_end(writer, closing);
     writer->entry_count = writer->count - writer->first_entry;
-    for (uint32_t r = writer->region_first[opening]; r != BUSTER_CHECK_NONE && writer->program->status == CHECK_PROGRAM_OK; r = writer->region_next[r])
+    const uint32_t first_region = writer->region_first != NULL ? writer->region_first[opening] : BUSTER_CHECK_NONE;
+    for (uint32_t r = first_region; r != BUSTER_CHECK_NONE && writer->program->status == CHECK_PROGRAM_OK; r = writer->region_next[r])
     {
         const CheckInputRegion* source = input->regions + r;
         CheckProgramRegion* region = writer->program->regions + r;
@@ -1909,9 +1935,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         source = graph->operand0[source];
                     }
                     unsigned __int128 value = 0;
-                    const bool known = check_program_case_value(program, entry->node, program->stream->values[entry->node].type, &value);
+                    const bool known = check_program_case_value(program, entry->node, check_stream_type(program->stream, entry->node), &value);
                     const bool enumeration = source < graph->count &&
-                        type_kind(program->types, type_strip_aligned(program->types, program->stream->values[source].type)) == BUSTER_TYPE_KIND_ENUM;
+                        type_kind(program->types, type_strip_aligned(program->types, check_stream_type(program->stream, source))) == BUSTER_TYPE_KIND_ENUM;
                     warning_safe &= !enumeration || known;
                 }
                 else if (entry->kind == CHECK_CONTROL_CASE)
@@ -2076,7 +2102,7 @@ static uint32_t check_program_reference_initializer(CheckProgram* program, const
         const uint32_t expression = write->node;
         if (write->kind == CHECK_INIT_VALUE && expression < graph->count)
         {
-            if (program->stream->values[expression].overload_head != 0)
+            if (check_stream_overload_head(program->stream, expression) != 0)
             {
                 const CheckValue value = write->value;
                 if (value.overload_head != 0 || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.object >= program->object_count)
@@ -2420,9 +2446,11 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
 
 // The bodies to build and the initializers' declaration tokens by node, in one pass over the tokens (#530): each body's
 // opening brace (a token with a body declaration, unless deferred) into `openings` in token order, and each initializer
-// node's token into `initializers`, the last as a scan in token order leaves it. AVX-512 tests 16 tokens at a time, the
-// rest and the `scalar` path one at a time. Returns the number of bodies.
-static uint32_t check_program_openings(const CheckInput* input, uint32_t node_count, uint32_t* openings, uint32_t* initializers, bool scalar)
+// node's token into `initializers`, the last as a scan in token order leaves it, with the node's bit in `initialized`
+// (zeroed), which says which entries were written (#877). AVX-512 tests 16 tokens at a time, the rest and the `scalar`
+// path one at a time. Returns the number of bodies.
+static uint32_t check_program_openings(const CheckInput* input, uint32_t node_count, uint32_t* openings, uint32_t* initializers, uint64_t* initialized,
+                                       bool scalar)
 {
     (void)scalar;
 
@@ -2442,11 +2470,12 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t node_co
         {
             openings[bodies++] = token + (uint32_t)__builtin_ctz(lanes);
         }
-        const __mmask16 initialized = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_nodes + token), nodes);
-        for (uint32_t lanes = initialized; lanes != 0; lanes &= lanes - 1)
+        const __mmask16 initializing = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_nodes + token), nodes);
+        for (uint32_t lanes = initializing; lanes != 0; lanes &= lanes - 1)
         {
             const uint32_t at = token + (uint32_t)__builtin_ctz(lanes);
             initializers[input->initializer_nodes[at]] = at;
+            check_program_bit_set(initialized, input->initializer_nodes[at]);
         }
     }
     for (; token < count; token += 1)
@@ -2458,6 +2487,7 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t node_co
         if (input->initializer_nodes[token] < node_count)
         {
             initializers[input->initializer_nodes[token]] = token;
+            check_program_bit_set(initialized, input->initializer_nodes[token]);
         }
     }
     return bodies;
@@ -2493,6 +2523,51 @@ static bool check_program_runtime_object(const CheckInput* input, const TypeTabl
 {
     return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
            !input->static_objects[token] && check_action_runtime_size(types, input->declared_types[token]);
+}
+
+// Each statement's initializer plans, linked from the last back so that a statement's list is in declaration order: a
+// statement's first entry is written, and its bit set in `planned`, at its first plan, and no other entry of plan_first is
+// (#877). A compound literal's plan joins no statement's list; true when one of a runtime object does.
+static bool check_program_plans(CheckProgram* program, const Parser* parser, const CheckInitializers* initializers, uint32_t* plan_first, uint64_t* planned,
+                                uint32_t* plan_next)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    bool compound_initializers = false;
+    for (uint32_t i = initializers != 0 ? initializers->count : 0; i-- > 0;)
+    {
+        const uint32_t declaration = initializers->declaration_tokens[i];
+        const bool compound = declaration < count && input->compound_objects[declaration];
+        uint32_t token = declaration < count && input->initializer_begins[declaration] != 0 ? input->initializer_begins[declaration] - 1 : BUSTER_CHECK_NONE;
+        uint32_t steps = 0;
+        while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
+        {
+            token = parser->tree.parents[token];
+            steps += 1;
+        }
+        if (compound)
+        {
+            // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
+            // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
+            plan_next[i] = BUSTER_CHECK_NONE;
+            compound_initializers |= !input->static_objects[declaration];
+        }
+        else if (token < count && steps < count)
+        {
+            if (!check_program_bit(planned, token))
+            {
+                check_program_bit_set(planned, token);
+                plan_first[token] = BUSTER_CHECK_NONE;
+            }
+            plan_next[i] = plan_first[token];
+            plan_first[token] = i;
+        }
+        else
+        {
+            check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
+        }
+    }
+    return compound_initializers;
 }
 
 // The variable-length arrays' objects, by their statements, and each block's first, from the last token back, so that the
@@ -2533,6 +2608,15 @@ static void check_program_allocations(CheckProgram* program, const Parser* parse
             check_program_allocation(program, parser, token, allocation_first, allocation_next, vla_blocks, vla_saves);
         }
     }
+}
+
+// Whether the unit may have a variable-length array's bounds or object, of which check_program keeps four token-sized
+// columns and finds the objects by a pass over every token (check_program_allocations): where it has a bound
+// (CheckInput.vlas), or its type table has a variable-length array's type, without which no type has a runtime size
+// (check_action_runtime_size). Most units have neither, and their program none of the columns (#877).
+static bool check_program_variable(const CheckInput* input, const TypeTable* types)
+{
+    return input->vla_count != 0 || memchr(types->types.kind, BUSTER_TYPE_KIND_VARIABLE_ARRAY, types->types.count) != NULL;
 }
 
 // The operators of the builtins the program lists (CheckProgram.builtin_nodes): every one from CHECK_OP_BUILTIN_UNARY on,
@@ -2936,23 +3020,32 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* previous = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* token_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* node_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+    // The initializers by node and the plans by statement, written at few entries, which their bits mark, rather than
+    // cleared at every one: 4 bytes a node and 4 a token, against a bit of each (#877).
     uint32_t* initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+    uint64_t* initialized = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)node_count + 64) / 64) : 0;
     uint32_t* plan_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint64_t* planned = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)count + 64) / 64) : 0;
     uint32_t* plan_next = valid && options.initializers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)options.initializers->count + 1) : 0;
-    uint32_t* vla_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    // The variable-length arrays' columns, the asm statements' and the regions', only for a unit that may have them: each
+    // is 4 bytes a token, which its fill touched in every unit (#877).
+    const bool variable = valid && check_program_variable(input, types);
+    const bool assemblies = valid && input->asm_count != 0;
+    const bool regions = valid && input->region_count != 0;
+    uint32_t* vla_first = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* vla_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->vla_count + 1) : 0;
-    uint32_t* allocation_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* allocation_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* vla_blocks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* vla_saves = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* asm_statements = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* allocation_first = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* allocation_next = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* vla_blocks = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* vla_saves = variable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* asm_statements = assemblies ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_map = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* source_labels = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* stops = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* repeats = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* region_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* region_first = regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* region_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->region_count + 1) : 0;
     // Each body's opening brace, in token order: at most one per token, and only the bodies' entries are touched.
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -2971,12 +3064,13 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControlTask, capacity) : 0;
-    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
-            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
+    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && initialized != 0 && labels != 0 &&
+            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
-            stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && openings != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
-            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0 && (input->cleanup_count == 0 || cleanup_parents != 0);
+            stops != 0 && repeats != 0 && (!regions || region_first != 0) && region_next != 0 && openings != 0 && vla_next != 0 && (!assemblies || asm_statements != 0) &&
+            (!variable || (vla_first != 0 && allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0)) &&
+            (input->cleanup_count == 0 || cleanup_parents != 0);
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -2987,19 +3081,25 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
         memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(initializers, 0xff, ((uint64_t)node_count + 1) * sizeof(uint32_t));
-        memset(plan_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(allocation_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(vla_blocks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(vla_saves, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(asm_statements, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        for (uint32_t i = 0; i < input->asm_count; i += 1)
+        memset(initialized, 0, ((uint64_t)node_count + 64) / 64 * sizeof(uint64_t));
+        memset(planned, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
+        if (variable)
         {
-            const CheckInputAsm* assembly = input->asm_statements + i;
-            if (assembly->body != BUSTER_CHECK_NONE && assembly->statement < count)
+            memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(allocation_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(vla_blocks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(vla_saves, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
+        if (assemblies)
+        {
+            memset(asm_statements, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            for (uint32_t i = 0; i < input->asm_count; i += 1)
             {
-                asm_statements[assembly->statement] = i;
+                const CheckInputAsm* assembly = input->asm_statements + i;
+                if (assembly->body != BUSTER_CHECK_NONE && assembly->statement < count)
+                {
+                    asm_statements[assembly->statement] = i;
+                }
             }
         }
         memset(needed, 0, (uint64_t)count + 1);
@@ -3013,7 +3113,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             *options.return_flow_work += (uint64_t)node_count + 1;
         }
-        memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (regions)
+        {
+            memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         for (uint32_t r = input->region_count; r-- > 0;)
         {
             const uint32_t body = input->regions[r].body;
@@ -3027,42 +3130,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 region_first[body] = r;
             }
         }
-        body_count = check_program_openings(input, node_count, openings, initializers, BUSTER_SCALAR_PATH(options.scalar));
+        body_count = check_program_openings(input, node_count, openings, initializers, initialized, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t node = node_count; node-- > 0;)
         {
             const uint32_t token = input->graph.tokens[node];
             node_next[node] = token_first[token];
             token_first[token] = node;
         }
-        bool compound_initializers = false;
-        for (uint32_t i = options.initializers != 0 ? options.initializers->count : 0; i-- > 0;)
-        {
-            const uint32_t declaration = options.initializers->declaration_tokens[i];
-            const bool compound = declaration < count && input->compound_objects[declaration];
-            uint32_t token = declaration < count && input->initializer_begins[declaration] != 0 ? input->initializer_begins[declaration] - 1 : BUSTER_CHECK_NONE;
-            uint32_t steps = 0;
-            while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
-            {
-                token = parser->tree.parents[token];
-                steps += 1;
-            }
-            if (compound)
-            {
-                // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
-                // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
-                plan_next[i] = BUSTER_CHECK_NONE;
-                compound_initializers |= !input->static_objects[declaration];
-            }
-            else if (token < count && steps < count)
-            {
-                plan_next[i] = plan_first[token];
-                plan_first[token] = i;
-            }
-            else
-            {
-                check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
-            }
-        }
+        const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next);
         if (compound_initializers && program->status == CHECK_PROGRAM_OK)
         {
             program->compound_initializers = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, options.initializers->count);
@@ -3075,7 +3150,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 memset(program->compound_initializers, 0, options.initializers->count);
             }
         }
-        check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, BUSTER_SCALAR_PATH(options.scalar));
+        if (variable)
+        {
+            check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, BUSTER_SCALAR_PATH(options.scalar));
+        }
         for (uint32_t i = input->vla_count; i-- > 0;)
         {
             const CheckInputVla* vla = input->vlas + i;
@@ -3151,8 +3229,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .token_first = token_first,
         .node_next = node_next,
         .initializers = initializers,
+        .initialized = initialized,
         .plan_first = plan_first,
+        .planned = planned,
         .plan_next = plan_next,
+        .variable = variable,
         .vla_first = vla_first,
         .vla_next = vla_next,
         .allocation_first = allocation_first,

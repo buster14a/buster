@@ -188,8 +188,9 @@ static Tier1CertError tier1_allocation_certificate_check(const Tier1AllocationIn
             };
             ends[in.fixed.ends[f]] = cursor++;
         }
-        uint32_t registers[2][32];
-        uint32_t reserved[2][32] = { 0 };
+        // A register's owner and its fixed ranges' count, per class: general, vector and opmask (#179).
+        uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES][32];
+        uint32_t reserved[BUSTER_TIER1_ALLOCATE_CLASSES][32] = { { 0 } };
         memset(registers, 0xff, sizeof(registers));
         for (uint32_t p = 0; valid && p < positions; p += 1)
         {

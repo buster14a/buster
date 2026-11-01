@@ -292,12 +292,13 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         const uint32_t selected = mapping[node];
         if (selected != BUSTER_CHECK_NONE)
         {
-            CheckValue expected = source->values[node];
+            CheckValue expected = check_stream_value(source, node);
             if (expected.fault != CHECK_FAULT_NONE && expected.fault_node != BUSTER_CHECK_NONE && expected.fault_node < source_graph->count)
             {
                 expected.fault_node = mapping[expected.fault_node];
             }
-            equal = check_test_value_equal(&expected, stream->values + selected) && source->diagnostics[node] == stream->diagnostics[selected] &&
+            const CheckValue selected_value = check_stream_value(stream, selected);
+            equal = check_test_value_equal(&expected, &selected_value) && source->diagnostics[node] == stream->diagnostics[selected] &&
                     source->warnings[node] == stream->warnings[selected] && source->warning_ignored[node] == stream->warning_ignored[selected];
             const CheckNodeConversions* a = source->conversions + node;
             const CheckNodeConversions* b = stream->conversions + selected;

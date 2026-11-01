@@ -392,7 +392,9 @@ not have that ambiguity.
 ## Floating checking
 
 `c_check_builtin_float.c` retains the declared real format and constructs
-infinities and quiet NaNs exactly for float, double and target x87 long double.
+infinities and NaNs exactly for float, double, target x87 long double,
+`_Float16` and `__float128` ("Signaling NaNs and the `_Float16` and
+`__float128` constants" below).
 NaN payload metadata is the entire decoded narrow string literal after
 parentheses/casts, excluding only the final terminator. Embedded zero bytes
 remain part of that slice and prevent constant folding. Unknown or invalid
@@ -556,6 +558,52 @@ signbits and canonicalize's results; folds; operands evaluated once; and
 vectors of 4 to 64 bytes of floats and doubles, GNU's and clang's extended
 ones, at x86-64-v4. Clang -O3's code differs from -O0's for eight masks of x87
 values, so -O0's builds are the oracle.
+
+### Signaling NaNs and the `_Float16` and `__float128` constants (#148)
+
+`__builtin_nans`, `__builtin_nansf` and `__builtin_nansl` (catalog codes 0x3e4
+to 0x3e6), and the `_Float16` and `__float128` forms of `nan`, `nans`, `inf`
+and `huge_val` (0x3e7 to 0x3ee: `nanf16`, `nansf16`, `inff16`, `huge_valf16`,
+`nanf128`, `nansf128`, `inff128`, `huge_valf128`), are floating builtins of the
+checker's, as `nan` and `inf` are (`cbuiltin_float_constant_extra`,
+`cbuiltin_float_nan`, `cbuiltin_float_signaling`), and `__has_builtin` answers
+them. Their payloads are read as `nan`'s are, and each value is APFloat
+`makeNaN`'s (`check_builtin_float_special`): the payload masked below the quiet
+bit, the quiet bit set or, for a signaling NaN, clear, and a signaling NaN
+without a payload given the bit below the quiet one (`nans("")` is
+`0x7ff4000000000000`, `nansf16("")` `0x7d00`).
+
+The checker's long double holds every format's NaN as the x87's own loads
+place it: the format's fraction at the significand's top, so that bit 62 is
+every format's quiet bit (`check_action_nan_bits`). A `__float128`'s 112
+fraction bits don't fit, so its NaN keeps its quiet bit at 62, its fraction's
+bit 110 (a signaling NaN without a payload's) at 61 and its payload's low 61
+bits below (`check_action_quad_bits`). A payload past 61 bits is refused:
+in a static initializer as an initializer that is not a constant expression,
+and in a function as an unsupported floating builtin. The value keeps its bits until a conversion to another format quiets it,
+as APFloat's does (`check_action_convert_nan`, which first re-encodes a
+`__float128` NaN as a narrowing reads it), so a conversion to the value's own
+format, the rounding of a NaN, and a unary `+` or `-` (a sign change alone, as
+`changeSign` makes it) leave a signaling NaN signaling.
+
+Static data, aggregates' initializers and function code write a NaN's bits from
+that encoding, its payload and quiet bit among them (`check_data_float_bytes`,
+`check_lower_float_bits`). Main wrote the canonical NaN, so `static double d =
+__builtin_nan("5")` lost its payload (`0x7ff8000000000000` where clang writes
+`0x7ff8000000000005`), and so did `nanf` and `nanl` in static data and `nanl`
+in code. The classifications fold of `_Float16` constants, their least normal
+`0x1p-14`, and of `__float128` infinities, NaNs and zeros, the values these
+builtins make, which are exact in the long double. They still refuse a
+run-time `_Float16` or `__float128` argument by name, as before.
+
+`test-check-builtins-float` checks the constructions and refusals, and
+`test-checker --program-float-constants` (`c_check_program_constants_test.c`)
+checks sources by both paths against clang (folds in constant expressions,
+result types, static and aggregate initializers, refusals) and runs programs
+natively against clang -O0's builds: each builtin's bytes in static data, in
+an aggregate's initializer and in code, with payloads, signs, negations and the
+conversions that quiet a signaling NaN, and `nan`'s, `nanf`'s and `nanl`'s
+payloads in static data.
 
 ## Atomic and terminal helper calls
 
@@ -1068,11 +1116,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 450 audited SemaX86 constraint facts for 422
+`c_check_builtin_x86.c` adds 558 audited SemaX86 constraint facts for 530
 affected names in the frozen 1,492-name own-main target-builtin scope and the
-supplementary scope: 87
-rounding sets, 90 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
+supplementary scope: 127
+rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 276 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -1204,6 +1252,60 @@ the existing families or of new ones:
   one's predicate is the immediate's whole byte, as clang's code passes it
   (`vcomiss`'s and `vcomisd`'s its low 5 bits, as `vcomish`'s, all the
   instruction reads), with the exceptions' suppression it asks for.
+- AVX-512's arithmetic by a rounding control: the 64-byte vectors' sums,
+  differences, products, quotients and square roots (`addpd512` to `divps512`,
+  `sqrtpd512`, `sqrtps512`), the scalar ones into w under a mask
+  (`addsd_round_mask` to `divss_round_mask`), the conversions of integers to
+  floats and of floats to doubles under a mask (`cvtdq2ps512_mask`,
+  `cvtudq2ps512_mask`, `cvtqq2pd512_mask`, `cvtuqq2pd512_mask`,
+  `cvtps2pd512_mask`, which takes the exceptions' suppression), the scalar
+  conversions to integers (`vcvtsd2si32` to `vcvtss2si64`) and from them into a
+  vector's low element (`cvtsi2sd64` to `cvtusi2ss64`, a family of their own,
+  `CHECK_X86_LOWER_INT_CONVERT`), and the 64-byte FMAs merged into a, zeroed or
+  merged into c (`vfmaddpd512_mask` to `vfmsubps512_mask3`). The current mode
+  (4) takes the plain form; 8 to 11 take the embedded rounding's form with its
+  direction. `x86_semantics.c` gained the effects of the forms these reach that
+  it lacked: VSUBSS, VSUBSD, VDIVSS and VDIVSD's EVEX forms, the 231 FMAs' and
+  FMSUBs' 64-byte forms and the EVEX integer-to-float conversions.
+- the rest of the gathers and scatters: AVX-512's of floats and doubles at 64
+  bytes (`gathersiv16sf` to `gatherdiv8df`, `scatterdiv16sf` to
+  `scattersiv8di`) and of every element at 16 and 32 bytes (`gather3div2df` to
+  `gather3siv8si`, `scatterdiv2df` to `scattersiv8si`), the existing families'
+  with their forms; and AVX2's under a vector's signs (`gatherd_d` to
+  `gatherq_q256`), a family of their own (`CHECK_X86_LOWER_GATHER_VECTOR`:
+  VEX's VPGATHER with the mask in vvvv, which the instruction zeroes). Each
+  takes clang's scale check (1, 2, 4 or 8). `x86_semantics.c` gained the effects
+  of the float gathers and scatters, VPGATHERQD's and VPSCATTERDQ's.
+- SSE4.1's roundings by an immediate (`roundps`, `roundpd`, their 256-bit
+  forms, and `roundss` and `roundsd` of b's first element into a: 0 to 15), its
+  dot products (`dpps`, `dpps256`, `dppd`), AES's key assist
+  (`aeskeygenassist128`), SHA's four rounds (`sha1rnds4`, 0 to 3, a legacy form
+  without vvvv, as BINARY's SHA forms are) and F16C's conversions to halves
+  (`vcvtps2ph`, `vcvtps2ph256`, 0 to 255), each the immediate's whole byte, by
+  VEX forms that require AVX. `x86_semantics.c` gained their VEX forms'
+  effects, and Tier 0's legacy list SHA1RNDS4.
+- the system builtins whose instructions take fixed registers or memory, as
+  per-unit leaves (`c_builtin_x86_helpers.c`): `rdtsc` (`__rdtsc`'s records),
+  `lzcnt_u16` (BSR's index xored with 15, 16 for 0), the fences (`lfence`,
+  `mfence`, `sfence`), `clflush`, `ldmxcsr` and `stmxcsr` (through the leaf's
+  red zone) and `xsetbv`, which only the kernel may run and whose fixture only
+  compiles and links.
+- the header builtins, leaves too: the names `<xmmintrin.h>`, `<emmintrin.h>`
+  and `<prfchwintrin.h>` declare (`_mm_lfence`, `_mm_mfence`, `_mm_sfence`,
+  `_mm_pause`, `_mm_clflush`, `_mm_getcsr`, `_mm_setcsr`, `_m_prefetch` and
+  `_m_prefetchw`), whose calls were calls of undefined functions. An x86 builtin
+  of the intrinsic catalogue's rows and leaves (`cbuiltin_source_intrinsic`)
+  stays the builtin under a declaration of it with external linkage, at file
+  scope or at block scope, as clang keeps it (`check_input_intrinsic_prepare`,
+  each catalogue row's verdict remembered in `CheckInputReader.intrinsic_source`);
+  a definition with internal linkage is the program's function, and a local
+  object of the name hides it. Pending: clang refuses a definition of one with
+  external linkage (`definition of builtin function`), which this compiler
+  takes as the builtin; and the builtins of the dedicated paths
+  (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
+  declaration too, become calls of their names here.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
+  modes, and stays out of the scope.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's
@@ -1427,9 +1529,9 @@ which clang tests inline, are the floating builtins' ("Floating checking"),
 not calls. The table's other `F` rows stay refused, and `__has_builtin`
 answers 0 for them. The lowering refuses by name those the checker can type:
 `__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
-Tier 0's allocation doesn't take), and the signaling NaNs' and the `_Float128`
-and `_Float16` NaNs' (constants clang folds that no library function makes).
-The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
+Tier 0's allocation doesn't take). The signaling NaNs and the `_Float128` and
+`_Float16` NaNs, which clang folds, are the floating builtins' constants
+("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
 function takes or returns `__fp16`), the matrix builtins, and the `FILE`
 builtins (`fprintf` and its kin).
 

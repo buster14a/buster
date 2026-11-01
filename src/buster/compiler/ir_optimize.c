@@ -1264,13 +1264,16 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
     }
 }
 
-static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
+// `masks`: whether the caller's passes take a function whose only SIMD values are masks (#179): SCCP, dead code and CFG
+// cleanup, whose folds of and, or, xor, not and bitcast keep a mask's bits as an integer's of its width. GVN, LICM, SROA
+// and the inliner don't, and no pass takes vectors (#141's).
+static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool masks)
 {
     (void)scalar;
 
     work->function = function;
     IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
-    if (check.error == IR_OK && ir_function_has_simd(function))
+    if (check.error == IR_OK && ir_function_has_simd(function) && (!masks || ir_function_has_vectors(function)))
     {
         check.error = IR_ERROR_UNSUPPORTED;
     }
@@ -1625,7 +1628,7 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
 
     const uint64_t mark = scratch->length;
     IrOptimizeWork verification = { 0 };
-    IrCheck check = ir_optimize_prepare(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar));
+    IrCheck check = ir_optimize_prepare(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar), true);
     if (check.error == IR_OK)
     {
         const IrDominance dominance = {
@@ -1665,7 +1668,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
     }
     if (check.error == IR_OK)
     {
@@ -1706,6 +1709,9 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
         ir_optimize_dce(&work, options);
         check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
     }
+    // Load-bearing: the C driver's --tier1 plans this result by tier1_select_plan_verified, which doesn't verify it again,
+    // its uses dominated by their definitions (c_check_tier1.c, #141). Weakening this verification needs the driver to
+    // verify instead (tier1_select_plan).
     if (check.error == IR_OK)
     {
         check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));

@@ -48,12 +48,23 @@ The shared interpreter keeps wide payloads only for vector-producing values.
 [#141](https://github.com/buster14a/buster/issues/141) must select these values
 using the generated target, retain memory effects and publish vector/mask
 register constraints. [#179](https://github.com/buster14a/buster/issues/179)
-must then allocate the distinct opmask class, define k0 eligibility per selected
-form, spill/reload mask widths exactly and reconcile live values at CFG edges.
-Neither consumer may reinterpret a mask as an ordinary GPR value or infer target
-permission from the compiler host. Scalar-only promotion, optimization and
-selection still refuse SIMD functions before publication; this handoff does not
-claim native Tier 1 vector execution, full vector ABI support or a throughput gain.
+allocates the distinct opmask class: `tier1_allocate.c` and `tier1_cfg.c` take
+it as their third class, k1 to k7 for values and k0 the class's scratch, calls
+clobbering all of them, and `tier1_cfg_verify` checks it; `tier1_cfg_ir.c`
+models the IR's masks with it, and `test-tier1-cfg-source --simd` allocates
+real C's `vcmp` masks ([the allocation guide](tier1-allocation.md)'s "The
+opmask class"). The selector takes masks' operations, and the CFG consumer
+spills and reloads a mask at its width, moves it along CFG edges with `kmov` and
+saves it around calls ([the selection guide](tier1-selection.md)'s "AVX-512's
+masks"): `test-tier1-masks` runs hand-written IR of masks natively against the
+shared IR's interpreter. Neither consumer may reinterpret a mask as an ordinary
+GPR value or infer target permission from the compiler host. SSA promotion and
+SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
+stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
+guide](ir-simd.md)'s "Masks from the typed stream"), and refuse one with vectors;
+GVN, LICM, SROA and the inliner still refuse every SIMD function, and selection
+refuses vectors; this handoff does not claim native Tier 1 vector
+execution, full vector ABI support or a throughput gain.
 
 ## Required evidence
 
@@ -67,7 +78,7 @@ The component issues retain their individual acceptance criteria:
 | Differential testing | [#142](https://github.com/buster14a/buster/issues/142) | Recorded real Csmith and YARPGen programs compiled by Buster at both tiers and Clang at both optimization levels |
 | Scheduling | [#172](https://github.com/buster14a/buster/issues/172) | Dependency validity and measured program benefit relative to compilation cost; retain only if it pays |
 | Dominators and loops | [#174](https://github.com/buster14a/buster/issues/174) | Agreement with independent definitions and actual SSA, optimizer and allocator consumers |
-| Frame layout | [#177](https://github.com/buster14a/buster/issues/177) | Valid slot sharing, call alignment, variadic/over-aligned ABI cross-linking, unwind integration and program results |
+| Frame layout | [#177](https://github.com/buster14a/buster/issues/177) | Valid slot sharing, call alignment, variadic/over-aligned ABI cross-linking and program results; unwind integration is done (the driver's unwind tables) |
 | Rematerialization | [#178](https://github.com/buster14a/buster/issues/178) | Flags-safe recipes at actual uses, spill/frame reduction and generated-program correctness and cost |
 | Zen 5 costs | [#181](https://github.com/buster14a/buster/issues/181) | Independent emitter coverage and real consumers; unknown measurements remain unknown |
 
@@ -86,7 +97,7 @@ and execution following lighter work. CI retains priority between runs.
 
 ## The C driver's `--tier1`
 
-`./build/compiler --tier1 -fno-asynchronous-unwind-tables [options] file.c...`
+`./build/compiler --tier1 [options] file.c...`
 compiles each function the pipeline takes by Tier 1 and every other function by
 Tier 0, as without the option, into one System V program
 (`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
@@ -102,8 +113,9 @@ and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
 that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
 1's code: its records, its spills' stores and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
-definitions of them it left out, its edges' moves, its spill slots and its
-frames' bytes. `--tier1-no-rematerialize` compiles Tier 1's functions spilling
+definitions of them it left out, its edges' moves, its spill slots, its
+frames' bytes, and its unwind tables' shapes: open frames, returns published as
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`). `--tier1-no-rematerialize` compiles Tier 1's functions spilling
 what they would recompute (#178's comparison: [the allocation
 guide](tier1-allocation.md)'s "Rematerialization"):
 
@@ -111,11 +123,17 @@ guide](tier1-allocation.md)'s "Rematerialization"):
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
 ```
 
-The driver refuses what Tier 1's code can't carry yet: unwind tables (Tier 1's
-frames save registers with stores, which the push-based unwind descriptor doesn't
-describe), hence the required `-fno-asynchronous-unwind-tables`, and `-g`'s
-rows. Several source files compile as without the option, each unit's report
-added to the command's.
+Tier 1's functions have unwind tables as Tier 0's do, by default and under the
+same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables"):
+their frames are Tier 0's frame protocol (callee-saved registers pushed, one
+subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
+realignment after the subtraction), which Tier 1's code publishes to the
+emission (`check_tier1_frame`), its early returns' epilogues as teardowns the
+tables remember and restore around, and a function whose code doesn't end in its
+last epilogue (a loop's latch last) as an open frame ([the frame
+guide](tier1-frame.md)'s "Unwind tables", #177). The driver refuses what Tier
+1's code can't carry yet: `-g`'s rows. Several source files compile as without
+the option, each unit's report added to the command's.
 
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
@@ -148,14 +166,17 @@ records) and the spills' stores and reloads (15,028 to 7,550). A constant, a
 symbol's address or a frame object's address, or a copy of one, is recomputed
 where the allocator takes it out of a register, rather than stored and reloaded
 (#178), which took a third of those stores and reloads again, with no change in
-speedtest1's run time. Still refused: floating point, narrow
-call arguments (the IR doesn't keep their signedness, which the callee's
-extension needs), stack arguments, labels, switches, aggregates by value and
-variadic definitions.
+speedtest1's run time. Labels and indirect jumps (#789) go through the CFG
+consumer too: an indirect jump's edge moves at each label's block, or in a stub
+after the jump, and each label's symbol where the jump enters it. So do variadic
+definitions (#789): the frame's register save area, which the prologue fills
+from the argument registers, and the overflow area past the incoming stack
+arguments. Still refused: floating point, narrow call arguments (the IR doesn't
+keep their signedness, which the callee's extension needs), stack arguments,
+switches and aggregates by value.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
-`test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
-#142's campaigns.
+`test-differential --tier1-arg --tier1` #142's campaigns.
 
 Measured on the 9700X ([step 5's
 record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)

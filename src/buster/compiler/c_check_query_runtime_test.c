@@ -47,7 +47,8 @@ static void check_test_query_source(CheckTest* test, const CheckQueryFixture* fi
         if (valid)
         {
             const CheckBuiltinQueryEffect* effect = stream.queries + stream.query_count - 1;
-            const CheckValue* value = stream.values + effect->node;
+            const CheckValue checked_value = check_stream_value(&stream, effect->node);
+            const CheckValue* value = &checked_value;
             valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->integer == fixture->source &&
                     effect->runtime_value.constant_kind == CHECK_CONSTANT_INTEGER && effect->runtime_value.integer == fixture->runtime &&
                     effect->evaluated_operands == fixture->evaluated;
@@ -109,8 +110,8 @@ static void check_test_query_conversion_proofs(CheckTest* test, TypeTable* table
                     const bool sign = targets[target] == BUSTER_TYPE_INT || targets[target] == BUSTER_TYPE_INT128;
                     const unsigned __int128 expected = value == 0 ? maximum : value == 1 && sign ? maximum + 1 : 0;
                     check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &stream) && stream.report_count == 0 &&
-                        stream.values[cast].fault == CHECK_FAULT_NONE && stream.values[cast].constant_kind == CHECK_CONSTANT_INTEGER &&
-                        stream.values[cast].integer == expected && stream.values[query].integer == 1 && stream.queries[0].runtime_value.integer == 1 &&
+                        check_stream_value(&stream, cast).fault == CHECK_FAULT_NONE && check_stream_constant_kind(&stream, cast) == CHECK_CONSTANT_INTEGER &&
+                        check_stream_value(&stream, cast).integer == expected && check_stream_value(&stream, query).integer == 1 && stream.queries[0].runtime_value.integer == 1 &&
                         stream.queries[0].runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_SKIP && stream.queries[0].evaluated_operands == 0 &&
                         stream.statistics.scalar_nodes + stream.statistics.vector_nodes == 3,
                         "a constant query of an out-of-range floating conversion is constant, the value saturated as clang folds it");

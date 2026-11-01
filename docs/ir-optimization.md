@@ -174,6 +174,26 @@ failures at the initial pass-group checkpoint. Entry-phi refusal regression
 was added after that checkpoint; target-host results and final
 revision validation must be recorded separately.
 
+### Pass fixtures in the text form
+
+[#175](https://github.com/buster14a/buster/issues/175)'s last acceptance item is
+the first tests of this issue written in the IR's text form, and
+`tests/ir/optimize/*.ir` are those fixtures: hand-written before/after pairs for
+SCCP alone, DCE alone, CFG cleanup alone, the combined set the C driver's
+`--tier1` runs, value numbering, loop-invariant motion and private-field
+replacement. `test-ir-optimize` parses each pair with both parser paths, runs
+the pass with both optimizer twins, requires the vector result's canonical
+print to be the after file's bytes, reparses it to the after file's function,
+and executes both sides on eighteen inputs through the same independent
+interpreter the constructed fixtures use. Value numbering's scalar twin is the
+available-expression oracle, so it may remove fewer instructions than the
+vector partition; every other pair must give both twins the same function.
+SROA's slot renumbering means its stores legitimately move in the executor's
+address-keyed trace, so that pair compares values and statuses alone.
+`test-ir-optimize --print-text` prints the vector results for a reviewed
+regeneration of the pairs. The [text tools guide](ir-tools.md#pass-fixtures-in-the-text-form)
+has the fixture-by-fixture record and the exact contracts.
+
 ## Remaining issue scope and acceptance
 
 The SCCP/dead-code/CFG group and the following separate slices are implemented
