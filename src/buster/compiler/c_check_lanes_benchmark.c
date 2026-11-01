@@ -89,6 +89,8 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
     {
         own[i] = options[i];
     }
+    // Zeroed: pp_parse_options sets every field, but where the option arena can't push its arguments it doesn't run, and
+    // the program's options below read the target and the predefines whether or not the file could be read.
     PPOptions pp_options = { 0 };
     const char* input = 0;
     const char* output_file = 0;

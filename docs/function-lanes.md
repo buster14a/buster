@@ -386,7 +386,9 @@ compiles for the target its options give (`-march` and the `-m` flags, and the
 predefines a function's `target` attribute resolves against); before #1045 it
 was always the baseline x86-64 profile's. `test-checker` runs it on a unit of
 512-bit vectors (`c_check_lanes_benchmark_test.c`), measured with
-`-march=znver5` and refused without, as `-c` refuses it.
+`-march=znver5` and refused for the baseline profile, as `-c` refuses it, and
+on a baseline unit whose function's `target("avx2")` attribute takes a 32-byte
+vector, measured only with the predefines.
 
 ### The 9700X
 
