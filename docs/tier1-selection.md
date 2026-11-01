@@ -154,10 +154,18 @@ patterns are:
   as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
   `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
   zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
-  alone, which would otherwise wait for the register's last writer. A return
-  moves its value into xmm0. Still refused: `F80` (the x87's), a select of
-  floating values, and conversions between floating values and unsigned 64-bit
-  integers, whose values past `INT64_MAX` no single conversion takes.
+  alone, which would otherwise wait for the register's last writer. An unsigned
+  64-bit integer's conversions, whose values past `INT64_MAX` no single
+  conversion takes, are sequences of the fixed-register path's room
+  (`TIER1_RULE_FLOAT_CONVERT_WIDE`, through the scratch registers alone). To a
+  floating value, the source converts as a signed value where its sign bit is
+  clear. Otherwise it is halved with its last bit kept as a sticky bit, so
+  rounding the half rounds the source, then converted, and `paddq` or `paddd`
+  adds 1 to the result's exponent. From a floating value, the result is the
+  signed conversion's, or, where that is 2^63 (the value is 2^63 or more), 2^63
+  ORed with the truncation of the value less 2^63: the negation of the
+  truncation of 2^63 less the value. A return moves its value into xmm0. Still
+  refused: `F80` (the x87's) and a select of floating values.
 - Call arguments and parameters take their places by the System V classes
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,

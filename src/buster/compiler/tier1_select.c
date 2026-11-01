@@ -153,6 +153,7 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_COMPARE,
     TIER1_RULE_FLOAT_BRANCH_COMPARE,
     TIER1_RULE_FLOAT_CONVERT,
+    TIER1_RULE_FLOAT_CONVERT_WIDE,
     TIER1_RULE_FLOAT_RETURN,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
@@ -168,6 +169,9 @@ typedef enum Tier1SelectRule
 // - FROM_BITS and TO_BITS, a bitcast between an F32 and an I32 or an F64 and an I64: movd or movq.
 // Each conversion to a floating value zeroes its destination first (xorps), but a resize: cvtsi2s* writes its low
 // element alone, which would otherwise wait for the register's last writer.
+// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`, whose values
+// past INT64_MAX no single conversion takes: a sequence longer than a node's room, through the fixed-register path's
+// (tier1_select_fixed), which names the scratch register alone, holding no value (tier1_select_fixed_registers).
 #define BUSTER_TIER1_FLOAT_FROM_SIGNED 0
 #define BUSTER_TIER1_FLOAT_FROM_UNSIGNED 1
 #define BUSTER_TIER1_FLOAT_TO_SIGNED 2
@@ -1156,7 +1160,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 static uint32_t tier1_select_fixed_registers(uint32_t rule)
 {
     const uint32_t divide = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX);
-    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX : 0;
+    // An unsigned I64's conversion (#141) writes the scratch register alone, which no value lives in: nothing is saved for
+    // it, but its sequence takes the path's room.
+    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX : rule == TIER1_RULE_FLOAT_CONVERT_WIDE ? 1u << BUSTER_TIER1_SELECT_SCRATCH : 0;
 }
 
 // TIER1_RULE_DIVIDE_RECIPROCAL's records (Tier1SelectReciprocal), the high product in rdx: the multiplier in rax, or in rdx
@@ -1298,6 +1304,48 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
     {
         count = tier1_select_reciprocal_records(holes, records);
+    }
+    else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
+    {
+        // An unsigned I64 to a floating value (#141), the source s unchanged: s, converted as a signed one where its sign
+        // bit is clear; else v = (s | (s & 1) << 1) >> 1, s halved with its last bit kept as a sticky one so that rounding
+        // v rounds s, converted and doubled by adding 1 to the result's exponent (s's sign bit shifted to the exponent's
+        // lowest, by paddq or paddd through the vector class's scratch register).
+        const uint8_t x = holes->destination & 15;
+        const uint8_t xs = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        const Tier1SelectFloatForms* forms = tier1_select_float_forms(width);
+        records[count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = scratch, .rm = holes->left, .index = holes->left, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) };
+        records[count++] = (X86Instruction){ .form = X86_FORM_AND_RM32_IMM8, .rm = scratch, .immediate = 2 };
+        records[count++] = tier1_select_register_record(X86_FORM_OR_R64_RM64, scratch, holes->left);
+        records[count++] = (X86Instruction){ .form = X86_FORM_SHR_RM64_IMM8, .rm = scratch, .immediate = 1 };
+        records[count++] = tier1_select_register_record(X86_FORM_TEST_RM64_R64, holes->left, holes->left);
+        records[count++] = tier1_select_register_record(X86_FORM_CMOVNS_R64_RM64, scratch, holes->left);
+        records[count++] = tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x);
+        records[count++] = tier1_select_register_record(forms->from_integer[1], x, scratch);
+        records[count++] = tier1_select_move(8, scratch, holes->left);
+        records[count++] = (X86Instruction){ .form = X86_FORM_SHR_RM64_IMM8, .rm = scratch, .immediate = 63 };
+        records[count++] = (X86Instruction){ .form = X86_FORM_SHL_RM64_IMM8, .rm = scratch, .immediate = width == 8 ? 52 : 23 };
+        records[count++] = tier1_select_register_record(forms->from_general, xs, scratch);
+        records[count++] = tier1_select_register_record(width == 8 ? X86_FORM_PADDQ_X_XM128 : X86_FORM_PADDD_X_XM128, x, xs);
+    }
+    else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE)
+    {
+        // A floating value to an unsigned I64 (#141), the source x unchanged: d = trunc(x), and where x is 2^63 or more,
+        // whose d is then 2^63 (the conversion's out-of-range result), 2^63 | trunc(x - 2^63), computed as the negation of
+        // trunc(2^63 - x) (truncation is symmetric), 2^63 in the vector class's scratch register from the scratch one.
+        const uint8_t x = holes->left & 15;
+        const uint8_t xs = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        const uint32_t source_width = holes->source_width;
+        const Tier1SelectFloatForms* forms = tier1_select_float_forms(source_width);
+        records[count++] = tier1_select_register_record(forms->to_integer[1], holes->destination, x);
+        records[count++] = tier1_select_constant_move(source_width == 8 ? 8 : 4, scratch, source_width == 8 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x5f000000));
+        records[count++] = tier1_select_register_record(forms->from_general, xs, scratch);
+        records[count++] = tier1_select_register_record(forms->arithmetic[1], xs, x);
+        records[count++] = tier1_select_register_record(forms->to_integer[1], scratch, xs);
+        records[count++] = (X86Instruction){ .form = X86_FORM_NEG_RM64, .rm = scratch };
+        records[count++] = tier1_select_register_record(X86_FORM_OR_R64_RM64, scratch, holes->destination);
+        records[count++] = tier1_select_register_record(X86_FORM_TEST_RM64_R64, holes->destination, holes->destination);
+        records[count++] = tier1_select_register_record(X86_FORM_CMOVS_R64_RM64, holes->destination, scratch);
     }
     return count;
 }
@@ -2353,24 +2401,25 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = c == IR_EQ || c == IR_NE ? 5 : 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    // Conversions (BUSTER_TIER1_FLOAT_FROM_SIGNED and the others): from an I8 to I64 signed, and an I1 to I32 unsigned, to
-    // a floating value; from one to an I8 to I64 signed, and an I8 to I32 unsigned; between the two precisions; and the
-    // bits of an F32 as an I32's or an F64 as an I64's, and back. An unsigned I64 isn't taken, whose values past INT64_MAX
-    // no single conversion handles.
-    else if ((float_width != 0 && ((op == IR_SITOFP && function->type[a] >= IR_I8 && function->type[a] <= IR_I64) || (op == IR_UITOFP && function->type[a] >= IR_I1 && function->type[a] <= IR_I32))) ||
-             (operand_float != 0 && ((op == IR_FPTOSI && type >= IR_I8 && type <= IR_I64) || (op == IR_FPTOUI && type >= IR_I8 && type <= IR_I32))) ||
+    // Conversions (BUSTER_TIER1_FLOAT_FROM_SIGNED and the others): from an I8 to I64 signed, and an I1 to I64 unsigned, to
+    // a floating value; from one to an I8 to I64, signed or unsigned; between the two precisions; and the bits of an F32
+    // as an I32's or an F64 as an I64's, and back. An unsigned I64's, whose values past INT64_MAX no single conversion
+    // takes, is TIER1_RULE_FLOAT_CONVERT_WIDE's sequence.
+    else if ((float_width != 0 && ((op == IR_SITOFP && function->type[a] >= IR_I8 && function->type[a] <= IR_I64) || (op == IR_UITOFP && function->type[a] >= IR_I1 && function->type[a] <= IR_I64))) ||
+             (operand_float != 0 && ((op == IR_FPTOSI && type >= IR_I8 && type <= IR_I64) || (op == IR_FPTOUI && type >= IR_I8 && type <= IR_I64))) ||
              (float_width != 0 && operand_float != 0 && (op == IR_FTRUNC || op == IR_FEXT)) ||
              (op == IR_BITCAST && float_width != 0 && function->type[a] == (float_width == 8 ? IR_I64 : IR_I32)) ||
              (op == IR_BITCAST && operand_float != 0 && type == (operand_float == 8 ? IR_I64 : IR_I32)))
     {
         const uint32_t source = function->type[a];
-        base.rule = TIER1_RULE_FLOAT_CONVERT;
+        const bool wide = (op == IR_UITOFP && source == IR_I64) || (op == IR_FPTOUI && type == IR_I64);
+        base.rule = wide ? TIER1_RULE_FLOAT_CONVERT_WIDE : TIER1_RULE_FLOAT_CONVERT;
         base.values[0] = a;
         base.width = (uint8_t)(float_width != 0 ? float_width : tier1_select_memory_width(type));
         base.source_width = (uint8_t)(operand_float != 0 ? operand_float : source == IR_I1 ? 1 : tier1_select_memory_width(source));
         base.scale = (uint8_t)(op == IR_SITOFP ? BUSTER_TIER1_FLOAT_FROM_SIGNED : op == IR_UITOFP ? BUSTER_TIER1_FLOAT_FROM_UNSIGNED : op == IR_FPTOSI ? BUSTER_TIER1_FLOAT_TO_SIGNED :
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
-        base.intrinsic_cost = op == IR_BITCAST ? 1 : 2;
+        base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
         // An integer constant's conversion is the floating constant it converts to, rounded as cvtsi2s* rounds under the
         // default rounding mode, to nearest: C's conversion on this host computes it so.

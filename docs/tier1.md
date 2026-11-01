@@ -226,9 +226,9 @@ stack slots, and stores an aggregate result into its object; a function stores
 each aggregate parameter's registers into a frame object at its entry, and
 returns an aggregate's parts or copies it through the hidden pointer (the
 selection guide's "By-value aggregates"). Still refused: long double, selects
-of floating values, conversions between floating values and unsigned 64-bit
-integers, switches, and the convention's rarer aggregate shapes (a part in a
-stack slot, a high or low eightbyte alone, a vector's or the x87's register).
+of floating values, switches, the dynamic stack, and the convention's rarer
+aggregate shapes (a part in a stack slot, a high or low eightbyte alone, a
+vector's or the x87's register).
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

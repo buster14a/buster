@@ -25,7 +25,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUSTER_TIER1_PIPELINE_CASES 15
+#define BUSTER_TIER1_PIPELINE_CASES 16
 #define BUSTER_TIER1_PIPELINE_CALL_CASES 3
 #define BUSTER_TIER1_PIPELINE_FUNCTIONS 2
 #define BUSTER_TIER1_PIPELINE_INPUTS 32
@@ -547,11 +547,25 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
     }
+    else if (shape == 8)
+    {
+        // The stack's position saved and restored around a's, the dynamic stack's, which Tier 1 refuses
+        // (tier1_pipeline_refusals).
+        tier0_emit(program, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    }
     else
     {
+        // An unsigned 64-bit integer to a double and back (#141): (double)a * 0.75 + 1.0, past 2^63 both ways for half the
+        // inputs, and within an unsigned 64-bit integer's range for every one.
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F64, 0);
-        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, UINT64_C(0x4008000000000000));
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, UINT64_C(0x3fe8000000000000));
+        tier0_emit(program, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_F64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, UINT64_C(0x3ff0000000000000));
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_F64, 0);
         tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
     }
@@ -1173,6 +1187,7 @@ static const uint32_t tier1_pipeline_shapes[BUSTER_TIER1_PIPELINE_CASES] = {
     13,
     14,
     15,
+    16,
 };
 
 static void tier1_pipeline_supported(Tier1PipelineTest* test)
@@ -1336,7 +1351,7 @@ static void tier1_pipeline_refusals(Tier1PipelineTest* test)
                 memcpy(&prior, &plan, sizeof(plan));
                 uint32_t node = BUSTER_IR_NONE;
                 const Tier1SelectError selection = tier1_select_plan(&function, &dominance, selected, scratch, test->vector, &plan, &node);
-                const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "floating point receives explicit unsupported status");
+                const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "the dynamic stack receives explicit unsupported status");
                 tier1_pipeline_expect(test, selected->length == 0 && scratch->length == 0 && memcmp(&plan, &prior, sizeof(plan)) == 0, "unsupported selection rolls back arenas and result");
                 test->refused += refused;
             }
@@ -1371,6 +1386,7 @@ static const char* const tier1_pipeline_formulas[BUSTER_TIER1_PIPELINE_CASES] = 
     "uint64_t v[8]; for (unsigned k = 0; k < 8; ++k) v[k] = a ^ constant(k); for (uint64_t i = c & 7; i != 0; i -= 1) for (unsigned k = 0; k < 8; ++k) v[k] = (v[k] + v[(k + 1) % 8]) ^ b; result = v[0]; for (unsigned k = 1; k < 8; ++k) result ^= v[k];",
     "uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b;",
     "uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1);",
+    "result = (uint64_t)((double)a * 0.75 + 1.0);",
 };
 
 static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const char* path)
@@ -1553,7 +1569,8 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
             tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
             tier1_pipeline_expect(&test, test.refused == 2, "every remaining unsupported shape is refused on both paths");
-            tier1_pipeline_expect(&test, test.general == 7 * 4 && test.edge_moves != 0 && test.edge_stubs != 0, "every control-flow fixture goes through the CFG consumer, whose edges move values, critical ones through stubs");
+            tier1_pipeline_expect(&test, test.general == 8 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
+                                  "every control-flow fixture and the floating one go through the CFG consumer, whose edges move values, critical ones through stubs");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");

@@ -492,8 +492,9 @@ static const char check_test_tier1_stack_callee_source[] =
 // The floating values' fixture (#141): F32 and F64 parameters, results and arguments interleaved with integers, past
 // xmm7 onto the stack, to clang -O2's code and from it through a pointer, a variadic call of doubles (printf's and the
 // other unit's: al their count), every comparison against NaNs, infinities and signed zeros, the conversions between
-// the precisions and to and from integers of every width, signed and unsigned, a negation, loops of doubles and floats
-// through arrays and a struct's members, and a conditional expression of doubles.
+// the precisions and to and from integers of every width, signed and unsigned (an unsigned 64-bit one's past 2^63 both
+// ways among them), a negation, loops of doubles and floats through arrays and a struct's members, and a conditional
+// expression of doubles.
 static const char check_test_tier1_float_source[] =
     "#include <stdio.h>\n"
     "double tier1_other_mix(double a, int b, float c, double d, long e, double f, double g, double h, double i, double j, float k, double l);\n"
@@ -583,6 +584,28 @@ static const char check_test_tier1_float_source[] =
     "{\n"
     "    printf(\"%.17g %.9g %ld\\n\", x, (double)f, n);\n"
     "}\n"
+    "unsigned long tier1_wide_hash(unsigned long seed)\n"
+    "{\n"
+    "    static const unsigned long edges[] = { 0, 1, 3, 0x7fffffffUL, 0xffffffffUL, (1UL << 53) + 1, 0x7fffffffffffffffUL, 0x8000000000000000UL, 0x8000000000000401UL, 0x8000000000000c00UL,\n"
+    "                                           0xfffffffffffffbffUL, 0xfffffffffffffc00UL, 0xffffffffffffffffUL, 0x9000017fffffffffUL };\n"
+    "    unsigned long h = 0;\n"
+    "    for (int i = 0; i < 14; i += 1)\n"
+    "    {\n"
+    "        const double d = (double)edges[i];\n"
+    "        const float f = (float)edges[i];\n"
+    "        h = h * 1000003 + (unsigned long)(d * 0.75) + (unsigned long)(f * 0.5f);\n"
+    "    }\n"
+    "    unsigned long r = seed;\n"
+    "    for (int i = 0; i < 4096; i += 1)\n"
+    "    {\n"
+    "        r ^= r << 13;\n"
+    "        r ^= r >> 7;\n"
+    "        r ^= r << 17;\n"
+    "        const double d = (double)r;\n"
+    "        h = h * 31 + (unsigned long)(d * 0.875) + (unsigned long)((float)(r >> (i & 63)) * 0.5f);\n"
+    "    }\n"
+    "    return h;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    volatile double zero = 0.0;\n"
@@ -613,6 +636,7 @@ static const char check_test_tier1_float_source[] =
     "    }\n"
     "    struct tier1_point points[4] = { { 1.5, 2.0f, 3 }, { -0.5, 4.0f, -1 }, { 10.0, 0.25f, 7 }, { 2.0, -1.0f, 0 } };\n"
     "    printf(\" %.17g %.9g %.9g\\n\", tier1_points(points, 4), (double)points[0].y, (double)points[3].y);\n"
+    "    printf(\"%lx\\n\", tier1_wide_hash(0x243f6a8885a308d3UL));\n"
     "    return 0;\n"
     "}\n";
 
@@ -1929,7 +1953,7 @@ static void check_test_driver_tier1_float(CheckTest* test, const char* clang, co
     char expected[2048] = { 0 };
     const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's builds of the floating values' fixture run");
-    static const char* const names[8] = { "tier1_float_take", "tier1_pass_float", "tier1_classify", "tier1_convert", "tier1_accumulate", "tier1_points", "tier1_print", "main" };
+    static const char* const names[9] = { "tier1_float_take", "tier1_pass_float", "tier1_classify", "tier1_convert", "tier1_accumulate", "tier1_points", "tier1_print", "tier1_wide_hash", "main" };
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
     {
         for (uint32_t path = 0; path < 2; path += 1)
