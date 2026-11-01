@@ -46,6 +46,151 @@ static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uin
            token < reader->output->initializer_ends[declaration] ? reader->incomplete_array_types[declaration] : 0;
 }
 
+// Whether a declared type is const-qualified, through an array's element type as Clang's -Wunused-const-variable sees it.
+static bool check_input_type_const(const TypeTable* types, TypeId type)
+{
+    bool result = false;
+    TypeId current = type;
+    for (uint32_t steps = 0; !result && current != 0 && steps < types->types.count; steps += 1)
+    {
+        const TypeId stripped = type_strip_aligned(types, current);
+        result = (type_qualifiers(stripped) & BUSTER_TYPE_CONST) != 0;
+        const uint8_t kind = type_kind(types, type_unqualified(stripped));
+        if (!result && type_kind_is_array(kind))
+        {
+            current = type_element(types, stripped);
+        }
+        else
+        {
+            current = 0;
+        }
+    }
+    return result;
+}
+
+// Whether a declaration is written in the main file, where Clang gives file-scope unused variables' warnings.
+static bool check_input_in_main_file(const CheckInputReader* reader, uint32_t token)
+{
+    const uint32_t source = token < reader->parser->tokens.count ? reader->parser->tokens.sources[token] : BUSTER_CHECK_NONE;
+    const uint32_t location = source < reader->pp->output.count && reader->pp->output.locations != NULL ? reader->pp->output.locations[source] : 0;
+    const bool result = source < reader->pp->output.count && pp_location_in_main_file(reader->pp, location);
+    return result;
+}
+
+// A declaration clang's unused warnings leave alone: one the source marks unused or used, a typedef or enumerator,
+// a label or tag, or a name whose object is never emitted. Parameters are marked from their definitions' chains.
+static bool check_input_unused_suppressed(const CheckInput* input, uint32_t token, uint32_t kind)
+{
+    const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
+    bool marked = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const uint32_t attribute = attributes->records[i].kind;
+        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED;
+    }
+    const bool result = kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION ? true : marked;
+    return result;
+}
+
+// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn.
+static bool check_input_parameter_marks(const CheckInput* input, const Parser* parser, uint8_t* marks)
+{
+    bool valid = parser != NULL && marks != NULL && input->body_declarations != NULL && input->parameters != NULL && input->parameter_next != NULL;
+    for (uint32_t opening = 0; valid && opening < parser->tokens.count; opening += 1)
+    {
+        const uint32_t declaration = input->body_declarations[opening];
+        valid = declaration == BUSTER_CHECK_NONE || declaration < parser->tokens.count;
+        for (uint32_t parameter = declaration != BUSTER_CHECK_NONE ? input->parameters[opening] : BUSTER_CHECK_NONE, steps = 0;
+             valid && parameter != BUSTER_CHECK_NONE && steps < parser->tokens.count; steps += 1)
+        {
+            valid = parameter < parser->tokens.count;
+            marks[parameter] = 1;
+            parameter = input->parameter_next[parameter];
+        }
+    }
+    return valid;
+}
+
+// A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on a
+// prototype covers the definition that follows it.
+static bool check_input_unused_marked_chain(const CheckInput* input, const CBindings* events, uint32_t event, uint32_t kind)
+{
+    bool marked = false;
+    uint32_t at = event + 1;
+    for (uint32_t steps = 0; !marked && at != 0 && steps < events->count; steps += 1)
+    {
+        const uint32_t previous = events->previous[at - 1];
+        if (previous == 0 || events->operation[previous - 1] != C_BINDING_DECLARE || events->key[previous - 1] != events->key[event])
+        {
+            break;
+        }
+        const uint32_t token = events->declaration[previous - 1];
+        marked = token < input->token_count && check_input_unused_suppressed(input, token, kind);
+        at = previous;
+    }
+    return marked;
+}
+
+// -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
+// no use names. The declaration's own body decides the completion, as clang reports it after the function.
+static void check_input_unused_events(CheckInputReader* reader, const uint32_t* resolved, const uint8_t* used_tokens, const uint8_t* used_names,
+                                      const uint8_t* parameters, uint8_t* reported)
+{
+    CheckInput* output = reader->output;
+    const Parser* parser = reader->parser;
+    const CBindings* events = &reader->bindings;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t event = 0; event < events->count; event += 1)
+    {
+        const uint32_t token = events->declaration[event];
+        const uint32_t kind = events->kind[event];
+        const bool local = token < count && output->declaration_bodies[token] < count;
+        const uint32_t parameter = token < count && parameters != NULL && parameters[token] != 0;
+        const bool implicit = token < count && output->function_flags != NULL &&
+                              (output->function_flags[token] & (CHECK_INPUT_FUNCTION_IMPLICIT | CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY)) != 0;
+        const bool inline_function = kind == C_BINDING_FUNCTION && token < count && output->function_flags != NULL &&
+                                     (output->function_flags[token] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+        const uint32_t name = events->key[event] % events->name_capacity;
+        const bool name_used = name < events->name_capacity && used_names != NULL && used_names[name] != 0;
+        const bool used = parameter || local ? used_tokens[token] != 0 : name_used;
+        const bool file_scope = !local && kind == C_BINDING_OBJECT;
+        const bool main_file = !file_scope || check_input_in_main_file(reader, token);
+        const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
+        const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
+                              token < count && !implicit && !inline_function && !used && !reported[token] && !check_input_unused_suppressed(output, token, kind) &&
+                              !check_input_unused_marked_chain(output, events, event, kind) && main_file &&
+                              (parameter || local || (token < count && output->linkage[token] == 1));
+        const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
+                            parameter ? CHECK_WARNING_ID_UNUSED_PARAMETER :
+                            const_variable ? CHECK_WARNING_ID_UNUSED_CONST_VARIABLE : CHECK_WARNING_ID_UNUSED_VARIABLE;
+        const uint32_t event_kind = kind == C_BINDING_FUNCTION ? CHECK_WARNING_EVENT_UNUSED_FUNCTION :
+                                    parameter ? CHECK_WARNING_EVENT_UNUSED_PARAMETER : CHECK_WARNING_EVENT_UNUSED_VARIABLE;
+        if (selected)
+        {
+            const uint32_t body = output->declaration_bodies[token];
+            const uint32_t closing = body < count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
+            const CheckWarningEvent warning = {
+                .id = id,
+                .kind = event_kind,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                .completion_kind = closing < count ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_TU_END,
+                .completion = closing < count ? closing : BUSTER_CHECK_NONE,
+                .payload = { .name = parser->tokens.names[token] },
+            };
+            if (!check_input_warning_event(reader, &warning, NULL, 0))
+            {
+                output->resource = true;
+            }
+            else
+            {
+                reported[token] = 1;
+            }
+        }
+    }
+}
+
 // `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is
 // checked before any is published: a use names a token, and sees no event at or after itself.
 static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t* resolved)
@@ -99,6 +244,49 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             if (declaration == BUSTER_CHECK_NONE)
             {
                 check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+            }
+        }
+    }
+    const bool unused_columns = output->body_declarations != NULL && output->parameters != NULL && output->parameter_next != NULL &&
+                                output->declaration_bodies != NULL && output->declaration_kinds != NULL && output->static_objects != NULL &&
+                                output->thread_local != NULL && output->linkage != NULL;
+    if (valid && unused_columns && output->report_count == 0 && events->count != 0)
+    {
+        uint8_t* used = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
+        uint8_t* used_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+        uint8_t* used_names = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->name_capacity);
+        uint8_t* parameters = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+        uint8_t* reported = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+        if (used != NULL && used_tokens != NULL && used_names != NULL && parameters != NULL && reported != NULL)
+        {
+            memset(used, 0, events->count);
+            memset(used_tokens, 0, count);
+            memset(used_names, 0, events->name_capacity);
+            memset(parameters, 0, count);
+            memset(reported, 0, count);
+            for (uint32_t event = 0; event < events->count; event += 1)
+            {
+                if (events->operation[event] == C_BINDING_USE)
+                {
+                    const uint32_t handle = resolved[event];
+                    if (handle != 0 && handle <= events->count && events->operation[handle - 1] == C_BINDING_DECLARE)
+                    {
+                        used[handle - 1] = 1;
+                        if (events->declaration[handle - 1] < count)
+                        {
+                            used_tokens[events->declaration[handle - 1]] = 1;
+                        }
+                        const uint32_t name = events->key[handle - 1] % events->name_capacity;
+                        if (events->key[handle - 1] / events->name_capacity == C_BINDING_ORDINARY && name < events->name_capacity)
+                        {
+                            used_names[name] = 1;
+                        }
+                    }
+                }
+            }
+            if (check_input_parameter_marks(output, parser, parameters))
+            {
+                check_input_unused_events(reader, resolved, used_tokens, used_names, parameters, reported);
             }
         }
     }

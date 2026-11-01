@@ -19,14 +19,18 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
-The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
-`-Werror` does not guarantee the warnings or build failures Clang gives for the
-same source: some warnings are not produced, and some produced warnings are not
-promoted by `-Werror`. For example, an unused local, an address of a local
-returned from a function, or a mismatched `printf` format can pass with
-`-Wall -Werror`. Use Clang as a separate diagnostic check when those warnings
-matter. The individual supported diagnostics and their boundaries are described
-in this guide; the remaining warning work is tracked in
+The driver gives Clang's common default and `-Wall`/`-Wextra` warnings for
+constant conversions and bounds, shifts and division, parenthesization, unused
+results and names, format calls, returned stack addresses, uninitialized reads
+and enum switches, with Clang's messages, places, notes and
+`#pragma clang diagnostic` policy; `-Werror` and its `=group` and
+`-Wno-error=` forms promote them. The remaining gaps are the full
+`-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
+computed `case` expressions in `-Wswitch`, and several rarer
+`-Wparentheses`/`-Wreturn-stack-address` shapes and `-Wunused-but-set-variable`,
+so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
+their boundaries and their differential tests are described in "Common
+warnings (#823)" below; the remaining work stays tracked in
 [#823](https://github.com/buster14a/buster/issues/823).
 
 `-c` and the direct path lower only the definitions that the unit's roots reach,
@@ -3190,6 +3194,45 @@ result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or
 8, `V` for none, then the intrinsic's name. `--print NAME` prints each object's trace of a
 case, every record it followed with the value it made. The files are removed
 unless `--keep` or a failure.
+
+## Common warnings (#823)
+
+`c_check_common_warnings.c`, included by the driver, reports the expression
+warnings that need the completed graph or the parser's operator tree:
+`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
+`-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
+bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
+`-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
+`-Wdangling-else` and `-Wuninitialized`. `c_check_binding.c` adds
+`-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
+`-Wunused-parameter` as sparse events, with the declaration's body deciding
+the completion, so they follow Clang's after-function order; a redeclaration
+inherits an earlier `unused` or `used` attribute. A file-scope variable's
+unused warning is given only in the main file, as Clang leaves a header's
+file-scope variables alone because every unit that includes the header shares
+them. The graph pass adds `-Wunused-but-set-parameter` for a parameter a
+statement assignment writes and no read uses.
+
+Each uses the shared warning policy, so a default or group option, a
+`#pragma clang diagnostic` change and `-Werror` promotion behave as the other
+sparse warnings do. A token from a system-header macro is suppressed by its
+spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
+for it. The `-Wswitch` check needs a named enum's source definition and literal
+enumerator `case` labels; a computed case leaves the switch to a full constant
+evaluator. `-Wuninitialized` is the source-order case where a local scalar
+object is read before any write and its address is not taken; an unmodeled
+write through inline assembly or a builtin suppresses it. `-Wformat` checks the
+four `printf`-family names, a declaration's `format(printf, ...)` attribute, and
+literal formats' common conversions and sizes.
+
+`test-checker-driver`'s `check_test_driver_common_warnings` compares the
+filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
+`-Werror=unused-function`, `-Wno-*`, a warning-clean unit and a header whose
+file-scope variables no unit reports line for line against Clang on both check
+paths. The semantics are also covered by
+`test-checker`'s existing warning and constraint fixtures, and by
+`test-diagnostics` for their ordering.
 
 ## The constraint catalogue
 

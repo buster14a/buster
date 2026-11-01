@@ -1935,7 +1935,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
     const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
-    if (program->status == CHECK_PROGRAM_OK && aggregate && body->count != 0 && body->count == body->entry_count)
+    // main returns 0 without a return statement, so it has no -Wreturn-type fall-off warning.
+    const bool scalar = result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main;
+    if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar) && body->count != 0 && body->count == body->entry_count)
     {
         CheckControl* entries = writer->entries + body->first;
         uint8_t* seen = (uint8_t*)writer->tasks;
@@ -2125,9 +2127,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
             const bool falls = body->count != 0 && seen[body->count - 1] != 0;
             if (pass == 0)
             {
-                body->return_flow = true;
+                body->return_flow = aggregate;
                 body->falls = falls;
-                for (uint32_t i = 0; i < body->count; i += 1)
+                for (uint32_t i = 0; aggregate && i < body->count; i += 1)
                 {
                     if (seen[i] == 0 && entries[i].kind >= CHECK_CONTROL_BRANCH_FALSE)
                     {
