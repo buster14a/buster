@@ -5574,8 +5574,9 @@ every run one lane's code, for the target its options give (#1045:
 refuses the same unit for the baseline profile, and measures a baseline
 unit's function whose target attribute takes AVX2's vectors,
 `c_check_lanes_benchmark_test.c`). Run it under the 9700X's lock without
-`taskset`, with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
-and the benchmark on the frozen SQLite source where the emission changes.
+`taskset`, with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job
+runs the test, and the benchmark on the frozen SQLite source where the
+emission changes, on the lane counts of the guide's table (#1069).
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
 measurements.
 
