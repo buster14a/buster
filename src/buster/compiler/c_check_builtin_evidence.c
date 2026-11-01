@@ -141,6 +141,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
     {
         evidence->base_token = base;
         evidence->base_alignment = (uint8_t)(check_input_declaration_alignment(reader, object, reader->declared_types[base]) + 1);
+        evidence->base_object = reader->objects[object];
     }
     bool address = false;
     while (first < end)

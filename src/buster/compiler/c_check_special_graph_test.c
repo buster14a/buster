@@ -314,12 +314,14 @@ static __attribute__((noinline)) void check_test_special_graph(CheckTest* test, 
                                expected.query_count == 4 && expected.atomic_count == 2, "all generic builtin families retain exactly one compact descriptor per call");
         if (checked)
         {
-            check_test_expect(test, expected.values[expect].type == BUSTER_TYPE_LONG && expected.values[expect].fault == CHECK_FAULT_DIVIDE_BY_ZERO &&
-                                   expected.misc[0].evaluated_operands == 3 && expected.misc[0].constant_evaluated_operands == 1 &&
+            check_test_expect(test, expected.values[expect].type == BUSTER_TYPE_LONG && expected.values[expect].fault == CHECK_FAULT_NONE &&
+                                   expected.values[expect].constant_kind == CHECK_CONSTANT_INTEGER && expected.values[expect].integer == 7 &&
+                                   (expected.values[expect].flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                   expected.misc[0].evaluated_operands == 0 && expected.misc[0].constant_evaluated_operands == 1 &&
                                    expected.misc[0].constant_value.type == BUSTER_TYPE_LONG && expected.misc[0].constant_value.integer == 7 &&
                                    expected.misc[0].constant_value.fault == CHECK_FAULT_NONE && expected.argument_conversions[0].type == BUSTER_TYPE_LONG &&
                                    expected.argument_conversions[1].type == BUSTER_TYPE_LONG,
-                              "EXPECT retains both runtime operands while its separate source constant result visits only argument zero");
+                              "EXPECT of a constant first argument folds to it, neither operand run, as clang's code does, the effectful and faulting second dropped");
             check_test_expect(test, expected.values[stop].type == BUSTER_TYPE_VOID && expected.misc[1].terminates &&
                                    expected.values[query].integer == 0 && expected.values[query].fault == CHECK_FAULT_NONE &&
                                    expected.values[query].flags == BUSTER_CHECK_ICE && expected.queries[0].evaluated_operands == 0 &&

@@ -7546,6 +7546,10 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_OPENCL_ATOMIC_INIT, "__opencl_atomic_init", false, true, false },
         { CBUILTIN_OPENCL_ATOMIC_LOAD, "__opencl_atomic_load", false, true, false },
         { CBUILTIN_OPENCL_ATOMIC_STORE, "__opencl_atomic_store", false, true, false },
+        { CBUILTIN_ALIGN_UP, "__builtin_align_up", false, true, true },
+        { CBUILTIN_ALIGN_DOWN, "__builtin_align_down", false, true, true },
+        { CBUILTIN_IS_ALIGNED, "__builtin_is_aligned", false, true, true },
+        { CBUILTIN_EXPECT_WITH_PROBABILITY, "__builtin_expect_with_probability", false, true, true },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

@@ -79,34 +79,48 @@ static void check_builtin_misc_test_values(CheckBuiltinMiscTest* test, TypeTable
     };
     CheckBuiltinMiscResult result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT, arguments, 2);
     check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_LONG &&
-                                  result.action.value.integer == UINT64_MAX && result.evaluated_operands == 3 &&
+                                  result.action.value.integer == UINT64_MAX && result.evaluated_operands == 0 &&
+                                  (result.action.value.flags & BUSTER_CHECK_ICE) != 0 &&
                                   result.argument_conversions[0].type == BUSTER_TYPE_LONG && result.argument_conversions[1].type == BUSTER_TYPE_LONG &&
-                                  result.runtime_builtin == CBUILTIN_EXPECT, "expect converts both parameters to long and returns converted first");
+                                  result.runtime_builtin == CBUILTIN_EXPECT,
+                                  "expect converts both parameters to long and folds to its converted constant first, evaluating neither");
     arguments[1] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
     result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT, arguments, 2);
     check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.integer == UINT64_MAX &&
-                                  result.evaluated_operands == 3 && result.constant_evaluated_operands == 1 &&
-                                  result.constant_value.integer == UINT64_MAX && (result.constant_value.flags & BUSTER_CHECK_ICE) != 0,
-                                  "expect source evaluator ignores an unknown expected value, while runtime still evaluates it");
+                                  result.action.value.constant_kind == CHECK_CONSTANT_INTEGER && result.evaluated_operands == 0 &&
+                                  result.constant_evaluated_operands == 1 && result.constant_value.integer == UINT64_MAX &&
+                                  (result.constant_value.flags & BUSTER_CHECK_ICE) != 0,
+                                  "expect of a constant first argument ignores an unknown expected value, at run time too");
     arguments[1].category = CHECK_LVALUE;
     arguments[1].type = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_VOLATILE);
     result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT, arguments, 2);
-    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
-                                  (result.action.value.flags & BUSTER_CHECK_ICE) == 0 && result.evaluated_operands == 3 &&
-                                  result.constant_evaluated_operands == 1 && (result.constant_value.flags & BUSTER_CHECK_ICE) != 0 &&
-                                  (result.constant_value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                  (result.action.value.flags & BUSTER_CHECK_ICE) != 0 && result.evaluated_operands == 0 &&
+                                  result.constant_evaluated_operands == 1 && (result.constant_value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
                                   (result.argument_conversions[1].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0,
-                                  "expect retains second volatile read at runtime and omits it from source constant evaluation");
+                                  "expect of a constant first argument drops a volatile expected value's read, as clang's code does");
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 0);
     arguments[1].constant_kind = CHECK_CONSTANT_NONE;
     arguments[1].fault = CHECK_FAULT_DIVIDE_BY_ZERO;
     arguments[1].fault_node = 42;
     result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT, arguments, 2);
-    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE &&
-                                  result.action.value.fault == CHECK_FAULT_DIVIDE_BY_ZERO && result.action.value.fault_node == 42 &&
-                                  result.constant_value.fault == CHECK_FAULT_NONE && result.constant_value.integer == UINT64_MAX &&
-                                  (result.constant_value.flags & BUSTER_CHECK_ICE) != 0 && result.constant_evaluated_operands == 1,
-                                  "expect keeps runtime fault provenance separate from first-only source constant result");
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.fault == CHECK_FAULT_NONE &&
+                                  result.action.value.integer == UINT64_MAX && result.constant_value.fault == CHECK_FAULT_NONE &&
+                                  result.constant_value.integer == UINT64_MAX && (result.constant_value.flags & BUSTER_CHECK_ICE) != 0 &&
+                                  result.constant_evaluated_operands == 1 && result.evaluated_operands == 0,
+                                  "expect of a constant first argument never evaluates a faulting expected value");
+    arguments[0] = (CheckValue){ .type = BUSTER_TYPE_LONG, .category = CHECK_RVALUE };
+    arguments[1] = (CheckValue){ .type = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_VOLATILE), .category = CHECK_LVALUE };
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
+                                  result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.evaluated_operands == 3,
+                                  "expect of an unknown first argument evaluates both, a volatile expected value's read among them");
+    arguments[0] = check_test_integer(BUSTER_TYPE_INT, 9);
+    arguments[0].flags |= BUSTER_CHECK_SIDE_EFFECT;
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 1);
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
+                                  result.evaluated_operands == 3, "expect of a constant first argument with side effects evaluates both");
     const CBuiltinId terminal[] = { CBUILTIN_TRAP, CBUILTIN_UNREACHABLE };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(terminal); i += 1)
     {
@@ -204,6 +218,287 @@ static void check_builtin_misc_test_values(CheckBuiltinMiscTest* test, TypeTable
         check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == type_pointer(table, BUSTER_TYPE_VOID) &&
                                       result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.runtime_builtin == frame_identities[i],
                                       "return-address representation helpers retain target identity without claiming source constexpr");
+    }
+}
+
+// An alignment builtin's action with its first argument's evidence: its object and that object's declaration alignment,
+// its log2 plus 1.
+static CheckBuiltinMiscResult check_builtin_misc_test_witnessed(TypeTable* table, CBuiltinId id, const CheckValue* arguments, uint32_t object, uint8_t alignment)
+{
+    const CheckBuiltinMiscAction input = {
+        .id = id,
+        .arguments = arguments,
+        .argument_count = 2,
+        .node = 148,
+        .source_position = UINT32_MAX,
+        .pointer_object = object,
+        .pointer_alignment = alignment,
+    };
+    CheckBuiltinMiscResult output;
+    check_builtin_misc_one(table, &input, &output);
+    return output;
+}
+
+// An alignment builtin whose call's evidence gives its alignment as clang's evaluator reads it (CheckBuiltinCall's
+// alignment_evaluated): `value`, with side effects or not.
+static CheckBuiltinMiscResult check_builtin_misc_test_evaluated(TypeTable* table, CBuiltinId id, const CheckValue* arguments, unsigned __int128 value, bool effects)
+{
+    const CheckBuiltinMiscAction input = {
+        .id = id,
+        .arguments = arguments,
+        .argument_count = 2,
+        .node = 148,
+        .source_position = UINT32_MAX,
+        .alignment_evaluated = true,
+        .alignment_side_effects = effects,
+        .alignment_value = value,
+    };
+    CheckBuiltinMiscResult output;
+    check_builtin_misc_one(table, &input, &output);
+    return output;
+}
+
+// expect_with_probability: expect's longs and fold, and its probability's rules; and the alignment builtins: their
+// operands' types, their alignments' rules, their result types and their folds of integers and of addresses.
+static void check_builtin_misc_test_alignment(CheckBuiltinMiscTest* test, TypeTable* table)
+{
+    CheckValue arguments[3] = {
+        (CheckValue){ .type = BUSTER_TYPE_LONG, .category = CHECK_RVALUE },
+        check_test_integer(BUSTER_TYPE_INT, 1),
+        check_test_float(BUSTER_TYPE_DOUBLE, 0.5L),
+    };
+    CheckBuiltinMiscResult result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_LONG &&
+                                  result.evaluated_operands == 3 && result.argument_conversions[2].type == BUSTER_TYPE_DOUBLE &&
+                                  result.runtime_builtin == CBUILTIN_EXPECT_WITH_PROBABILITY,
+                                  "expect_with_probability evaluates its longs and never its probability");
+    arguments[2] = check_test_integer(BUSTER_TYPE_INT, 1);
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "an integer probability of 1 converts to 1.0");
+    arguments[2] = check_test_float(BUSTER_TYPE_DOUBLE, -0.0L);
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "a probability of -0.0 is in [0, 1]");
+    const long double out[] = { 1.5L, -0.1L, 1.0L + 0x1p-52L, __builtin_nanl(""), __builtin_infl() };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(out); i += 1)
+    {
+        arguments[2] = check_test_float(BUSTER_TYPE_DOUBLE, out[i]);
+        result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+        check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 2 &&
+                                      result.constraint == CHECK_BUILTIN_MISC_CONSTRAINT_RANGE, "a probability outside [0, 1], or NaN, is refused");
+    }
+    arguments[2] = (CheckValue){ .type = BUSTER_TYPE_DOUBLE, .category = CHECK_RVALUE };
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 2 &&
+                                  result.constraint == CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT, "an unknown probability is refused");
+    arguments[2] = check_test_float(BUSTER_TYPE_DOUBLE, 0.5L);
+    arguments[2].flags |= BUSTER_CHECK_SIDE_EFFECT;
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.constraint == CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT,
+                                  "a probability with side effects is no constant expression");
+    arguments[0] = check_test_integer(BUSTER_TYPE_INT, 2);
+    arguments[1] = (CheckValue){ .type = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_VOLATILE), .category = CHECK_LVALUE };
+    arguments[2] = check_test_float(BUSTER_TYPE_FLOAT, 0.25L);
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 3);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.integer == 2 &&
+                                  (result.action.value.flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_SIDE_EFFECT)) == BUSTER_CHECK_ICE &&
+                                  result.evaluated_operands == 0, "expect_with_probability of a constant first argument folds, evaluating nothing");
+    result = check_builtin_misc_test_action(table, CBUILTIN_EXPECT_WITH_PROBABILITY, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "expect_with_probability takes three arguments");
+
+    // Integer folds, in the source's width and type.
+    const struct
+    {
+        CBuiltinId id;
+        TypeId type;
+        unsigned __int128 value;
+        unsigned __int128 alignment;
+        unsigned __int128 expected;
+    } folds[] =
+    {
+        { CBUILTIN_ALIGN_UP, BUSTER_TYPE_INT, 5, 4, 8 },
+        { CBUILTIN_ALIGN_DOWN, BUSTER_TYPE_INT, 7, 4, 4 },
+        { CBUILTIN_IS_ALIGNED, BUSTER_TYPE_INT, 16, 8, 1 },
+        { CBUILTIN_IS_ALIGNED, BUSTER_TYPE_INT, 12, 8, 0 },
+        { CBUILTIN_ALIGN_UP, BUSTER_TYPE_SCHAR, 127, 2, 0x80 },
+        { CBUILTIN_ALIGN_UP, BUSTER_TYPE_UINT, UINT32_MAX, 16, 0 },
+        { CBUILTIN_ALIGN_UP, BUSTER_TYPE_INT, UINT32_MAX - 4, 4, UINT32_MAX - 3 },
+        { CBUILTIN_ALIGN_DOWN, BUSTER_TYPE_INT, UINT32_MAX - 4, 4, UINT32_MAX - 7 },
+        { CBUILTIN_ALIGN_UP, BUSTER_TYPE_INT128, ((unsigned __int128)1 << 100) + 1, (unsigned __int128)1 << 64,
+          ((unsigned __int128)1 << 100) + ((unsigned __int128)1 << 64) },
+        { CBUILTIN_ALIGN_DOWN, BUSTER_TYPE_UINT128, ~(unsigned __int128)0, (unsigned __int128)1 << 127, (unsigned __int128)1 << 127 },
+        { CBUILTIN_IS_ALIGNED, BUSTER_TYPE_LONG, 24, 1, 1 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(folds); i += 1)
+    {
+        arguments[0] = check_test_integer(folds[i].type, folds[i].value);
+        arguments[1] = check_test_integer(folds[i].alignment > UINT64_MAX ? BUSTER_TYPE_UINT128 : BUSTER_TYPE_ULONG, folds[i].alignment);
+        result = check_builtin_misc_test_action(table, folds[i].id, arguments, 2);
+        const TypeId type = folds[i].id == CBUILTIN_IS_ALIGNED ? BUSTER_TYPE_BOOL : folds[i].type;
+        check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == type &&
+                                      result.action.value.constant_kind == CHECK_CONSTANT_INTEGER && result.action.value.integer == folds[i].expected &&
+                                      (result.action.value.flags & BUSTER_CHECK_ICE) != 0 && result.evaluated_operands == 0 &&
+                                      ((result.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNED_TO_ONE) != 0) == (folds[i].alignment == 1),
+                                      "an alignment builtin of constants folds in its source's width, an ICE that evaluates nothing");
+    }
+    // The alignment's rules, by the source's width: at least 1, at most 2 to the width less 1, a power of 2.
+    const struct
+    {
+        TypeId source;
+        TypeId type;
+        unsigned __int128 alignment;
+        CheckBuiltinMiscConstraint constraint;
+    } rules[] =
+    {
+        { BUSTER_TYPE_INT, BUSTER_TYPE_INT, 0, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { BUSTER_TYPE_INT, BUSTER_TYPE_INT, (unsigned __int128)-4, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { BUSTER_TYPE_INT, BUSTER_TYPE_INT, 3, CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT },
+        { BUSTER_TYPE_CHAR, BUSTER_TYPE_INT, 256, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { BUSTER_TYPE_CHAR, BUSTER_TYPE_INT, 128, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+        { BUSTER_TYPE_INT, BUSTER_TYPE_LONG, UINT64_C(1) << 31, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+        { BUSTER_TYPE_INT, BUSTER_TYPE_LONG, UINT64_C(1) << 32, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { BUSTER_TYPE_UINT128, BUSTER_TYPE_UINT128, (unsigned __int128)1 << 127, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+        { BUSTER_TYPE_INT, BUSTER_TYPE_UINT, UINT32_C(0x80000000), CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+        { BUSTER_TYPE_SHORT, BUSTER_TYPE_INT, UINT32_C(0x80000000), CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rules); i += 1)
+    {
+        arguments[0] = (CheckValue){ .type = rules[i].source, .category = CHECK_RVALUE };
+        arguments[1] = check_test_integer(rules[i].type, rules[i].alignment);
+        result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
+        const bool accepted = rules[i].constraint == CHECK_BUILTIN_MISC_CONSTRAINT_NONE;
+        check_builtin_misc_test_expect(test, accepted ? result.action.diagnostic == CHECK_DIAG_NONE :
+                                                        result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 1 &&
+                                                        result.constraint == rules[i].constraint,
+                                      "a constant alignment must be a power of 2 from 1 to 2 to the source's width less 1");
+    }
+    arguments[0] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+    arguments[1].flags |= BUSTER_CHECK_SIDE_EFFECT;
+    result = check_builtin_misc_test_action(table, CBUILTIN_IS_ALIGNED, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.constraint == CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT,
+                                  "an alignment is checked past its side effects, as clang evaluates it");
+    arguments[0] = check_test_integer(BUSTER_TYPE_INT, 5);
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 4);
+    arguments[1].flags |= BUSTER_CHECK_SIDE_EFFECT;
+    result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE &&
+                                  result.evaluated_operands == 3, "an alignment with side effects folds nothing");
+    arguments[1] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+    result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE &&
+                                  result.evaluated_operands == 3, "an unknown alignment is checked at run time");
+    // The operands' types, before their lvalue conversions.
+    const TypeId function = type_function(table, BUSTER_TYPE_VOID, NULL, 0, false);
+    const TypeId sources[] = {
+        BUSTER_TYPE_BOOL, BUSTER_TYPE_DOUBLE, type_pointer(table, function), function, type_atomic(table, BUSTER_TYPE_INT), BUSTER_TYPE_NULLPTR,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        arguments[0] = (CheckValue){ .type = sources[i], .category = i == 3 ? CHECK_FUNCTION : CHECK_LVALUE };
+        arguments[1] = check_test_integer(BUSTER_TYPE_INT, 4);
+        result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_DOWN, arguments, 2);
+        check_builtin_misc_test_expect(test, sources[i] == 0 || (result.action.diagnostic == CHECK_DIAG_SCALAR_REQUIRED && result.action.diagnostic_operand == 0),
+                                      "an alignment builtin's source is an integer but bool and enums, or an object pointer");
+    }
+    const TypeId alignments[] = { BUSTER_TYPE_BOOL, BUSTER_TYPE_DOUBLE, type_pointer(table, BUSTER_TYPE_INT) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(alignments); i += 1)
+    {
+        arguments[0] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+        arguments[1] = (CheckValue){ .type = alignments[i], .category = CHECK_RVALUE };
+        result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_DOWN, arguments, 2);
+        check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INTEGER_REQUIRED && result.action.diagnostic_operand == 1,
+                                      "an alignment builtin's alignment is an integer but bool and enums");
+    }
+    arguments[0] = (CheckValue){ .type = type_bit_int(table, 200, true), .category = CHECK_RVALUE };
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 4);
+    result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
+    check_builtin_misc_test_expect(test, arguments[0].type == 0 || (result.action.diagnostic == CHECK_DIAG_UNSUPPORTED &&
+                                                                    (result.unsupported & BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE) != 0),
+                                  "an alignment builtin of a _BitInt past 128 bits is refused by name");
+    // Result types: the source's own, qualifiers kept, an array's decayed pointer, and is_aligned's bool.
+    arguments[0] = (CheckValue){ .type = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST), .category = CHECK_LVALUE };
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 4);
+    result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST) &&
+                                  result.argument_conversions[0].type == BUSTER_TYPE_INT && result.evaluated_operands == 3,
+                                  "align_up of a const int lvalue is a const int");
+    const TypeId array = type_array(table, BUSTER_TYPE_INT, 4);
+    arguments[0] = (CheckValue){ .type = array, .category = CHECK_LVALUE, .flags = BUSTER_CHECK_STATIC_OBJECT, .constant_kind = CHECK_CONSTANT_ADDRESS, .object = 9 };
+    result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_DOWN, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == type_pointer(table, BUSTER_TYPE_INT) &&
+                                  result.action.value.constant_kind == CHECK_CONSTANT_NONE, "an array source decays to its element's pointer, whose address doesn't fold past an alignment of 1 without evidence");
+    // Address folds: alignment 1 always, else the object's declaration alignment at the offset (clang's getBaseAlignment).
+    const TypeId pointer = type_pointer(table, BUSTER_TYPE_CHAR);
+    const struct
+    {
+        CBuiltinId id;
+        int64_t offset;
+        uint64_t alignment;
+        uint32_t object;
+        uint8_t declared;
+        CheckConstantKind kind;
+        int64_t expected;
+    } addresses[] =
+    {
+        { CBUILTIN_IS_ALIGNED, 16, 16, 7, 5, CHECK_CONSTANT_INTEGER, 1 },
+        { CBUILTIN_IS_ALIGNED, 3, 8, 7, 5, CHECK_CONSTANT_INTEGER, 0 },
+        { CBUILTIN_IS_ALIGNED, -4, 4, 7, 3, CHECK_CONSTANT_INTEGER, 1 },
+        { CBUILTIN_IS_ALIGNED, 16, 32, 7, 5, CHECK_CONSTANT_NONE, 0 },
+        { CBUILTIN_ALIGN_UP, 3, 8, 7, 5, CHECK_CONSTANT_ADDRESS, 8 },
+        { CBUILTIN_ALIGN_UP, -3, 8, 7, 5, CHECK_CONSTANT_ADDRESS, 0 },
+        { CBUILTIN_ALIGN_DOWN, 13, 8, 7, 5, CHECK_CONSTANT_ADDRESS, 8 },
+        { CBUILTIN_ALIGN_DOWN, -3, 8, 7, 5, CHECK_CONSTANT_ADDRESS, -8 },
+        { CBUILTIN_ALIGN_UP, 32, 32, 7, 6, CHECK_CONSTANT_ADDRESS, 32 },
+        { CBUILTIN_ALIGN_UP, 1, 32, 7, 1, CHECK_CONSTANT_NONE, 0 },
+        { CBUILTIN_ALIGN_UP, 5, 1, 7, 0, CHECK_CONSTANT_ADDRESS, 5 },
+        { CBUILTIN_IS_ALIGNED, 5, 1, 0, 0, CHECK_CONSTANT_INTEGER, 1 },
+        { CBUILTIN_IS_ALIGNED, 16, 16, 8, 5, CHECK_CONSTANT_NONE, 0 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(addresses); i += 1)
+    {
+        arguments[0] = check_builtin_misc_test_pointer(pointer, 7, addresses[i].offset);
+        arguments[0].flags |= BUSTER_CHECK_STATIC_OBJECT;
+        arguments[1] = check_test_integer(BUSTER_TYPE_ULONG, addresses[i].alignment);
+        result = check_builtin_misc_test_witnessed(table, addresses[i].id, arguments, addresses[i].object, addresses[i].declared);
+        const CheckValue* value = &result.action.value;
+        const bool folded = addresses[i].kind == CHECK_CONSTANT_INTEGER ? value->integer == (unsigned __int128)addresses[i].expected && (value->flags & BUSTER_CHECK_ICE) != 0 &&
+                                                                          result.evaluated_operands == 0 :
+                            addresses[i].kind == CHECK_CONSTANT_ADDRESS ? value->object == 7 && value->offset == addresses[i].expected && value->type == pointer &&
+                                                                          result.evaluated_operands == 3 :
+                                                                          result.evaluated_operands == 3;
+        check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && value->constant_kind == addresses[i].kind && folded,
+                                      "an alignment builtin folds an address where clang's evaluator does, by its object's declaration alignment");
+    }
+    // The alignment as clang's evaluator reads it (a const object's initializer), where the runtime view has no constant.
+    const struct
+    {
+        unsigned __int128 value;
+        bool effects;
+        CheckBuiltinMiscConstraint constraint;
+    } evaluated[] =
+    {
+        { 3, false, CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT },
+        { 0, false, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { (unsigned __int128)-8, false, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { UINT64_C(1) << 40, false, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { 3, true, CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT },
+        { 8, false, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+        { 8, true, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(evaluated); i += 1)
+    {
+        arguments[0] = check_test_integer(BUSTER_TYPE_INT, 5);
+        arguments[1] = (CheckValue){ .type = evaluated[i].value >> 32 != 0 ? BUSTER_TYPE_LONG : BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+        result = check_builtin_misc_test_evaluated(table, CBUILTIN_ALIGN_UP, arguments, evaluated[i].value, evaluated[i].effects);
+        const bool fold = evaluated[i].constraint == CHECK_BUILTIN_MISC_CONSTRAINT_NONE && !evaluated[i].effects;
+        const bool checked = evaluated[i].constraint == CHECK_BUILTIN_MISC_CONSTRAINT_NONE ?
+                             result.action.diagnostic == CHECK_DIAG_NONE &&
+                             (fold ? result.action.value.constant_kind == CHECK_CONSTANT_INTEGER && result.action.value.integer == 8 &&
+                                     (result.action.value.flags & BUSTER_CHECK_ICE) != 0 && result.evaluated_operands == 0 :
+                                     result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.evaluated_operands == 3) :
+                             result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 1 &&
+                             result.constraint == evaluated[i].constraint;
+        check_builtin_misc_test_expect(test, checked, "an alignment the evaluator reads through a const object is checked, and folds without side effects");
     }
 }
 
@@ -429,6 +724,27 @@ static void check_builtin_misc_test_clang(CheckBuiltinMiscTest* test, const char
         { "void* f(void) { return __builtin_return_address(4294967296ULL); }\n", false },
         { "void* f(const int* p) { return __builtin_extract_return_addr(p); }\n", false },
         { "void* f(void* p) { return __builtin_frob_return_addr(p); }\n", false },
+        { "long f(long x) { return __builtin_expect_with_probability(x, 1, 0.5); }\n", false },
+        { "long f(long x) { return __builtin_expect_with_probability(x, 1, 1); }\n", false },
+        { "const double half = 0.5; long f(long x) { return __builtin_expect_with_probability(x, 1, half); }\n", false },
+        { "long f(long x, double p) { return __builtin_expect_with_probability(x, 1, p); }\n", true },
+        { "long f(long x) { return __builtin_expect_with_probability(x, 1, 1.5); }\n", true },
+        { "long f(long x) { return __builtin_expect_with_probability(x, 1, __builtin_nan(\"\")); }\n", true },
+        { "long f(long x) { return __builtin_expect_with_probability(x, 1); }\n", true },
+        { "_Static_assert(__builtin_expect_with_probability(3, 1, 0.25) == 3, \"constant first argument\");\n", false },
+        { "_Static_assert(__builtin_align_up(5, 4) == 8 && __builtin_align_down(7, 4) == 4 && __builtin_is_aligned(16, 8), \"integers\");\n", false },
+        { "_Static_assert(__builtin_align_up((signed char)127, 2) == -128, \"wraps in its width\");\n", false },
+        { "_Static_assert(_Generic(__builtin_align_up((short)1, 4), short: 1, default: 0) && _Generic(__builtin_is_aligned(1, 1), _Bool: 1, default: 0), \"types\");\n", false },
+        { "static char buf[64]; _Static_assert(__builtin_is_aligned(&buf[16], 16) && !__builtin_is_aligned(&buf[3], 8), \"addresses\");\n", false },
+        { "static char buf[64]; static char* p = __builtin_align_up(&buf[3], 8);\n", false },
+        { "static char small[8]; static char* p = __builtin_align_up(&small[1], 8);\n", true },
+        { "int f(int x) { return __builtin_align_up(x, 0); }\n", true },
+        { "int f(int x) { return __builtin_align_up(x, 3); }\n", true },
+        { "char f(char x) { return __builtin_align_up(x, 256); }\n", true },
+        { "int f(_Bool x) { return __builtin_align_up(x, 4); }\n", true },
+        { "int f(int x, _Bool a) { return __builtin_align_up(x, a); }\n", true },
+        { "void f(void); int g(void) { return __builtin_is_aligned(f, 4); }\n", true },
+        { "int f(int x, int a) { return __builtin_align_down(x, a); }\n", false },
     };
     char directory[] = "/tmp/buster-check-builtin-misc-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
@@ -483,6 +799,7 @@ static __attribute__((unused)) int run_check_builtin_misc_tests(int argc, char**
         if (initialized)
         {
             check_builtin_misc_test_values(&test, &types.table);
+            check_builtin_misc_test_alignment(&test, &types.table);
             check_builtin_misc_test_constraints(&test, &types.table);
             check_builtin_misc_test_pages(&test, &types.table);
         }

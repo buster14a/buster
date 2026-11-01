@@ -6385,6 +6385,14 @@ static uint32_t check_lower_builtin_type(const TypeTable* types, TypeId type)
     return result;
 }
 
+// An alignment builtin's operand's or result's descriptor (c_builtin_misc_lower.c's cbuiltin_misc_align): an integer's, a
+// pointer's 64 bits, unsigned.
+static uint32_t check_lower_align_type(const TypeTable* types, TypeId type)
+{
+    const uint32_t result = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_POINTER ? 64 : check_lower_builtin_type(types, type);
+    return result;
+}
+
 // Whether an overflow builtin's operand or destination is a _BitInt of 65 to 127 bits, which its recipes don't take: they
 // take a 128-bit one whole (BUSTER_CBUILTIN_LOWER_WIDE) and narrower ones of up to 64 bits.
 static bool check_lower_builtin_between(const TypeTable* types, TypeId type)
@@ -6681,10 +6689,12 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
     // A frame builtin's level is a constant of its own, which nothing evaluates (CheckBuiltinMiscEffect.frame_level): its
-    // recipe takes no arguments. Every other builtin's operands are evaluated in order, each into a temporary.
+    // recipe takes no arguments, and expect_with_probability's probability is a constant that never runs, its recipe
+    // expect's. Every other builtin's operands are evaluated in order, each into a temporary.
     const CBuiltinId runtime = selected != BUSTER_CHECK_NONE ? stream->misc[selected].runtime_builtin : CBUILTIN_NONE;
     const bool frame = runtime == CBUILTIN_FRAME_ADDRESS || runtime == CBUILTIN_RETURN_ADDRESS;
-    const uint32_t evaluated = frame ? 0 : count;
+    const bool probability = runtime == CBUILTIN_EXPECT_WITH_PROBABILITY;
+    const uint32_t evaluated = frame ? 0 : probability ? 2 : count;
     if (selected == BUSTER_CHECK_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -6703,8 +6713,25 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
-        *call = (CBuiltinMiscLowerCall){ .id = runtime, .argument_count = evaluated };
-        if (cbuiltin_bits(call->id))
+        *call = (CBuiltinMiscLowerCall){ .id = probability ? CBUILTIN_EXPECT : runtime, .argument_count = evaluated };
+        if (cbuiltin_align(call->id))
+        {
+            // An alignment builtin's recipe takes its source's, alignment's and result's descriptors, of up to 128 bits (the
+            // checker refuses wider _BitInts), a pointer's 64, and a result past 64 bits' frame object.
+            const TypeId result_type = stream->values[node].type;
+            call->result_type = check_lower_align_type(program->types, result_type);
+            call->argument_types[0] = check_lower_align_type(program->types, stream->argument_conversions[first].type);
+            call->argument_types[1] = check_lower_align_type(program->types, stream->argument_conversions[first + 1].type);
+            if (call->result_type == 0 || call->argument_types[0] == 0 || call->argument_types[1] == 0)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else if (cbuiltin_bits_width(call->result_type) > 64)
+            {
+                call->result_object = check_lower_temporary(writer, check_lower_class(writer, result_type));
+            }
+        }
+        else if (cbuiltin_bits(call->id))
         {
             // A bit builtin's recipe (c_builtin_bits_lower.c) takes its arguments' and result's descriptors, of up to 128
             // bits (the checker refuses wider _BitInts), and a result past 64 bits' frame object, whose value it is.
@@ -6745,10 +6772,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         }
         for (uint32_t i = 0; i < evaluated; i += 1)
         {
-            // A bit builtin's 128-bit integer is a frame object of its own (check_lower_temporary's), whose limbs its
-            // recipe loads.
+            // A bit builtin's or an alignment builtin's 128-bit integer is a frame object of its own (check_lower_temporary's),
+            // whose limbs its recipe loads.
             const TypeId type = stream->argument_conversions[first + i].type;
-            if (check_lower_memory(writer, type) && !cbuiltin_bits(call->id))
+            if (check_lower_memory(writer, type) && !cbuiltin_bits(call->id) && !cbuiltin_align(call->id))
             {
                 check_lower_unsupported(writer, "builtins of long double and __int128 operands");
             }

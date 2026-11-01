@@ -56,8 +56,10 @@
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
 // take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
-// stdc ones and the carry chains) 0x3a0 to 0x3c7, and its floating builtins past the first ones (c_check_builtin_float.c:
-// isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9.
+// stdc ones and the carry chains) 0x3a0 to 0x3c7, its floating builtins past the first ones (c_check_builtin_float.c:
+// isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9, and the alignment builtins and
+// __builtin_expect_with_probability 0x3e0 to 0x3e3. Those last two families are the table's last rows: a lookup scans the
+// table's names in order, so rows that few units call cost least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -404,7 +406,11 @@
     X(SIGNBITL, 0x3d6u, "__builtin_signbitl", BUSTER_CBUILTIN_SOURCE) \
     X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
     X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
-    X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE)
+    X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE) \
+    X(ALIGN_UP, 0x3e0u, "__builtin_align_up", BUSTER_CBUILTIN_CONSTANT) \
+    X(ALIGN_DOWN, 0x3e1u, "__builtin_align_down", BUSTER_CBUILTIN_CONSTANT) \
+    X(IS_ALIGNED, 0x3e2u, "__builtin_is_aligned", BUSTER_CBUILTIN_CONSTANT) \
+    X(EXPECT_WITH_PROBABILITY, 0x3e3u, "__builtin_expect_with_probability", BUSTER_CBUILTIN_CONSTANT)
 
 typedef enum CBuiltinId
 {
@@ -587,6 +593,22 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
     const bool rotate = id == CBUILTIN_STDC_ROTATE_LEFT || id == CBUILTIN_STDC_ROTATE_RIGHT;
     *minimum = cbuiltin_carry(id) ? 4 : rotate ? 2 : 1;
     *maximum = cbuiltin_carry(id) ? 4 : rotate || fallback ? 2 : 1;
+}
+
+// Whether an identity is one of clang's alignment builtins, which c_check_builtin_misc.c checks (align_up, align_down
+// and is_aligned).
+static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_IS_ALIGNED;
+    return result;
+}
+
+// Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
+// fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's.
+static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY;
+    return result;
 }
 
 // The language modes' token of clang 23.1.1's table for a catalog name, which the preprocessor's __has_builtin reads

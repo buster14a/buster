@@ -201,10 +201,15 @@ only the recipe expansion contract.
 without reading source memory. The result records converted arguments,
 evaluation masks, warnings, terminal effects, memory effects and explicit
 unsupported requirements. `__builtin_expect` converts both runtime arguments
-to `long` and evaluates each once. Its separate `constant_value` and
-`constant_evaluated_operands` describe the source constant evaluator's first
-argument only; using that folded value must not erase the second runtime
-argument's effects. Neither argument has a general ICE requirement.
+to `long` and evaluates each once, in order, unless clang's evaluator reads its
+first argument as an integer constant without side effects, a const object's
+constant initializer among them (`const long k = 9; __builtin_expect(k, f())`):
+then, as clang's code generation emits a builtin call that evaluates to a
+constant, the call is that constant and neither argument runs, the expected
+value's effects (a call, a volatile read) dropped. Its separate
+`constant_value` and `constant_evaluated_operands` describe the source constant
+evaluator's first argument only. Neither argument has a general ICE
+requirement.
 
 Prefetch hints retain default promotions and bounded constant constraints;
 alignment hints retain the original pointer, requested alignment and optional
@@ -944,6 +949,82 @@ against clang and runs programs of every builtin natively against clang -O0's
 build, 128-bit and wide `_BitInt` operands, results and counts among them. No
 unit of the corpora calls these builtins, so the folds stay scalar: the checker
 asks once per call, in source order, as for the other miscellaneous builtins.
+
+## Alignment builtins and `expect_with_probability`
+
+The checker takes `__builtin_align_up`, `__builtin_align_down`,
+`__builtin_is_aligned` (`cbuiltin_align`) and
+`__builtin_expect_with_probability` (catalog codes 0x3e0 to 0x3e3, the table's
+last rows) as miscellaneous builtins, by clang 23's Sema:
+
+- an alignment builtin's source is an integer type but bool and the
+  enumerations (`_BitInt`s and 128-bit ones among them), or an object pointer,
+  an array decayed to its element's pointer; a function, a function pointer, an
+  `_Atomic` type and `nullptr_t` aren't. Its alignment is such an integer type.
+  Both are checked by their types before their lvalue conversions;
+- a constant alignment, which clang evaluates past its side effects and through
+  const objects' constant initializers wherever the expression holds them
+  (`const int c = 3;` makes `__builtin_align_up(x, c + 0)` an error), must be at
+  least 1, at most 2 to the source's width less 1 (a pointer's 64), and a power
+  of 2, in that order; 1 draws clang's `-Wtautological-compare`, which the
+  checker records but doesn't report. The checker's runtime view of the argument
+  reads no const object, so the source adapter evaluates it as a constant
+  context would (`check_input_misc_evidence`), and the call's checks and
+  folds take that value from its evidence (`CheckBuiltinCall.alignment_evaluated`)
+  while the argument itself is checked, and runs, as before. An unknown
+  alignment is unchecked, and so is a modification's value, on which clang's
+  evaluator fails past side effects or not (`(s = 3)`, `(s = 3) + 0`, `s++`:
+  `BUSTER_CHECK_MODIFICATION`, which assignments and increments set and a
+  comma's discarded left operand doesn't pass on, so `(s = 4, 3)` is checked);
+- `align_up` and `align_down` are of the source's type, its qualifiers kept (a
+  `const int` source's `__typeof__` is a `const int`), and `is_aligned` is a
+  bool;
+- `expect_with_probability` takes `expect`'s two longs and a probability that,
+  converted to `double`, must be a constant floating expression without side
+  effects in [0, 1]: a NaN isn't. Clang evaluates it as a constant expression,
+  which reads a const object's constant initializer wherever it holds one
+  (`one ? 0.5 : 0.25` of a `const int one = 1`), so its subtree is checked as a
+  constant context's (`BUSTER_CHECK_CONTEXT_VALUE` on its node, without a
+  constraint report of its own), which the same helper marks from the call's
+  evidence record. A constant expression's evaluation also fails on a discarded
+  operand it can't evaluate, where a fold goes on: a comma's left operand or a
+  cast to void's that is no constant, as a variable's read or a modification
+  (`(s, 0.75)`, `((void)s, 0.75)`), marks the value
+  `BUSTER_CHECK_DISCARDED_UNEVALUABLE`, which the probability refuses, while
+  `((void)0, 0.75)`, `(one, 0.75)` and `(&s, 0.75)` are constants. It never
+  runs. Its call folds as `expect`'s, and otherwise its recipe is `expect`'s.
+
+The alignment builtins fold, as integer constant expressions, where clang's
+evaluator does: of constants without side effects, in the source's width
+(`(x + (a - 1)) & ~(a - 1)`, `x & ~(a - 1)` and `(x & (a - 1)) == 0`), and of an
+address constant by its object's declaration alignment as clang gives it
+(`check_input_declaration_alignment`, which the call's evidence carries with
+its object, `CheckBuiltinCall.base_object`): the same address, or 1, where the
+alignment at its offset is at least the requested one; the offset rounded, or
+0, where the object's is; nothing otherwise, so a static initializer of
+`__builtin_align_up(&small[1], 8)` for a `char small[8]` is no constant, as in
+clang. An alignment of 1 folds any address. A folded integer evaluates neither
+argument, as clang's code doesn't; a folded address still evaluates both, as
+clang computes it at run time. A local array's address is no constant: the
+call runs, and gives what the fold would, since a frame places a declaration at
+least as aligned as clang declares it (#978's large arrays). A source past 128
+bits, which clang takes, is refused by name.
+
+`c_builtin_misc_lower.c`'s `cbuiltin_misc_align` computes them as clang's code
+does, from the bit builtins' descriptors (a pointer's 64 bits): the source
+zero-extended from its width, the alignment zero-extended or truncated to it,
+the mask the alignment less 1 in that width (all ones for an alignment that
+truncates to 0, as a char's runtime 256 does), and a source of 65 to 128 bits
+limb by limb, with the mask's borrow and the sum's carry crossing between the
+limbs.
+
+`test-check-builtins-misc` checks the folds, the alignments' rules, the
+operands' types, the result types and the address folds, and
+`test-checker --program-align` checks source fixtures by both paths against
+clang and runs programs natively against clang -O0's build: every integer
+width by alignments of every width, 128-bit and wide `_BitInt` sources,
+addresses in static data and in frames, and `expect`'s and
+`expect_with_probability`'s arguments evaluated once, in order, or not at all.
 
 ## Intrinsic checking contracts
 
