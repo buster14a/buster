@@ -148,7 +148,11 @@ static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* inp
 
 static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
 {
-    const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
+    // The x86 range warning's command-line baseline is a snapshot of its DefaultError severity; a CheckInput built
+    // outside the reader (tests and fragments) keeps the default error.
+    const bool mapped_range = warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE && input->x86_range_policy;
+    const CheckWarningSeverity severity = mapped_range ? (CheckWarningSeverity)input->x86_range_severity :
+                                          default_ignored ? CHECK_WARNING_IGNORE :
                                           warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
     return check_diagnostic_severity_from(input, token, source, warning, severity);
 }
@@ -175,7 +179,7 @@ static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, u
 }
 
 // Snapshot command-line policy independently of option storage and source-ordered pragma overrides.
-static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options)
+static void check_input_warning_policy(CheckInput* input, const PPOptions* options)
 {
     _Static_assert(CHECK_WARNING_ID_KR_TOO_MANY - CHECK_WARNING_ID_KR_DEFINITION + 1 == BUSTER_ARRAY_LENGTH(input->kr_warning_severities),
                    "the K&R policy snapshot covers its four stable IDs");
@@ -188,6 +192,9 @@ static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* op
         input->kr_warning_errors |= command.severity >= CHECK_WARNING_ERROR;
     }
     input->kr_warning_policy = true;
+    const CheckWarningCommandLine x86_range = check_warning_command_line(options, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false);
+    input->x86_range_severity = (uint8_t)x86_range.severity;
+    input->x86_range_policy = true;
 }
 
 // K&R diagnostics retain call-site spelling independently of the definition's compatibility signature.

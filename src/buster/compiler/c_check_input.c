@@ -368,6 +368,10 @@ struct CheckInput
     bool kr_warning_quiet;
     bool kr_warning_system;
     bool kr_warning_errors;
+    // The x86 builtins' out-of-range immediate warning is a DefaultError diagnostic whose baseline the command line
+    // maps (#1080); source pragmas still override this snapshot at their locations.
+    uint8_t x86_range_severity;
+    bool x86_range_policy;
     uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
@@ -7500,7 +7504,7 @@ static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool
 
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
-static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options);
+static void check_input_warning_policy(CheckInput* input, const PPOptions* options);
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
@@ -7512,7 +7516,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .implicit_function_system = pp->options.implicit_function_system };
-    check_input_kr_warning_policy(input, &pp->options);
+    check_input_warning_policy(input, &pp->options);
     // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
     // inlines 16-byte atomics (cx16), which the lock-free queries read.
     types->char_unsigned = pp->options.predefines.char_unsigned;

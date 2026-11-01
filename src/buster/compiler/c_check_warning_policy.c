@@ -51,7 +51,10 @@ struct CheckWarningCommandLine
 
 static CheckWarningCommandLine check_warning_command_line(const PPOptions* options, uint32_t id, bool default_ignored)
 {
-    CheckWarningSeverity mapped = default_ignored ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
+    // Clang's argument-outside-range is a DefaultError warning: its baseline is an error, which the ordered
+    // mappings below may demote, disable or restore like any other warning's (#1080).
+    CheckWarningSeverity mapped = default_ignored ? CHECK_WARNING_IGNORE :
+                                  id == CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
     bool explicit_mapping = false;
     bool no_error = false;
     bool errors = false;

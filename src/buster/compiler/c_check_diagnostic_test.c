@@ -269,9 +269,62 @@ static void check_test_warning_policy_prefix(CheckTest* test)
     arena_release(&arena);
 }
 
+// Clang's argument-outside-range is a DefaultError warning whose baseline the command line maps (#1080). The
+// ordered mappings follow the same rules as the ordinary warnings above, starting from an error instead of a warning.
+static void check_test_warning_policy_x86_range(CheckTest* test)
+{
+    static const struct
+    {
+        const char* options[3];
+        uint32_t count;
+        CheckWarningSeverity expected;
+    } cases[] =
+    {
+        { { NULL }, 0, CHECK_WARNING_ERROR },
+        { { "-Wno-error=argument-outside-range" }, 1, CHECK_WARNING_WARNING },
+        { { "-Werror", "-Wno-error=argument-outside-range" }, 2, CHECK_WARNING_WARNING },
+        { { "-Wno-error=argument-outside-range", "-Werror" }, 2, CHECK_WARNING_WARNING },
+        { { "-Wno-argument-outside-range" }, 1, CHECK_WARNING_IGNORE },
+        { { "-Werror=argument-outside-range" }, 1, CHECK_WARNING_ERROR },
+        { { "-Wno-argument-outside-range", "-Wargument-outside-range" }, 2, CHECK_WARNING_WARNING },
+        { { "-Wno-everything" }, 1, CHECK_WARNING_IGNORE },
+        { { "-Weverything" }, 1, CHECK_WARNING_ERROR },
+        { { "-Wno-everything", "-Wargument-outside-range" }, 2, CHECK_WARNING_WARNING },
+        { { "-Werror", "-Wno-everything" }, 2, CHECK_WARNING_IGNORE },
+        { { "-Weverything", "-Wno-error=argument-outside-range" }, 2, CHECK_WARNING_WARNING },
+        { { "-Wno-argument-outside-range", "-Werror" }, 2, CHECK_WARNING_IGNORE },
+        { { "-Werror=argument-outside-range", "-Wno-error" }, 2, CHECK_WARNING_ERROR },
+        { { "-Werror", "-Wno-error=argument-outside-range", "-Werror" }, 3, CHECK_WARNING_WARNING },
+        { { "-w", "-Werror=argument-outside-range" }, 2, CHECK_WARNING_IGNORE },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        const PPOptions command = { .semantic_warning_options = cases[i].options, .semantic_warning_option_count = cases[i].count };
+        check_test_expect(test, check_warning_command_line(&command, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false).severity == cases[i].expected,
+                          "x86 range warning command-line mapping starts from its DefaultError baseline");
+    }
+    CheckInput input = { .x86_range_policy = true, .x86_range_severity = CHECK_WARNING_WARNING };
+    check_test_expect(test, check_diagnostic_severity(&input, 0, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) == CHECK_WARNING_WARNING,
+                      "the checked input's x86 range policy snapshot replaces the default error");
+    CheckInputDiagnosticPragma record =
+    {
+        .option = { .pointer = "-Wargument-outside-range", .length = sizeof("-Wargument-outside-range") - 1 },
+        .token = 0,
+        .state_before = BUSTER_CHECK_NONE,
+        .state_after = 0,
+        .operation = CHECK_DIAGNOSTIC_ERROR,
+    };
+    CheckInputDiagnosticPragmas history = { .records = &record, .count = 1, .final_state = 0 };
+    input.x86_range_severity = CHECK_WARNING_IGNORE;
+    input.diagnostic_pragmas = &history;
+    check_test_expect(test, check_diagnostic_severity(&input, 0, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) == CHECK_WARNING_ERROR,
+                      "a source pragma overrides the x86 range warning's command-line snapshot");
+}
+
 static __attribute__((noinline)) void check_test_diagnostic_policy(CheckTest* test)
 {
     check_test_warning_policy_prefix(test);
+    check_test_warning_policy_x86_range(test);
     check_test_diagnostic_replay(test);
     check_test_diagnostic_sources(test);
 }
