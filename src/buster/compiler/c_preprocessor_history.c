@@ -77,7 +77,7 @@ static uint32_t pp_history_expansion(Preprocessor* pp, PPMacroId macro, uint32_t
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp_history_room(pp, (void**)&pp->history, &pp->history_capacity, pp->history_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPExpansion), BUSTER_ARENA_SMALL_BYTES))
+        if (pp_history_room(pp, (void**)&pp->history, &pp->history_capacity, pp->history_count + 1, (BUSTER_PP_MAX_HISTORY >> pp->capacity_shift), sizeof(PPExpansion), BUSTER_ARENA_SMALL_BYTES))
         {
             const PPMacro* definition = &pp->macros[macro];
             result = ++pp->history_count;
@@ -104,7 +104,7 @@ static void pp_history_change(Preprocessor* pp, uint32_t token, uint32_t origin)
     const uint32_t previous = count != 0 ? pp->history_runs[count - 1].origin : 0;
     if (previous != origin)
     {
-        if (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, count + 1, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES))
+        if (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, count + 1, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift) + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES))
         {
             pp->history_runs[count] = (PPHistoryRun)
             {
@@ -197,7 +197,7 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
                 const __m256i before = _mm256_mask_set1_epi32(_mm256_permutexvar_epi32(shifted, values), 1, (int)previous);
                 const __mmask8 changes = _mm256_mask_cmpneq_epi32_mask(valid, values, before);
                 const uint32_t added = (uint32_t)__builtin_popcount(changes);
-                if (added != 0 && pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, pp->history_run_count + added, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES))
+                if (added != 0 && pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, pp->history_run_count + added, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift) + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES))
                 {
                     const __m256i positions = _mm256_add_epi32(lanes, _mm256_set1_epi32((int)(at + i - begin)));
                     const __m512i records = _mm512_or_si512(_mm512_cvtepu32_epi64(positions), _mm512_slli_epi64(_mm512_cvtepu32_epi64(values), 32));
@@ -231,7 +231,7 @@ static uint32_t pp_history_substitution(Preprocessor* pp, uint32_t source, uint3
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp_history_room(pp, (void**)&pp->substitutions, &pp->substitution_capacity, pp->substitution_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPSubstitution), BUSTER_PP_TABLE_SMALL_BYTES))
+        if (pp_history_room(pp, (void**)&pp->substitutions, &pp->substitution_capacity, pp->substitution_count + 1, (BUSTER_PP_MAX_HISTORY >> pp->capacity_shift), sizeof(PPSubstitution), BUSTER_PP_TABLE_SMALL_BYTES))
         {
             const uint32_t id = ++pp->substitution_count;
             pp->substitutions[id - 1] = (PPSubstitution)
@@ -270,8 +270,8 @@ static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uin
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp_history_room(pp, (void**)&pp->generated, &pp->generated_capacity, pp->generated_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPGenerated), BUSTER_PP_TABLE_SMALL_BYTES) &&
-            pp_history_room(pp, (void**)&pp->history_sources, &pp->history_source_capacity, pp->history_source_count + count, BUSTER_PP_MAX_HISTORY, sizeof(PPSource), BUSTER_ARENA_SMALL_BYTES))
+        if (pp_history_room(pp, (void**)&pp->generated, &pp->generated_capacity, pp->generated_count + 1, (BUSTER_PP_MAX_HISTORY >> pp->capacity_shift), sizeof(PPGenerated), BUSTER_PP_TABLE_SMALL_BYTES) &&
+            pp_history_room(pp, (void**)&pp->history_sources, &pp->history_source_capacity, pp->history_source_count + count, (BUSTER_PP_MAX_HISTORY >> pp->capacity_shift), sizeof(PPSource), BUSTER_ARENA_SMALL_BYTES))
         {
             const uint32_t id = ++pp->generated_count;
             pp->generated[id - 1] = (PPGenerated){

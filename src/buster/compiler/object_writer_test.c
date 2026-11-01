@@ -2385,11 +2385,15 @@ static void object_test_lanes_full_main(void* argument)
 {
     ObjectTestLanes* test = argument;
     Scratch scratch = scratch_begin(0);
+    const uint64_t capacity = scratch.arena->capacity;
     if (lane_index() == lane_count() - 1)
     {
-        arena_push(scratch.arena, scratch.arena->capacity - scratch.arena->length, 1);
+        // The arena reads full by its bound: pushing its whole reservation could refuse where the address space did
+        // not, and would leave the lane room the case takes away.
+        scratch.arena->capacity = scratch.arena->length;
     }
     test->written[lane_index()] = object_write_units(test->link, test->units, test->options, test->paths, test->source_names, test->errors);
+    scratch.arena->capacity = capacity;
     scratch_end(scratch);
 }
 

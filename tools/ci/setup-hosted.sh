@@ -9,7 +9,7 @@ test "$(uname -m)" = x86_64
 test "$VERSION_ID" = 26.04
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends gcc g++ binutils libc6-dev \
-    gdb tcc zstd linux-perf qemu-user libzstd-dev libxml2-dev zlib1g-dev
+    gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev
 # Use the matching official stable release for the compiler, Clang API oracle,
 # linker, and LLVM object/DWARF consumers. llvm-config's static library list
 # needs the LLVM archives and the Ubuntu development libraries above.

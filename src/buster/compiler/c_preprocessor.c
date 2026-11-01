@@ -666,6 +666,7 @@ struct PPPrepare
 
 struct FileCache
 {
+    uint32_t capacity_shift;
     PPPrepare prepare;
     // The intern table file_cache_prepare refines records with.
     InternTable* table;
@@ -1295,6 +1296,8 @@ struct PPDiagnosticRecord
 
 struct Preprocessor
 {
+    // Frozen at admission; every producer checks the same bounds that its tables were allocated with.
+    uint32_t capacity_shift;
     PPOptions options;
     InternTable* table;
     bool vectorized;
@@ -1699,8 +1702,10 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
     }
 }
 
-static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
+
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
+static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 
 #include "c_preprocessor_history.c"
@@ -1730,7 +1735,7 @@ static uint32_t pp_add_range(Preprocessor* pp, uint32_t length, uint32_t file, c
     uint32_t result = BUSTER_PP_NONE;
     const uint64_t size = (uint64_t)length + 1;
     const uint64_t limit = pp->options.location_limit != 0 ? pp->options.location_limit : UINT32_MAX;
-    if ((uint64_t)pp->location_top + size >= limit || pp->range_count == BUSTER_PP_MAX_RANGES)
+    if ((uint64_t)pp->location_top + size >= limit || pp->range_count == (BUSTER_PP_MAX_RANGES >> pp->capacity_shift))
     {
         // As clang reports it: an inclusion at its #include, and generated spellings without a place; once.
         if (pp->fatal)
@@ -1793,7 +1798,7 @@ static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t l
     uint32_t result = 0;
     uint32_t* current = &pp->scratch_range[clean];
     uint32_t* used = &pp->scratch_used[clean];
-    if (*current == BUSTER_PP_NONE || *used + length > pp->ranges[*current].length - 1)
+    if (*current == BUSTER_PP_NONE || *used + length >= pp->ranges[*current].length - 1)
     {
         const uint32_t chunk = length >= BUSTER_PP_SCRATCH_CHUNK_BYTES ? length + 1 : BUSTER_PP_SCRATCH_CHUNK_BYTES;
         uint8_t* memory = arena_push(&pp->scratch[clean], chunk, 1);
@@ -2437,10 +2442,7 @@ static bool pp_note_directives(Arena* arena, PPFileData* data)
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
 // pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it), then the
-// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table. The name's kind and value
-// and the line's word of the directive BUSTER_PP_DIRECTIVE_AHEAD on are prefetched: in a large file they have left the
-// caches, a window at a time (#451) more than whole.
-#define BUSTER_PP_DIRECTIVE_AHEAD 16
+// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table.
 static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data, const uint64_t* lines)
 {
     (void)vectorized;
@@ -2448,13 +2450,6 @@ static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data
     bool elifdef = false;
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
-        if (d + BUSTER_PP_DIRECTIVE_AHEAD < data->directive_count)
-        {
-            const uint32_t ahead = data->directive_hash[d + BUSTER_PP_DIRECTIVE_AHEAD] + 1;
-            _mm_prefetch((const char*)(data->kinds + ahead), _MM_HINT_T0);
-            _mm_prefetch((const char*)(data->values + ahead), _MM_HINT_T0);
-            _mm_prefetch((const char*)(lines + ahead / 64), _MM_HINT_T0);
-        }
         const uint32_t hash = data->directive_hash[d];
         const uint32_t end = pp_next_line(lines, data->token_count, hash);
         uint8_t kind = PP_DIRECTIVE_NULL;
@@ -3808,9 +3803,12 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     cache->prepare = prepare;
     cache->table = table;
     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
+    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
+    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
+    cache->capacity_shift = arena_capacity_shift(records > paths ? records : paths);
     // Reserved in turn until one can't be (file_cache_release releases those that were).
-    const uint64_t sizes[] = { (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64, 2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64,
-                               (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64, 2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64 };
+    const uint64_t sizes[] = { (uint64_t)(BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(PPFileData) + 64, 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(uint32_t) + 64,
+                               (uint64_t)(BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(FileCachePath) + 64, 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(uint32_t) + 64 };
     bool reserved = true;
     for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
     {
@@ -3818,10 +3816,10 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
         reserved = cache->arrays[i].base != 0;
     }
     cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
-    cache->records = arena_push_array(&cache->arrays[0], BUSTER_PP_MAX_FILES, sizeof(PPFileData), 64);
-    cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
-    cache->paths = arena_push_array(&cache->arrays[2], BUSTER_FILE_CACHE_MAX_PATHS, sizeof(FileCachePath), 64);
-    cache->path_slots = arena_push_array(&cache->arrays[3], 2ull * BUSTER_FILE_CACHE_MAX_PATHS, sizeof(uint32_t), 64);
+    cache->records = arena_push_array(&cache->arrays[0], (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(PPFileData), 64);
+    cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(uint32_t), 64);
+    cache->paths = arena_push_array(&cache->arrays[2], (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(FileCachePath), 64);
+    cache->path_slots = arena_push_array(&cache->arrays[3], 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(uint32_t), 64);
     cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
     cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
     return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
@@ -3929,7 +3927,7 @@ static void file_cache_place_identity(FileCache* cache, uint32_t record)
 static uint32_t file_cache_add_record(FileCache* cache, const FileProbe* probe)
 {
     uint32_t result = BUSTER_PP_NONE;
-    if (cache->record_count < BUSTER_PP_MAX_FILES)
+    if (cache->record_count < (BUSTER_PP_MAX_FILES >> cache->capacity_shift))
     {
         result = cache->record_count;
         cache->records[result] = (PPFileData){
@@ -4061,7 +4059,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
 static FileCachePath* file_cache_add_path(FileCache* cache, const char* path, uint32_t length, uint64_t hash, const FileProbe* probe)
 {
     FileCachePath* result = 0;
-    char* copy = cache->path_count < BUSTER_FILE_CACHE_MAX_PATHS ? arena_push(&cache->path_arena, (uint64_t)length + 1, 1) : 0;
+    char* copy = cache->path_count < (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) ? arena_push(&cache->path_arena, (uint64_t)length + 1, 1) : 0;
     if (copy != 0)
     {
         memcpy(copy, path, length);
@@ -4200,7 +4198,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
 static uint32_t pp_data_of_record(Preprocessor* pp, uint32_t record)
 {
     uint32_t result = pp->record_data[record] - 1;
-    if (pp->record_data[record] == 0 && pp->data_count < BUSTER_PP_MAX_FILES)
+    if (pp->record_data[record] == 0 && pp->data_count < (BUSTER_PP_MAX_FILES >> pp->capacity_shift))
     {
         const PPFileData* shared = &pp->cache->records[record];
         result = pp->data_count;
@@ -4328,7 +4326,7 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
         }
     }
     // The table has room: it is never more than half full, and can grow to twice as large as the most files there can be.
-    if (result == BUSTER_PP_NONE && pp->file_count < BUSTER_PP_MAX_FILES)
+    if (result == BUSTER_PP_NONE && pp->file_count < (BUSTER_PP_MAX_FILES >> pp->capacity_shift))
     {
         char* copy = arena_push(&pp->arena, (uint64_t)length + 1, 1);
         if (copy != 0)
@@ -4723,7 +4721,7 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name)
 {
     PPMacroId result = 0;
-    if (pp->macro_count < BUSTER_PP_MAX_MACROS)
+    if (pp->macro_count < (BUSTER_PP_MAX_MACROS >> pp->capacity_shift))
     {
         result = pp->macro_count;
         pp->macros[result] = (PPMacro){ .name = name };
@@ -5818,8 +5816,8 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     const uint32_t parameter_count = macro->parameter_count;
     const bool substitutes = (macro->flags & BUSTER_PP_MACRO_FUNCTION) != 0 && parameter_count != 0;
     const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
-    bool result = pp->item_count + (macro->body_end - macro->body_begin) <= BUSTER_PP_MAX_ITEMS &&
-                  pp->parameter_count + parameter_count <= BUSTER_PP_MAX_ITEMS;
+    bool result = pp->item_count + (macro->body_end - macro->body_begin) <= (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift) &&
+                  pp->parameter_count + parameter_count <= (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift);
     // The parameters' ids: the identifiers of the parameter list, and __VA_ARGS__ for `...`.
     macro->parameters = pp->parameter_count;
     uint32_t parameter = 0;
@@ -5989,7 +5987,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             if (!pasted && in_order && !((listed[parameter / 64] >> (parameter % 64)) & 1))
             {
                 listed[parameter / 64] |= 1ull << (parameter % 64);
-                in_order = pp->item_count + order_count < BUSTER_PP_MAX_ITEMS;
+                in_order = pp->item_count + order_count < (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift);
                 if (in_order)
                 {
                     pp->items[pp->item_count + order_count] = (PPItem){ .kind = PP_ITEM_PARAMETER, .parameter = (uint16_t)parameter };
@@ -6016,7 +6014,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         name_count += items[i].kind == PP_ITEM_TOKEN && (data->kinds[items[i].token] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
     }
     // A simple macro's body identifiers, after the order, if they fit.
-    simple = simple && name_count <= UINT16_MAX && (uint64_t)pp->item_count + order_count + name_count <= BUSTER_PP_MAX_ITEMS;
+    simple = simple && name_count <= UINT16_MAX && (uint64_t)pp->item_count + order_count + name_count <= (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift);
     uint32_t named = 0;
     for (uint32_t i = 0; simple && i < count; i += 1)
     {
@@ -6055,7 +6053,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     // (pp_initialize): the scalar twins and the history's runs take pp_emit_simple_write and pp_substitute_simple, their
     // twin, or for a macro with ## and # the invocation stack and pp_substitute.
     const bool templated = (simple || operators) && pp->templates != 0 && count <= BUSTER_PP_TEMPLATE_TOKENS &&
-                           parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < BUSTER_PP_MAX_TEMPLATES;
+                           parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < (BUSTER_PP_MAX_TEMPLATES >> pp->capacity_shift);
     if (templated)
     {
         PPTemplate* template = &pp->templates[pp->template_count];
@@ -6205,7 +6203,7 @@ static PPToken pp_context_token(const Preprocessor* pp, const PPContext* context
 static PPContext* pp_push_context(Preprocessor* pp, uint8_t kind)
 {
     PPContext* result = 0;
-    if (pp->context_count < BUSTER_PP_MAX_CONTEXTS)
+    if (pp->context_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift))
     {
         result = &pp->contexts[pp->context_count];
         *result = (PPContext){ .kind = kind };
@@ -7793,7 +7791,7 @@ static bool pp_needs_expansion(const Preprocessor* pp, const PPTokens* tokens, u
 
 static bool pp_push_capture(Preprocessor* pp, uint8_t kind, uint32_t invocation, uint32_t argument)
 {
-    const bool result = pp->capture_count < BUSTER_PP_MAX_CONTEXTS;
+    const bool result = pp->capture_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift);
     if (result)
     {
         pp->capture_frames[pp->capture_count] = (PPCapture){ .kind = kind, .begin = pp->captures.count, .invocation = invocation, .argument = argument, .pragma_mark = pp->pragma_lines };
@@ -7813,7 +7811,7 @@ static bool pp_push_capture(Preprocessor* pp, uint8_t kind, uint32_t invocation,
 // calls. Returns false (after a fatal error) if a stack is full.
 static bool pp_start_capture(Preprocessor* pp, PPCapture capture, uint32_t begin, uint32_t end, uint32_t expansion_end)
 {
-    bool result = pp->capture_count < BUSTER_PP_MAX_CONTEXTS;
+    bool result = pp->capture_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift);
     if (result)
     {
         capture.begin = pp->captures.count;
@@ -7999,7 +7997,7 @@ static void pp_finish_invocation(Preprocessor* pp)
 
 static bool pp_new_argument(Preprocessor* pp)
 {
-    const bool result = pp->argument_record_count < BUSTER_PP_MAX_STACK_TOKENS;
+    const bool result = pp->argument_record_count < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift);
     if (result)
     {
         const uint32_t at = pp->arguments.count;
@@ -8034,9 +8032,9 @@ static bool pp_index_arguments(Preprocessor* pp)
 {
     if (pp->argument_links == 0)
     {
-        const uint64_t bytes = (uint64_t)BUSTER_PP_MAX_STACK_TOKENS * sizeof(uint32_t);
+        const uint64_t bytes = (uint64_t)(BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) * sizeof(uint32_t);
         pp->argument_link_arena = arena_reserve_small(bytes, BUSTER_PP_TABLE_SMALL_BYTES);
-        pp->argument_links = arena_push_array(&pp->argument_link_arena, BUSTER_PP_MAX_STACK_TOKENS, sizeof(uint32_t), 64);
+        pp->argument_links = arena_push_array(&pp->argument_link_arena, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift), sizeof(uint32_t), 64);
         if (pp->argument_links == 0)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory indexing macro arguments");
@@ -8120,7 +8118,7 @@ static bool pp_collect_argument_slice(Preprocessor* pp, PPInvocation* invocation
         while (result && next < close && !(variadic && record - first + 1 >= parameter_count))
         {
             pp->argument_records[record] = (PPArgument){ .raw_begin = begin, .raw_end = next };
-            result = record + 1 < BUSTER_PP_MAX_STACK_TOKENS;
+            result = record + 1 < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift);
             record += result;
             begin = next + 1;
             next = pp->argument_links[next];
@@ -8261,7 +8259,7 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
     const uint32_t* separators = scan.separators;
     const uint32_t separator_count = scan.separator_count;
     const uint32_t close = scan.close;
-    const bool result = close != BUSTER_PP_NONE && pp->argument_record_count + separator_count < BUSTER_PP_MAX_STACK_TOKENS &&
+    const bool result = close != BUSTER_PP_NONE && pp->argument_record_count + separator_count < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) &&
                         pp_room(pp, &pp->arguments, close - open);
     if (result)
     {
@@ -8542,7 +8540,7 @@ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint
     }
     else
     {
-        uint8_t* lexical = pp->data_count >= BUSTER_PP_MAX_FILES ? 0 : data->lexical_bytes != 0 ? (uint8_t*)data->lexical_bytes : arena_push(&pp->arena, data->length, 1);
+        uint8_t* lexical = pp->data_count >= (BUSTER_PP_MAX_FILES >> pp->capacity_shift) ? 0 : data->lexical_bytes != 0 ? (uint8_t*)data->lexical_bytes : arena_push(&pp->arena, data->length, 1);
         result = lexical != 0;
         if (result)
         {
@@ -9217,9 +9215,9 @@ static bool pp_emit_simple_size(Preprocessor* pp, const PPInvocation* invocation
     // fatal) the main loop's path takes the expansion, recording what it can as it does at that point.
     const bool history = !pp->options.no_history;
     result = result && (!history || (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, pp->history_run_count + (uint32_t)size + 2,
-                                                     BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES) &&
+                                                     (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift) + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES) &&
                                      pp_history_room(pp, (void**)&pp->substitutions, &pp->substitution_capacity, pp->substitution_count + (uint32_t)size,
-                                                     BUSTER_PP_MAX_HISTORY, sizeof(PPSubstitution), BUSTER_PP_TABLE_SMALL_BYTES)));
+                                                     (BUSTER_PP_MAX_HISTORY >> pp->capacity_shift), sizeof(PPSubstitution), BUSTER_PP_TABLE_SMALL_BYTES)));
     plan->size = (uint32_t)size;
     return result;
 }
@@ -10074,7 +10072,7 @@ static bool pp_nested_invocation(Preprocessor* pp, uint32_t name, uint32_t end, 
     PPMacro* macro = &pp->macros[id];
     bool result = pp->templates != 0 && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN)) == BUSTER_PP_MACRO_FUNCTION &&
                   name + 1 < end && pp->arguments.kinds[name + 1] == C_TOKEN_L_PAREN &&
-                  pp->argument_record_count + BUSTER_PP_TEMPLATE_TOKENS < BUSTER_PP_MAX_STACK_TOKENS;
+                  pp->argument_record_count + BUSTER_PP_TEMPLATE_TOKENS < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift);
     if (result && !(macro->flags & BUSTER_PP_MACRO_COMPILED))
     {
         result = pp_compile_macro(pp, id);
@@ -10348,7 +10346,7 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
     PPTemplate* template = pp_template_of(pp, macro);
     const bool operators = template != 0 && (template->pastes | template->strings) != 0;
     bool result = ((macro->flags & BUSTER_PP_MACRO_SIMPLE) || operators) && (pp->stream_count | pp->limit_count) == 0 && !pp->fatal &&
-                  count + omitted == macro->parameter_count && pp->argument_record_count < BUSTER_PP_MAX_STACK_TOKENS;
+                  count + omitted == macro->parameter_count && pp->argument_record_count < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift);
     const PPItem* order = pp->items + macro->items_begin + macro->item_count;
     // The arguments to expand in place, by their places in the order (a macro expands at most 64 so), and the plans of
     // the invocations in them.
@@ -10493,8 +10491,8 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
         uint32_t count = scan.separator_count + 1;
         count = macro->parameter_count == 0 && count == 1 && close == open + 1 ? 0 : count;
         const bool omitted = (macro->flags & BUSTER_PP_MACRO_VARIADIC) && count + 1 == macro->parameter_count;
-        simple = close != BUSTER_PP_NONE && count + omitted == macro->parameter_count && pp->invocation_count < BUSTER_PP_MAX_CONTEXTS &&
-                 records_begin + scan.separator_count + 1 < BUSTER_PP_MAX_STACK_TOKENS && pp_room(pp, &pp->arguments, close - open);
+        simple = close != BUSTER_PP_NONE && count + omitted == macro->parameter_count && pp->invocation_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift) &&
+                 records_begin + scan.separator_count + 1 < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) && pp_room(pp, &pp->arguments, close - open);
         PPArgument* records = &pp->argument_records[records_begin];
         if (simple)
         {
@@ -10639,7 +10637,7 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         .opened = true,
         .content_end = BUSTER_PP_NONE,
     };
-    bool valid = pp->invocation_count < BUSTER_PP_MAX_CONTEXTS;
+    bool valid = pp->invocation_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift);
     if (!valid)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, name.location, "macro expansion nests too deeply");
@@ -11072,7 +11070,7 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
         const uint32_t emitted = pp->output.count;
         result = lexed && pp_pragma(pp, begin, pp->arguments.count, name_location, true, false, restore);
         if (lexed && !result && pp->options.expansion_starts && pp->capture_count == 0 && pp->output.count == emitted &&
-            pp->silent_pragma_count < BUSTER_PP_MAX_SILENT_PRAGMAS)
+            pp->silent_pragma_count < (BUSTER_PP_MAX_SILENT_PRAGMAS >> pp->capacity_shift))
         {
             pp->silent_pragmas[pp->silent_pragma_count] = (PPExpansionStart){ .token = emitted, .location = pp->expansion_location };
             pp->silent_pragma_count += 1;
@@ -11180,7 +11178,7 @@ static void pp_defer_pragma(Preprocessor* pp, uint32_t name_location, uint8_t na
 // collects the operand (pp_collect_step, as an invocation's arguments, from its '(' on), then pp_close_builtin takes it.
 static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8_t flags, uint32_t expansion_end)
 {
-    bool valid = pp->invocation_count < BUSTER_PP_MAX_CONTEXTS;
+    bool valid = pp->invocation_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift);
     if (!valid)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, name.location, "macro expansion nests too deeply");
@@ -11298,7 +11296,7 @@ static void pp_start_stream(Preprocessor* pp)
     pp->invocation_count -= 1;
     pp->argument_record_count = invocation.arguments;
     pp->arguments.count = invocation.arguments_begin;
-    if (pp->capture_count < BUSTER_PP_MAX_CONTEXTS)
+    if (pp->capture_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift))
     {
         pp->capture_frames[pp->capture_count] = (PPCapture){
             .kind = BUSTER_PP_CAPTURE_STREAM,
@@ -11409,7 +11407,7 @@ static void pp_lift_pragma_lines(Preprocessor* pp)
 // pp_end_pragma_stream runs the pragma.
 static void pp_start_pragma_stream(Preprocessor* pp, PPToken name, uint8_t flags)
 {
-    if (pp->capture_count < BUSTER_PP_MAX_CONTEXTS)
+    if (pp->capture_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift))
     {
         pp->capture_frames[pp->capture_count] = (PPCapture){
             .kind = BUSTER_PP_CAPTURE_STREAM,
@@ -12735,7 +12733,7 @@ static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d,
         const PPFileData* data = &pp->datas[context->data];
         context->guard_taken |= d == data->guard_opener && data->guard != 0 && taken;
         const uint32_t name = pp->ranges[context->range].base + data->starts[data->directive_hash[d] + 1];
-        if (pp->conditional_count < BUSTER_PP_MAX_CONTEXTS)
+        if (pp->conditional_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift))
         {
             pp->conditionals[pp->conditional_count] = (PPConditional){ .taken = taken, .location = name };
             pp->conditional_count += 1;
@@ -13552,7 +13550,7 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
 {
     PPRange* record = &pp->ranges[range];
     const uint32_t latest = record->last_line_directive;
-    if (pp->line_directive_count < BUSTER_PP_MAX_LINE_DIRECTIVES)
+    if (pp->line_directive_count < (BUSTER_PP_MAX_LINE_DIRECTIVES >> pp->capacity_shift))
     {
         const uint32_t index = pp->line_directive_count;
         const bool inherits = name == 0 && latest != BUSTER_PP_NONE;
@@ -14218,7 +14216,7 @@ static void pp_pragma_push_pop(Preprocessor* pp, PPPragmaKind kind, const PPToke
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "pragma %s requires a parenthesized string", kind == PP_PRAGMA_PUSH_MACRO ? "push_macro" : "pop_macro");
     }
-    else if (name != 0 && kind == PP_PRAGMA_PUSH_MACRO && pp->pushed_count < BUSTER_PP_MAX_PUSHED)
+    else if (name != 0 && kind == PP_PRAGMA_PUSH_MACRO && pp->pushed_count < (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift))
     {
         pp->pushed_names[pp->pushed_count] = name;
         pp->pushed_macros[pp->pushed_count] = pp->macro_of[name];
@@ -16134,7 +16132,7 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
                 fits = !((parameters.given >> BUSTER_PP_EMBED_IF_EMPTY) & 1) ||
                        pp_embed_push(pp, tokens, parameters.begins[BUSTER_PP_EMBED_IF_EMPTY], parameters.ends[BUSTER_PP_EMBED_IF_EMPTY]);
             }
-            else if (pp->embed_count < BUSTER_PP_MAX_EMBEDS)
+            else if (pp->embed_count < (BUSTER_PP_MAX_EMBEDS >> pp->capacity_shift))
             {
                 pp->embeds[pp->embed_count] = (PPEmbed){ .data = source, .offset = offset, .length = taken };
                 fits = (!((parameters.given >> BUSTER_PP_EMBED_PREFIX) & 1) ||
@@ -17442,7 +17440,7 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
 {
     uint32_t result = BUSTER_PP_NONE;
     uint8_t* bytes = arena_push(&pp->arena, (uint64_t)length + 64, 64);
-    if (bytes != 0 && pp->data_count < BUSTER_PP_MAX_FILES && pp->file_count < BUSTER_PP_MAX_FILES)
+    if (bytes != 0 && pp->data_count < (BUSTER_PP_MAX_FILES >> pp->capacity_shift) && pp->file_count < (BUSTER_PP_MAX_FILES >> pp->capacity_shift))
     {
         memcpy(bytes, text, length);
         memset(bytes + length, 0, 64);
@@ -17465,7 +17463,7 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
 // Why pp_virtual_file couldn't make a file, for a message: the unit's files table is full, or else memory ran out.
 static const char* pp_virtual_file_error(const Preprocessor* pp)
 {
-    return pp->data_count >= BUSTER_PP_MAX_FILES || pp->file_count >= BUSTER_PP_MAX_FILES ? "too many files" : strerror(ENOMEM);
+    return pp->data_count >= (BUSTER_PP_MAX_FILES >> pp->capacity_shift) || pp->file_count >= (BUSTER_PP_MAX_FILES >> pp->capacity_shift) ? "too many files" : strerror(ENOMEM);
 }
 
 // Runs a file to its end, as the main file or one that runs before it.
@@ -17570,7 +17568,7 @@ static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
         length -= 1;
     }
     char* copy = arena_push(&pp->arena, (uint64_t)length + 1, 1);
-    const bool result = copy != 0 && pp->directory_count < BUSTER_PP_MAX_PUSHED;
+    const bool result = copy != 0 && pp->directory_count < (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift);
     if (result)
     {
         memcpy(copy, path, length);
@@ -17648,18 +17646,23 @@ static void pp_dedupe_directories(Preprocessor* pp)
 // reservations stop at the first that fails.
 // pp_array whose first `small` bytes are base pages (arena_reserve_small): for a table a translation unit usually fills
 // to a few hundred kilobytes, where the first huge page past them would cost more than the base pages it replaces.
-static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
+static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact)
 {
     void* result = 0;
     if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
-        *arena = arena_reserve_small(count * size + 64, small);
+        *arena = exact ? arena_reserve_exact(count * size + 64, small) : arena_reserve_small(count * size + 64, small);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
     *reserved = result != 0;
     return result;
+}
+
+static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
+{
+    return pp_array_with(pp, reserved, count, size, small, false);
 }
 
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
@@ -17715,7 +17718,7 @@ static bool pp_initialize_time(Preprocessor* pp)
     return result;
 }
 
-BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
+static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
     *pp = (Preprocessor){ 0 };
     pp->diagnostic_include_range = BUSTER_PP_NONE;
@@ -17750,39 +17753,54 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
     }
     pp->scratch_range[0] = BUSTER_PP_NONE;
     pp->scratch_range[1] = BUSTER_PP_NONE;
-    result = result && pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
-             pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
-    pp->ranges = pp_array(pp, &result, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
-    pp->datas = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
+    const uint64_t largest_tables[] = {
+        (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS * sizeof(PPExpansionStart),
+        (uint64_t)BUSTER_PP_MAX_STACK_TOKENS * sizeof(PPArgument),
+        (uint64_t)BUSTER_PP_MAX_ITEMS * sizeof(PPItem),
+        (uint64_t)BUSTER_PP_MAX_MACROS * sizeof(PPMacro),
+        (uint64_t)BUSTER_PP_MAX_TEMPLATES * sizeof(PPTemplate),
+        (uint64_t)BUSTER_PP_MAX_CONTEXTS * sizeof(PPInvocation),
+        (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData),
+    };
+    uint64_t largest = (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS * sizeof(uint32_t) + BUSTER_PP_TOKEN_SLACK * sizeof(uint32_t);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(largest_tables); i += 1)
+    {
+        largest = largest > largest_tables[i] ? largest : largest_tables[i];
+    }
+    pp->capacity_shift = arena_capacity_shift(largest);
+    result = result && pp_tokens_reserve(&pp->output, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->arguments, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) &&
+             pp_tokens_reserve(&pp->captures, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->expansions, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift));
+    pp->ranges = pp_array(pp, &result, (BUSTER_PP_MAX_RANGES >> pp->capacity_shift), sizeof(PPRange));
+    pp->datas = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFileData));
     pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
-    pp->files = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFile));
-    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
+    pp->files = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFile));
+    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS >> pp->capacity_shift, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp->directories = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(char*));
-    pp->directory_lengths = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
-    pp->line_directives = pp_array(pp, &result, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
-    pp->expansion_starts = pp_array(pp, &result, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
-    pp->silent_pragmas = pp_array(pp, &result, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
-    pp->embeds = pp_array(pp, &result, BUSTER_PP_MAX_EMBEDS, sizeof(PPEmbed));
-    pp->macro_of = pp_array_small(pp, &result, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->is_macro = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->poisoned = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->macros = pp_array_small(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->items = pp_array_small(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->parameters = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
+    pp->directories = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(char*));
+    pp->directory_lengths = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(uint32_t));
+    pp->directory_system = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(uint8_t));
+    pp->line_directives = pp_array(pp, &result, (BUSTER_PP_MAX_LINE_DIRECTIVES >> pp->capacity_shift), sizeof(PPLineDirective));
+    pp->expansion_starts = pp_array(pp, &result, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift) + 1, sizeof(PPExpansionStart));
+    pp->silent_pragmas = pp_array(pp, &result, (BUSTER_PP_MAX_SILENT_PRAGMAS >> pp->capacity_shift), sizeof(PPExpansionStart));
+    pp->embeds = pp_array(pp, &result, (BUSTER_PP_MAX_EMBEDS >> pp->capacity_shift), sizeof(PPEmbed));
+    pp->macro_of = pp_array_with(pp, &result, intern_id_limit(table), sizeof(PPMacroId), BUSTER_PP_TABLE_SMALL_BYTES, true);
+    pp->is_macro = pp_array_with(pp, &result, intern_id_limit(table) / 64, sizeof(uint64_t), BUSTER_ARENA_SMALL_BYTES, true);
+    pp->poisoned = pp_array_with(pp, &result, intern_id_limit(table) / 64, sizeof(uint64_t), BUSTER_ARENA_SMALL_BYTES, true);
+    pp->macros = pp_array_small(pp, &result, (BUSTER_PP_MAX_MACROS >> pp->capacity_shift), sizeof(PPMacro), BUSTER_PP_TABLE_SMALL_BYTES);
+    pp->items = pp_array_small(pp, &result, (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift), sizeof(PPItem), BUSTER_PP_TABLE_SMALL_BYTES);
+    pp->parameters = pp_array(pp, &result, (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift), sizeof(IdentId));
     // About 250 templates of 260 bytes on sqlite3.c and on this compiler's main.c: past pp_array's 64 KB of base
     // pages, the first huge page cost them 2 MB of clearing.
     pp->templates = BUSTER_VECTOR_PATH(pp->vectorized) && pp->options.no_history
-                        ? pp_array_small(pp, &result, BUSTER_PP_MAX_TEMPLATES, sizeof(PPTemplate), BUSTER_PP_TABLE_SMALL_BYTES)
+                        ? pp_array_small(pp, &result, (BUSTER_PP_MAX_TEMPLATES >> pp->capacity_shift), sizeof(PPTemplate), BUSTER_PP_TABLE_SMALL_BYTES)
                         : 0;
-    pp->pushed_names = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
-    pp->pushed_macros = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
-    pp->contexts = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
-    pp->conditionals = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
-    pp->invocations = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
-    pp->argument_records = pp_array(pp, &result, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
-    pp->capture_frames = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
+    pp->pushed_names = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(IdentId));
+    pp->pushed_macros = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(PPMacroId));
+    pp->contexts = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPContext));
+    pp->conditionals = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPConditional));
+    pp->invocations = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPInvocation));
+    pp->argument_records = pp_array(pp, &result, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift), sizeof(PPArgument));
+    pp->capture_frames = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPCapture));
     if (result && !pp->options.no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
@@ -17952,6 +17970,21 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
             }
         }
         result = !pp->fatal;
+    }
+    return result;
+}
+
+BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
+{
+    const bool compact = arena_compact;
+    bool result = pp_initialize_once(pp, options, table);
+    if (!result && !pp->fatal && !compact && arena_compact)
+    {
+        ArenaPool* pool = arena_pool;
+        arena_pool = 0;
+        pp_release(pp);
+        arena_pool = pool;
+        result = pp_initialize_once(pp, options, table);
     }
     return result;
 }
@@ -20497,6 +20530,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
 // `compiler -E [options] file.c`: preprocesses the file and prints the result, as clang -E does.
 static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
+    arena_failure = (ArenaFailure){ 0 };
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
@@ -20507,9 +20541,9 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
     options.expansion_starts = markers;
     // -E reads no history but its diagnostics' notes, which record it when there are diagnostics.
     options.defer_history = true;
-    if (arena.base == 0)
+    if (arena.base == 0 || (!parsed && arena_failure.bytes != 0))
     {
-        fprintf(stderr, "fatal error: can't reserve memory\n");
+        arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
     }
     else if (!parsed)
     {
@@ -20526,7 +20560,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
             // A failure pp_initialize reported (a location space too small for its first spellings) or memory.
             if (!pp.fatal)
             {
-                fprintf(stderr, "fatal error: can't reserve memory\n");
+                arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
             }
         }
         else

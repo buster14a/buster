@@ -296,12 +296,12 @@ ends.
   `refine_gap_is_splices` decide their bit.
 - Pass A writes `values` only when they aren't the ends (in place, as the
   preprocessor refines, a non-identifier's value is its end already).
-- For a file lexed whole before its refinement, each step prefetches the step
-  1,024 tokens on in the three columns, and 512 bytes of the source past what
-  the scan has read: the columns (10.5 MB for `sqlite3.c`) and the source
-  (9.5 MB) come back from memory, and pass B's work hides their fetch. A file
-  refined a window at a time prefetches nothing ("A large file a window at a
-  time").
+- Pass A prefetches nothing. It used to prefetch, for a file lexed whole
+  before its refinement, the step 1,024 tokens on in the three columns and 512
+  bytes of the source past the scan; #871's qualification on the 9700X found
+  those hints, with stage 1's bucket prefetches below, about 84% ineffective
+  and no faster than a build without them on `sqlite3.c -E -P`, and removed
+  them.
 
 ### Pass B: interning in batches
 
@@ -317,10 +317,9 @@ stages 2 to 3.
    bounded by its length, so the load never reads outside the token. Masks made
    in vectors (a byte permute and a compare per two identifiers) took 0.01 ms
    more. Four identifiers are hashed at a time
-   (`intern_hash_vectors4_short`, below). After the batch's hashing, its
-   buckets are prefetched from the offsets it stored: moving each group's four
-   offsets out of its vector as it was made (three extracts and four moves)
-   took 0.015 ms more of `sqlite3.c`'s refine phase. The rare identifiers of 33
+   (`intern_hash_vectors4_short`, below), and its buckets' offsets stored for
+   stage 2; the buckets are not prefetched (#871), and the pipelining leaves
+   the out-of-order core a batch's work to cover their loads. The rare identifiers of 33
    to 63 bytes (0.1% of `sqlite3.c`'s) are hashed again from all their bytes. The
    batch's loads are checked for a backslash (or with trigraphs a `?`) with a
    vector minimum of the bytes XORed with `'\\'`, on the two vectors that hold
@@ -549,9 +548,8 @@ are refined while they are in the caches:
   completes, and the last window the rest. What a block gives the next is
   carried from call to call (`RefineProgress`: the ends of the 16 tokens before
   the block, which pass C overwrote in place, and the backslash chunks scanned
-  so far), so that the blocks come out as `refine_tokens` makes them. Pass A
-  prefetches nothing there: the lexer has just written the columns and read the
-  source.
+  so far), so that the blocks come out as `refine_tokens` makes them: the lexer
+  has just written the columns and read the source, which are in the caches.
 - The leading-space words go after the kinds, as for a whole file, where the
   lexer's writes have faulted their pages in. Their place waits for the token
   count, so refinement writes them to scratch memory, and the end copies them
@@ -694,9 +692,11 @@ of their own, both now less:
   long lines and no directive 0.02 ms more than the bit loop, and with the
   groups skipped 0.002 to 0.003 ms more (below).
 - `pp_finish_directives` read each directive's name and line word after the
-  early windows' columns had left the caches. It prefetches them 16 directives
+  early windows' columns had left the caches. It prefetched them 16 directives
   ahead: kinds and line ends 107.3 against 126.6 µs a window at a time, and
-  98.9 against 106.9 µs whole.
+  98.9 against 106.9 µs whole, in that screening build. #871's qualification of
+  the whole `-E -P` on the 9700X found no cycle benefit from it, and the
+  prefetch was removed.
 
 With both as switches in one screening build, `sqlite3.c`'s directive phase
 took 0.322 ms a window at a time against 0.353 (0.341 with the places alone,

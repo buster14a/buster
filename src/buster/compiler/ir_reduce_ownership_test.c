@@ -39,7 +39,9 @@ static void ir_reduce_test_simd_ownership(IrReduceTest* test)
         IrSimdValue* own = source.vector_constants;
         for (uint32_t placement = 0; placement < 5; placement += 1)
         {
+            assert(arena_commit(&output, output.capacity));
             memset(output.base, 0xa4, 384);
+            assert(arena_commit(&scratch, scratch.capacity));
             memset(scratch.base, 0xb5, 384);
             output.length = 128;
             scratch.length = 128;
@@ -165,6 +167,7 @@ static void ir_reduce_test_ownership(IrReduceTest* test)
     {
         for (uint32_t api = 0; api < 2; api += 1)
         {
+            assert(arena_commit(&shared, shared.capacity));
             memset(shared.base, 0xb7, 128);
             uint8_t before[128];
             memcpy(before, shared.base, sizeof(before));
@@ -276,7 +279,9 @@ static void ir_reduce_test_ownership(IrReduceTest* test)
         uint32_t succeeded = 0;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(available); i += 1)
         {
+            assert(arena_commit(&output, output.capacity));
             memset(output.base, 0x3c, 64);
+            assert(arena_commit(&scratch, scratch.capacity));
             memset(scratch.base, 0x4d, 64);
             Arena out = { .base = output.base, .length = 64, .capacity = axis == 0 ? 64 + available[i] : output.capacity };
             Arena temp = { .base = scratch.base, .length = 64, .capacity = axis == 1 ? 64 + available[i] : scratch.capacity };
