@@ -51,6 +51,11 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    // Declared x86 builtins called in bodies that lanes read (#148): each lane works out their verdicts itself, writing
+    // nothing the top level's reader or another lane reads.
+    { "declared-builtins-in-bodies", "void _mm_sfence(void);void _mm_pause(void);void _mm_lfence(void);unsigned _mm_getcsr(void);\n"
+      "int f(int n){_mm_sfence();_mm_pause();return n+(int)(_mm_getcsr()&1);}\nint g(int n){_mm_sfence();return n*2;}\n"
+      "int h(int n){_mm_lfence();_mm_pause();return n-1;}\nint k(int n){_mm_sfence();_mm_sfence();return f(n)+g(n)+h(n);}\n", true },
     { "kr-promoted-parameters", "int f(a,b) char a; float b; {return a+(int)b;}\nint g(void){return f(258,3.5); }\n", true },
     { "kr-parenthesized-atomic-parameters", "int f(a,b)_Atomic(short) a;_Atomic(float) b;{return a+(int)b;}\n"
       "int g(void){return f(65539,3.5);}\n", true },

@@ -629,6 +629,9 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     lane->input = *top_input;
     CheckInputReader* reader = &lane->reader;
     CheckInput* input = &lane->input;
+    // The top level's memo of declared builtins' verdicts (CheckInputReader.intrinsic_source) is the top reader's alone:
+    // a lane, which no lane's write may reach, keeps none, and its pre-check works each verdict out again.
+    reader->intrinsic_source = NULL;
     reader->output = input;
     reader->types = &lane->types;
     reader->arena = &arenas->output;

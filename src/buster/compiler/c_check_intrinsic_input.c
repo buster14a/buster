@@ -280,9 +280,10 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
     // a declaration of it with external linkage, as clang keeps it: the names <xmmintrin.h>, <emmintrin.h> and
     // <prfchwintrin.h> declare (_mm_sfence, _m_prefetch), and a block-scope declaration's. A definition with internal
     // linkage (static) is the program's function, and a local object of the name hides it. Each row's verdict is
-    // remembered (CheckInputReader.intrinsic_source), so that a declared call site costs a lookup of its row alone.
-    // The cache's entry comes first: a name of no catalogue row (0, nearly every bound name) needs nothing more.
-    // A unit without an intrinsic's name (reader->intrinsic_names null, nearly every unit) reads no binding at all.
+    // remembered (CheckInputReader.intrinsic_source, the top level's reader's alone: a deferred lane has none and works
+    // it out each time), so that a declared call site costs a lookup of its row alone. A unit without an intrinsic's
+    // name (reader->intrinsic_names null, nearly every unit) reads no binding at all; in one with them, every operand's
+    // binding is read, as before, and a bound name of no catalogue row (its cache entry 0) needs nothing more.
     const bool intrinsics = operand && reader->intrinsic_names != 0;
     const uint32_t bound = intrinsics ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
     const uint32_t entry = bound != 0 ? reader->intrinsic_names[name] : 0;
