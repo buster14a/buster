@@ -583,8 +583,10 @@ decoration's role of another kind (both of its bits) or past the scratch registe
 with masks, and mask operands and scratch registers past the seven a borrowing row has (and, as in any row, a form with
 a segment override). `interpreter.c` runs mask entries (but rows and objects, which it doesn't model), each mask's bits
 in its value's low word and its bytes in the high word;
-`ir_lower.c` refuses a function with masks, since the IR's `m8` to `m64` have no conversion to or from an integer
-(`docs/ir-simd.md`), so that `--tier1` leaves it to Tier 0.
+`ir_lower.c` lowers them to the IR's `m8` to `m64`, its conversions through `bitcast` to and from the integer of the
+mask's bits, and the front end's `_k*` rows through `ir_simd_typed.c`'s decoder; a row it doesn't decode (a vector's, or
+one that names opmask registers by number) is refused, so that `--tier1` leaves that function to Tier 0
+(`docs/ir-simd.md`'s "Masks from the typed stream").
 
 The front end's AVX-512 builtins are the class's first user (`check_x86_lower_masks`, `c_check_program_x86.c`): a row
 whose mask operands its records move into opmask registers from their integers, and whose mask result one moves out,
