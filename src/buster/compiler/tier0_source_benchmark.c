@@ -10,7 +10,8 @@
 //
 // Each file is checked as the driver checks it (the vector path, check_corpus_check_policy), and its reachable
 // definitions (check_program_select_mode's C_LOWERING_REACHABLE) lowered and emitted by check_program_emit, outside the time,
-// for the target its options give (-march and the -m features: PPOptions.target), as -c compiles it (#1041).
+// for the target its options give (-march and the -m features: PPOptions.target), and each function for its target
+// attribute's, as -c compiles them (#1041).
 // Admission ends at function emission: static-data publication and object-section placement (including descriptors
 // for assembled file-scope atoms) are outside this benchmark. A valid typed function stream can be measured when
 // whole-object publication is unsupported; use the driver/corpus object checks to establish that eligibility.
@@ -99,8 +100,11 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
         // The options' target (-march, the -m features), as -c and ir_source_prepare compile for it: without it the
-        // functions would be the baseline profile's, and a unit of wider vectors would be refused (#1041).
+        // functions would be the baseline profile's, and a unit of wider vectors would be refused (#1041). And the
+        // options it came from, against which a function's target attribute resolves (CheckProgram.body_targets), as -c
+        // resolves it: without them every function would be the unit's target.
         .target = pp_options.target,
+        .predefines = &pp_options.predefines,
     };
     prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
     // A statement the checked program refuses by name leaves the file out, as -c refuses it.

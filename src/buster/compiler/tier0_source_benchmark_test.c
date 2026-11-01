@@ -9,8 +9,9 @@
 // scratch, and the corpus's room for functions, full at the second of a file's two and not at its last; and a file
 // whose one function lowers to no typed entry. Then the options' target (#1041): a unit of <immintrin.h>'s 512-bit
 // intrinsics, which -march=znver5 compiles (its masks Tier 0's opmask class, #179) and the baseline profile refuses by
-// name, leaving it out. Each case's corpus, counts, exit status and report lines are checked,
-// the totals last with the measurement's outcome. Then the command's repeated --only, and tier0_benchmark_add at its
+// name, leaving it out; and, without -march, a function whose target("bmi2") attribute its BMI2 builtin needs, measured
+// as -c compiles it for its attribute's target (#1041's review), where the unit's would refuse the builtin by name.
+// Each case's corpus, counts, exit status and report lines are checked, the totals last with the measurement's outcome. Then the command's repeated --only, and tier0_benchmark_add at its
 // corpus's capacity, which must write nothing. Include after tier0_source_benchmark.c and
 // c_lowering_source_benchmark_test.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
@@ -184,6 +185,10 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         "#include <immintrin.h>\n__m512i mix(__m512i a, __m512i b)\n{\n    const __mmask16 k = _mm512_cmpgt_epi32_mask(a, b);\n"
         "    const __mmask16 m = _mm512_kand(k, _mm512_cmplt_epi32_mask(b, _mm512_set1_epi32(8)));\n    return _mm512_mask_add_epi32(a, m, a, b);\n}\n"
         "int main(void)\n{\n    const __m512i c = mix(_mm512_set1_epi32(3), _mm512_set1_epi32(1));\n    return _mm512_cvtsi512_si32(c) - 4;\n}\n",
+        // A function whose target attribute its builtin needs (#1041's review): without -march the unit's target is the
+        // baseline's, which hasn't BMI2.
+        "__attribute__((target(\"bmi2\"))) unsigned deposit(unsigned x, unsigned m)\n{\n    return __builtin_ia32_pdep_si(x, m);\n}\n"
+        "int main(void)\n{\n    return (int)deposit(5u, 0xf0u) - 0x50;\n}\n",
     };
     enum { FIXTURES = BUSTER_ARRAY_LENGTH(fixtures) };
     static const BackendSourceTestCase cases[] = {
@@ -304,6 +309,14 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .left_out = 1,
             .report = { "/5.c unsupported=\"vector results wider than the target's registers\"\n", "/0.c functions=2 entries=",
                         " totals files=1 left_out=1 failures=0 measurement=reported\n" },
+        },
+        {
+            .label = "a function's target(\"bmi2\") attribute gives its builtin's instruction without -march",
+            .files = { 6, -1 },
+            .functions = 2,
+            .measured = 1,
+            .report = { "/6.c functions=2 entries=", "benchmark-backend-source: 2 functions, ",
+                        " totals files=1 left_out=0 failures=0 measurement=reported\n" },
         },
     };
     char directory[] = "/tmp/buster-backend-source-XXXXXX";

@@ -59,7 +59,7 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on checked functions' typed streams
   of C files, `sqlite3.c`'s among them ("Measurements", below), compiled for the target their options give (`-march`
-  and the `-m` features), as `-c` compiles them (#1041).
+  and the `-m` features), and each function with a target attribute for the attribute's, as `-c` compiles them (#1041).
   The source benchmark admits the reachable functions through typed emission.
   Static-data publication and object-section placement, including assembled
   file-scope atoms' section descriptors, are outside its validation scope.
