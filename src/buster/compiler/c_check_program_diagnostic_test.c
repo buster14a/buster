@@ -68,17 +68,20 @@ static uint32_t check_test_program_diagnostic(CheckTest* test, const char* sourc
                      expected, diagnostic.token, diagnostic.status, path == 0 ? "scalar" : "vector");
             check_test_expect(test, diagnosed && diagnostic.token == expected && diagnostic.status ==
                                    (expected == BUSTER_CHECK_NONE ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID), description);
+            // The first diagnostic the driver publishes: the control diagnostic at its position, or a report at its
+            // token, whichever comes first. A missing name in a switch's statements comes before the switch's end, where
+            // its duplicate case is published (#1077); any other report comes after the control diagnostic.
             uint32_t reported = diagnostic.token;
-            if (reported == BUSTER_CHECK_NONE)
+            uint32_t published = diagnostic.token != BUSTER_CHECK_NONE ? diagnostic.position : BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i < input.report_count; i += 1)
             {
-                for (uint32_t i = 0; i < input.report_count; i += 1)
-                {
-                    reported = input.reports[i].token < reported ? input.reports[i].token : reported;
-                }
-                for (uint32_t i = 0; i < stream.report_count; i += 1)
-                {
-                    reported = stream.reports[i].token < reported ? stream.reports[i].token : reported;
-                }
+                reported = input.reports[i].token < published ? input.reports[i].token : reported;
+                published = input.reports[i].token < published ? input.reports[i].token : published;
+            }
+            for (uint32_t i = 0; i < stream.report_count; i += 1)
+            {
+                reported = stream.reports[i].token < published ? stream.reports[i].token : reported;
+                published = stream.reports[i].token < published ? stream.reports[i].token : published;
             }
             const char* file = 0;
             uint32_t length = 0;
@@ -228,7 +231,8 @@ static void check_test_program_diagnostics(CheckTest* test, const char* clang)
     check_test_program_diagnostic(test, "int f(int n){int x=*1;switch(n){case 1:;case 1:;}return x;}", PARSE_ROLE_CLOSE_CASE, 0, false);
     check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case *1:;}return 0;}", PARSE_ROLE_CLOSE_CASE, 0, false);
     check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case 1:;return *1;}return 0;}", PARSE_ROLE_CLOSE_CASE, 0, false);
-    check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case 1:;return missing;}return 0;}", PARSE_ROLE_CLOSE_CASE, 0, true);
+    // A missing name in a switch's statements leaves its cases, whose duplicate clang reports at the switch's end (#1077).
+    check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case 1:;return missing;}return 0;}", PARSE_ROLE_CLOSE_CASE, 2, true);
     static const struct
     {
         const char* source;
@@ -246,7 +250,7 @@ static void check_test_program_diagnostics(CheckTest* test, const char* clang)
         { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nswitch(n){case 2:;\ncase 2:;}\n}return *1;}\n", 4, PARSE_ROLE_CLOSE_CASE, false },
         { "int f(int n){switch(n)case 1:\ncase 1:\nswitch(n){case 2:;\ncase 2:;}\nreturn *1;}\n", 4, PARSE_ROLE_CLOSE_CASE, false },
         { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nreturn *1;\n}return 0;}\n", 0, PARSE_ROLE_CLOSE_CASE, false },
-        { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nreturn missing;\n}return 0;}\n", 0, PARSE_ROLE_CLOSE_CASE, true },
+        { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nreturn missing;\n}return 0;}\n", 2, PARSE_ROLE_CLOSE_CASE, true },
         { "int f(double n){switch(\nn\n){}return *1;}\n", 1, PARSE_ROLE_CLOSE_CONDITION, false },
     };
     char directory[] = "/tmp/buster-control-order-XXXXXX";

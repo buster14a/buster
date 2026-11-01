@@ -891,13 +891,16 @@ static void check_test_binding_recovery_limits(CheckTest* test)
         check_input_diagnostic_recover(&reader, scenario != 2);
         if (scenario == 0)
         {
+            // A token's cut is the first report at or after its subtree's first token in its declaration (#1077): the
+            // roots hold the reports, the leaves after a report don't, and the declaration without one has none.
+            const uint32_t none = parser.tokens.count;
+            const uint32_t expected[] = { 1, 1, none, 1, none, none, none, none, 9, 9, none, 9 };
             bool exact = input.diagnostic_limits != NULL && input.diagnostic_report_count == 2 && !input.resource;
             for (uint32_t token = 0; exact && token < parser.tokens.count; token += 1)
             {
-                const uint32_t expected = token < 4 ? 1 : token < 8 ? parser.tokens.count : 9;
-                exact = input.diagnostic_limits[token] == expected;
+                exact = input.diagnostic_limits[token] == expected[token];
             }
-            check_test_expect(test, exact, "failed declarations retain safe prefixes and independent declaration cuts stay complete");
+            check_test_expect(test, exact, "constructs that hold a report are cut there, and those that don't, and independent declarations, aren't");
         }
         else
         {
@@ -906,6 +909,34 @@ static void check_test_binding_recovery_limits(CheckTest* test)
         }
         check_test_expect(test, reports[0].token == 1 && reports[0].message == CHECK_INPUT_UNDECLARED && input.graph.count == 0,
                           "declaration-cut recovery neither changes original reports nor fabricates expression values");
+    }
+    // `missing + (b) - c;` as the parser's tree has it (#1077): the operators that hold the name, and the statement, are cut
+    // at it; the operands after it, a group and a leaf, aren't, nor is the next declaration, `d;`, which has none.
+    {
+        arena_pop_to(&storage, 0);
+        storage.capacity = capacity;
+        uint32_t nested_parents[] = { 1, 5, 4, 4, 1, 7, 5, BUSTER_PARSE_ROOT, 9, BUSTER_PARSE_ROOT };
+        uint32_t nested_postorder[] = { 0, 2, 3, 4, 1, 6, 5, 7, 8, 9 };
+        uint8_t nested_kinds[BUSTER_ARRAY_LENGTH(nested_parents)];
+        uint8_t nested_roles[BUSTER_ARRAY_LENGTH(nested_parents)];
+        memset(nested_kinds, PARSE_KIND_IDENTIFIER, sizeof(nested_kinds));
+        memset(nested_roles, PARSE_ROLE_OPERAND, sizeof(nested_roles));
+        Parser nested = {
+            .tokens = { .kinds = nested_kinds, .count = BUSTER_ARRAY_LENGTH(nested_parents) },
+            .tree = { .parents = nested_parents, .roles = nested_roles },
+        };
+        CheckInputReport report = { .token = 0, .message = CHECK_INPUT_UNDECLARED };
+        CheckInput input = { .token_count = nested.tokens.count, .reports = &report, .report_count = 1 };
+        CheckInputReader reader = { .output = &input, .parser = &nested, .arena = &storage, .postorder = nested_postorder };
+        check_input_diagnostic_recover(&reader, true);
+        const uint32_t none = nested.tokens.count;
+        const uint32_t expected[] = { 0, 0, none, none, none, 0, none, 0, none, none };
+        bool exact = input.diagnostic_limits != NULL && input.diagnostic_report_count == 1 && !input.resource;
+        for (uint32_t token = 0; exact && token < nested.tokens.count; token += 1)
+        {
+            exact = input.diagnostic_limits[token] == expected[token];
+        }
+        check_test_expect(test, exact, "a missing name cuts the operators that hold it, and none of the operands after it");
     }
     storage.capacity = capacity;
     arena_release(&storage);

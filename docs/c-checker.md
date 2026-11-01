@@ -2823,13 +2823,37 @@ an incompletely diagnosed warning-only source. Failed history replays keep
 queued groups' backing alive or replace a silent failure safely.
 
 After the whole declaration/body resolver has completed, ordinary missing-name
-binding reports can retain independent later declarations (#699). Two bounded
-forest passes give each rejected top-level declaration its earlier safe graph
-prefix; independent declarations keep their full graphs. Missing operands
+binding reports can retain independent later declarations (#699) and, within a
+declaration, every construct that doesn't hold a missing name (#1077), as
+clang's `RecoveryExpr` does: the operators, calls, initializers and statements
+that hold the name are cut, and their other operands, the statements after them
+and the declarations without one keep their graphs and diagnostics. A token's
+cut (`check_input_diagnostic_recover`) is the first report at or after its
+subtree's first token, in its top-level declaration: a bounded forest pass up
+the postorder for the subtrees' first tokens, and a backward scan over the
+tokens for each one's next report, only on a rejected unit. A condition's
+parenthesis and a case label's colon, whose subtrees hold their statements, are
+cut by their own expressions alone, so a name in an `if`'s body or in a case's
+statement leaves the condition and the case value, and a switch's duplicate
+cases are found among its cases whose values hold no name. Missing operands
 acquire no invented value or type. Initializer, assembly and control scans use
-the same local completion cuts, including whole-switch completion barriers,
-and independent tentative-definition constraints still run at translation-unit
-end. Type-query/declarator failures, unsupported pragmas, resource failures and
+the same local completion cuts, and independent tentative-definition
+constraints still run at translation-unit end. `test-checker`
+(`c_check_undeclared_test.c`) compares fixtures of both orders, the parents the
+name silences and the siblings it doesn't with clang, by both paths, with
+`-fsyntax-only` and `-c`. What remains conservative: a statement expression
+that holds the name is cut whole, where clang still checks an operator on its
+value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
+runtime (non-constant) shift warning, where clang, which then skips their
+reachability analysis, publishes them all (`x << 40`); a missing name that
+the declaration walk reports (an enumerator's or an array bound's) is a
+declarator failure, which keeps the whole unit's conservative prefix; and a
+unit with any report other than a missing name (a control-flow error such as
+a `break` outside a loop, a declaration conflict) keeps the previous
+whole-unit prefix, which starts at the unit's first report of any kind, even
+after a missing name, since these per-construct cuts are made only when the
+unit's only reports are missing operand names.
+Type-query/declarator failures, unsupported pragmas, resource failures and
 unfinished resolver states retain the conservative prefix. Repaired/deferred
 views with skipped bodies do not enable this new binding recovery. A successful
 deferred merge has the same complete unit as source order and uses the same cuts.
