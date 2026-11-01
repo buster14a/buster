@@ -527,6 +527,85 @@ static bool lane_test_arenas(void)
     }
     lane_test_expect(&tally, borrowed_kept, "a discard touched borrowed storage");
 
+    // The driver's arenas start with arena_small_floor's 16 MB of base pages: a discard at a length inside them goes from
+    // the next huge page boundary after it there, across the region's end into its huge pages, and one past the region
+    // as in any other arena.
+    const uint64_t small_region = 16ull << 20;
+    const uint64_t small_written = small_region + 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 100;
+    static const uint64_t small_lengths[] = { 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 7, small_region - 1, small_region + BUSTER_ARENA_PAGE_BYTES };
+    for (uint64_t l = 0; l < BUSTER_ARRAY_LENGTH(small_lengths); l += 1)
+    {
+        Arena discarded = arena_reserve_small(64ull << 20, small_region);
+        uint8_t* bytes = discarded.base != 0 ? arena_push(&discarded, small_written, 64) : 0;
+        lane_test_expect(&tally, bytes == discarded.base && bytes != 0 && discarded.small == small_region, "an arena with base pages to discard couldn't be pushed");
+        if (bytes != 0)
+        {
+            memset(bytes, 0x5a, small_written);
+            const uint64_t length = small_lengths[l];
+            arena_pop_to(&discarded, length);
+            const uint64_t peak = discarded.peak;
+            arena_discard(&discarded);
+            const uintptr_t boundary = ((uintptr_t)bytes + length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uint64_t cut = boundary - (uintptr_t)bytes;
+            bool kept = true;
+            bool zeroed = true;
+            for (uint64_t i = 0; i < small_written; i += 1)
+            {
+                kept &= i >= cut || bytes[i] == 0x5a;
+                zeroed &= i < cut || bytes[i] == 0;
+            }
+            lane_test_expect(&tally, kept && zeroed && discarded.length == length && discarded.peak == peak,
+                             "a discard in an arena's base pages changed the bytes below the boundary, left those past it, or moved the length or the peak");
+        }
+        arena_release(&discarded);
+    }
+
+    // An arena whose writable extent is unknown (arena_unaccounted) keeps every byte.
+    Arena unknown = arena_reserve(64ull << 20);
+    uint8_t* unknown_bytes = unknown.base != 0 ? arena_push(&unknown, written_bytes, 64) : 0;
+    lane_test_expect(&tally, unknown_bytes != 0, "an unaccounted arena couldn't be pushed");
+    if (unknown_bytes != 0)
+    {
+        memset(unknown_bytes, 0x3c, written_bytes);
+        arena_unaccounted(&unknown, unknown.committed);
+        arena_pop_to(&unknown, 0);
+        arena_discard(&unknown);
+        bool unknown_kept = true;
+        for (uint64_t i = 0; i < written_bytes; i += 1)
+        {
+            unknown_kept &= unknown_bytes[i] == 0x3c;
+        }
+        lane_test_expect(&tally, unknown.unaccounted && unknown_kept, "a discard touched an unaccounted arena");
+    }
+    arena_release(&unknown);
+
+    // Commits run ahead of the peak (to the next huge page boundary here), and the discard stops at the peak's page: what
+    // lies past it, which no push wrote, it leaves alone.
+    Arena ahead = arena_reserve(64ull << 20);
+    const uint64_t ahead_peak = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + 100;
+    uint8_t* ahead_bytes = ahead.base != 0 ? arena_push(&ahead, ahead_peak, 64) : 0;
+    const uint64_t ahead_written = ahead.committed - ahead.mapping_offset;
+    const uint64_t ahead_page = (ahead_peak + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    lane_test_expect(&tally, ahead_bytes != 0 && ahead_written > ahead_page + BUSTER_ARENA_PAGE_BYTES, "an arena's commit didn't run ahead of its peak");
+    if (ahead_bytes != 0 && ahead_written > ahead_page + BUSTER_ARENA_PAGE_BYTES)
+    {
+        memset(ahead_bytes, 0x5a, ahead_written);
+        arena_pop_to(&ahead, 0);
+        arena_discard(&ahead);
+        const uintptr_t boundary = ((uintptr_t)ahead_bytes + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        const uint64_t cut = boundary - (uintptr_t)ahead_bytes;
+        bool ahead_zeroed = true;
+        bool ahead_kept = true;
+        for (uint64_t i = 0; i < ahead_written; i += 1)
+        {
+            const bool discarded = i >= cut && i < ahead_page;
+            ahead_zeroed &= !discarded || ahead_bytes[i] == 0;
+            ahead_kept &= discarded || ahead_bytes[i] == 0x5a;
+        }
+        lane_test_expect(&tally, ahead_zeroed && ahead_kept && ahead.peak == ahead_peak, "a discard went past its arena's peak, or stopped short of it");
+    }
+    arena_release(&ahead);
+
     // Filled exactly, then one more byte, which fails without changing the arena.
     const uint64_t small_capacity = 3 * BUSTER_ARENA_PAGE_BYTES + 100;
     Arena small = arena_reserve(small_capacity);

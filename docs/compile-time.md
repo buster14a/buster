@@ -593,7 +593,7 @@ which agree within 40 KB; the reader's end is the high-water mark when
 
 - **The parse's buffers and the graph's columns** took 1.4 and 10.3 MB off
   the reader's end in a measurement of each alone, and **the rare columns**
-  15 MB. The backend's peak, 7 MB above the reader's end then, was the
+  15 MB. The backend's peak, 27 MB above the reader's end then, was the
   compile's.
 - **The discard** takes the backend's peak below the reader's end, which sets
   the compile's again, within 0.3 MB of the end of `check_program`.

@@ -3553,7 +3553,7 @@ tokens it may act at, and tests there only what may make it act. On SQLite
   write of the seven columns keeps (`check_input_sparse_mark`), rather than
   the columns themselves; so the walk reads four of them (the cached
   constants, the `va_arg` calls, the designators and the variable arrays'
-  bounds) only where they have entries, and they live in the base pages of
+  bounds) only at tokens a mark names, and they live in the base pages of
   the reader's arena of rare columns. It skips the tokens it doesn't act
   at, whose first values, `NONE`, the pass writes, and tests the sparse
   columns only of the tokens that have an entry.
