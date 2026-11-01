@@ -6,8 +6,10 @@ b0:
   %2 = add.i64 %0, %1
   %3 = mul.i64 %2, %2
   %4 = stack_addr.ptr $0
-  %5 = store.void %4, %2 align=8
-  %6 = load.i64 %4 align=8
-  %7 = copy.i64 %0
-  %8 = ret.void %7
+  %5 = lifetime.void $0 start
+  %6 = store.void %4, %2 align=8
+  %7 = load.i64 %4 align=8
+  %8 = lifetime.void $0 end
+  %9 = copy.i64 %0
+  %10 = ret.void %9
 }

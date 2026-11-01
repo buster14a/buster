@@ -33,7 +33,9 @@ admission boundary, not that deferred capability.
 
 The reducer rebuilds selected blocks and instructions into fresh columns, with
 compact value/block IDs, remapped phi predecessors, call/signature/operand
-slices, addresses and referenced slots. Symbol identities and ABI stay stable.
+slices, addresses and the slots that addresses and `lifetime` markers refer to
+(a slot only markers refer to stays, renumbered with them; #177). Symbol
+identities and ABI stay stable.
 Both complete verifiers, including reachable SSA dominance, approve every
 candidate before the predicate runs. Candidate order is stable. The objective
 orders block count, instruction count, side-record count, then constant bit

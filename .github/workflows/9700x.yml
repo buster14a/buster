@@ -998,9 +998,8 @@ jobs:
 
       - name: Benchmark the printer on main.c and the frozen sqlite3.c, with line markers and without
         # #649: -E -P's and -E's printing (--markers runs and prints as the -E driver does) by pp_print_spellings against
-        # the printer's general loop for every chunk (--spelling-cost), which with line markers prints in the time the
-        # printer before #649 took (with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon and 6% slower
-        # a token on the 9700X: main.c's history in the step above is -P's before). About 13 s.
+        # the printer's general loop for every chunk (--spelling-cost), with the printer's own copies either way: each
+        # row's history is its before. About 13 s.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
         run: |
           unset CPATH C_INCLUDE_PATH
@@ -1209,9 +1208,10 @@ jobs:
 
       - name: Benchmark the functions' lanes on frozen SQLite
         # #151: -c's emission of the frozen SQLite source on 1, 2, 3, 4, 6 and 8 lanes and on the rule's, every run one
-        # lane's code and each lane count's object one lane's: the rows of docs/function-lanes.md's table (#1069). Lane 0 runs on CPU 2, the other lanes on one CPU of each other
-        # core the job may use. The driver's own feature answers, not clang's (--clang-features), as -c takes them: with
-        # clang's, SQLite takes its atomics' path, which the emission refuses.
+        # lane's code and each lane count's object one lane's: the rows of docs/function-lanes.md's table (#1069). Lane 0
+        # runs on CPU 2, the other lanes on one CPU of each other core the job may use. The driver's own feature answers,
+        # not clang's (--clang-features), as -c takes them: with clang's, SQLite takes its atomics' path, which the
+        # emission refuses.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-lanes,')
         run: |
           unset CPATH C_INCLUDE_PATH

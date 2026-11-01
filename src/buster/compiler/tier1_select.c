@@ -117,6 +117,9 @@ typedef enum Tier1SelectRule
     // places its edges' moves after it, at its labels' blocks or in stubs where it defines their labels
     // (tier1_emit_cfg.c).
     TIER1_RULE_JUMP_INDIRECT,
+    // A frame slot's lifetime marker (IR_LIFETIME, #177): no records. The CFG consumer colors the frame's objects by the
+    // markers (tier1_emit_cfg_lifetimes).
+    TIER1_RULE_LIFETIME,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -560,6 +563,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
     case TIER1_RULE_LEAF:
     case TIER1_RULE_NONE:
+    case TIER1_RULE_LIFETIME:
         break;
     case TIER1_RULE_CONSTANT:
         tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
@@ -2140,6 +2144,12 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    else if (op == IR_LIFETIME)
+    {
+        base.rule = TIER1_RULE_LIFETIME;
+        base.immediate = a;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     return candidates;
 }
 
@@ -2681,7 +2691,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
-            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
+            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
+            tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
             tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE || plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;

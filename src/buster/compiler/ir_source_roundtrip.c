@@ -10,7 +10,7 @@
 
 #include <stdlib.h>
 
-_Static_assert(IR_OP_COUNT == 60, "audit the text round-trip oracle when adding an IR operation");
+_Static_assert(IR_OP_COUNT == 61, "audit the text round-trip oracle when adding an IR operation");
 
 typedef struct IrSourceTextCheck IrSourceTextCheck;
 struct IrSourceTextCheck

@@ -66,6 +66,27 @@ static const char ir_reduce_test_call[] =
     "  %2 = ret.void %1\n"
     "}\n";
 
+// #177's lifetime markers beside slots of every kind: one nothing refers to, one only markers refer to, and one an address
+// reaches, and a dead addition for the reducer to remove. The rebuild compacts the slots that addresses and markers refer
+// to, by their first reference.
+static const char ir_reduce_test_lifetimes_input[] =
+    "function (i64) -> i64 {\n"
+    "  slot $0 size=32 align=16 type=void flags=0x00\n"
+    "  slot $1 size=16 align=8 type=void flags=0x00\n"
+    "  slot $2 size=8 align=8 type=i64 flags=0x00\n"
+    "b0:\n"
+    "  %0 = param.i64 0\n"
+    "  %1 = lifetime.void $1 start\n"
+    "  %2 = lifetime.void $2 start\n"
+    "  %3 = stack_addr.ptr $2\n"
+    "  %4 = store.void %3, %0 align=8\n"
+    "  %5 = load.i64 %3 align=8\n"
+    "  %6 = lifetime.void $2 end\n"
+    "  %7 = lifetime.void $1 end\n"
+    "  %8 = add.i64 %0, %0\n"
+    "  %9 = ret.void %5\n"
+    "}\n";
+
 // Function metadata the rebuild doesn't remap, each of which a function may carry with only rows it takes: a label
 // (in a function without br_indirect), a variadic definition's incoming frame, and by-value aggregates' ABI records.
 static const char* const ir_reduce_test_metadata_inputs[] = {
@@ -388,6 +409,53 @@ static void ir_reduce_test_rebuild(IrReduceTest* test)
     arena_release(&input);
 }
 
+static IrReduceObservation ir_reduce_test_counting(const IrFunction* function, const IrReduceLimits* limits, void* context, Arena* scratch);
+
+// #1071's review: a lifetime marker refers to its slot as an address does, so the rebuild keeps and renumbers a slot only
+// markers refer to, drops one nothing refers to, and the reducer's candidates, every one rebuilt, keep verifying.
+static void ir_reduce_test_lifetimes(IrReduceTest* test)
+{
+    Arena input = arena_reserve(UINT64_C(1) << 20);
+    Arena output = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 27);
+    IrFunction source = { 0 };
+    const bool valid = ir_reduce_test_parse(ir_reduce_test_lifetimes_input, &input, &scratch, &source);
+    arena_pop_to(&scratch, 0);
+    IrFunction rebuilt = { 0 };
+    const IrCheck cloned = valid ? ir_rebuild(&source, NULL, &output, &scratch, &rebuilt) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+    ir_reduce_test_expect(test, cloned.error == IR_OK && rebuilt.slot_count == 2 && rebuilt.slots[0].size == 16 && rebuilt.slots[1].size == 8 &&
+                          rebuilt.op[1] == IR_LIFETIME && rebuilt.a[1] == 0 && rebuilt.b[1] == 0 && rebuilt.op[7] == IR_LIFETIME &&
+                          rebuilt.a[7] == 0 && rebuilt.b[7] == 1 && rebuilt.a[2] == 1 && rebuilt.a[3] == 1 && rebuilt.a[6] == 1,
+                          "a slot only markers refer to stays, renumbered with its markers, beside an addressed slot");
+    arena_pop_to(&output, 0);
+    const uint32_t blocks[] = { 0 };
+    const uint32_t rows[] = { 0, 2, 3, 4, 5, 6, 8, 9 };
+    const uint32_t offsets[] = { 0, 8 };
+    const IrRebuildPlan unmarked = { .blocks = blocks, .block_count = 1, .rows = rows, .offsets = offsets, .instruction_count = 8 };
+    const IrCheck dropped = valid ? ir_rebuild(&source, &unmarked, &output, &scratch, &rebuilt) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+    ir_reduce_test_expect(test, dropped.error == IR_OK && rebuilt.slot_count == 1 && rebuilt.slots[0].size == 8 && rebuilt.op[1] == IR_LIFETIME &&
+                          rebuilt.a[1] == 0 && rebuilt.a[2] == 0 && rebuilt.a[5] == 0,
+                          "a slot whose markers go is dropped and the others' markers and addresses renumbered");
+    arena_pop_to(&output, 0);
+    uint32_t calls = 0;
+    IrReduceResult reduced = { 0 };
+    const IrReduceLimits limits = ir_reduce_limits();
+    const IrReduceStatus status = valid ? ir_reduce(&source, ir_reduce_test_counting, &calls, &limits, &output, &scratch, &reduced) : IR_REDUCE_INVALID;
+    uint32_t markers = 0;
+    for (uint32_t i = 0; status == IR_REDUCE_COMPLETE && i < reduced.function.instruction_count; i += 1)
+    {
+        markers += reduced.function.op[i] == IR_LIFETIME;
+    }
+    ir_reduce_test_expect(test, status == IR_REDUCE_COMPLETE && calls > 1 && reduced.accepted != 0 &&
+                          ir_verify_complete(&reduced.function, &scratch, true).error == IR_OK &&
+                          ir_verify_complete(&reduced.function, &scratch, false).error == IR_OK &&
+                          reduced.function.instruction_count < source.instruction_count && markers == 4 && reduced.function.slot_count == 2,
+                          "the reducer removes the dead row through rebuilt candidates that keep the markers and their slots");
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static IrReduceObservation ir_reduce_test_counting(const IrFunction* function, const IrReduceLimits* limits, void* context, Arena* scratch)
 {
     (void)function;
@@ -578,6 +646,7 @@ static int run_ir_reduce_tests(int argc, char** argv)
     {
         IrReduceTest test = { .random = seed != 0 ? seed : UINT64_C(0xd153e733) };
         ir_reduce_test_rebuild(&test);
+        ir_reduce_test_lifetimes(&test);
         ir_reduce_test_metadata(&test);
         ir_reduce_test_ownership(&test);
         ir_reduce_test_simd_ownership(&test);

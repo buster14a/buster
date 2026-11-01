@@ -5649,6 +5649,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
 #include "c_check_program_bits_test.c"
+#include "c_check_program_generic_builtins_test.c"
 #include "c_check_program_align_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
@@ -5723,7 +5724,7 @@ static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
-static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
+static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -5974,7 +5975,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_diagnostic_policy(&test);
             check_test_lazy(&test);
             check_test_intrinsic_inputs(&test, clang);
-            check_test_x86_diagnostics(&test, clang);
+            check_test_x86_diagnostics(&test, &types.table, clang);
             check_test_initializers(&test, clang);
             check_test_embed_initializers(&test, clang);
             check_test_data_sources(&test);
