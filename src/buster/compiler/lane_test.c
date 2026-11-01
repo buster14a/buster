@@ -532,7 +532,7 @@ static bool lane_test_arenas(void)
     // as in any other arena.
     const uint64_t small_region = 16ull << 20;
     const uint64_t small_written = small_region + 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 100;
-    static const uint64_t small_lengths[] = { 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 7, small_region - 1, small_region + BUSTER_ARENA_PAGE_BYTES };
+    const uint64_t small_lengths[] = { 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 7, small_region - 1, small_region + BUSTER_ARENA_PAGE_BYTES };
     for (uint64_t l = 0; l < BUSTER_ARRAY_LENGTH(small_lengths); l += 1)
     {
         Arena discarded = arena_reserve_small(64ull << 20, small_region);
