@@ -752,15 +752,6 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             const uint32_t canonical = definition < input->token_count && input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
             found = found || (canonical < input->token_count && input->attributes != NULL &&
                               check_common_format_attribute(input->attributes[canonical], &format_index, &first_argument));
-            for (uint32_t at = definition < input->token_count ? definition : 0; !found && at != 0 && input->declarations != NULL &&
-                 input->declaration_kinds != NULL && input->attributes != NULL;)
-            {
-                at -= 1;
-                if (input->declarations[at] == at && input->declaration_kinds[at] == C_BINDING_FUNCTION && parser->tokens.names[at] == name_id)
-                {
-                    found = check_common_format_attribute(input->attributes[at], &format_index, &first_argument);
-                }
-            }
         }
         const uint32_t offset = graph->argument_offsets[node];
         const uint32_t count = graph->argument_counts[node];
