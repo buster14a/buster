@@ -78,6 +78,9 @@ struct Tier1EmitPrepared
     uint32_t* alignments;
     uint32_t reserved_registers;
     uint32_t call_count;
+    // The straight-line consumer's nodes of fixed-register rules (tier1_select_fixed_registers), whose records take more
+    // than a node's share.
+    uint32_t fixed_count;
     uint32_t call_save_mask;
     uint32_t slot_columns;
     AbiCall call_abi;
@@ -155,7 +158,9 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             const uint32_t arguments = plan->function->calls[plan->function->b[node]].argument_count;
             prepared.call_abi.integer_registers = prepared.call_abi.integer_registers > arguments ? prepared.call_abi.integer_registers : arguments;
         }
-        fixed_saves |= plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule);
+        const uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule);
+        fixed_saves |= fixed;
+        prepared.fixed_count += fixed != 0;
     }
     prepared.call_abi.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     prepared.call_save_mask = (prepared.call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
@@ -505,8 +510,9 @@ static X86Instruction tier1_emit_move(uint32_t source, uint32_t destination, uin
 // A node whose rule takes x86's fixed registers (tier1_select_fixed: a division or a shift by a register, a division by a
 // constant's reciprocal): the `saved` registers, which hold other values that live past it, stored in their call-save rows
 // before its records and loaded after them. Both consumers give those registers rows (tier1_emit_prepare, and
-// tier1_emit_cfg_problem) and say which values live past the node, each by its own liveness.
-static Tier1EmitError tier1_emit_fixed(Tier1EmitResult* emitted, uint32_t saved, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+// tier1_emit_cfg_problem) and say which values live past the node, each by its own liveness. Out of line: the consumers'
+// loops over every node take it for a few of a function's, and the long sequences beneath it stay out of those loops.
+static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult* emitted, uint32_t saved, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
 {
     X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS];
     const uint32_t count = tier1_select_fixed(holes, records);
@@ -675,12 +681,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
 static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint32_t count = plan->function->instruction_count;
-    // The nodes of fixed-register rules, whose sequences and saves take records past their share.
-    result->fixed_count = 0;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        result->fixed_count += !plan->covered[node] && tier1_select_fixed_registers(plan->patterns[node].rule) != 0;
-    }
+    // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
+    result->fixed_count = result->prepared.fixed_count;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)result->allocation.fragment_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * 2 + (uint64_t)result->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS +
                               (uint64_t)result->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS;
     const bool terminal_sink = count != 0 && plan->function->op[count - 1] == IR_BR;
