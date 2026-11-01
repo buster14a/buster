@@ -532,9 +532,10 @@ heads and at its merge with main, `cc3387f`:
   scripts against 10,763 M and 4,281 M. Each program's hottest function
   (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
-  the frozen `sqlite3.c`: 338 by the vector path and 340 by the scalar twin. A
-  quarter of each is the plan's `ir_verify` of its input, which the pipeline
-  has verified already.
+  the frozen `sqlite3.c`: 243 by the vector path and 253 by the scalar twin,
+  since the plan no longer verifies the optimizer's verified result
+  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01));
+  with that verification they were 338 and 340.
 - **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
   `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
   others fail in clang's own steps (links past the small code model, which
