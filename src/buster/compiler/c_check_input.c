@@ -207,6 +207,9 @@ struct CheckInputKrDiagnostic
     uint32_t warning;
 };
 
+// The class codes the visits byte's bits 2 to 6 hold (CheckInputExpressionCode, BUSTER_CHECK_EXPRESSION_CODE_MASK).
+#define BUSTER_CHECK_EXPRESSION_CODES 32u
+
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
 struct CheckInputLiteralTable
@@ -459,6 +462,17 @@ struct CheckInput
     // path, and on the vector path those they act at, which the tests require to be fewer.
     uint32_t resolve_visits;
     uint32_t expression_visits;
+    // The tokens the coded walk (c_check_expression_input.c, #1038) acted at by their classes' own actions, and those it
+    // left to the walk's visit, by class (CheckInputExpressionCode): CHECK_INPUT_CODE_SCALAR's tokens, which no class's
+    // action takes, are all left, and so is a token whose class's action can't decide it (check_input_expression_coded).
+    // All 0 on the scalar path and in a unit the coded walk leaves to the walk's visit throughout (one with expressions
+    // past its limit or deferred, or with overload tables); test-checker requires each class's action to act, and where
+    // it declines valid code, to leave a token, in its fixtures.
+    uint32_t expression_acted[BUSTER_CHECK_EXPRESSION_CODES];
+    uint32_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
+    // The TSC's ticks the expressions' walk took (check_input_expressions), which --time-stages reports apart within the
+    // reader's stage (#1038).
+    uint64_t expression_ticks;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -518,6 +532,59 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 // One of the sparse columns the walk tests first has an entry for the token: a statement expression's group, a cached
 // constant, a selection, a va_arg call, a designator, a variable array's bound or an asm statement.
 #define BUSTER_CHECK_EXPRESSION_SPARSE 0x02u
+// The class of the walk's action at a token it acts at (#1038), a CheckInputExpressionCode in the byte's bits 2 to 6: which
+// branch of the walk's tests the token's role, kind and its columns that the walk doesn't write lead to. The coded walk
+// (c_check_expression_input.c) acts at a token of each class but CHECK_INPUT_CODE_SCALAR by that class's own action, which
+// tests what the class can't say (its values, the columns the walk writes) and leaves the token to the walk's visit where
+// they don't hold. A token the walk doesn't act at has no class: its byte is 0.
+#define BUSTER_CHECK_EXPRESSION_CODE_SHIFT 2u
+#define BUSTER_CHECK_EXPRESSION_CODE_MASK 0x7cu
+// The bytes CheckInputReader.visits has past its count + 1: a gather of four bytes at the last token, count - 1, reads to
+// count + 2 (the coded walk's compaction).
+#define BUSTER_CHECK_VISITS_PADDING 2u
+
+typedef enum CheckInputExpressionCode
+{
+    // In check_input_role_codes alone, where it is every role's but those it lists: a role no test of the walk takes,
+    // which acts only through its children, a DROP but for the kinds the walk refuses.
+    CHECK_INPUT_CODE_OTHER,
+    // The walk's own visit (check_input_expression_visit): a sparse column's entry, a type query's finish, or a role or
+    // kind no other class takes.
+    CHECK_INPUT_CODE_SCALAR,
+    // The children's values passed on as the token's: an ignored token of a list role (a specifier chain), a ternary's
+    // opening, a separator that is no comma operator, an association and an initializer's closing brace.
+    CHECK_INPUT_CODE_LIST,
+    // No value: an ignored token of another role, and a token whose role and kind no test of the walk takes, which acts
+    // only by having children.
+    CHECK_INPUT_CODE_DROP,
+    // An identifier operand: a VALUE node of its declaration, or none for one without a declared type.
+    CHECK_INPUT_CODE_IDENTIFIER,
+    // A number or a character operand: a VALUE node of the literal, or a report.
+    CHECK_INPUT_CODE_LITERAL,
+    CHECK_INPUT_CODE_PREFIX,
+    // A binary operator's role, or a comma's.
+    CHECK_INPUT_CODE_BINARY,
+    // A separator: a comma operator where the walk's expression_commas says so, a list otherwise.
+    CHECK_INPUT_CODE_SEPARATOR,
+    // A group's closing parenthesis: its one value.
+    CHECK_INPUT_CODE_GROUP,
+    CHECK_INPUT_CODE_CAST,
+    CHECK_INPUT_CODE_TERNARY,
+    CHECK_INPUT_CODE_SUBSCRIPT,
+    CHECK_INPUT_CODE_MEMBER,
+    CHECK_INPUT_CODE_POSTFIX,
+    // A statement's terminator or a for's closing parenthesis: its values discarded.
+    CHECK_INPUT_CODE_TERMINATOR,
+    // The closing parenthesis of an if's, a while's or a switch's condition: its one value tested.
+    CHECK_INPUT_CODE_CONDITION,
+    // A call's closing parenthesis: its callee's and its arguments' values.
+    CHECK_INPUT_CODE_CALL,
+    // In check_input_role_codes alone: an operand's role, whose class its kind gives.
+    CHECK_INPUT_CODE_OPERAND,
+} CheckInputExpressionCode;
+
+_Static_assert(CHECK_INPUT_CODE_OPERAND << BUSTER_CHECK_EXPRESSION_CODE_SHIFT <= BUSTER_CHECK_EXPRESSION_CODE_MASK, "the classes fit their bits");
+_Static_assert(BUSTER_CHECK_EXPRESSION_CODE_MASK >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == BUSTER_CHECK_EXPRESSION_CODES - 1, "a counter per code the bits hold");
 
 // The walks' tests of a token's role and of its kind, a bit each, in tables that a pass looks 64 tokens up in at once
 // (_mm512_permutex2var_epi8 of a 128-byte table: roles and kinds are below 128). The scalar twins of the passes that read
@@ -543,6 +610,8 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 #define BUSTER_CHECK_KIND_TAG 0x08u
 // The expressions' walk acts at a token of the kind that isn't ignored.
 #define BUSTER_CHECK_KIND_EXPRESSION 0x20u
+// A number or a character: an operand's literal, for the walk's classes (CHECK_INPUT_CODE_LITERAL).
+#define BUSTER_CHECK_KIND_LITERAL 0x40u
 
 _Static_assert(PARSE_ROLE_COUNT <= 128 && PARSE_KIND_COUNT <= 128, "the walks' role and kind tests are 128-entry tables");
 
@@ -610,6 +679,8 @@ static const uint8_t check_input_role_tests[128] __attribute__((aligned(64))) =
 static const uint8_t check_input_kind_tests[128] __attribute__((aligned(64))) =
 {
     [PARSE_KIND_IDENTIFIER] = BUSTER_CHECK_KIND_IDENTIFIER,
+    [PARSE_KIND_NUMBER] = BUSTER_CHECK_KIND_LITERAL,
+    [PARSE_KIND_CHARACTER] = BUSTER_CHECK_KIND_LITERAL,
     [PARSE_KIND_STRING] = BUSTER_CHECK_KIND_EXPRESSION,
     [PARSE_KIND_STRUCT] = BUSTER_CHECK_KIND_RESOLVE | BUSTER_CHECK_KIND_TAG | BUSTER_CHECK_KIND_EXPRESSION,
     [PARSE_KIND_ENUM] = BUSTER_CHECK_KIND_RESOLVE | BUSTER_CHECK_KIND_TAG | BUSTER_CHECK_KIND_EXPRESSION,
@@ -630,6 +701,56 @@ static const uint8_t check_input_kind_tests[128] __attribute__((aligned(64))) =
     [PARSE_KIND_GOTO] = BUSTER_CHECK_KIND_RESOLVE | BUSTER_CHECK_KIND_EXPRESSION,
     [PARSE_KIND_CONTINUE] = BUSTER_CHECK_KIND_EXPRESSION,
     [PARSE_KIND_BREAK] = BUSTER_CHECK_KIND_EXPRESSION,
+};
+
+// The expressions' walk's class of a token of the role that isn't ignored and that no sparse column has an entry for
+// (CheckInputExpressionCode), by the order of its tests: an operand's (CHECK_INPUT_CODE_OPERAND) its kind decides, and a
+// role none of them takes (CHECK_INPUT_CODE_OTHER, every role this doesn't list) acts only through its children, but for
+// the kinds the walk refuses. check_input_expression_code is the twin, by the walk's own tests.
+static const uint8_t check_input_role_codes[128] __attribute__((aligned(64))) =
+{
+    [PARSE_ROLE_OPERAND] = CHECK_INPUT_CODE_OPERAND,
+    [PARSE_ROLE_PREFIX] = CHECK_INPUT_CODE_PREFIX,
+    [PARSE_ROLE_MULTIPLICATIVE] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_ADDITIVE] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_SHIFT] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_RELATIONAL] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_EQUALITY] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_BITWISE_AND] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_BITWISE_XOR] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_BITWISE_OR] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_LOGICAL_AND] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_LOGICAL_OR] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_ASSIGN] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_COMMA] = CHECK_INPUT_CODE_BINARY,
+    [PARSE_ROLE_SEPARATOR] = CHECK_INPUT_CODE_SEPARATOR,
+    [PARSE_ROLE_CLOSE_GROUP] = CHECK_INPUT_CODE_GROUP,
+    [PARSE_ROLE_CLOSE_CAST] = CHECK_INPUT_CODE_CAST,
+    [PARSE_ROLE_OPEN_TERNARY] = CHECK_INPUT_CODE_LIST,
+    [PARSE_ROLE_ASSOCIATION] = CHECK_INPUT_CODE_LIST,
+    [PARSE_ROLE_CLOSE_INITIALIZER] = CHECK_INPUT_CODE_LIST,
+    [PARSE_ROLE_CLOSE_TERNARY] = CHECK_INPUT_CODE_TERNARY,
+    [PARSE_ROLE_CLOSE_SUBSCRIPT] = CHECK_INPUT_CODE_SUBSCRIPT,
+    [PARSE_ROLE_MEMBER_OPERATOR] = CHECK_INPUT_CODE_MEMBER,
+    [PARSE_ROLE_POSTFIX] = CHECK_INPUT_CODE_POSTFIX,
+    [PARSE_ROLE_RETURN] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_SIZEOF] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_CALL] = CHECK_INPUT_CODE_CALL,
+    [PARSE_ROLE_CLOSE_FUNCTION] = CHECK_INPUT_CODE_CALL,
+    [PARSE_ROLE_CLOSE_KEYWORD] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_CONDITION] = CHECK_INPUT_CODE_CONDITION,
+    [PARSE_ROLE_TERMINATOR] = CHECK_INPUT_CODE_TERMINATOR,
+    [PARSE_ROLE_CLOSE_FOR] = CHECK_INPUT_CODE_TERMINATOR,
+    [PARSE_ROLE_CLOSE_COMPOUND_BODY] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_RANGE] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_CASE] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_STRUCT] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_ENUM] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_SPECIFIER] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_CLOSE_ASM] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_LABEL] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_TAG] = CHECK_INPUT_CODE_SCALAR,
+    [PARSE_ROLE_BITFIELD] = CHECK_INPUT_CODE_SCALAR,
 };
 
 typedef struct CheckInputReader CheckInputReader;
@@ -858,9 +979,9 @@ struct CheckInputReader
     // Each token's tests by its syntax alone (BUSTER_CHECK_SYNTAX_*), from check_input_count_tokens' pass: the walk
     // tests a bit of a byte where it compared the token's name and kind with each name and kind it acts on.
     const uint8_t* syntax;
-    // Which tokens the walks' vector paths visit, a byte each (count + 1): the walk in source order's marks
-    // (BUSTER_CHECK_RESOLVE_*), then the expressions' walk's classes (BUSTER_CHECK_EXPRESSION_*). Lanes (#113) share it,
-    // each writing its own body's.
+    // Which tokens the walks' vector paths visit, a byte each (count + 1, and BUSTER_CHECK_VISITS_PADDING bytes after): the
+    // walk in source order's marks (BUSTER_CHECK_RESOLVE_*), then the expressions' walk's classes (BUSTER_CHECK_EXPRESSION_*).
+    // Lanes (#113) share it, each writing its own body's.
     uint8_t* visits;
     uint32_t* parameters;
     uint32_t* parameter_next;
@@ -6014,11 +6135,13 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
     return reader->parser->tree.roles[token] == PARSE_ROLE_CLOSE_CONDITION ? token + 1 : reader->ends[token] + 1;
 }
 
-static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+// A node of `op` at `token` with operands a, b and c (check_graph_add's, its checks and columns), the end of its value
+// chain, and the columns the reader gives every node: where its expression ends, its warnings' suppression and its
+// floating-point environment. A full graph is a resource failure. It doesn't record the nodes before it, which
+// check_input_add does first; the coded walk leaves that to the next check_input_add or check_graph_record_finish, which
+// record them in node order from their final columns.
+static uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
-    // The previous node's caller has now filled its action data and witnesses. Finish it before a new node
-    // can consume its purity, while its columns are still hot. Late reader passes only add diagnostic context.
-    check_graph_record_nodes(&reader->output->graph);
     const uint32_t node = check_graph_add(&reader->output->graph, op, token, a, b, c);
     if (node == BUSTER_CHECK_NONE)
     {
@@ -6038,6 +6161,14 @@ static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t t
         }
     }
     return node;
+}
+
+static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+{
+    // The previous node's caller has now filled its action data and witnesses. Finish it before a new node
+    // can consume its purity, while its columns are still hot. Late reader passes only add diagnostic context.
+    check_graph_record_nodes(&reader->output->graph);
+    return check_input_add_node(reader, op, token, a, b, c);
 }
 
 static void check_input_vector_member(CheckInputReader* reader, uint32_t node, uint32_t token)
@@ -6177,11 +6308,104 @@ static bool check_input_expression_sparse(const CheckInputReader* reader, uint32
            reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
 }
 
+// The walk's class of `token` (CheckInputExpressionCode), by its own tests in their order: the twin of
+// check_input_role_codes' lookups. `sparse` says a sparse column has an entry for it and `list` that its role is one an
+// ignored token passes its values on by. A type query that finishes at the token makes its class the walk's visit too.
+static uint8_t check_input_expression_code(const CheckInputReader* reader, uint32_t token, bool sparse, bool list)
+{
+    const uint8_t role = reader->parser->tree.roles[token];
+    const uint8_t kind = reader->parser->tokens.kinds[token];
+    const bool refused = kind == PARSE_KIND_STRING || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE ||
+                         kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT ||
+                         kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_ASM || kind == PARSE_KIND_ATTRIBUTE ||
+                         kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
+                         kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
+    uint8_t code;
+    if (sparse || reader->specifier_finishes[token] != 0)
+    {
+        code = CHECK_INPUT_CODE_SCALAR;
+    }
+    else if (reader->ignored[token])
+    {
+        code = list ? CHECK_INPUT_CODE_LIST : CHECK_INPUT_CODE_DROP;
+    }
+    else if (role == PARSE_ROLE_OPERAND)
+    {
+        code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
+               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL : CHECK_INPUT_CODE_SCALAR;
+    }
+    else if (role == PARSE_ROLE_PREFIX)
+    {
+        code = CHECK_INPUT_CODE_PREFIX;
+    }
+    else if ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA)
+    {
+        code = CHECK_INPUT_CODE_BINARY;
+    }
+    else if (role == PARSE_ROLE_SEPARATOR)
+    {
+        code = CHECK_INPUT_CODE_SEPARATOR;
+    }
+    else if (role == PARSE_ROLE_CLOSE_GROUP)
+    {
+        code = CHECK_INPUT_CODE_GROUP;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CAST)
+    {
+        code = CHECK_INPUT_CODE_CAST;
+    }
+    else if (role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_ASSOCIATION || role == PARSE_ROLE_CLOSE_INITIALIZER)
+    {
+        code = CHECK_INPUT_CODE_LIST;
+    }
+    else if (role == PARSE_ROLE_CLOSE_TERNARY)
+    {
+        code = CHECK_INPUT_CODE_TERNARY;
+    }
+    else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT)
+    {
+        code = CHECK_INPUT_CODE_SUBSCRIPT;
+    }
+    else if (role == PARSE_ROLE_MEMBER_OPERATOR)
+    {
+        code = CHECK_INPUT_CODE_MEMBER;
+    }
+    else if (role == PARSE_ROLE_POSTFIX)
+    {
+        code = CHECK_INPUT_CODE_POSTFIX;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CONDITION)
+    {
+        code = CHECK_INPUT_CODE_CONDITION;
+    }
+    else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR)
+    {
+        code = CHECK_INPUT_CODE_TERMINATOR;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
+    {
+        code = CHECK_INPUT_CODE_CALL;
+    }
+    else if (role == PARSE_ROLE_RETURN || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_COMPOUND_BODY || role == PARSE_ROLE_RANGE || role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_CLOSE_STRUCT ||
+             role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_ASM || role == PARSE_ROLE_LABEL ||
+             role == PARSE_ROLE_TAG || role == PARSE_ROLE_BITFIELD)
+    {
+        code = CHECK_INPUT_CODE_SCALAR;
+    }
+    else
+    {
+        code = refused ? CHECK_INPUT_CODE_SCALAR : CHECK_INPUT_CODE_DROP;
+    }
+    return code;
+}
+
 // The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
 // check_input_expression_classes' vector path. The walk acts at a token with children, at one a sparse column has an
 // entry for, and at one whose role or kind its other tests take: for an ignored token, a role whose values it passes on
-// as a list. At any other token it writes the token's first value, NONE, and nothing else.
-static uint8_t check_input_expression_class(const CheckInputReader* reader, uint32_t token)
+// as a list. At any other token it writes the token's first value, NONE, and nothing else. The class code
+// (check_input_expression_code) only where `coded`, the coded walk's: the walk's action reads its ACTS and SPARSE bits
+// alone, so that --scalar's walk doesn't pay for the code's tests at every token.
+static uint8_t check_input_expression_class(const CheckInputReader* reader, uint32_t token, bool coded)
 {
     const Parser* parser = reader->parser;
     const uint8_t role = parser->tree.roles[token];
@@ -6205,12 +6429,14 @@ static uint8_t check_input_expression_class(const CheckInputReader* reader, uint
                          kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
                          kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
     const bool acts = reader->first_child[token] != BUSTER_CHECK_NONE || sparse || (reader->ignored[token] ? list : operation || closing || refused);
-    return (uint8_t)((acts ? BUSTER_CHECK_EXPRESSION_ACTS : 0) | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0));
+    const uint8_t code = coded ? check_input_expression_code(reader, token, sparse, list) : CHECK_INPUT_CODE_OTHER;
+    return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
 // The expressions' walk's classes of every token, into CheckInputReader.visits, as check_input_expression_class gives
-// them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests) and 16 tokens'
-// sparse columns and first children at a time; on the scalar path, its twin's, a token at a time. Each token the walk
+// them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests, check_input_role_codes)
+// and 16 tokens' sparse columns, type queries and first children at a time; on the scalar path, its twin's, a token at a
+// time, with the class codes only for the coded walk (all but --scalar's, which reads none). Each token the walk
 // doesn't act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path
 // skips it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
 // reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
@@ -6224,6 +6450,8 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const __m512i role_tests_high = _mm512_load_si512(check_input_role_tests + 64);
     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
+    const __m512i role_codes_low = _mm512_load_si512(check_input_role_codes);
+    const __m512i role_codes_high = _mm512_load_si512(check_input_role_codes + 64);
     const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
     uint32_t result = 0;
     uint32_t token = 0;
@@ -6240,8 +6468,25 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t taken = (skipped & _mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_LIST))) |
                                (~skipped & (_mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_EXPRESSION)) |
                                             _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_EXPRESSION))));
+        // The classes: the role's, an operand's by its kind, a role no test takes a DROP but for the refused kinds, and an
+        // ignored token's a LIST of a list role and a DROP otherwise.
+        const __m512i role_codes = _mm512_permutex2var_epi8(role_codes_low, role, role_codes_high);
+        const uint64_t operand = _mm512_cmpeq_epi8_mask(role_codes, _mm512_set1_epi8(CHECK_INPUT_CODE_OPERAND));
+        const uint64_t other = _mm512_cmpeq_epi8_mask(role_codes, _mm512_set1_epi8(CHECK_INPUT_CODE_OTHER));
+        const uint64_t refused = _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_EXPRESSION));
+        const uint64_t list = _mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_LIST));
+        __m512i codes = _mm512_mask_mov_epi8(role_codes, operand, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+        codes = _mm512_mask_mov_epi8(codes, operand & _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_IDENTIFIER)),
+                                     _mm512_set1_epi8(CHECK_INPUT_CODE_IDENTIFIER));
+        codes = _mm512_mask_mov_epi8(codes, operand & _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_LITERAL)),
+                                     _mm512_set1_epi8(CHECK_INPUT_CODE_LITERAL));
+        codes = _mm512_mask_mov_epi8(codes, other & ~refused, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
+        codes = _mm512_mask_mov_epi8(codes, other & refused, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+        codes = _mm512_mask_mov_epi8(codes, skipped & ~list, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
+        codes = _mm512_mask_mov_epi8(codes, skipped & list, _mm512_set1_epi8(CHECK_INPUT_CODE_LIST));
         uint64_t acts = 0;
         uint64_t sparse = 0;
+        uint64_t specified = 0;
         for (uint32_t part = 0; part < length; part += 16)
         {
             const __mmask16 parts = (__mmask16)_bzhi_u32(UINT32_MAX, length - part < 16 ? length - part : 16);
@@ -6259,17 +6504,27 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
             const __mmask16 part_acts = children | part_sparse | (__mmask16)(taken >> part);
             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
+            // The type queries that finish at the tokens, 8 pointers at a time.
+            const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, reader->specifier_finishes + at);
+            const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), reader->specifier_finishes + at + 8);
+            const uint32_t part_specified = (uint32_t)_mm512_test_epi64_mask(jobs_low, jobs_low) | (uint32_t)_mm512_test_epi64_mask(jobs_high, jobs_high) << 8;
             acts |= (uint64_t)part_acts << part;
             sparse |= (uint64_t)part_sparse << part;
+            specified |= (uint64_t)part_specified << part;
         }
-        const __m512i classes = _mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
-                                                _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE)));
+        codes = _mm512_mask_mov_epi8(codes, sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+        // Every class is below 32, so each byte's shift stays in its byte.
+        const __m512i classes = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
+                                                                _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE))),
+                                                _mm512_maskz_mov_epi8(acts, _mm512_slli_epi16(codes, BUSTER_CHECK_EXPRESSION_CODE_SHIFT)));
         _mm512_mask_storeu_epi8(reader->visits + token, lanes, classes);
         result += (uint32_t)__builtin_popcountll(acts);
     }
+    // The coded walk reads the class codes, on any path but --scalar's (check_input_expressions).
+    const bool coded = !parser->options.scalar;
     for (; token < count; token += 1)
     {
-        reader->visits[token] = check_input_expression_class(reader, token);
+        reader->visits[token] = check_input_expression_class(reader, token, coded);
         if ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
         {
             reader->first_value[token] = BUSTER_CHECK_NONE;
@@ -6281,640 +6536,686 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
 
 #include "c_check_sizeof_input.c"
 
-// The walk over the tokens in postorder that builds the expression graph. The vector path skips the tokens it doesn't
-// act at, whose first values their classes wrote (check_input_expression_classes), and tests the sparse columns only
-// of tokens their classes say have an entry; the scalar path, its twin, visits every token and tests every column.
-
-static void check_input_expressions(CheckInputReader* reader)
+// The walk's action at `token`, of classes `classes` (its visits byte), once its first value is NONE and it is within the
+// expressions' limit (check_input_expression_visit): its children's values gathered, then the node, the list or the
+// report its role, kind and columns ask for. The scalar walk's for every token, and the coded walk's for a token of
+// CHECK_INPUT_CODE_SCALAR or one its class's action leaves to it (c_check_expression_input.c). Called, not inlined, by
+// both walks: clang 23's code is the same without the attribute (its 28 KB aren't inlined at two places), which keeps the
+// coded walk's dispatch small. --scalar's walk of sqlite3.c, which calls it at every token, took 57.5 ms against 55.5
+// before the coded walk (minima of 21 runs in a 4-CPU VM, #1038's review); no benchmark times that path.
+static __attribute__((noinline)) void check_input_expression_act(CheckInputReader* reader, uint32_t token, uint8_t classes)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
     // The requested walk controls filtering and value-list accounting. Host ISA
     // only selects how the classification above is computed.
     const bool scalar = parser->options.scalar;
-    // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
-    const uint32_t acts = check_input_expression_classes(reader);
-    reader->output->expression_visits = scalar ? parser->tokens.count : acts;
-    for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
+    const uint8_t role = parser->tree.roles[token];
+    const uint8_t kind = parser->tokens.kinds[token];
+    uint32_t first = BUSTER_CHECK_NONE;
+    uint32_t last = BUSTER_CHECK_NONE;
+    uint32_t count = 0;
+    // A typeof expression of variably modified type is evaluated, unlike a fixed-type one: its operand's value
+    // must reach the declaration as a discarded expression, which its initializer and other effects then run.
+    const CheckInputSpecifierJob* specifier_job = reader->specifier_finishes[token];
+    const bool evaluated_specifier = specifier_job != 0 &&
+                                     (specifier_job->variably_modified || check_input_vla_modified(reader->types, specifier_job->result));
+    for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
     {
-        const uint32_t token = reader->postorder[order];
-        const uint8_t classes = reader->visits[token];
-        if (!scalar && (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
+        if (specifier_job != 0 && !evaluated_specifier && child < token)
         {
+            // A fixed-type query keeps its region checked; its value is not a runtime declaration operand.
             continue;
         }
-        // Every token's first value is written when the walk reaches it, NONE for one without values, before its parent
-        // reads it: a column written before it is read.
-        reader->first_value[token] = BUSTER_CHECK_NONE;
-        if (check_input_expression_end(reader, token) > check_input_expression_limit(reader, token) ||
-            (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0))
+        const uint32_t begin = reader->first_value[child];
+        if (begin != BUSTER_CHECK_NONE)
         {
-            continue;
-        }
-        const uint8_t role = parser->tree.roles[token];
-        const uint8_t kind = parser->tokens.kinds[token];
-        uint32_t first = BUSTER_CHECK_NONE;
-        uint32_t last = BUSTER_CHECK_NONE;
-        uint32_t count = 0;
-        // A typeof expression of variably modified type is evaluated, unlike a fixed-type one: its operand's value
-        // must reach the declaration as a discarded expression, which its initializer and other effects then run.
-        const CheckInputSpecifierJob* specifier_job = reader->specifier_finishes[token];
-        const bool evaluated_specifier = specifier_job != 0 &&
-                                         (specifier_job->variably_modified || check_input_vla_modified(reader->types, specifier_job->result));
-        for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
-        {
-            if (specifier_job != 0 && !evaluated_specifier && child < token)
+            if (last != BUSTER_CHECK_NONE)
             {
-                // A fixed-type query keeps its region checked; its value is not a runtime declaration operand.
-                continue;
+                reader->value_next[last] = begin;
             }
-            const uint32_t begin = reader->first_value[child];
-            if (begin != BUSTER_CHECK_NONE)
+            else
             {
-                if (last != BUSTER_CHECK_NONE)
+                first = begin;
+            }
+            last = reader->last_value[child];
+            if (scalar)
+            {
+                for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
                 {
-                    reader->value_next[last] = begin;
+                    count += 1;
                 }
-                else
-                {
-                    first = begin;
-                }
-                last = reader->last_value[child];
-                if (scalar)
-                {
-                    for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
-                    {
-                        count += 1;
-                    }
-                }
-                else
-                {
-                    count += reader->value_counts[child];
-                }
+            }
+            else
+            {
+                count += reader->value_counts[child];
             }
         }
-        const uint32_t a = first;
-        const uint32_t b = a != BUSTER_CHECK_NONE ? reader->value_next[a] : BUSTER_CHECK_NONE;
-        const uint32_t c = b != BUSTER_CHECK_NONE ? reader->value_next[b] : BUSTER_CHECK_NONE;
-        if (evaluated_specifier && a != BUSTER_CHECK_NONE)
+    }
+    const uint32_t a = first;
+    const uint32_t b = a != BUSTER_CHECK_NONE ? reader->value_next[a] : BUSTER_CHECK_NONE;
+    const uint32_t c = b != BUSTER_CHECK_NONE ? reader->value_next[b] : BUSTER_CHECK_NONE;
+    if (evaluated_specifier && a != BUSTER_CHECK_NONE)
+    {
+        // The operand's value is the declaration's runtime side effect. Its graph token is the operand's own, so
+        // the declaration's token task wouldn't evaluate it through its token's first values; record it at the
+        // statement's terminator instead, where its bounds and initializers are written (check_program's token
+        // task).
+        uint32_t statement = specifier_job->first;
+        for (uint32_t steps = 0; statement < parser->tokens.count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR &&
+             steps < parser->tokens.count; steps += 1)
         {
-            // The operand's value is the declaration's runtime side effect. Its graph token is the operand's own, so
-            // the declaration's token task wouldn't evaluate it through its token's first values; record it at the
-            // statement's terminator instead, where its bounds and initializers are written (check_program's token
-            // task).
-            uint32_t statement = specifier_job->first;
-            for (uint32_t steps = 0; statement < parser->tokens.count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR &&
-                 steps < parser->tokens.count; steps += 1)
-            {
-                statement = parser->tree.parents[statement];
-            }
-            if (statement < parser->tokens.count && parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR)
-            {
-                reader->output->evaluation_nodes[statement] = a;
-            }
+            statement = parser->tree.parents[statement];
         }
-        uint32_t node = BUSTER_CHECK_NONE;
-        bool list = false;
-        bool supported = true;
-        CheckOp op = CHECK_OP_COUNT;
-        // The sparse columns' tests, of a token whose classes say one has an entry for it on the vector path.
-        const bool sparse = scalar || (classes & BUSTER_CHECK_EXPRESSION_SPARSE) != 0;
-        if (sparse && role == PARSE_ROLE_CLOSE_GROUP && reader->output->expression_regions[token] != 0)
+        if (statement < parser->tokens.count && parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR)
         {
-            CheckInputRegion* region = &reader->output->regions[reader->output->expression_regions[token] - 1];
-            if (region->result == BUSTER_CHECK_NONE)
-            {
-                region->result = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (region->result != BUSTER_CHECK_NONE)
-                {
-                    *check_graph_leaf_of(graph, region->result) = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
-                }
-            }
+            reader->output->evaluation_nodes[statement] = a;
+        }
+    }
+    uint32_t node = BUSTER_CHECK_NONE;
+    bool list = false;
+    bool supported = true;
+    CheckOp op = CHECK_OP_COUNT;
+    // The sparse columns' tests, of a token whose classes say one has an entry for it on the vector path.
+    const bool sparse = scalar || (classes & BUSTER_CHECK_EXPRESSION_SPARSE) != 0;
+    if (sparse && role == PARSE_ROLE_CLOSE_GROUP && reader->output->expression_regions[token] != 0)
+    {
+        CheckInputRegion* region = &reader->output->regions[reader->output->expression_regions[token] - 1];
+        if (region->result == BUSTER_CHECK_NONE)
+        {
+            region->result = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (region->result != BUSTER_CHECK_NONE)
             {
-                const uint32_t proof = check_input_region_proof(reader, region);
-                node = check_input_add(reader, CHECK_OP_STATEMENT_VALUE, token, region->result, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (node != BUSTER_CHECK_NONE && proof != BUSTER_CHECK_NONE)
-                {
-                    graph->region_proofs[proof].node = node;
-                }
+                *check_graph_leaf_of(graph, region->result) = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
             }
         }
-        else if (sparse && reader->constant_present[token] != 0)
+        if (region->result != BUSTER_CHECK_NONE)
+        {
+            const uint32_t proof = check_input_region_proof(reader, region);
+            node = check_input_add(reader, CHECK_OP_STATEMENT_VALUE, token, region->result, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (node != BUSTER_CHECK_NONE && proof != BUSTER_CHECK_NONE)
+            {
+                graph->region_proofs[proof].node = node;
+            }
+        }
+    }
+    else if (sparse && reader->constant_present[token] != 0)
+    {
+        node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            *check_graph_leaf_of(graph, node) = reader->cached_constants[reader->constant_present[token] - 1];
+        }
+    }
+    else if (sparse && reader->selected_tokens[token] < parser->tokens.count)
+    {
+        const uint32_t selected = reader->output->token_nodes[reader->selected_tokens[token]];
+        supported = selected != BUSTER_CHECK_NONE;
+        if (supported)
+        {
+            node = check_input_add(reader, CHECK_OP_SELECT, token, selected, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        }
+    }
+    else if (sparse && reader->vararg_calls[token] != 0)
+    {
+        op = CHECK_OP_VARARGS;
+    }
+    else if (sparse && reader->designator_tokens[token] != 0)
+    {
+        const uint32_t opener = reader->designator_tokens[token] - 1;
+        node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            *check_graph_leaf_of(graph, node) = (CheckValue)
+            {
+                .type = BUSTER_TYPE_ULONG,
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_ICE,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = reader->designator_indices[opener],
+            };
+        }
+    }
+    else if (sparse && reader->vla_ends[token] != 0)
+    {
+        node = check_input_vla_capture(reader, token);
+    }
+    else if (sparse && check_input_asm_id(reader->output, token) != 0)
+    {
+        if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
+        {
+            supported = count == 1;
+            reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
+        }
+    }
+    else if (reader->ignored[token])
+    {
+        // Specifier chains carry initializer nodes to their enclosing statement without creating expressions.
+        list = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_SEPARATOR ||
+               role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT ||
+               role == PARSE_ROLE_CLOSE_SPECIFIER;
+    }
+    else if (role == PARSE_ROLE_OPERAND && kind == PARSE_KIND_IDENTIFIER)
+    {
+        if (reader->declared_types[token] != 0)
         {
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(graph, node) = reader->cached_constants[reader->constant_present[token] - 1];
+                const TypeId type = check_input_expression_type(reader, token);
+                const uint32_t declaration = reader->output->declarations[token];
+                const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+                const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
+                    check_input_constexpr_find(reader, declaration) : 0;
+                *check_graph_leaf_of(graph, node) = constant != 0 ? constant->value : (CheckValue)
+                {
+                    .type = type,
+                    .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
+                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) | (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                    .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
+                    .integer = enumeration ? reader->enum_values[declaration] : 0,
+                    .object = reader->objects[declaration],
+                    .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
+                };
+                if (constant != 0)
+                {
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
+                    {
+                        .type = type,
+                        .category = CHECK_LVALUE,
+                        .flags = constant->value.flags | BUSTER_CHECK_ICE,
+                        .constant_kind = constant->value.constant_kind,
+                        .integer = constant->value.integer,
+                        .floating = constant->value.floating,
+                        .imaginary = constant->value.imaginary,
+                        .object = reader->objects[declaration],
+                    };
+                }
             }
         }
-        else if (sparse && reader->selected_tokens[token] < parser->tokens.count)
+    }
+    else if (role == PARSE_ROLE_OPERAND && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER) && !check_input_function_name_token(parser, token))
+    {
+        CheckLiteral literal;
+        check_input_literal(reader, token, &literal);
+        if (!literal.valid)
         {
-            const uint32_t selected = reader->output->token_nodes[reader->selected_tokens[token]];
-            supported = selected != BUSTER_CHECK_NONE;
-            if (supported)
+            check_input_report(reader, token, check_input_literal_report(&literal));
+        }
+        else
+        {
+            node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (node != BUSTER_CHECK_NONE)
             {
-                node = check_input_add(reader, CHECK_OP_SELECT, token, selected, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+                *check_graph_leaf_of(graph, node) = check_input_literal_value(reader, token, literal);
             }
         }
-        else if (sparse && reader->vararg_calls[token] != 0)
+    }
+    else if ((reader->syntax[token] & BUSTER_CHECK_SYNTAX_STRING) != 0 && role == PARSE_ROLE_OPERAND)
+    {
+        const CheckInitString* string = check_input_string(reader, token);
+        if (string != 0)
         {
-            op = CHECK_OP_VARARGS;
-        }
-        else if (sparse && reader->designator_tokens[token] != 0)
-        {
-            const uint32_t opener = reader->designator_tokens[token] - 1;
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
                 *check_graph_leaf_of(graph, node) = (CheckValue)
                 {
-                    .type = BUSTER_TYPE_ULONG,
-                    .category = CHECK_RVALUE,
-                    .flags = BUSTER_CHECK_ICE,
-                    .constant_kind = CHECK_CONSTANT_INTEGER,
-                    .integer = reader->designator_indices[opener],
+                    .type = string->type,
+                    .category = CHECK_LVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = string->object,
                 };
             }
         }
-        else if (sparse && reader->vla_ends[token] != 0)
+    }
+    else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
+             check_input_indirect_goto(parser, parser->tree.parents[token]))
+    {
+        // goto *expression: the whole expression after the `*` converted to const void * as if by assignment (clang's).
+        supported = count == 1;
+        op = CHECK_OP_CONVERT;
+        reader->query_types[token] = check_input_type_result(reader, type_pointer(reader->types, type_qualify(reader->types, BUSTER_TYPE_VOID, BUSTER_TYPE_CONST)));
+        supported &= reader->query_types[token] != 0;
+    }
+    else if (role == PARSE_ROLE_PREFIX)
+    {
+        supported = count == 1;
+        switch (kind)
         {
-            node = check_input_vla_capture(reader, token);
-        }
-        else if (sparse && check_input_asm_id(reader->output, token) != 0)
-        {
-            if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
+            case PARSE_KIND_AMPAMP:
             {
-                supported = count == 1;
-                reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
-            }
-        }
-        else if (reader->ignored[token])
-        {
-            // Specifier chains carry initializer nodes to their enclosing statement without creating expressions.
-            list = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_SEPARATOR ||
-                   role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT ||
-                   role == PARSE_ROLE_CLOSE_SPECIFIER;
-        }
-        else if (role == PARSE_ROLE_OPERAND && kind == PARSE_KIND_IDENTIFIER)
-        {
-            if (reader->declared_types[token] != 0)
-            {
-                node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (node != BUSTER_CHECK_NONE)
-                {
-                    const TypeId type = check_input_expression_type(reader, token);
-                    const uint32_t declaration = reader->output->declarations[token];
-                    const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                    const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
-                        check_input_constexpr_find(reader, declaration) : 0;
-                    *check_graph_leaf_of(graph, node) = constant != 0 ? constant->value : (CheckValue)
-                    {
-                        .type = type,
-                        .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) | (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
-                        .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
-                        .integer = enumeration ? reader->enum_values[declaration] : 0,
-                        .object = reader->objects[declaration],
-                        .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
-                    };
-                    if (constant != 0)
-                    {
-                        *check_graph_leaf_of(graph, node) = (CheckValue)
-                        {
-                            .type = type,
-                            .category = CHECK_LVALUE,
-                            .flags = constant->value.flags | BUSTER_CHECK_ICE,
-                            .constant_kind = constant->value.constant_kind,
-                            .integer = constant->value.integer,
-                            .floating = constant->value.floating,
-                            .imaginary = constant->value.imaginary,
-                            .object = reader->objects[declaration],
-                        };
-                    }
-                }
-            }
-        }
-        else if (role == PARSE_ROLE_OPERAND && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER) && !check_input_function_name_token(parser, token))
-        {
-            CheckLiteral literal;
-            check_input_literal(reader, token, &literal);
-            if (!literal.valid)
-            {
-                check_input_report(reader, token, check_input_literal_report(&literal));
-            }
-            else
-            {
-                node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (node != BUSTER_CHECK_NONE)
-                {
-                    *check_graph_leaf_of(graph, node) = check_input_literal_value(reader, token, literal);
-                }
-            }
-        }
-        else if ((reader->syntax[token] & BUSTER_CHECK_SYNTAX_STRING) != 0 && role == PARSE_ROLE_OPERAND)
-        {
-            const CheckInitString* string = check_input_string(reader, token);
-            if (string != 0)
-            {
-                node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+                // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the
+                // label's own object, its token plus one, which no declaration has.
+                const uint32_t label = reader->output->label_targets[token];
+                const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
+                supported = label < parser->tokens.count && pointer != 0 && count == 0;
+                node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
                 if (node != BUSTER_CHECK_NONE)
                 {
                     *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
-                        .type = string->type,
-                        .category = CHECK_LVALUE,
+                        .type = pointer,
+                        .category = CHECK_RVALUE,
                         .flags = BUSTER_CHECK_STATIC_OBJECT,
                         .constant_kind = CHECK_CONSTANT_ADDRESS,
-                        .object = string->object,
+                        .object = label + 1,
                     };
                 }
+                break;
             }
+            case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
+            case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
+            case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
+            case PARSE_KIND_EXCLAIM: op = CHECK_OP_NOT; break;
+            case PARSE_KIND_TILDE: op = CHECK_OP_BIT_NOT; break;
+            case PARSE_KIND_AMP: op = CHECK_OP_ADDRESS; break;
+            case PARSE_KIND_STAR: op = CHECK_OP_DEREFERENCE; break;
+            case PARSE_KIND_PLUSPLUS: op = CHECK_OP_PRE_INCREMENT; break;
+            case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
+            case PARSE_KIND_REAL_IMAG:
+                op = parser->tokens.names[token] == C_NAME_GNU_IMAG || parser->tokens.names[token] == C_NAME_GNU_IMAG2 ? CHECK_OP_IMAGINARY : CHECK_OP_REAL;
+                break;
+            case PARSE_KIND_SIZEOF:
+                op = parser->tokens.names[token] == C_NAME_SIZEOF ? CHECK_OP_SIZEOF : CHECK_OP_ALIGNOF;
+                supported = count == 1 || reader->query_types[token] != 0;
+                break;
+            default: supported = false; break;
         }
-        else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
-                 check_input_indirect_goto(parser, parser->tree.parents[token]))
+    }
+    else if ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA || (role == PARSE_ROLE_SEPARATOR && reader->expression_commas[token]))
+    {
+        op = check_input_binary(kind);
+        supported = count == 2 && op != CHECK_OP_COUNT;
+        if (reader->initializers[token])
         {
-            // goto *expression: the whole expression after the `*` converted to const void * as if by assignment (clang's).
-            supported = count == 1;
+            op = reader->initializers[token] == 1 ? CHECK_OP_INITIALIZE : CHECK_OP_COUNT;
+            supported = reader->initializers[token] == 2 || count == 1;
+            list = reader->initializers[token] == 2;
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_GROUP)
+    {
+        supported = count == 1;
+        list = true;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CAST)
+    {
+        supported = count == 1 && reader->query_types[token] != 0;
+        op = CHECK_OP_CAST;
+    }
+    else if (role == PARSE_ROLE_CLOSE_SIZEOF)
+    {
+        list = count == 1;
+        const uint32_t parent = parser->tree.parents[token];
+        if (reader->query_types[token] != 0 && parent < parser->tokens.count)
+        {
+            reader->query_types[parent] = reader->query_types[token];
+        }
+    }
+    else if (role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_ASSOCIATION)
+    {
+        list = true;
+    }
+    else if (role == PARSE_ROLE_CLOSE_TERNARY)
+    {
+        supported = count == 3 || count == 2;
+        op = CHECK_OP_CONDITIONAL;
+    }
+    else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT)
+    {
+        supported = count == 2;
+        op = CHECK_OP_SUBSCRIPT;
+    }
+    else if (role == PARSE_ROLE_MEMBER_OPERATOR)
+    {
+        supported = count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
+        op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
+    }
+    else if (role == PARSE_ROLE_POSTFIX)
+    {
+        supported = count == 1 && (kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS);
+        op = kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : CHECK_OP_POST_DECREMENT;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
+    {
+        const uint16_t builtin = reader->builtins[token];
+        const bool intrinsic = reader->output->intrinsic_ids != 0 && reader->output->intrinsic_ids[token] != 0;
+        const bool overflow = builtin >= CBUILTIN_ADD_OVERFLOW && builtin <= CBUILTIN_MUL_OVERFLOW;
+        const CheckOp special = check_graph_builtin_op((CBuiltinId)builtin);
+        const bool component = check_input_complex_builtin((CBuiltinId)builtin);
+        supported = intrinsic || (component ? count == 1 : special == CHECK_OP_BUILTIN_OVERFLOW ? count == 3 :
+                    builtin != 0 ? special != CHECK_OP_COUNT || (builtin < CBUILTIN_COUNT && count == (overflow ? 3 : 1)) : count != 0);
+        op = intrinsic ? CHECK_OP_BUILTIN_X86 : component ? (builtin >= CBUILTIN_CIMAG ? CHECK_OP_IMAGINARY : CHECK_OP_REAL) :
+             special != CHECK_OP_COUNT ? special : builtin != 0 ? (overflow ? CHECK_OP_BUILTIN_OVERFLOW : CHECK_OP_BUILTIN_UNARY) : CHECK_OP_CALL;
+    }
+    else if (role == PARSE_ROLE_RETURN)
+    {
+        supported = reader->return_types[token] != 0 && count <= 1;
+        if (count == 1)
+        {
             op = CHECK_OP_CONVERT;
-            reader->query_types[token] = check_input_type_result(reader, type_pointer(reader->types, type_qualify(reader->types, BUSTER_TYPE_VOID, BUSTER_TYPE_CONST)));
-            supported &= reader->query_types[token] != 0;
+            reader->query_types[token] = reader->return_types[token];
         }
-        else if (role == PARSE_ROLE_PREFIX)
+        else if (check_action_kind(reader->types, reader->return_types[token]) != BUSTER_TYPE_KIND_VOID &&
+                 !check_graph_system_token(graph, token))
         {
-            supported = count == 1;
-            switch (kind)
+            // No value for a non-void function: -Wreturn-mismatch, which clang suppresses in a system header.
+            check_input_report(reader, token, CHECK_INPUT_RETURN);
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_KEYWORD)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        const bool builtin = reader->builtins[token] != 0;
+        op = builtin ? check_graph_builtin_op((CBuiltinId)reader->builtins[token]) : CHECK_OP_COUNT;
+        supported = builtin ? op != CHECK_OP_COUNT :
+                    keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && count == 1;
+        if (supported && !builtin)
+        {
+            graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT;
+            graph->contexts[a] |= BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
+            const uint32_t completion = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_SEMI ? token + 1 : token;
+            check_input_const_warning(reader, a, keyword + 2, CHECK_WARNING_COMPLETE_AFTER_DELIMITER, completion);
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_CONDITION)
+    {
+        // The condition itself is the first value; child statements have already been checked and dropped.
+        supported = count == 1;
+        const uint32_t keyword = reader->first_child[token];
+        op = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION;
+    }
+    else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR)
+    {
+        // Discarding an expression still performs its lvalue/array/function conversions. In particular an
+        // unused register array cannot decay, and a volatile lvalue remains an observable load.
+        supported = !reader->conditions[token] || count <= 1;
+        const uint32_t parent = parser->tree.parents[token];
+        uint32_t selected = parent < parser->tokens.count ? reader->output->expression_regions[parent] : 0;
+        if (selected == 0 && reader->output->region_count != 0 && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
+        {
+            selected = check_input_labeled_region(reader, parent);
+        }
+        if (selected != 0 && reader->output->regions[selected - 1].final_statement == token)
+        {
+            supported &= count == 1;
+            reader->output->regions[selected - 1].result = count == 1 ? first : BUSTER_CHECK_NONE;
+        }
+        uint32_t last_discard = BUSTER_CHECK_NONE;
+        for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+        {
+            const uint32_t discard = check_input_add(reader, reader->conditions[token] ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (discard != BUSTER_CHECK_NONE)
             {
-                case PARSE_KIND_AMPAMP:
+                graph->types[discard] = BUSTER_TYPE_VOID;
+                if (reader->region_roots != NULL)
                 {
-                    // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the
-                    // label's own object, its token plus one, which no declaration has.
-                    const uint32_t label = reader->output->label_targets[token];
-                    const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
-                    supported = label < parser->tokens.count && pointer != 0 && count == 0;
-                    node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
-                    if (node != BUSTER_CHECK_NONE)
+                    if (last_discard == BUSTER_CHECK_NONE)
                     {
-                        *check_graph_leaf_of(graph, node) = (CheckValue)
-                        {
-                            .type = pointer,
-                            .category = CHECK_RVALUE,
-                            .flags = BUSTER_CHECK_STATIC_OBJECT,
-                            .constant_kind = CHECK_CONSTANT_ADDRESS,
-                            .object = label + 1,
-                        };
+                        reader->region_roots[token] = discard;
                     }
-                    break;
-                }
-                case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
-                case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
-                case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
-                case PARSE_KIND_EXCLAIM: op = CHECK_OP_NOT; break;
-                case PARSE_KIND_TILDE: op = CHECK_OP_BIT_NOT; break;
-                case PARSE_KIND_AMP: op = CHECK_OP_ADDRESS; break;
-                case PARSE_KIND_STAR: op = CHECK_OP_DEREFERENCE; break;
-                case PARSE_KIND_PLUSPLUS: op = CHECK_OP_PRE_INCREMENT; break;
-                case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
-                case PARSE_KIND_REAL_IMAG:
-                    op = parser->tokens.names[token] == C_NAME_GNU_IMAG || parser->tokens.names[token] == C_NAME_GNU_IMAG2 ? CHECK_OP_IMAGINARY : CHECK_OP_REAL;
-                    break;
-                case PARSE_KIND_SIZEOF:
-                    op = parser->tokens.names[token] == C_NAME_SIZEOF ? CHECK_OP_SIZEOF : CHECK_OP_ALIGNOF;
-                    supported = count == 1 || reader->query_types[token] != 0;
-                    break;
-                default: supported = false; break;
-            }
-        }
-        else if ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA || (role == PARSE_ROLE_SEPARATOR && reader->expression_commas[token]))
-        {
-            op = check_input_binary(kind);
-            supported = count == 2 && op != CHECK_OP_COUNT;
-            if (reader->initializers[token])
-            {
-                op = reader->initializers[token] == 1 ? CHECK_OP_INITIALIZE : CHECK_OP_COUNT;
-                supported = reader->initializers[token] == 2 || count == 1;
-                list = reader->initializers[token] == 2;
-            }
-        }
-        else if (role == PARSE_ROLE_CLOSE_GROUP)
-        {
-            supported = count == 1;
-            list = true;
-        }
-        else if (role == PARSE_ROLE_CLOSE_CAST)
-        {
-            supported = count == 1 && reader->query_types[token] != 0;
-            op = CHECK_OP_CAST;
-        }
-        else if (role == PARSE_ROLE_CLOSE_SIZEOF)
-        {
-            list = count == 1;
-            const uint32_t parent = parser->tree.parents[token];
-            if (reader->query_types[token] != 0 && parent < parser->tokens.count)
-            {
-                reader->query_types[parent] = reader->query_types[token];
-            }
-        }
-        else if (role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_ASSOCIATION)
-        {
-            list = true;
-        }
-        else if (role == PARSE_ROLE_CLOSE_TERNARY)
-        {
-            supported = count == 3 || count == 2;
-            op = CHECK_OP_CONDITIONAL;
-        }
-        else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT)
-        {
-            supported = count == 2;
-            op = CHECK_OP_SUBSCRIPT;
-        }
-        else if (role == PARSE_ROLE_MEMBER_OPERATOR)
-        {
-            supported = count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
-            op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
-        }
-        else if (role == PARSE_ROLE_POSTFIX)
-        {
-            supported = count == 1 && (kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS);
-            op = kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : CHECK_OP_POST_DECREMENT;
-        }
-        else if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
-        {
-            const uint16_t builtin = reader->builtins[token];
-            const bool intrinsic = reader->output->intrinsic_ids != 0 && reader->output->intrinsic_ids[token] != 0;
-            const bool overflow = builtin >= CBUILTIN_ADD_OVERFLOW && builtin <= CBUILTIN_MUL_OVERFLOW;
-            const CheckOp special = check_graph_builtin_op((CBuiltinId)builtin);
-            const bool component = check_input_complex_builtin((CBuiltinId)builtin);
-            supported = intrinsic || (component ? count == 1 : special == CHECK_OP_BUILTIN_OVERFLOW ? count == 3 :
-                        builtin != 0 ? special != CHECK_OP_COUNT || (builtin < CBUILTIN_COUNT && count == (overflow ? 3 : 1)) : count != 0);
-            op = intrinsic ? CHECK_OP_BUILTIN_X86 : component ? (builtin >= CBUILTIN_CIMAG ? CHECK_OP_IMAGINARY : CHECK_OP_REAL) :
-                 special != CHECK_OP_COUNT ? special : builtin != 0 ? (overflow ? CHECK_OP_BUILTIN_OVERFLOW : CHECK_OP_BUILTIN_UNARY) : CHECK_OP_CALL;
-        }
-        else if (role == PARSE_ROLE_RETURN)
-        {
-            supported = reader->return_types[token] != 0 && count <= 1;
-            if (count == 1)
-            {
-                op = CHECK_OP_CONVERT;
-                reader->query_types[token] = reader->return_types[token];
-            }
-            else if (check_action_kind(reader->types, reader->return_types[token]) != BUSTER_TYPE_KIND_VOID &&
-                     !check_graph_system_token(graph, token))
-            {
-                // No value for a non-void function: -Wreturn-mismatch, which clang suppresses in a system header.
-                check_input_report(reader, token, CHECK_INPUT_RETURN);
-            }
-        }
-        else if (role == PARSE_ROLE_CLOSE_KEYWORD)
-        {
-            const uint32_t keyword = reader->first_child[token];
-            const bool builtin = reader->builtins[token] != 0;
-            op = builtin ? check_graph_builtin_op((CBuiltinId)reader->builtins[token]) : CHECK_OP_COUNT;
-            supported = builtin ? op != CHECK_OP_COUNT :
-                        keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && count == 1;
-            if (supported && !builtin)
-            {
-                graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT;
-                graph->contexts[a] |= BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
-                const uint32_t completion = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_SEMI ? token + 1 : token;
-                check_input_const_warning(reader, a, keyword + 2, CHECK_WARNING_COMPLETE_AFTER_DELIMITER, completion);
-            }
-        }
-        else if (role == PARSE_ROLE_CLOSE_CONDITION)
-        {
-            // The condition itself is the first value; child statements have already been checked and dropped.
-            supported = count == 1;
-            const uint32_t keyword = reader->first_child[token];
-            op = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION;
-        }
-        else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR)
-        {
-            // Discarding an expression still performs its lvalue/array/function conversions. In particular an
-            // unused register array cannot decay, and a volatile lvalue remains an observable load.
-            supported = !reader->conditions[token] || count <= 1;
-            const uint32_t parent = parser->tree.parents[token];
-            uint32_t selected = parent < parser->tokens.count ? reader->output->expression_regions[parent] : 0;
-            if (selected == 0 && reader->output->region_count != 0 && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
-            {
-                selected = check_input_labeled_region(reader, parent);
-            }
-            if (selected != 0 && reader->output->regions[selected - 1].final_statement == token)
-            {
-                supported &= count == 1;
-                reader->output->regions[selected - 1].result = count == 1 ? first : BUSTER_CHECK_NONE;
-            }
-            uint32_t last_discard = BUSTER_CHECK_NONE;
-            for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
-            {
-                const uint32_t discard = check_input_add(reader, reader->conditions[token] ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (discard != BUSTER_CHECK_NONE)
-                {
-                    graph->types[discard] = BUSTER_TYPE_VOID;
-                    if (reader->region_roots != NULL)
+                    else
                     {
-                        if (last_discard == BUSTER_CHECK_NONE)
+                        reader->value_next[last_discard] = discard;
+                    }
+                    last_discard = discard;
+                }
+            }
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_INITIALIZER)
+    {
+        list = true;
+    }
+    else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+    {
+        const uint32_t declaration = reader->initializer_declarations[token];
+        supported = declaration != BUSTER_CHECK_NONE && reader->output->compound_objects[declaration];
+        if (supported)
+        {
+            node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (node != BUSTER_CHECK_NONE)
+            {
+                *check_graph_leaf_of(graph, node) = (CheckValue)
+                {
+                    .type = reader->declared_types[declaration],
+                    .category = CHECK_LVALUE,
+                    .flags = reader->static_objects[declaration] ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = reader->objects[declaration],
+                };
+            }
+            // A file-scope compound literal's elements are constant expressions, like a static
+            // initializer's: their constant evaluation supplies no context report of its own.
+            for (uint32_t value = reader->static_objects[declaration] ? first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE;
+                 value = reader->value_next[value])
+            {
+                graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+            }
+        }
+    }
+    else if (role == PARSE_ROLE_RANGE)
+    {
+        supported = count == 2 && parser->tree.parents[token] < parser->tokens.count && parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_CASE;
+        list = supported;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CASE)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        const bool fallback = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_DEFAULT;
+        supported = reader->output->control_owners[token] != BUSTER_CHECK_NONE && (fallback ? count == 0 : count == 1 || count == 2);
+        if (supported && !fallback)
+        {
+            reader->output->token_nodes[token] = a;
+            reader->output->case_ranges[token] = count == 2 ? b : BUSTER_CHECK_NONE;
+            graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
+            check_input_const_warning(reader, a, keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
+            if (count == 2)
+            {
+                graph->contexts[b] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
+                uint32_t range = keyword + 1;
+                while (range < token && parser->tokens.kinds[range] != PARSE_KIND_ELLIPSIS)
+                {
+                    range += 1;
+                }
+                check_input_const_warning(reader, b, range < token ? range + 1 : keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
+            }
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_STRUCT ||
+             role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER ||
+             role == PARSE_ROLE_CLOSE_ASM || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_TAG || role == PARSE_ROLE_BITFIELD)
+    {
+        supported = false;
+    }
+    else if (kind == PARSE_KIND_STRING)
+    {
+        // Static-assert messages and concatenated tails are already ignored. Other literals need an operand.
+        supported = false;
+    }
+    else if (kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH ||
+             kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+             kind == PARSE_KIND_ASM || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC ||
+             kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT ||
+             kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION)
+    {
+        supported = false;
+    }
+    if (op == CHECK_OP_SIZEOF && supported)
+    {
+        TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
+        if (requested == 0)
+        {
+            requested = check_input_sizeof_operand(reader, token);
+        }
+        if (check_input_vla_runtime_size(reader->types, requested))
+        {
+            node = check_input_vla_size(reader, token, requested, reader->query_types[token] == 0 ? a : BUSTER_CHECK_NONE);
+            op = CHECK_OP_COUNT;
+            supported = node != BUSTER_CHECK_NONE;
+        }
+        else if (reader->sizeof_types[token] == 0)
+        {
+            // Preparation coalesces known unevaluated spans. A failed/unsupported operand retains the old
+            // fallback and its warning handling; the graph still owns the semantic constraint diagnostics.
+            check_input_warning_suppress(reader, token + 1, reader->ends[token] + 1, check_constant_unevaluated_warnings());
+        }
+    }
+    if (op != CHECK_OP_COUNT && supported)
+    {
+        if (op == CHECK_OP_ALIGNOF && reader->query_types[token] == 0 && a != BUSTER_CHECK_NONE)
+        {
+            const uint32_t operand = graph->tokens[a];
+            const uint32_t declaration = operand < parser->tokens.count ? reader->output->declarations[operand] : BUSTER_CHECK_NONE;
+            CheckInputAttributes* attributes = declaration < parser->tokens.count ? reader->output->attributes[declaration] : 0;
+            if (attributes != 0 && attributes->alignment_log2 != 0)
+            {
+                const TypeId type = reader->declared_types[declaration];
+                const uint32_t requested = attributes->alignment_log2 - 1;
+                const uint32_t natural = type_alignment_log2(reader->types, type);
+                reader->query_types[token] = check_input_type_result(reader, type_aligned(reader->types, type, requested > natural ? requested : natural));
+            }
+        }
+        const bool arguments = check_graph_has_arguments(op) && op != CHECK_OP_CALL;
+        uint32_t left = arguments ? BUSTER_CHECK_NONE : op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF ?
+                        (reader->query_types[token] == 0 && count == 1 ? a : BUSTER_CHECK_NONE) : a;
+        if (check_input_complex_builtin((CBuiltinId)reader->builtins[token]))
+        {
+            left = check_input_add(reader, CHECK_OP_CONVERT, token, left, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (left != BUSTER_CHECK_NONE)
+            {
+                graph->types[left] = check_input_type_result(reader, type_complex(reader->types, check_input_complex_format((CBuiltinId)reader->builtins[token])));
+            }
+        }
+        const bool one = op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL || op == CHECK_OP_CAST || op == CHECK_OP_CONDITION ||
+                         op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW || role == PARSE_ROLE_PREFIX || role == PARSE_ROLE_POSTFIX;
+        const bool omitted = op == CHECK_OP_CONDITIONAL && count == 2;
+        uint64_t intrinsic_ice = 0;
+        uint32_t intrinsic_offset = 0;
+        if (op == CHECK_OP_BUILTIN_X86)
+        {
+            const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
+            intrinsic_offset = check_input_intrinsic_arguments(reader, call, a, &intrinsic_ice);
+        }
+        node = check_input_add(reader, op, token, left, one || arguments ? BUSTER_CHECK_NONE : omitted ? a : b,
+                               omitted ? b : op == CHECK_OP_CONDITIONAL || op == CHECK_OP_BUILTIN_OVERFLOW ? c : BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            graph->types[node] = reader->query_types[token];
+            if (op == CHECK_OP_CALL && reader->output->kr_parameter_count != 0)
+            {
+                // Parentheses don't create graph nodes. Address-of preserves a direct declaration, but
+                // dereference, a cast or a conditional is a call through its expression's type instead.
+                uint32_t callee = a;
+                if (callee < node && graph->ops[callee] == CHECK_OP_ADDRESS)
+                {
+                    callee = graph->operand0[callee];
+                }
+                const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+                const uint32_t declaration = use < parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
+                if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
+                    (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
+                {
+                    // CALL's type is the known promoted signature, member its designator's source token plus one.
+                    graph->types[node] = reader->declared_types[declaration];
+                    graph->members[node] = use + 1;
+                }
+            }
+            if (op == CHECK_OP_CALL && a < node && (graph->ops[a] == CHECK_OP_VALUE || graph->ops[a] == CHECK_OP_ADDRESS))
+            {
+                // A call of a plain library builtin's declaration that clang folds (#148), marked for the checker.
+                const uint32_t callee = graph->ops[a] == CHECK_OP_ADDRESS ? graph->operand0[a] : a;
+                const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+                const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                graph->members[node] = library != 0 ? library : graph->members[node];
+            }
+            if (reader->builtins[token] != 0)
+            {
+                graph->members[node] = reader->builtins[token];
+            }
+            if (op == CHECK_OP_VARARGS)
+            {
+                const CheckInputVarargs* call = &reader->varargs[reader->vararg_calls[token] - 1];
+                uint32_t second = b;
+                while (second < graph->count && (graph->ops[second] == CHECK_OP_CAST || graph->ops[second] == CHECK_OP_SELECT))
+                {
+                    second = graph->operand0[second];
+                }
+                const uint32_t operand = second < graph->count ? graph->tokens[second] : BUSTER_CHECK_NONE;
+                const uint32_t declaration = operand < parser->tokens.count ? reader->output->declarations[operand] : BUSTER_CHECK_NONE;
+                if (graph->varargs_count < graph->varargs_capacity)
+                {
+                    graph->argument_offsets[node] = graph->varargs_count;
+                    graph->argument_counts[node] = call->argument_count;
+                    graph->varargs_calls[graph->varargs_count++] = (CheckVarargsCall)
+                    {
+                        .node = node,
+                        .second_argument_declaration = declaration,
+                        .context = call->context,
+                    };
+                }
+                else
+                {
+                    reader->output->resource = true;
+                }
+            }
+            if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+            {
+                graph->members[node] = parser->tokens.names[token + 1];
+                if (op == CHECK_OP_MEMBER)
+                {
+                    check_input_vector_member(reader, node, token + 1);
+                }
+            }
+            if (check_graph_has_arguments(op))
+            {
+                if (op == CHECK_OP_CALL && reader->output->overload_heads != 0 && a != BUSTER_CHECK_NONE)
+                {
+                    const uint32_t callee = graph->tokens[a];
+                    const uint32_t head = callee < parser->tokens.count ? reader->output->overload_heads[callee] : 0;
+                    if (head != 0)
+                    {
+                        if (graph->overload_count < graph->overload_capacity)
                         {
-                            reader->region_roots[token] = discard;
+                            graph->overload_calls[graph->overload_count++] = (CheckOverloadCall){ .node = node, .head = head - 1 };
                         }
                         else
                         {
-                            reader->value_next[last_discard] = discard;
+                            reader->output->resource = true;
                         }
-                        last_discard = discard;
                     }
                 }
-            }
-        }
-        else if (role == PARSE_ROLE_CLOSE_INITIALIZER)
-        {
-            list = true;
-        }
-        else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
-        {
-            const uint32_t declaration = reader->initializer_declarations[token];
-            supported = declaration != BUSTER_CHECK_NONE && reader->output->compound_objects[declaration];
-            if (supported)
-            {
-                node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (node != BUSTER_CHECK_NONE)
+                graph->argument_offsets[node] = op == CHECK_OP_BUILTIN_X86 ? intrinsic_offset : graph->argument_count;
+                graph->argument_counts[node] = count - (op == CHECK_OP_CALL);
+                for (uint32_t argument = op == CHECK_OP_BUILTIN_X86 ? BUSTER_CHECK_NONE : op == CHECK_OP_CALL ? b : a;
+                     argument != BUSTER_CHECK_NONE; argument = reader->value_next[argument])
                 {
-                    *check_graph_leaf_of(graph, node) = (CheckValue)
+                    if (graph->argument_count < graph->argument_capacity)
                     {
-                        .type = reader->declared_types[declaration],
-                        .category = CHECK_LVALUE,
-                        .flags = reader->static_objects[declaration] ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
-                        .constant_kind = CHECK_CONSTANT_ADDRESS,
-                        .object = reader->objects[declaration],
-                    };
-                }
-                // A file-scope compound literal's elements are constant expressions, like a static
-                // initializer's: their constant evaluation supplies no context report of its own.
-                for (uint32_t value = reader->static_objects[declaration] ? first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE;
-                     value = reader->value_next[value])
-                {
-                    graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
-                }
-            }
-        }
-        else if (role == PARSE_ROLE_RANGE)
-        {
-            supported = count == 2 && parser->tree.parents[token] < parser->tokens.count && parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_CASE;
-            list = supported;
-        }
-        else if (role == PARSE_ROLE_CLOSE_CASE)
-        {
-            const uint32_t keyword = reader->first_child[token];
-            const bool fallback = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_DEFAULT;
-            supported = reader->output->control_owners[token] != BUSTER_CHECK_NONE && (fallback ? count == 0 : count == 1 || count == 2);
-            if (supported && !fallback)
-            {
-                reader->output->token_nodes[token] = a;
-                reader->output->case_ranges[token] = count == 2 ? b : BUSTER_CHECK_NONE;
-                graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
-                check_input_const_warning(reader, a, keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
-                if (count == 2)
-                {
-                    graph->contexts[b] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
-                    uint32_t range = keyword + 1;
-                    while (range < token && parser->tokens.kinds[range] != PARSE_KIND_ELLIPSIS)
-                    {
-                        range += 1;
+                        graph->argument_tokens[graph->argument_count] = check_input_first_token(reader, graph->tokens[argument]);
+                        graph->argument_nodes[graph->argument_count++] = argument;
                     }
-                    check_input_const_warning(reader, b, range < token ? range + 1 : keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
-                }
-            }
-        }
-        else if (role == PARSE_ROLE_CLOSE_STRUCT ||
-                 role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER ||
-                 role == PARSE_ROLE_CLOSE_ASM || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_TAG || role == PARSE_ROLE_BITFIELD)
-        {
-            supported = false;
-        }
-        else if (kind == PARSE_KIND_STRING)
-        {
-            // Static-assert messages and concatenated tails are already ignored. Other literals need an operand.
-            supported = false;
-        }
-        else if (kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH ||
-                 kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
-                 kind == PARSE_KIND_ASM || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC ||
-                 kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT ||
-                 kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION)
-        {
-            supported = false;
-        }
-        if (op == CHECK_OP_SIZEOF && supported)
-        {
-            TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
-            if (requested == 0)
-            {
-                requested = check_input_sizeof_operand(reader, token);
-            }
-            if (check_input_vla_runtime_size(reader->types, requested))
-            {
-                node = check_input_vla_size(reader, token, requested, reader->query_types[token] == 0 ? a : BUSTER_CHECK_NONE);
-                op = CHECK_OP_COUNT;
-                supported = node != BUSTER_CHECK_NONE;
-            }
-            else if (reader->sizeof_types[token] == 0)
-            {
-                // Preparation coalesces known unevaluated spans. A failed/unsupported operand retains the old
-                // fallback and its warning handling; the graph still owns the semantic constraint diagnostics.
-                check_input_warning_suppress(reader, token + 1, reader->ends[token] + 1, check_constant_unevaluated_warnings());
-            }
-        }
-        if (op != CHECK_OP_COUNT && supported)
-        {
-            if (op == CHECK_OP_ALIGNOF && reader->query_types[token] == 0 && a != BUSTER_CHECK_NONE)
-            {
-                const uint32_t operand = graph->tokens[a];
-                const uint32_t declaration = operand < parser->tokens.count ? reader->output->declarations[operand] : BUSTER_CHECK_NONE;
-                CheckInputAttributes* attributes = declaration < parser->tokens.count ? reader->output->attributes[declaration] : 0;
-                if (attributes != 0 && attributes->alignment_log2 != 0)
-                {
-                    const TypeId type = reader->declared_types[declaration];
-                    const uint32_t requested = attributes->alignment_log2 - 1;
-                    const uint32_t natural = type_alignment_log2(reader->types, type);
-                    reader->query_types[token] = check_input_type_result(reader, type_aligned(reader->types, type, requested > natural ? requested : natural));
-                }
-            }
-            const bool arguments = check_graph_has_arguments(op) && op != CHECK_OP_CALL;
-            uint32_t left = arguments ? BUSTER_CHECK_NONE : op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF ?
-                            (reader->query_types[token] == 0 && count == 1 ? a : BUSTER_CHECK_NONE) : a;
-            if (check_input_complex_builtin((CBuiltinId)reader->builtins[token]))
-            {
-                left = check_input_add(reader, CHECK_OP_CONVERT, token, left, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                if (left != BUSTER_CHECK_NONE)
-                {
-                    graph->types[left] = check_input_type_result(reader, type_complex(reader->types, check_input_complex_format((CBuiltinId)reader->builtins[token])));
-                }
-            }
-            const bool one = op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL || op == CHECK_OP_CAST || op == CHECK_OP_CONDITION ||
-                             op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW || role == PARSE_ROLE_PREFIX || role == PARSE_ROLE_POSTFIX;
-            const bool omitted = op == CHECK_OP_CONDITIONAL && count == 2;
-            uint64_t intrinsic_ice = 0;
-            uint32_t intrinsic_offset = 0;
-            if (op == CHECK_OP_BUILTIN_X86)
-            {
-                const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
-                intrinsic_offset = check_input_intrinsic_arguments(reader, call, a, &intrinsic_ice);
-            }
-            node = check_input_add(reader, op, token, left, one || arguments ? BUSTER_CHECK_NONE : omitted ? a : b,
-                                   omitted ? b : op == CHECK_OP_CONDITIONAL || op == CHECK_OP_BUILTIN_OVERFLOW ? c : BUSTER_CHECK_NONE);
-            if (node != BUSTER_CHECK_NONE)
-            {
-                graph->types[node] = reader->query_types[token];
-                if (op == CHECK_OP_CALL && reader->output->kr_parameter_count != 0)
-                {
-                    // Parentheses don't create graph nodes. Address-of preserves a direct declaration, but
-                    // dereference, a cast or a conditional is a call through its expression's type instead.
-                    uint32_t callee = a;
-                    if (callee < node && graph->ops[callee] == CHECK_OP_ADDRESS)
+                    else
                     {
-                        callee = graph->operand0[callee];
-                    }
-                    const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-                    const uint32_t declaration = use < parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
-                    if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
-                        (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
-                    {
-                        // CALL's type is the known promoted signature, member its designator's source token plus one.
-                        graph->types[node] = reader->declared_types[declaration];
-                        graph->members[node] = use + 1;
+                        reader->output->resource = true;
                     }
                 }
-                if (op == CHECK_OP_CALL && a < node && (graph->ops[a] == CHECK_OP_VALUE || graph->ops[a] == CHECK_OP_ADDRESS))
+                if (op == CHECK_OP_BUILTIN_X86)
                 {
-                    // A call of a plain library builtin's declaration that clang folds (#148), marked for the checker.
-                    const uint32_t callee = graph->ops[a] == CHECK_OP_ADDRESS ? graph->operand0[a] : a;
-                    const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-                    const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
-                    graph->members[node] = library != 0 ? library : graph->members[node];
-                }
-                if (reader->builtins[token] != 0)
-                {
-                    graph->members[node] = reader->builtins[token];
-                }
-                if (op == CHECK_OP_VARARGS)
-                {
-                    const CheckInputVarargs* call = &reader->varargs[reader->vararg_calls[token] - 1];
-                    uint32_t second = b;
-                    while (second < graph->count && (graph->ops[second] == CHECK_OP_CAST || graph->ops[second] == CHECK_OP_SELECT))
+                    const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
+                    const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+                    if (graph->x86_count < graph->x86_capacity)
                     {
-                        second = graph->operand0[second];
-                    }
-                    const uint32_t operand = second < graph->count ? graph->tokens[second] : BUSTER_CHECK_NONE;
-                    const uint32_t declaration = operand < parser->tokens.count ? reader->output->declarations[operand] : BUSTER_CHECK_NONE;
-                    if (graph->varargs_count < graph->varargs_capacity)
-                    {
-                        graph->argument_offsets[node] = graph->varargs_count;
-                        graph->argument_counts[node] = call->argument_count;
-                        graph->varargs_calls[graph->varargs_count++] = (CheckVarargsCall)
+                        graph->x86_calls[graph->x86_count++] = (CheckX86Call)
                         {
                             .node = node,
-                            .second_argument_declaration = declaration,
-                            .context = call->context,
+                            .info = declaration->info,
+                            .required_ice_arguments = declaration->types.ice_parameters,
+                            .ice_arguments = intrinsic_ice,
+                            .reachability = CHECK_BUILTIN_X86_UNKNOWN,
+                            .constant_evaluated_context = reader->constant_contexts[token] != 0,
                         };
                     }
                     else
@@ -6922,179 +7223,156 @@ static void check_input_expressions(CheckInputReader* reader)
                         reader->output->resource = true;
                     }
                 }
-                if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+                if (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+                    (op == CHECK_OP_BUILTIN_VECTOR && reader->builtins[token] == CBUILTIN_SHUFFLEVECTOR) ||
+                    (op == CHECK_OP_BUILTIN_MISC && cbuiltin_misc_recorded(reader->builtins[token])))
                 {
-                    graph->members[node] = parser->tokens.names[token + 1];
-                    if (op == CHECK_OP_MEMBER)
+                    if (graph->builtin_count < graph->builtin_capacity)
                     {
-                        check_input_vector_member(reader, node, token + 1);
-                    }
-                }
-                if (check_graph_has_arguments(op))
-                {
-                    if (op == CHECK_OP_CALL && reader->output->overload_heads != 0 && a != BUSTER_CHECK_NONE)
-                    {
-                        const uint32_t callee = graph->tokens[a];
-                        const uint32_t head = callee < parser->tokens.count ? reader->output->overload_heads[callee] : 0;
-                        if (head != 0)
+                        const uint32_t keyword = reader->first_child[token];
+                        const uint32_t begin = keyword < token ? keyword + 2 : token;
+                        const uint32_t end = check_constant_punctuation(parser, begin, token, PARSE_KIND_COMMA);
+                        CheckBuiltinCall* evidence = &graph->builtin_calls[graph->builtin_count++];
+                        *evidence = (CheckBuiltinCall){ .node = node };
+                        if (op == CHECK_OP_BUILTIN_VECTOR)
                         {
-                            if (graph->overload_count < graph->overload_capacity)
-                            {
-                                graph->overload_calls[graph->overload_count++] = (CheckOverloadCall){ .node = node, .head = head - 1 };
-                            }
-                            else
-                            {
-                                reader->output->resource = true;
-                            }
-                        }
-                    }
-                    graph->argument_offsets[node] = op == CHECK_OP_BUILTIN_X86 ? intrinsic_offset : graph->argument_count;
-                    graph->argument_counts[node] = count - (op == CHECK_OP_CALL);
-                    for (uint32_t argument = op == CHECK_OP_BUILTIN_X86 ? BUSTER_CHECK_NONE : op == CHECK_OP_CALL ? b : a;
-                         argument != BUSTER_CHECK_NONE; argument = reader->value_next[argument])
-                    {
-                        if (graph->argument_count < graph->argument_capacity)
-                        {
-                            graph->argument_tokens[graph->argument_count] = check_input_first_token(reader, graph->tokens[argument]);
-                            graph->argument_nodes[graph->argument_count++] = argument;
+                            check_input_shuffle_evidence(reader, keyword, token, count, evidence);
                         }
                         else
                         {
-                            reader->output->resource = true;
+                            check_input_builtin_evidence(reader, begin, end, evidence);
+                        }
+                        if (op == CHECK_OP_BUILTIN_MISC)
+                        {
+                            check_input_misc_evidence(reader, node, token, count, end, evidence);
+                        }
+                        if (reader->builtins[token] == CBUILTIN_CONSTANT_P && count == 1)
+                        {
+                            evidence->constant_p_side_effects = check_input_builtin_syntax_effects(reader, a);
                         }
                     }
-                    if (op == CHECK_OP_BUILTIN_X86)
+                    else
                     {
-                        const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
-                        const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
-                        if (graph->x86_count < graph->x86_capacity)
-                        {
-                            graph->x86_calls[graph->x86_count++] = (CheckX86Call)
-                            {
-                                .node = node,
-                                .info = declaration->info,
-                                .required_ice_arguments = declaration->types.ice_parameters,
-                                .ice_arguments = intrinsic_ice,
-                                .reachability = CHECK_BUILTIN_X86_UNKNOWN,
-                                .constant_evaluated_context = reader->constant_contexts[token] != 0,
-                            };
-                        }
-                        else
-                        {
-                            reader->output->resource = true;
-                        }
-                    }
-                    if (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-                        (op == CHECK_OP_BUILTIN_VECTOR && reader->builtins[token] == CBUILTIN_SHUFFLEVECTOR) ||
-                        (op == CHECK_OP_BUILTIN_MISC && cbuiltin_misc_recorded(reader->builtins[token])))
-                    {
-                        if (graph->builtin_count < graph->builtin_capacity)
-                        {
-                            const uint32_t keyword = reader->first_child[token];
-                            const uint32_t begin = keyword < token ? keyword + 2 : token;
-                            const uint32_t end = check_constant_punctuation(parser, begin, token, PARSE_KIND_COMMA);
-                            CheckBuiltinCall* evidence = &graph->builtin_calls[graph->builtin_count++];
-                            *evidence = (CheckBuiltinCall){ .node = node };
-                            if (op == CHECK_OP_BUILTIN_VECTOR)
-                            {
-                                check_input_shuffle_evidence(reader, keyword, token, count, evidence);
-                            }
-                            else
-                            {
-                                check_input_builtin_evidence(reader, begin, end, evidence);
-                            }
-                            if (op == CHECK_OP_BUILTIN_MISC)
-                            {
-                                check_input_misc_evidence(reader, node, token, count, end, evidence);
-                            }
-                            if (reader->builtins[token] == CBUILTIN_CONSTANT_P && count == 1)
-                            {
-                                evidence->constant_p_side_effects = check_input_builtin_syntax_effects(reader, a);
-                            }
-                        }
-                        else
-                        {
-                            reader->output->resource = true;
-                        }
-                    }
-                }
-                if (reader->static_initializers[token] && op != CHECK_OP_INITIALIZE)
-                {
-                    graph->contexts[node] |= BUSTER_CHECK_CONTEXT_STATIC;
-                }
-                if (reader->static_initializers[token] && op == CHECK_OP_INITIALIZE)
-                {
-                    graph->contexts[node] |= BUSTER_CHECK_CONTEXT_VALUE;
-                }
-                if (op == CHECK_OP_INITIALIZE)
-                {
-                    reader->output->initializer_nodes[reader->initializer_declarations[token]] = node;
-                }
-            }
-        }
-        if (scalar)
-        {
-            // What the vector path's classes of the token, made before the walk, would have missed: the walk acts at a
-            // token they say it doesn't, or a sparse column has an entry for one they say has none.
-            const bool acted = node != BUSTER_CHECK_NONE || list || !supported || op != CHECK_OP_COUNT || count != 0;
-            reader->output->visit_misses += ((classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 && acted) ||
-                                            ((classes & BUSTER_CHECK_EXPRESSION_SPARSE) == 0 && check_input_expression_sparse(reader, token));
-        }
-        if (!supported && reader->output->report_count == 0)
-        {
-            check_input_report(reader, token, CHECK_INPUT_UNSUPPORTED);
-        }
-        if (node != BUSTER_CHECK_NONE)
-        {
-            if (reader->output->overload_heads != 0)
-            {
-                const CheckOp actual = (CheckOp)graph->ops[node];
-                const uint32_t child = graph->operand0[node];
-                const uint32_t child_token = child != BUSTER_CHECK_NONE ? graph->tokens[child] : parser->tokens.count;
-                reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? check_graph_leaf_of(graph, node)->overload_head :
-                    (actual == CHECK_OP_ADDRESS || actual == CHECK_OP_SELECT) && child_token < parser->tokens.count ? reader->output->overload_heads[child_token] : 0;
-            }
-            if (reader->constant_contexts[token] && graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_EXPECT)
-            {
-                const uint32_t keyword = reader->first_child[token];
-                CheckValue constant = { 0 };
-                if (keyword < token && check_input_evaluate_cached(reader, keyword, token + 1, &constant) &&
-                    constant.constant_kind != CHECK_CONSTANT_NONE && constant.fault == CHECK_FAULT_NONE && (constant.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
-                {
-                    // The original call and both operands remain checked. Only a constant-required consumer
-                    // receives the independent source-evaluator result; runtime calls retain both evaluations.
-                    const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                    if (proven != BUSTER_CHECK_NONE)
-                    {
-                        *check_graph_leaf_of(graph, proven) = constant;
-                        node = proven;
+                        reader->output->resource = true;
                     }
                 }
             }
-            reader->output->token_nodes[token] = node;
-            if (role != PARSE_ROLE_CLOSE_CONDITION && role != PARSE_ROLE_RETURN)
+            if (reader->static_initializers[token] && op != CHECK_OP_INITIALIZE)
             {
-                reader->first_value[token] = node;
-                reader->last_value[token] = node;
-                reader->value_counts[token] = 1;
+                graph->contexts[node] |= BUSTER_CHECK_CONTEXT_STATIC;
+            }
+            if (reader->static_initializers[token] && op == CHECK_OP_INITIALIZE)
+            {
+                graph->contexts[node] |= BUSTER_CHECK_CONTEXT_VALUE;
+            }
+            if (op == CHECK_OP_INITIALIZE)
+            {
+                reader->output->initializer_nodes[reader->initializer_declarations[token]] = node;
             }
         }
-        else if (list)
+    }
+    if (scalar)
+    {
+        // What the vector path's classes of the token, made before the walk, would have missed: the walk acts at a
+        // token they say it doesn't, or a sparse column has an entry for one they say has none.
+        const bool acted = node != BUSTER_CHECK_NONE || list || !supported || op != CHECK_OP_COUNT || count != 0;
+        reader->output->visit_misses += ((classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 && acted) ||
+                                        ((classes & BUSTER_CHECK_EXPRESSION_SPARSE) == 0 && check_input_expression_sparse(reader, token));
+    }
+    if (!supported && reader->output->report_count == 0)
+    {
+        check_input_report(reader, token, CHECK_INPUT_UNSUPPORTED);
+    }
+    if (node != BUSTER_CHECK_NONE)
+    {
+        if (reader->output->overload_heads != 0)
         {
-            reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
-            reader->first_value[token] = first;
-            reader->last_value[token] = last;
-            reader->value_counts[token] = count;
-            if (reader->static_initializers[token])
+            const CheckOp actual = (CheckOp)graph->ops[node];
+            const uint32_t child = graph->operand0[node];
+            const uint32_t child_token = child != BUSTER_CHECK_NONE ? graph->tokens[child] : parser->tokens.count;
+            reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? check_graph_leaf_of(graph, node)->overload_head :
+                (actual == CHECK_OP_ADDRESS || actual == CHECK_OP_SELECT) && child_token < parser->tokens.count ? reader->output->overload_heads[child_token] : 0;
+        }
+        if (reader->constant_contexts[token] && graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_EXPECT)
+        {
+            const uint32_t keyword = reader->first_child[token];
+            CheckValue constant = { 0 };
+            if (keyword < token && check_input_evaluate_cached(reader, keyword, token + 1, &constant) &&
+                constant.constant_kind != CHECK_CONSTANT_NONE && constant.fault == CHECK_FAULT_NONE && (constant.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
             {
-                // A braced static initializer's elements are constant expressions, which initializer
-                // planning diagnoses: the same constant evaluation its scalar form's INITIALIZE gets.
-                for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+                // The original call and both operands remain checked. Only a constant-required consumer
+                // receives the independent source-evaluator result; runtime calls retain both evaluations.
+                const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+                if (proven != BUSTER_CHECK_NONE)
                 {
-                    graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+                    *check_graph_leaf_of(graph, proven) = constant;
+                    node = proven;
                 }
             }
         }
+        reader->output->token_nodes[token] = node;
+        if (role != PARSE_ROLE_CLOSE_CONDITION && role != PARSE_ROLE_RETURN)
+        {
+            reader->first_value[token] = node;
+            reader->last_value[token] = node;
+            reader->value_counts[token] = 1;
+        }
+    }
+    else if (list)
+    {
+        reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
+        reader->first_value[token] = first;
+        reader->last_value[token] = last;
+        reader->value_counts[token] = count;
+        if (reader->static_initializers[token])
+        {
+            // A braced static initializer's elements are constant expressions, which initializer
+            // planning diagnoses: the same constant evaluation its scalar form's INITIALIZE gets.
+            for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+            {
+                graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+            }
+        }
+    }
+}
+
+// The walk's visit of `token`: every token's first value is written when the walk reaches it, NONE for one without values,
+// before its parent reads it (a column written before it is read); then its action, but at a token past the
+// expressions' limit or deferred.
+static void check_input_expression_visit(CheckInputReader* reader, uint32_t token, uint8_t classes)
+{
+    reader->first_value[token] = BUSTER_CHECK_NONE;
+    if (check_input_expression_end(reader, token) <= check_input_expression_limit(reader, token) &&
+        (reader->output->deferred_tokens == 0 || reader->output->deferred_tokens[token] == 0))
+    {
+        check_input_expression_act(reader, token, classes);
+    }
+}
+
+#include "c_check_expression_input.c"
+
+// The walk over the tokens in postorder that builds the expression graph. The scalar path visits every token and tests
+// every column (check_input_expression_visit), the oracle. The vector path, its twin, is the coded walk
+// (check_input_expressions_coded): it visits only the tokens it acts at, whose first values their classes wrote
+// (check_input_expression_classes), and acts at most of them by their classes, testing the sparse columns only of tokens
+// their classes say have an entry.
+static void check_input_expressions(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
+    const uint32_t acts = check_input_expression_classes(reader);
+    reader->output->expression_visits = parser->options.scalar ? parser->tokens.count : acts;
+    if (parser->options.scalar)
+    {
+        for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
+        {
+            const uint32_t token = reader->postorder[order];
+            check_input_expression_visit(reader, token, reader->visits[token]);
+        }
+    }
+    else
+    {
+        check_input_expressions_coded(reader);
     }
 }
 
@@ -7602,7 +7880,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     }
     const uint64_t mark = scratch->length;
     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
-    uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64) : 0;
+    // With BUSTER_CHECK_VISITS_PADDING bytes past its count + 1, which the coded walk's gathers of four bytes may read.
+    uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
     const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, BUSTER_SCALAR_PATH(parser->options.scalar));
     input->vla_capacity = counts.subscripts;
     input->asm_capacity = counts.asms;
@@ -8239,7 +8518,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         check_input_sizeof_prepare(&reader);
                     }
+                    const uint64_t expressions_start = __rdtsc();
                     check_input_expressions(&reader);
+                    input->expression_ticks = __rdtsc() - expressions_start;
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {
