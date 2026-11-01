@@ -15,5 +15,7 @@ b0:
   %10 = call.void @2() fixed=() variadic=0
   %11 = load.i8 %0 align=1
   %12 = store.void %0, %11 align=1
-  %13 = ret.void %9
+  %13 = lifetime.void $1 start
+  %14 = lifetime.void $1 end
+  %15 = ret.void %9
 }

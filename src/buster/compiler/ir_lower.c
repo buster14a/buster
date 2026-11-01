@@ -1014,9 +1014,20 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
              (input->local_count != 0 && (input->local_classes == 0 || input->local_flags == 0)) ||
              (input->parameter_count != 0 && input->parameters == 0) ||
              (input->call_count != 0 && (input->call_targets == 0 || input->call_first == 0 || input->call_argument_counts == 0 || input->call_variadic == 0 || input->calls == 0)) ||
-             (input->argument_count != 0 && (input->argument_classes == 0 || input->argument_locations == 0)))
+             (input->argument_count != 0 && (input->argument_classes == 0 || input->argument_locations == 0)) ||
+             (input->lifetime_count != 0 && (input->lifetime_entries == 0 || input->lifetime_locals == 0)))
     {
         check.error = IR_ERROR_STRUCTURE;
+    }
+    // The objects' lifetime events (#177), which Tier 0 doesn't read: each of a local, in entry order, before an entry.
+    for (uint32_t k = 0; check.error == IR_OK && k < input->lifetime_count; k += 1)
+    {
+        const uint32_t entry = input->lifetime_entries[k];
+        if (entry >= input->count || (input->lifetime_locals[k] & ~BUSTER_TIER0_LIFETIME_END) >= input->local_count || (k != 0 && entry < input->lifetime_entries[k - 1]))
+        {
+            check.error = IR_ERROR_STRUCTURE;
+            check.instruction = entry;
+        }
     }
     if (check.error == IR_OK)
     {

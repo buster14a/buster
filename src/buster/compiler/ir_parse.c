@@ -665,6 +665,15 @@ static void ir_parse_instruction(IrParseState* state)
             } break;
             case IR_PARAM: row.a = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false); break;
             case IR_STACK_ADDR: row.a = ir_parse_id(state, '$'); break;
+            case IR_LIFETIME:
+            {
+                static const char* const edges[2] = {
+                    "start",
+                    "end",
+                };
+                row.a = ir_parse_id(state, '$');
+                row.b = ir_parse_named(state, edges, 2);
+            } break;
             case IR_SYMBOL_ADDR:
             {
                 row.a = ir_parse_id(state, '@');

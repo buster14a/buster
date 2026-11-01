@@ -131,6 +131,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
 
     // The next jump table, whose jump (Tier0Function.table_jumps, in entry order) is a br_indirect of its own (#785).
     uint32_t table = 0;
+    // The next lifetime event (Tier0Function.lifetime_entries, in entry order, #177), a marker of its local's slot before
+    // its entry's instructions; an event of an entry the plan's blocks leave out (unreachable code) is dropped.
+    uint32_t lifetime = 0;
     for (uint32_t b = 0; b < plan->block_count; b += 1)
     {
         if (output != 0)
@@ -156,6 +159,15 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             const uint8_t class = ir_typed_stack_class(input, i);
             const IrType type = (IrType)types[i];
             const uint64_t value = input->values[i];
+            while (lifetime < input->lifetime_count && input->lifetime_entries[lifetime] < i)
+            {
+                lifetime += 1;
+            }
+            for (; lifetime < input->lifetime_count && input->lifetime_entries[lifetime] == i; lifetime += 1)
+            {
+                const uint32_t local = input->lifetime_locals[lifetime];
+                ir_typed_emit(&sink, IR_LIFETIME, IR_VOID, local & ~BUSTER_TIER0_LIFETIME_END, (local & BUSTER_TIER0_LIFETIME_END) != 0, BUSTER_IR_NONE, 0);
+            }
             switch (kind)
             {
             case BUSTER_TYPED_CONST:
