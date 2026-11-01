@@ -32,11 +32,7 @@ struct CheckOverloadCandidate
 typedef struct CheckOverloadContext CheckOverloadContext;
 struct CheckOverloadContext
 {
-    const uint32_t* tag_completions;
-    const uint32_t* transparent_unions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
+    CheckContext semantic;
     uint64_t* scratch_peak;
 };
 
@@ -110,7 +106,7 @@ static bool check_overload_candidate_valid(const TypeTable* table, const CheckOv
 
 static TypeAnswer check_overload_compatible(const TypeTable* table, TypeId left, TypeId right, const CheckOverloadContext* context)
 {
-    return left == right ? TYPE_ANSWER_YES : type_compatible_at(table, left, right, context->transparent_unions, context->tag_completion_count, context->source_position);
+    return left == right ? TYPE_ANSWER_YES : type_compatible_at(table, left, right, context->semantic.transparent_unions, context->semantic.tag_completion_count, context->semantic.source_position);
 }
 
 // Parameter canonical identity distinguishes an enum from its compatible integer type, and a prototyped function
@@ -266,13 +262,7 @@ static bool check_overload_float_promotion(TypeId source, TypeId target)
 
 static CheckAction check_overload_action(CheckOverloadContext context)
 {
-    const CheckAction action = {
-        .tag_completions = context.tag_completions,
-        .transparent_unions = context.transparent_unions,
-        .tag_completion_count = context.tag_completion_count,
-        .source_position = context.source_position,
-        .extensions = context.extensions,
-    };
+    const CheckAction action = { .context = context.semantic };
     return action;
 }
 
@@ -332,7 +322,7 @@ static uint8_t check_overload_conversion(const TypeTable* table, const CheckValu
         {
             rank = sk == BUSTER_TYPE_KIND_COMPLEX || tk == BUSTER_TYPE_KIND_COMPLEX ? CHECK_OVERLOAD_COMPLEX_REAL : CHECK_OVERLOAD_CONVERSION;
         }
-        else if (tk == BUSTER_TYPE_KIND_POINTER && check_action_null(table, value, context->extensions))
+        else if (tk == BUSTER_TYPE_KIND_POINTER && check_action_null(table, value, context->semantic.extensions))
         {
             rank = CHECK_OVERLOAD_CONVERSION;
         }
@@ -496,7 +486,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
         const CheckOverloadCandidate* candidate = &request->candidates[current];
         valid = check_overload_candidate_valid(table, candidate) && candidate->scope == request->candidates[request->head].scope &&
                 (candidate->previous == UINT32_MAX || candidate->previous < current) &&
-                (request->context.source_position == 0 || candidate->position <= request->context.source_position);
+                (request->context.semantic.source_position == 0 || candidate->position <= request->context.semantic.source_position);
         if (valid && (candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
         {
             valid = (table->types.flags[type_index(type_strip_aligned(table, candidate->type))] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
@@ -645,11 +635,7 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
         .arguments = action->arguments,
         .argument_count = action->argument_count,
         .context = {
-            .tag_completions = action->tag_completions,
-            .transparent_unions = action->transparent_unions,
-            .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
-            .extensions = action->extensions,
+            .semantic = action->context,
             .scratch_peak = scratch_peak,
         },
         .scalar = BUSTER_SCALAR_PATH(scalar),

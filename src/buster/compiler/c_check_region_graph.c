@@ -52,10 +52,12 @@ static CheckValue check_region_value(const CheckRegionValues* values, uint32_t n
 static CheckValue check_region_operand(TypeTable* types, const CheckGraph* graph, const CheckRegionValues* values,
                                        uint32_t node, bool runtime, CheckDiagnostic* diagnostic)
 {
-    const CheckAction action = { .op = CHECK_OP_VALUE, .node = node, .operands = { check_region_value(values, node) },
-        .tag_completions = graph->tag_completions, .transparent_unions = graph->transparent_unions,
-        .tag_completion_count = graph->tag_completion_count,
-        .source_position = graph->source_positions != NULL ? graph->source_positions[node] : 0, .extensions = graph->extensions };
+    const CheckAction action = {
+        .op = CHECK_OP_VALUE,
+        .node = node,
+        .operands = { check_region_value(values, node) },
+        .context = check_graph_context(graph, node, false),
+    };
     CheckActionResult checked = { 0 };
     CheckValue value = check_action_operand(types, &action, &checked, 0);
     if (*diagnostic == CHECK_DIAG_NONE)

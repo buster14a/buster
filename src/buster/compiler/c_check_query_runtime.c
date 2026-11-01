@@ -335,11 +335,11 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
         action.member = 0;
     }
     action.argument_conversions = conversions;
-    const bool strict = lane != 0 && action.fp_environment != 0;
-    action.fp_environment = 0;
+    const bool strict = lane != 0 && action.context.fp_environment != 0;
+    action.context.fp_environment = 0;
     if (lane != 2)
     {
-        action.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
+        action.context.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
     }
     const uint32_t operands[3] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
     for (uint32_t i = 0; i < 3; i += 1)
@@ -392,10 +392,13 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     }
     else if (action.op == CHECK_OP_BUILTIN_UNARY)
     {
-        const CheckBuiltinAction input = { .id = (CBuiltinId)action.member, .operands = { action.operands[0] }, .argument_count = 1,
-                                          .node = node, .tag_completions = action.tag_completions, .tag_completion_count = action.tag_completion_count,
-                                          .source_position = action.source_position, .extensions = action.extensions,
-                                          .const_values = action.const_values, .constant_evaluated = action.constant_evaluated };
+        const CheckBuiltinAction input = {
+            .id = (CBuiltinId)action.member,
+            .operands = { action.operands[0] },
+            .argument_count = 1,
+            .node = node,
+            .context = action.context,
+        };
         CheckBuiltinResult output;
         check_builtins(types, &input, &output, 1, true);
         result = output.action;
@@ -521,7 +524,7 @@ static void check_query_prove(TypeTable* types, const CheckGraph* graph, const C
     bool folded[3] = { false, false, false };
     for (uint32_t lane = 0; lane < 3; lane += 1)
     {
-        const CheckValue value = check_query_convert(types, &(CheckAction){ .node = node, .extensions = graph->extensions },
+        const CheckValue value = check_query_convert(types, &(CheckAction){ .node = node, .context = check_graph_context(graph, node, false) },
                                                    child->values[lane], stream->argument_conversions[graph->argument_offsets[node]], lane != 2);
         input.complex_constant = value.constant_kind == CHECK_CONSTANT_COMPLEX;
         folded[lane] = child->valid[lane] && check_builtin_query_constant(types, &input, &value);
@@ -686,10 +689,7 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
                 .arguments = arguments,
                 .argument_count = 1,
                 .node = node,
-                .tag_completions = graph->tag_completions,
-                .tag_completion_count = graph->tag_completion_count,
-                .source_position = graph->source_positions != NULL ? graph->source_positions[node] : 0,
-                .extensions = graph->extensions,
+                .context = check_graph_context(graph, node, false),
                 .string_literal_start = witness != NULL && witness->string_literal_start,
                 .absolute_address_constant = witness != NULL && witness->absolute_address_constant,
                 .complex_constant = child->values[0].constant_kind == CHECK_CONSTANT_COMPLEX,

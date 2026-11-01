@@ -48,7 +48,7 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
             const TypeId pointer = type_pointer(table, tag);
             functions_by_tag[i] = type_function(table, integer, &pointer, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
         }
-        const CheckOverloadContext context = { .source_position = UINT32_MAX };
+        const CheckOverloadContext context = { .semantic.source_position = UINT32_MAX };
         uint32_t longest = 0;
         for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(candidates); i += 1)
         {

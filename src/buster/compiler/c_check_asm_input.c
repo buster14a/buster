@@ -1043,10 +1043,7 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
         CheckAction action =
         {
             .node = source->node,
-            .tag_completions = input->graph.tag_completions,
-            .tag_completion_count = input->graph.tag_completion_count,
-            .source_position = input->graph.source_positions != NULL ? input->graph.source_positions[source->node] : BUSTER_CHECK_NONE,
-            .extensions = input->graph.extensions,
+            .context = check_graph_context(&input->graph, source->node, false),
         };
         action.operands[0] = original;
         value = original;

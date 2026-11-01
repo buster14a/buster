@@ -1562,8 +1562,7 @@ static const char* check_lower_call_passed(CheckLowerWriter* writer, TypeId type
 static uint64_t check_lower_stride(CheckLowerWriter* writer, TypeId pointer)
 {
     const TypeTable* types = writer->program->types;
-    const CheckAction action = { .extensions = writer->program->input->graph.extensions };
-    const uint64_t size = check_action_pointer_stride(types, pointer, &action);
+    const uint64_t size = check_action_pointer_stride(types, pointer);
     if (size == 0 && !check_action_runtime_size(types, type_element(types, type_strip_aligned(types, pointer))))
     {
         check_lower_unsupported(writer, "pointer arithmetic over types of no size");

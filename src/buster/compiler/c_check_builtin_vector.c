@@ -86,10 +86,7 @@ struct CheckBuiltinVectorAction
     uint32_t argument_count;
     TypeId destination_type;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
+    CheckContext context;
     TypeId fp_evaluation_type;
     CheckBuiltinVectorLaxConversions lax_vector_conversions;
     const uint8_t* shuffle_index_ice;
@@ -158,11 +155,11 @@ static bool check_builtin_vector_complete(const TypeTable* table, TypeId type, c
     const TypeId plain = type_strip_aligned(table, type);
     const uint8_t kind = type_kind(table, plain);
     bool result = type_is_complete(table, plain);
-    if (result && input->tag_completions != NULL &&
+    if (result && input->context.tag_completions != NULL &&
         (kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
     {
         const uint32_t tag = table->types.index[type_index(plain)];
-        result = tag < input->tag_completion_count && input->tag_completions[tag] <= input->source_position;
+        result = tag < input->context.tag_completion_count && input->context.tag_completions[tag] <= input->context.source_position;
     }
     return result;
 }
@@ -781,10 +778,7 @@ static void check_builtin_vector_store(TypeTable* table, const CheckBuiltinVecto
             .arguments = input->arguments,
             .argument_count = input->argument_count,
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
+            .context = input->context,
         };
         CheckBuiltinAtomicResult converted = { 0 };
         converted.argument_conversions[0] = output->argument_conversions[0];

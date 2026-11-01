@@ -97,7 +97,7 @@ static CheckBuiltinAction check_builtin_typed_overflow_test_input(TypeTable* tab
         },
         .argument_count = 3,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     return result;
 }
@@ -411,14 +411,14 @@ static void check_builtin_typed_overflow_test_constraints(CheckBuiltinTypedOverf
         const uint32_t tag = table->types.index[type_index(enumeration)];
         completions[tag] = 20;
         input = check_builtin_typed_overflow_test_input(table, check_test_integer(enumeration, UINT32_MAX), check_test_integer(BUSTER_TYPE_INT, 2));
-        input.tag_completions = completions;
-        input.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+        input.context.tag_completions = completions;
+        input.context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
         input.node = 999;
-        input.source_position = 19;
+        input.context.source_position = 19;
         result = check_builtin_typed_overflow_test_action(test, table, &input);
         check_builtin_typed_overflow_test_expect(test, result.builtin.action.diagnostic == CHECK_DIAG_INCOMPLETE && result.builtin.action.diagnostic_operand == 0 && !result.builtin.store,
             "late enum completion is checked before ordinary prototype conversion");
-        input.source_position = 20;
+        input.context.source_position = 20;
         check_builtin_typed_overflow_test_fold(test, table, input, ULONG_MAX, 2);
     }
 }

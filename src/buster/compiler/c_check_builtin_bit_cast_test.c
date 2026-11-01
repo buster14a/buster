@@ -40,7 +40,7 @@ static CheckBuiltinBitCastAction check_builtin_bit_cast_test_action(TypeId desti
         .arguments = source,
         .argument_count = 1,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     return action;
 }
@@ -375,24 +375,24 @@ static void check_builtin_bit_cast_test_types(CheckBuiltinBitCastTest* test, Typ
     uint32_t history[512] = { 0 };
     const uint32_t tag = table->types.index[type_index(enumeration)];
     history[tag] = 20;
-    action.tag_completions = history;
-    action.tag_completion_count = BUSTER_ARRAY_LENGTH(history);
+    action.context.tag_completions = history;
+    action.context.tag_completion_count = BUSTER_ARRAY_LENGTH(history);
     for (uint32_t position = 19; position <= 21; position += 1)
     {
-        action.source_position = position;
+        action.context.source_position = position;
         result = check_builtin_bit_cast_test_apply(table, action);
         check_builtin_bit_cast_test_expect(test, result.action.diagnostic == (position < 20 ? CHECK_DIAG_INCOMPLETE : CHECK_DIAG_NONE) &&
             result.folded == (position >= 20), "enum completeness uses the expression source position rather than final table completion");
     }
-    action.tag_completion_count = tag;
+    action.context.tag_completion_count = tag;
     result = check_builtin_bit_cast_test_apply(table, action);
     check_builtin_bit_cast_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "missing history entry is incomplete without reading beyond history");
     source.type = type_array(table, record, 1);
     action.destination_type = BUSTER_TYPE_UINT;
     action.source_proof = CHECK_BUILTIN_BIT_CAST_PROOF_NONE;
     history[table->types.index[type_index(record)]] = 30;
-    action.tag_completion_count = BUSTER_ARRAY_LENGTH(history);
-    action.source_position = 29;
+    action.context.tag_completion_count = BUSTER_ARRAY_LENGTH(history);
+    action.context.source_position = 29;
     result = check_builtin_bit_cast_test_apply(table, action);
     check_builtin_bit_cast_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "array element tag uses source completion history");
 }
@@ -463,7 +463,7 @@ static void check_builtin_bit_cast_test_invalid(CheckBuiltinBitCastTest* test, T
     }
     action.source_bytes = NULL;
     action.source_byte_count = 0;
-    action.tag_completion_count = 1;
+    action.context.tag_completion_count = 1;
     result = check_builtin_bit_cast_test_apply(table, action);
     check_builtin_bit_cast_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "nonempty completion history requires a pointer");
 }
@@ -591,9 +591,9 @@ static void check_builtin_bit_cast_test_pages(CheckBuiltinBitCastTest* test, Typ
             }
             actions[i].source_bytes = payload + i * 4;
             actions[i].source_byte_count = 4;
-            actions[i].tag_completions = history;
-            actions[i].tag_completion_count = history_count;
-            actions[i].source_position = i % 4 == 0 ? 19 : 20;
+            actions[i].context.tag_completions = history;
+            actions[i].context.tag_completion_count = history_count;
+            actions[i].context.source_position = i % 4 == 0 ? 19 : 20;
             arguments[i].flags |= i % 7 == 0 ? BUSTER_CHECK_SIDE_EFFECT : 0;
             check_builtin_bit_cast_one(table, actions + i, expected + i);
             check_builtin_bit_cast_test_expect(test, expected[i].action.diagnostic == (i % 5 == 0 && i % 4 == 0 ? CHECK_DIAG_INCOMPLETE : CHECK_DIAG_NONE),
@@ -627,8 +627,8 @@ static void check_builtin_bit_cast_test_pages(CheckBuiltinBitCastTest* test, Typ
             const CheckBuiltinBitCastAction* x = saved_actions + i;
             const CheckBuiltinBitCastAction* y = actions + i;
             same_inputs &= x->id == y->id && x->destination_type == y->destination_type && x->arguments == y->arguments && x->argument_count == y->argument_count &&
-                x->node == y->node && x->tag_completions == y->tag_completions && x->tag_completion_count == y->tag_completion_count &&
-                x->source_position == y->source_position && x->source_proof == y->source_proof && x->source_bytes == y->source_bytes &&
+                x->node == y->node && x->context.tag_completions == y->context.tag_completions && x->context.tag_completion_count == y->context.tag_completion_count &&
+                x->context.source_position == y->context.source_position && x->source_proof == y->source_proof && x->source_bytes == y->source_bytes &&
                 x->source_byte_count == y->source_byte_count && check_test_value_equal(saved_arguments + i, arguments + i);
         }
         check_builtin_bit_cast_test_expect(test, same_inputs && memcmp(saved_payload, payload, count * 4) == 0 &&
@@ -707,8 +707,8 @@ static void check_builtin_bit_cast_test_pages(CheckBuiltinBitCastTest* test, Typ
         source.type = enumeration;
         action.source_bytes = NULL;
         action.source_byte_count = 0;
-        action.tag_completions = history;
-        action.tag_completion_count = tag;
+        action.context.tag_completions = history;
+        action.context.tag_completion_count = tag;
         result = check_builtin_bit_cast_test_apply(table, action);
         check_builtin_bit_cast_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "missing guarded history entry is refused without reading its tail");
         check_builtin_bit_cast(NULL, (const CheckBuiltinBitCastAction*)ends[0], (CheckBuiltinBitCastResult*)ends[1], 0);

@@ -514,11 +514,11 @@ static void check_lower_atomic_query(CheckLowerWriter* writer, uint32_t node)
         // pointee's completeness alone, as a constant address answers alike at either cut.
         const CBuiltinId id = (CBuiltinId)graph->members[node];
         const CheckValue pointer = { .type = effect->query_pointer, .category = CHECK_RVALUE };
+        CheckContext context = check_graph_context(graph, node, false);
+        context.source_position = program->parser->tree.parents[writer->body->opening];
         const CheckBuiltinAtomicAction cut = {
             .id = id,
-            .tag_completions = graph->tag_completions,
-            .tag_completion_count = graph->tag_completion_count,
-            .source_position = program->parser->tree.parents[writer->body->opening],
+            .context = context,
         };
         answer = check_builtin_atomic_lock_free(program->types, &cut, id, effect->query_size, &pointer, false);
     }

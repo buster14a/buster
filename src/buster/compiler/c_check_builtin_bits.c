@@ -67,10 +67,7 @@ static bool check_builtin_bits_convert(TypeTable* table, const CheckBuiltinMiscA
 {
     const CheckAction context = {
         .node = input->node,
-        .tag_completions = input->tag_completions,
-        .tag_completion_count = input->tag_completion_count,
-        .source_position = input->source_position,
-        .extensions = input->extensions,
+        .context = input->context,
     };
     bool accepted = false;
     if (destination == 0)
@@ -318,7 +315,7 @@ static void check_builtin_bits(TypeTable* table, const CheckBuiltinMiscAction* i
             // expressions keep their effects.
             value->constant_kind = CHECK_CONSTANT_INTEGER;
             value->integer = (__int128)(folded & check_action_mask(result_width));
-            value->flags |= (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 ? BUSTER_CHECK_ICE : 0;
+            check_action_builtin_ice(value);
         }
         else
         {
