@@ -126,7 +126,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 90
+    # The sanitizer rows run the whole inventory on runners whose detectors make it several times slower; the driver's
+    # in-process commands take tens of minutes each there. The plain rows took about 80 minutes, so they keep a
+    # 120-minute bound rather than the sanitizer rows' 360.
+    timeout-minutes: ${{ matrix.sanitizer == 'none' && 120 || 360 }}
     strategy:
       fail-fast: false
       matrix:
@@ -344,7 +347,9 @@ jobs:
       - name: Run correctness tests within the hosted CPU budget
         run: |
           timeout=600
-          if [ "$BUSTER_SANITIZER" != none ]; then timeout=1800; fi
+          # The driver's in-process checks run the whole compiler per fixture; with a detector they take tens of
+          # minutes each, so the command limit leaves room for one on a loaded runner (the job's limit is longer still).
+          if [ "$BUSTER_SANITIZER" != none ]; then timeout=7200; fi
           ./build/compiler parallel --github --jobs "$(nproc)" --timeout "$timeout" < tools/ci/correctness.tests
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then

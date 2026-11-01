@@ -91,6 +91,10 @@ rows run the entire suite at `-O1` on both host architectures. These rows and th
 fuzz campaigns run on pushes to main and on the daily and dispatched runs, not on
 pull requests, whose hosted jobs are the plain builds of both architectures. This retains
 diagnostic-friendly coverage without substituting it for production optimization.
+The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
+the driver's in-process checks run the whole compiler per fixture and take tens
+of minutes each with a detector, while the plain rows have a 120-minute job
+limit and 600-second command limit.
 
 | `BUSTER_SANITIZER` | Checks |
 | --- | --- |
@@ -113,7 +117,7 @@ incorrect-function-type canary proves that normal host calls retain this check.
 The source call-graph capture omits bootstrap sanitizer/coverage instrumentation,
 whose runtime calls and generated globals are outside the source graph; its
 analyzer still runs inside the instrumented compiler.
-Resource-exhaustion fixtures retain their cases and output/fallback comparisons.
+The other resource-exhaustion fixtures retain their cases and output/fallback comparisons.
 ASan, MSan and TSan builds inject compiler-owned arena-reservation and lane-start
 failures in place of process-wide address-space/process limits, which can prevent
 the detector from allocating shadow/fake-stack memory or starting its own threads.
@@ -127,12 +131,16 @@ in that window (the link tests' libc stand-ins and C-runtime startup, and Tier 0
 call of a program with thread-locals, which switches FS by system calls of its own)
 takes no sanitizer instrumentation. Outside that window the fixtures stay fully
 instrumented.
-Under TSan alone, the parser driver's and the units driver's walks that fail each
-reservation in turn are not run: TSan maps shadow for each new mapping and keeps it, so the address space
-neither returns to its base nor bounds the run's own reservations. ASan, MSan,
-UBSan and ordinary builds still run it. TSan also kills a child that starts a
-thread after a fork from a process of several threads, so under it
-`test-lanes`' child forked from a session's lane 0 (#905) runs a group of one.
+Under ASan, MSan and TSan, the units driver's walk that fails each reservation in
+turn is not run: each detector maps shadow of its own, whose high-water mark the
+parent's `VmPeak` keeps above its `VmSize`, so a probe inherits a peak that hides
+the growth a limit would fail at, and a limit below the shadow stops the detector
+at its start. The parser driver's reservation check still runs in those builds,
+with their injected arena limit in place of `RLIMIT_AS`; UBSan and ordinary
+builds, whose peak is the run's own, still run the units walk with the OS limit.
+TSan also kills a child that starts a thread after a fork from a process of
+several threads, so under it `test-lanes`' child forked from a session's lane 0
+(#905) runs a group of one.
 
 The TSan and MSan rows leave out the checking comparison of the compiler's own
 `main.c` (#129, `tools/ci/correctness.tests`). The unit's 6,323,682
