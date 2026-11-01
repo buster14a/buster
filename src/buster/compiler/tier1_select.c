@@ -96,8 +96,9 @@ typedef enum Tier1SelectRule
     // the k register's number). `width` is the mask's bytes, 1 to 8: kmovb, kmovw, kmovd, kmovq and the opmask
     // instructions of that width, which leave the bits past it zero, as the IR's masks have them. A constant (zero by
     // kxor, every bit by kxnor, else its bits through the scratch register); a copy (kmov); and, or and xor of values[0]
-    // and values[1]; not of values[0]; a load and a store, as the integer ones, the store's mask in values[2]. Only the
-    // CFG consumer takes them.
+    // and values[1]; not of values[0]; a load and a store, as the integer ones, the store's mask in values[2], each one
+    // kmov, which must stay its node's last record: the CFG consumer writes a frame object's base and offset into that
+    // record (`stack_object`, tier1_emit_cfg_records). Only the CFG consumer takes them.
     TIER1_RULE_MASK_CONSTANT,
     TIER1_RULE_MASK_COPY,
     TIER1_RULE_MASK_LOGIC,
@@ -498,8 +499,9 @@ static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHo
     }
 }
 
-// The opmask forms of a mask of each width (#179), by the width's log2: kmov between opmask registers, from memory, to
-// memory and from a general register (a 32-bit one, but kmovq's 64), and the opmask instructions the selector takes.
+// The opmask forms of a mask of each width (#179), by the width's log2, then a row of none for any other width: kmov
+// between opmask registers, from memory, to memory and from a general register (a 32-bit one, but kmovq's 64), and the
+// opmask instructions the selector takes.
 // kmovb, kandb and the other byte forms need AVX512DQ, the doubleword and quadword ones AVX512BW, the word ones AVX512F:
 // the target's allow-list decides, as for every record.
 typedef struct Tier1SelectMaskForms Tier1SelectMaskForms;
@@ -516,18 +518,21 @@ struct Tier1SelectMaskForms
     uint16_t not_forms;
 };
 
-static const Tier1SelectMaskForms tier1_select_mask_forms_table[4] =
+static const Tier1SelectMaskForms tier1_select_mask_forms_table[5] =
 {
     { X86_FORM_KMOVB_K_K, X86_FORM_KMOVB_K_M8, X86_FORM_KMOVB_M8_K, X86_FORM_KMOVB_K_R32, X86_FORM_KANDB_K_K_K, X86_FORM_KORB_K_K_K, X86_FORM_KXORB_K_K_K, X86_FORM_KXNORB_K_K_K, X86_FORM_KNOTB_K_K },
     { X86_FORM_KMOVW_K_K, X86_FORM_KMOVW_K_M16, X86_FORM_KMOVW_M16_K, X86_FORM_KMOVW_K_R32, X86_FORM_KANDW_K_K_K, X86_FORM_KORW_K_K_K, X86_FORM_KXORW_K_K_K, X86_FORM_KXNORW_K_K_K, X86_FORM_KNOTW_K_K },
     { X86_FORM_KMOVD_K_K, X86_FORM_KMOVD_K_M32, X86_FORM_KMOVD_M32_K, X86_FORM_KMOVD_K_R32, X86_FORM_KANDD_K_K_K, X86_FORM_KORD_K_K_K, X86_FORM_KXORD_K_K_K, X86_FORM_KXNORD_K_K_K, X86_FORM_KNOTD_K_K },
     { X86_FORM_KMOVQ_K_K, X86_FORM_KMOVQ_K_M64, X86_FORM_KMOVQ_M64_K, X86_FORM_KMOVQ_K_R64, X86_FORM_KANDQ_K_K_K, X86_FORM_KORQ_K_K_K, X86_FORM_KXORQ_K_K_K, X86_FORM_KXNORQ_K_K_K, X86_FORM_KNOTQ_K_K },
+    { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
 };
 
-// A mask width's forms: 1, 2, 4 or 8 bytes (any other width takes the byte forms, which no mask has).
+// A mask width's forms: 1, 2, 4 or 8 bytes. Any other width, which no mask has, gets X86_FORM_NONE throughout rather than
+// another width's forms: no target's allow-list takes that form (x86_target_form_allowed), so the CFG consumer refuses a
+// record of it at emission (TIER1_EMIT_TARGET).
 static const Tier1SelectMaskForms* tier1_select_mask_forms(uint32_t width)
 {
-    const uint32_t index = width == 8 ? 3 : width == 4 ? 2 : width == 2 ? 1 : 0;
+    const uint32_t index = width == 8 ? 3 : width == 4 ? 2 : width == 2 ? 1 : width == 1 ? 0 : 4;
     return &tier1_select_mask_forms_table[index];
 }
 
@@ -797,6 +802,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_MASK_NOT:
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_mask_forms(width)->not_forms, .reg = destination & 7, .rm = holes->left & 7 });
         break;
+    // One kmov each, the node's last record, which the CFG consumer's frame-object patch rewrites (`stack_object`).
     case TIER1_RULE_MASK_LOAD:
     case TIER1_RULE_MASK_LOAD_ADDRESS:
     {

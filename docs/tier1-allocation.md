@@ -376,7 +376,10 @@ a call clobbers all of them: `tier1_cfg_ir.c` gives each call a fixed range of
 the class over k1 to k7, which cuts every mask live across it around the call,
 stored before it and reloaded after. Every use of a mask in the model needs a
 register: the opmask instructions have no memory operand but `kmov`'s, and a
-write mask is a register.
+write mask is a register. No mask is rematerializable: its class has no recipe
+(a general register's copy can't recompute it), so the CFG consumer marks none
+(`Tier1CfgInput.rematerializable`), and none is recomputed or left out as a dead
+definition.
 
 Whether a spilled mask goes to memory or to a free general register is #179's
 measured choice. `measure-mask-spills [--passes N] [--iterations N]

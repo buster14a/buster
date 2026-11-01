@@ -441,7 +441,19 @@ come after the general registers' call-save rows, then the general class's
 temporary slot and the opmask class's, then the frame objects. The records' forms
 are the target's to allow, as every record's: `kmovw` and the word forms need
 AVX512F, the byte forms AVX512DQ, the doubleword and quadword ones AVX512BW, and
-a target without them is refused at emission (`TIER1_EMIT_TARGET`).
+a target without them is refused at emission (`TIER1_EMIT_TARGET`). A width no
+mask has gets no form at all (`X86_FORM_NONE`, which no target allows), so it is
+refused the same way rather than taking another width's forms.
+
+A mask load's or store's `kmov` is its node's only record, so its last, which the
+CFG consumer's frame-object patch rewrites with the frame's base and the
+object's offset (`stack_object`, #996). No mask is recomputed (#178): the
+masks' rules are none of the recipes' (`tier1_emit_cfg_recipes`), which skip a
+mask and any chain through one, and no mask value is marked for the allocator,
+whose dead definitions read the marks. A mask recipe would need its own `kxor`,
+`kxnor` or `kmov` forms. A division's fixed registers (#141's `rax` and `rdx`)
+don't touch a mask, which keeps its opmask register across the sequence; their
+saves take the general call-save rows, before the masks' own.
 
 `test-tier1-masks [--seed N] [--print]` (`tier1_masks_test.c`) takes
 hand-written IR of masks through this path: each fixture is a function of a
@@ -469,13 +481,22 @@ store writes among them, must be the shared IR interpreter's. The fixtures:
 - masks of every width stored into a frame object and loaded back, each access's
   object folded into its `kmov`'s memory operand, the frame's base at the object's
   offset, as an integer access's is (`stack_object`): the test checks each such
-  node's `kmov` there.
+  node's `kmov` there;
+- masks live across a division by a register, one by a constant's reciprocal and
+  a call, beside eight 64-bit constants live across all three, too wide for an
+  immediate.
+
+Each fixture runs with rematerialization (as the C driver's `--tier1` compiles)
+and without, and in each no mask may have a recipe or be marked to be recomputed;
+with it, some of the general values beside the masks must be recomputed, which
+the division fixture's constants are.
 
 And the refusals, on both paths: a vector at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
-masks alone is taken. `--print` prints each fixture's records by the vector path,
-as GNU as reads them.
+masks alone is taken; and each width's `kmov` forms, none for a width no mask
+has. `--print` prints each fixture's records by the vector path, as GNU as reads
+them.
 
 ## Tests and benchmark
 

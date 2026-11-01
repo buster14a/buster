@@ -179,7 +179,11 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
             root = walking ? next : root;
         }
         const Tier1SelectPattern* pattern = &plan->patterns[root];
-        const uint8_t rule = plan->covered[root] ? TIER1_RULE_NONE : pattern->rule;
+        // No mask has a recipe (#179): a general register's copy can't recompute an opmask register's value, whose
+        // recipe would need kxor, kxnor or kmov forms of its own. The masks' rules are none of those below, and neither
+        // a mask nor a chain through one takes them.
+        const bool mask = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_MASK || tier1_emit_class(&emitted->prepared, root) == BUSTER_TIER1_ALLOCATE_MASK;
+        const uint8_t rule = plan->covered[root] || mask ? TIER1_RULE_NONE : pattern->rule;
         const uint32_t symbol = (uint32_t)pattern->immediate;
         const uint8_t access = rule == TIER1_RULE_SYMBOL_ADDRESS && symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
         const bool displaced = displacement != 0;
@@ -449,7 +453,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             allowed[v] = classes[v] == BUSTER_TIER1_ALLOCATE_MASK ? BUSTER_TIER1_EMIT_MASK_REGISTERS : registers;
             defined[v] = op == IR_PARAM ? tier1_liveness_parameter_mask(function->a[node]) & registers : 0;
             definitions[v] = op == IR_PARAM ? 0 : op == IR_PHI ? block_starts[cfg.instruction_blocks[node] + added] : base + 2 * node + 1;
-            rematerializable[v] = marks[node];
+            // A mask is never recomputed (its class has no recipe, tier1_emit_cfg_recipes): neither in a fragment's or an
+            // edge's place, nor left out as a dead definition (tier1_emit_cfg_dead_definition reads this column).
+            rematerializable[v] = classes[v] == BUSTER_TIER1_ALLOCATE_MASK ? 0 : marks[node];
             use_offsets[v + 1] = op != IR_PHI;
         }
         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
