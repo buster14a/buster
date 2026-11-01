@@ -745,7 +745,7 @@ static bool executable_test_far_possible(const Link* link)
     {
         total += executable_align(link->atoms.size[atom], 1ull << link->atoms.alignment_log2[atom]);
     }
-    return total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE;
+    return total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE - BUSTER_EXECUTABLE_FAR_SLACK;
 }
 
 static bool executable_test_relaxes(const Link* link, FixupId fixup)
@@ -2539,7 +2539,7 @@ static bool executable_test_zero_fill_file(const Link* link, String8 file, uint6
 
 // A program whose 3 GiB .bss atom makes `_end` far, with a PC32 fixup to it: the writer refuses the fixup as SYMBOL_FAR,
 // naming the linker symbol. *end gets the symbol and *field the fixup.
-static bool executable_test_far_linker(ExecutableTestLink* test, SymbolId* start, SymbolId* end, FixupId* field)
+static bool executable_test_far_linker(ExecutableTestLink* test, SymbolId* start, SymbolId* end, FixupId* field, uint64_t size)
 {
     bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
     Link* link = &test->link;
@@ -2548,7 +2548,7 @@ static bool executable_test_far_linker(ExecutableTestLink* test, SymbolId* start
     ExecutableTestCode code = { 0 };
     executable_test_exit(&code, 0);
     result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
-    const AtomId bss = result ? link_add_atom(link, BUSTER_LINK_CLASS_BSS, 3, 3ull << 30, 0, 0) : 0;
+    const AtomId bss = result ? link_add_atom(link, BUSTER_LINK_CLASS_BSS, 3, size, 0, 0) : 0;
     const NameId name = bss != 0 ? link_add_name(link, (const uint8_t*)"_end", 4) : 0;
     *end = name != 0 ? link_add_symbol(link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_LINKER) : 0;
     const AtomId table = *end != 0 ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
@@ -2712,12 +2712,24 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     SymbolId far_start = 0;
     SymbolId far_end = 0;
     FixupId far_field = 0;
-    built = executable_test_far_linker(&far_linker, &far_start, &far_end, &far_field);
+    built = executable_test_far_linker(&far_linker, &far_start, &far_end, &far_field, 3ull << 30);
     executable_test_expect(&tally, built, "the far linker symbol's program", 0);
     if (built)
     {
-        executable_test_refused(&tally, &far_linker.link, far_start, path, EXECUTABLE_ERROR_LAYOUT, 0, far_end, far_field, "a fixup to a linker symbol past the references' reach");
+        executable_test_refused(&tally, &far_linker.link, far_start, path, EXECUTABLE_ERROR_FIXUP, 0, 0, far_field, "a PC32 to a linker symbol past the references' reach, which its distance does not");
     }
+    executable_test_link_end(&far_linker);
+    // The same target just past 2 GiB, but a PC32 distance from a caller early in the image that fits.
+    built = executable_test_far_linker(&far_linker, &far_start, &far_end, &far_field, (1ull << 31) - 0x2000);
+    executable_test_expect(&tally, built, "the near PC32 target's program", 0);
+    bool far_near = built;
+    for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+    {
+        unlink(path.pointer);
+        const bool written = executable_test_write(&far_linker.link, far_start, path, executable_test_lane_counts[l], &result, 0, 0);
+        far_near = far_near && written && executable_test_runs(path.pointer, (const uint8_t*)"", 0);
+    }
+    executable_test_expect(&tally, far_near, "a PC32 whose distance reaches a target past 2 GiB links and runs", 0);
     executable_test_link_end(&far_linker);
 
     // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with

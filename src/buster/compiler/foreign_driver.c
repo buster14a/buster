@@ -723,7 +723,7 @@ static const char* foreign_driver_executable_cause_name(ExecutableCause cause)
 {
     static const char* const names[] = {
         "none", "shared state allocation", "count allocation", "layout allocation", "dynamic-section allocation", "open allocation", "chunk allocation",
-        "atom too large", "atom alignment", "array entry", "unsupported atom class", "ordered atom placement", "far atom", "atom sizes overflow", "far symbol",
+        "atom too large", "atom alignment", "array entry", "unsupported atom class", "ordered atom placement", "far atom", "atom sizes overflow", "far symbol", "far GOT target without a slot",
         "image too large", "TLS block too large", "section names too large", "unwind atom too large", "unwind atom malformed", "unwind range",
         "entry undefined", "entry not code", "unsupported version", "debug information", "debug symbol", "symbol table", "TLS call", "TLS section",
         "string table", "text relocation", "absolute 32-bit relocation", "dynamic relocation", "relocation to address 0", "absolute relocation", "shared-library relocation",

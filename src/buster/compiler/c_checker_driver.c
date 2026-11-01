@@ -1901,6 +1901,10 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
                 fprintf(out, "error: can't link %s: atom %u%s is at image offset 0x%" PRIx64 ", not aligned to its ordered section's %" PRIu64 "-byte alignment\n", path,
                         result->atom, label, result->value, result->limit);
                 break;
+            case EXECUTABLE_CAUSE_FAR_GOT:
+                fprintf(out, "error: can't link %s: atom %u%s is far, and fixup %u to '%s' has no GOT slot\n", path, result->atom, label, result->fixup,
+                        symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "");
+                break;
             case EXECUTABLE_CAUSE_ATOM_FAR:
                 if (result->fixup != 0)
                 {
@@ -1939,6 +1943,10 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
                 fprintf(out, "error: can't link %s: symbol '%s' is at image offset 0x%" PRIx64 ", beyond the 32-bit references' reach (the maximum is 0x%" PRIx64
                              "); fixup %u refers to it\n",
                         path, symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->value, result->limit, result->fixup);
+                break;
+            case EXECUTABLE_CAUSE_FAR_GOT:
+                fprintf(out, "error: can't link %s: symbol '%s' is far, and fixup %u has no GOT slot\n", path,
+                        symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "", result->fixup);
                 break;
             case EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE:
                 fprintf(out, "error: can't link %s: the atoms' combined sizes overflow the image's address space\n", path);

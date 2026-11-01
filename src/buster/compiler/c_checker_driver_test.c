@@ -2595,6 +2595,8 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
           "atom 1 ('large') is at image offset 0x408010, not aligned to its ordered section's 16-byte alignment" },
         { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .symbol = 1, .fixup = 7, .cause = EXECUTABLE_CAUSE_ATOM_FAR, .value = 0x80000010, .limit = 0x7fffffff },
           "atom 1 ('large') is at image offset 0x80000010, which fixup 7 to 'large' can't reach" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1, .symbol = 1, .fixup = 7, .cause = EXECUTABLE_CAUSE_FAR_GOT, .value = 0x80000010 },
+          "atom 1 ('large') is far, and fixup 7 to 'large' has no GOT slot" },
         { { .error = EXECUTABLE_ERROR_LAYOUT }, "image, TLS or section-name layout exceeds executable limits" },
         { { .error = EXECUTABLE_ERROR_MEMORY, .cause = EXECUTABLE_CAUSE_MEMORY_SHARED }, "linker scratch memory exhausted while allocating the linker's shared state" },
         { { .error = EXECUTABLE_ERROR_MEMORY, .phase = EXECUTABLE_PHASE_LAYOUT }, "linker scratch memory exhausted while laying out the image" },
@@ -2680,9 +2682,9 @@ static void check_test_driver_link_layout_error(CheckTest* test, const char* exe
         char* text = NULL;
         unlink(output);
         const int status = far_made ? check_test_driver_spawn(scalar ? scalar_args : vector, &text) : -1;
-        check_test_expect(test, status != 0 && text != NULL && strstr(text, "'b'") != NULL && strstr(text, "can't reach") != NULL &&
-                                  strstr(text, "0x7fffffff") != NULL && access(output, F_OK) != 0,
-                          "a fixup to a .bss atom past the references' reach is refused with its atom and limit");
+        check_test_expect(test, status != 0 && text != NULL && strstr(text, "fixup to 'b'") != NULL && strstr(text, "does not fit its field") != NULL &&
+                                  access(output, F_OK) != 0,
+                          "a fixup to a .bss atom past the references' reach is refused with its target and reason");
         free(text);
     }
     unlink(output);

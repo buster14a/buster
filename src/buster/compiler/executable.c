@@ -208,6 +208,9 @@
 #define BUSTER_EXECUTABLE_MAX_ATOM_BYTES (1ull << 31)
 #define BUSTER_EXECUTABLE_MAX_TLS_BYTES (1ull << 31)
 #define BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES (1ull << 47)
+// A generous bound on the linker's own sections, which a link's atom counts don't include: if the atoms come this close
+// to the 32-bit reach, GOT candidates keep slots for a symbol the linker sections may put past it.
+#define BUSTER_EXECUTABLE_FAR_SLACK (64ull << 20)
 // Functions start on 16 bytes and are padded with int3, as lld pads them.
 #define BUSTER_EXECUTABLE_FUNCTION_ALIGNMENT_LOG2 4
 #define BUSTER_EXECUTABLE_INT3 0xcc
@@ -412,6 +415,7 @@ typedef enum ExecutableCause
     EXECUTABLE_CAUSE_ATOM_FAR,
     EXECUTABLE_CAUSE_ATOM_TOTAL_TOO_LARGE,
     EXECUTABLE_CAUSE_SYMBOL_FAR,
+    EXECUTABLE_CAUSE_FAR_GOT,
     // EXECUTABLE_ERROR_LAYOUT, without an atom: the image's end, the TLS block, or the section-name table.
     EXECUTABLE_CAUSE_IMAGE_TOO_LARGE,
     EXECUTABLE_CAUSE_TLS_TOO_LARGE,
@@ -4527,7 +4531,7 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
             total += shared->counts[other].bytes[bucket];
         }
     }
-    shared->far_possible = total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE;
+    shared->far_possible = total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE - BUSTER_EXECUTABLE_FAR_SLACK;
     const bool dynamic = shared->dynamic_bits != 0;
     const bool stubbed = dynamic || shared->runtime;
     const bool relr_slots = dynamic && shared->relr;
@@ -5551,21 +5555,12 @@ static void executable_write_stub(uint8_t* stubs, const ExecutableLayout* layout
     bytes[7] = 0x90;
 }
 
-// Whether a fixup of `kind` can reach a symbol whose address needs more than a signed 32-bit reference: a 64-bit field,
-// an unsigned 32-bit field that reaches 4 GB, a size, or a GOT slot (which is in the image, and holds the symbol's full
-// address). The other kinds (a call or PC32's signed 32-bit distance, an ABS32S, and a thread-local offset) can't.
-static bool executable_far_kind_reaches(uint8_t kind)
-{
-    return kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF ||
-           kind == BUSTER_LINK_FIXUP_ABS64 || kind == BUSTER_LINK_FIXUP_PC64 || kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_SIZE32 ||
-           kind == BUSTER_LINK_FIXUP_SIZE64 || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
-}
-
 // A link whose image extends to or past BUSTER_EXECUTABLE_MAX_ADDRESS, because a zero-fill atom needs more address space
-// than a signed 32-bit reference reaches: each fixup to a symbol farther than INT32_MAX is checked by its kind, and the
-// ones that can reach it get its full address in shared->far_addresses. A GOT slot, a 64-bit field and an unsigned
-// 32-bit field reach; a call, PC32, ABS32S or thread-local offset doesn't. Lane 0 only, and only for such a link, so an
-// ordinary one pays nothing.
+// than a signed 32-bit reference reaches: each fixup to a symbol farther than INT32_MAX gets its full address in
+// shared->far_addresses, and the checked patch computes the fixup's value and refuses it only if that doesn't fit its
+// field (so a PC32 whose distance fits still links). A GOT-mediated fixup must have its slot; a far candidate that
+// relaxed away would read slot 0, so that is refused. Lane 0 only, and only for such a link, so an ordinary one pays
+// nothing.
 static void executable_check_far(const Link* link, ExecutableShared* shared, const ExecutableLayout* layout, ExecutableLaneError* error)
 {
     if (layout->image_size < BUSTER_EXECUTABLE_MAX_ADDRESS)
@@ -5602,16 +5597,10 @@ static void executable_check_far(const Link* link, ExecutableShared* shared, con
                 continue;
             }
             const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
-            if (!executable_far_kind_reaches(kind))
+            const bool got_kind = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
+            if (got_kind && symbols->got_slot[target] == 0)
             {
-                if (target_atom != 0)
-                {
-                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_ATOM_FAR, address, INT32_MAX, target_atom, target, fixup);
-                }
-                else
-                {
-                    executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_SYMBOL_FAR, address, INT32_MAX, 0, target, fixup);
-                }
+                executable_lane_fail_detail(error, EXECUTABLE_ERROR_LAYOUT, EXECUTABLE_CAUSE_FAR_GOT, address, INT32_MAX, target_atom, target, fixup);
                 return;
             }
             shared->far_addresses[target] = address;
