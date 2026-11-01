@@ -193,8 +193,10 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     uint32_t* branches = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     uint32_t* targets = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
+    // Each label's first record, where the emission defines its symbol (#789).
+    uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
     uint32_t* tails = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.exit_count + 1) : 0;
-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || tails == 0))
+    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || tails == 0))
     {
         arena_pop_to(output, mark);
         stage = CHECK_TIER1_RESOURCE;
@@ -214,6 +216,10 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         if (emitted.reference_count != 0)
         {
             memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        }
+        if (emitted.label_count != 0)
+        {
+            memcpy(labels, emitted.label_records, (uint64_t)emitted.label_count * sizeof(uint32_t));
         }
         *counts = (CheckTier1Counts){
             .records = selected->count,
@@ -236,6 +242,8 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .branch_count = selected->branch_count,
             .references = references,
             .reference_count = emitted.reference_count,
+            .label_records = labels,
+            .label_count = emitted.label_count,
             .error = TIER0_OK,
         };
         const bool published = check_tier1_frame(&emitted, selected->count, tails, code);

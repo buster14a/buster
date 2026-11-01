@@ -20,7 +20,9 @@
 // block's terminator. A jump's edge moves go before it. A conditional branch's go at its successors' starts or, for a
 // split critical edge, in a stub after the branch: the edge's moves, then a jump to the successor. A jump to the
 // record that follows it is left out, and a branch is inverted where its true successor follows it or where its true
-// edge alone has a stub, which then follows it. Branch targets are record indices, which branch sizing takes.
+// edge alone has a stub, which then follows it. An indirect jump's (#789) go at its labels' blocks' starts or in stubs
+// after it, and each label's symbol where that jump enters it, its stub or its block (tier1_emit_cfg_labels); one that
+// can go to one label alone jumps there. Branch targets are record indices, which branch sizing takes.
 //
 // At every block's start, the emitter's view of where each value is becomes the block's entry state: the intervals
 // that cover its start, at tier1_cfg_entry_location, so that no predecessor's exit state leaks into another block. Move
@@ -70,6 +72,8 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     // parameter or one after other instructions the entry's definitions: the CFG consumer's. A division and a shift by a
     // register stay the CFG consumer's too, which keeps their functions' code as it was before both consumers saved
     // fixed registers (tier1_emit_fixed); a division by a constant's reciprocal takes them in either consumer.
+    // Labels' symbols, which the CFG consumer defines at their blocks (tier1_emit_cfg_labels), make a function its own too.
+    chain &= function->label_count == 0;
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -1005,6 +1009,91 @@ static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b
     return error;
 }
 
+// An indirect jump's split edges, after its jump (#789): a stub for each, the edge's moves and a jump to its label's block,
+// where the label's symbol goes (tier1_emit_cfg_labels). Its other edges' moves are at their labels' blocks' starts,
+// which they alone reach, and none goes before the jump, which reads its target's register.
+static Tier1EmitError tier1_emit_cfg_indirect(Tier1EmitResult* emitted, uint32_t b, Tier1EmitBuffer* buffer, uint32_t* stub_first, uint32_t* pending_branches, uint32_t* pending_goals, uint32_t* pending)
+{
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const Tier1CfgAllocation* cfg = &emitted->cfg;
+    Tier1EmitError error = TIER1_EMIT_OK;
+    for (uint32_t e = input->successor_offsets[b]; error == TIER1_EMIT_OK && e < input->successor_offsets[b + 1]; e += 1)
+    {
+        if (cfg->edge_placements[e] == TIER1_CFG_EDGE_SPLIT)
+        {
+            stub_first[e] = buffer->count;
+            emitted->edge_stubs += 1;
+            error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e], cfg->edge_move_offsets[e + 1], buffer);
+            error = error == TIER1_EMIT_OK ? tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, input->successors[e], pending_branches, pending_goals, pending, emitted) : error;
+        }
+    }
+    return error;
+}
+
+// Each of the function's labels' first record (Tier1EmitResult.label_records, #789): its block's, or where the indirect
+// jump that may go to it has a stub for that edge, the stub's, which the jump reaches through the label's address alone.
+// A label no block holds, in a function without br_indirect, gets the function's first record. An indirect jump with one
+// successor jumps there directly, and its label is its block's. A label is one address for every indirect jump that may
+// go to it. The C lowering puts each on one jump's list (a jump table's, or the dispatch block's of GNU C's goto *), but
+// for a dispatch block that lists none, which may go to every label, where goto * has no label of its own, and the IR
+// doesn't require it. A label two jumps may go to is its block's where neither edge has a stub, and otherwise the
+// function is refused, TIER1_EMIT_UNSUPPORTED: one jump would enter the other's stub (#1016's review).
+static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const uint32_t* block_first, const uint32_t* stub_first, Arena* output, Arena* scratch)
+{
+    const IrFunction* function = plan->function;
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const Tier1CfgAllocation* cfg = &emitted->cfg;
+    const uint32_t added = input->block_count - function->block_count;
+    bool ok = true;
+    uint32_t* records = function->label_count != 0 ? ir_allocate(output, function->label_count, 4, &ok) : 0;
+    // The edge from the jump's block to each of its successors, by successor: the CFG's successors are distinct.
+    uint32_t* edges = function->label_count != 0 ? ir_allocate(scratch, input->block_count, 4, &ok) : 0;
+    // Each label's indirect jumps that may go to it (the last one's block, and how many), and whether one's edge has a stub.
+    uint32_t* owners = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 4, &ok) : 0;
+    uint32_t* owner_counts = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 4, &ok) : 0;
+    uint8_t* stubbed = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 1, &ok) : 0;
+    for (uint32_t k = 0; ok && k < function->label_count; k += 1)
+    {
+        records[k] = function->labels[k] == BUSTER_IR_NONE ? 0 : block_first[function->labels[k] + added];
+        owners[k] = BUSTER_IR_NONE;
+        owner_counts[k] = 0;
+        stubbed[k] = 0;
+    }
+    for (uint32_t b = 0; ok && function->label_count != 0 && b < function->block_count; b += 1)
+    {
+        const uint32_t last = function->block_offsets[b + 1] - 1;
+        const uint32_t e_first = input->successor_offsets[b + added];
+        const uint32_t e_end = input->successor_offsets[b + added + 1];
+        if (function->op[last] == IR_BR_INDIRECT && e_end - e_first > 1)
+        {
+            for (uint32_t e = e_first; e < e_end; e += 1)
+            {
+                edges[input->successors[e]] = e;
+            }
+            const bool list = function->b[last] != BUSTER_IR_NONE;
+            const uint32_t listed = list ? function->c[last] : function->label_count;
+            for (uint32_t i = 0; i < listed; i += 1)
+            {
+                const uint32_t label = list ? function->extra[function->b[last] + i] : i;
+                const uint32_t e = edges[function->labels[label] + added];
+                const bool split = cfg->edge_placements[e] == TIER1_CFG_EDGE_SPLIT;
+                owner_counts[label] += owners[label] != b;
+                owners[label] = b;
+                stubbed[label] |= split;
+                records[label] = split ? stub_first[e] : records[label];
+            }
+        }
+    }
+    bool owned = true;
+    for (uint32_t k = 0; ok && k < function->label_count; k += 1)
+    {
+        owned &= owner_counts[k] < 2 || stubbed[k] == 0;
+    }
+    emitted->label_records = ok && owned ? records : 0;
+    emitted->label_count = ok && owned ? function->label_count : 0;
+    return !ok ? TIER1_EMIT_MEMORY : !owned ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_OK;
+}
+
 // Every block's records: see the header.
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
@@ -1315,9 +1404,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     }
                 }
             }
-            else if (error == TIER1_EMIT_OK && selected && (op == IR_BR || op == IR_CBR))
+            else if (error == TIER1_EMIT_OK && selected && (op == IR_BR || op == IR_CBR || (op == IR_BR_INDIRECT && input->successor_offsets[b + 1] - input->successor_offsets[b] == 1)))
             {
-                // The terminator, by its block's edges (one for a conditional branch whose successors are one block).
+                // The terminator, by its block's edges (one for a conditional branch whose successors are one block, and
+                // for an indirect jump that can go to one label alone, which jumps there).
                 const uint32_t e_first = input->successor_offsets[b];
                 if (input->successor_offsets[b + 1] - e_first == 1)
                 {
@@ -1433,6 +1523,11 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     error = TIER1_EMIT_INVALID;
                 }
             }
+            // An indirect jump to more than one label: its split edges' stubs, after the jump the generic path wrote.
+            if (error == TIER1_EMIT_OK && selected && op == IR_BR_INDIRECT && input->successor_offsets[b + 1] - input->successor_offsets[b] > 1)
+            {
+                error = tier1_emit_cfg_indirect(emitted, b, &buffer, stub_first, pending_branches, pending_goals, &pending);
+            }
             // A definition left out writes no register, so nothing saves one for it around a call or a fixed sequence.
             if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected && dropped[node] == 0 && tier1_emit_cfg_holds(emitted, node, transitions.registers[node]))
             {
@@ -1449,11 +1544,15 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[0], cfg->edge_move_offsets[1], &buffer);
         }
     }
-    // The pending jumps' targets, now that every block and stub has its first record.
+    // The pending jumps' targets, now that every block and stub has its first record, and the labels'.
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < pending; k += 1)
     {
         const uint32_t goal = pending_goals[k];
         buffer.targets[pending_branches[k]] = (goal & BUSTER_TIER1_EMIT_CFG_STUB) != 0 ? stub_first[goal & ~BUSTER_TIER1_EMIT_CFG_STUB] : block_first[goal];
+    }
+    if (error == TIER1_EMIT_OK)
+    {
+        error = tier1_emit_cfg_labels(plan, emitted, block_first, stub_first, output, scratch);
     }
     if (error == TIER1_EMIT_OK)
     {

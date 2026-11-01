@@ -112,6 +112,11 @@ typedef enum Tier1SelectRule
     TIER1_RULE_MASK_LOAD_ADDRESS,
     TIER1_RULE_MASK_STORE,
     TIER1_RULE_MASK_STORE_ADDRESS,
+    // An indirect jump (IR_BR_INDIRECT, #789) to the address in values[0]'s register: a computed goto's from its
+    // function's dispatch block, or a jump table's, its entry's offset added to the table's address. The CFG consumer
+    // places its edges' moves after it, at its labels' blocks or in stubs where it defines their labels
+    // (tier1_emit_cfg.c).
+    TIER1_RULE_JUMP_INDIRECT,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -728,6 +733,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_JUMP:
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
+        break;
+    case TIER1_RULE_JUMP_INDIRECT:
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_RM64, .rm = holes->left });
         break;
     case TIER1_RULE_RETURN:
         if (width != 0 && holes->left != X86_REGISTER_RAX)
@@ -2055,6 +2063,14 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    else if (op == IR_BR_INDIRECT)
+    {
+        base.rule = TIER1_RULE_JUMP_INDIRECT;
+        base.values[0] = a;
+        base.width = 8;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_CBR)
     {
         base.rule = TIER1_RULE_BRANCH;
@@ -2177,6 +2193,45 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
 // Function/plan/scratch storage is disjoint. `dominance` is required for any cross-block value use: the structural IR
 // verifier alone does not establish that such a definition reaches its use. No input-dependent recursion is used. With
 // `verify` false, the caller has verified the IR with `dominance` (tier1_select_plan_verified).
+// Marks `value` needed, and puts it on `pending` where it is new and the walk back has passed it (`passed`), to mark its
+// own values from there (tier1_select_need_values). `pending` has room for every node once, and one more.
+static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, uint32_t* pending, uint32_t pending_count)
+{
+    const bool fresh = needed[value] == 0;
+    needed[value] = 1;
+    pending[pending_count] = value;
+    return pending_count + (fresh && passed);
+}
+
+// Marks needed the values a needed `node`'s pattern reads: a call's arguments and an indirect call's callee, or its
+// pattern's values. A value the walk back has passed (`walked`, or one past `node`, a later block's value that an
+// earlier block reads, #789) goes on `pending`.
+static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count)
+{
+    if (pattern->rule == TIER1_RULE_CALL)
+    {
+        const IrCall call = function->calls[function->b[node]];
+        for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
+        {
+            const uint32_t value = function->extra[call.argument_first + argument];
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+        }
+        if (function->op[node] == IR_CALL_INDIRECT)
+        {
+            pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
+        }
+    }
+    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && operand < 3; operand += 1)
+    {
+        const uint32_t value = pattern->values[operand];
+        if (value != BUSTER_IR_NONE)
+        {
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+        }
+    }
+    return pending_count;
+}
+
 static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, Tier1SelectPlan* result, uint32_t* error_node)
 {
     (void)vector;
@@ -2217,6 +2272,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     uint32_t* level_nodes = 0;
     uint32_t* positions = 0;
     uint8_t* canonical = 0;
+    uint32_t* pending = 0;
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
@@ -2228,6 +2284,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         level_nodes = ir_allocate(scratch, count, 4, &ok);
         positions = ir_allocate(scratch, (uint64_t)count + 1, 4, &ok);
         canonical = ir_allocate(scratch, count, 1, &ok);
+        pending = ir_allocate(scratch, (uint64_t)count + 1, 4, &ok);
         plan.patterns = ir_allocate(output, count, sizeof(Tier1SelectPattern), &ok);
         plan.covered = ir_allocate(output, count, 1, &ok);
         plan.costs = ir_allocate(output, count, 4, &ok);
@@ -2239,9 +2296,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
-    // Labels (whose symbols the frame and the emitter would have to define), by-value aggregates' ABI records and a
-    // variadic definition's incoming frame (#131) aren't selected yet.
-    if (error == TIER1_SELECT_OK && (function->label_count != 0 || function->parameter_passed != 0 || function->variadic))
+    // By-value aggregates' ABI records and a variadic definition's incoming frame (#131, #789) aren't selected yet. Labels
+    // and br_indirect are: the CFG consumer defines the labels' symbols (tier1_emit_cfg.c).
+    if (error == TIER1_SELECT_OK && (function->parameter_passed != 0 || function->variadic))
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
     }
@@ -2255,7 +2312,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_BR_INDIRECT || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)))
+        if (op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -2285,14 +2342,18 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         for (uint32_t p = 0; error == TIER1_SELECT_OK && op != IR_PHI && p < operand_count; p += 1)
         {
             const IrOperand operand = ir_operand(function, node, p, blocks[node]);
-            if (operand.value >= node || (blocks[operand.value] != blocks[node] && dominance == 0))
+            // A value of another block, whose definition the dominance shows reaches its use, may follow it in the
+            // instructions' order: a computed goto's dispatch block's phis, which the lowering puts last, read in the
+            // labels' blocks (#789). Only a tree child, before its consumer in its block, orders the node's choice.
+            const bool across = operand.value < count && blocks[operand.value] != blocks[node];
+            if (operand.value >= count || (across ? dominance == 0 : operand.value >= node))
             {
                 error = TIER1_SELECT_ERROR_INVALID;
             }
             else
             {
                 uses[operand.value] += 1;
-                const uint32_t next = depths[operand.value] + 1;
+                const uint32_t next = operand.value < node ? depths[operand.value] + 1 : 0;
                 depths[node] = next > depths[node] ? next : depths[node];
             }
         }
@@ -2409,7 +2470,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         // optimizer kept for a fault it may raise (a load or a division), and each value a computed node's pattern reads.
         // Every other node is covered: its users' patterns compute it themselves, a constant as an immediate, a load as a
         // memory operand, an address as a displacement, a truth value's chain as a branch's comparison, however deep their
-        // walks went. A non-phi node's values precede it, so each is final when the walk back reaches it.
+        // walks went. A node is final when the walk back reaches it if every node that reads it precedes it. One a later
+        // node reads only after the walk passed it (a value of a later block that an earlier block reads, a computed goto's
+        // dispatch block's, #789) goes on a worklist, which marks its values once the walk ends, and theirs (#1016's review).
         uint8_t* needed = plan.covered;
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -2420,31 +2483,22 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 needed[ir_operand(function, node, p, blocks[node]).value] = 1;
             }
         }
+        uint32_t pending_count = 0;
         for (uint32_t reverse = count; reverse != 0; reverse -= 1)
         {
             const uint32_t node = reverse - 1;
             const uint32_t op = function->op[node];
-            needed[node] |= tier1_select_barrier(function, node) || op == IR_BR || op == IR_CBR || op == IR_RET || op == IR_UNREACHABLE || op == IR_PARAM || uses[node] == 0 ? 1 : 0;
-            const Tier1SelectPattern* pattern = &plan.patterns[node];
-            if (needed[node] != 0 && pattern->rule == TIER1_RULE_CALL)
+            needed[node] |= tier1_select_barrier(function, node) || op == IR_BR || op == IR_CBR || op == IR_BR_INDIRECT || op == IR_RET || op == IR_UNREACHABLE || op == IR_PARAM || uses[node] == 0 ? 1 : 0;
+            if (needed[node] != 0)
             {
-                const IrCall call = function->calls[function->b[node]];
-                for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
-                {
-                    needed[function->extra[call.argument_first + argument]] = 1;
-                }
-                if (op == IR_CALL_INDIRECT)
-                {
-                    needed[function->a[node]] = 1;
-                }
+                pending_count = tier1_select_need_values(function, &plan.patterns[node], node, false, needed, pending, pending_count);
             }
-            for (uint32_t operand = 0; needed[node] != 0 && pattern->rule != TIER1_RULE_CALL && operand < 3; operand += 1)
-            {
-                if (pattern->values[operand] != BUSTER_IR_NONE)
-                {
-                    needed[pattern->values[operand]] = 1;
-                }
-            }
+        }
+        while (pending_count != 0)
+        {
+            pending_count -= 1;
+            const uint32_t node = pending[pending_count];
+            pending_count = tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count);
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -2609,12 +2663,16 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
     // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
     // plan before allocating records, even if earlier value locations are spilled. A memory operand through a frame
-    // object needs the frame's layout too: the CFG consumer's.
+    // object needs the frame's layout too, and an indirect jump's labels their symbols: the CFG consumer's.
+    if (error == TIER1_SELECT_OK && plan->function->label_count != 0)
+    {
+        error = TIER1_SELECT_ERROR_UNSUPPORTED;
+    }
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
-            tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE)
+            tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE || plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;
