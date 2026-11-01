@@ -7,7 +7,8 @@
 // align_down and is_aligned of every integer width, _BitInt, 128-bit and pointer sources, by alignments of other widths
 // (one that truncates to 0 in a char among them), folded and at run time, of addresses in static data and frames; expect's
 // and expect_with_probability's arguments evaluated once, in order, or not at all where the first argument folds, as
-// clang's code does. Include after c_check_program_bits_test.c.
+// clang's code does; and the generic builtins of c_check_program_generic_builtins_test.c, which runs with them. Include after
+// c_check_program_bits_test.c and c_check_program_generic_builtins_test.c.
 #ifndef BUSTER_C_CHECK_PROGRAM_ALIGN_TEST_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_ALIGN_TEST_INCLUDED
 
@@ -236,6 +237,7 @@ static __attribute__((noinline)) void check_test_align(CheckTest* test, const ch
 {
     check_test_align_sources(test, clang);
     check_test_align_programs(test, clang);
+    check_test_generic_builtins(test, clang);
 }
 
 #endif

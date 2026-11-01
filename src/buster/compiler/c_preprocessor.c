@@ -360,9 +360,8 @@ struct PPOptions
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
     // Give every chunk's spellings by the vector printer's general loop, token by token, as before pp_print_spellings
-    // (#649's control, benchmark-preprocessor --spelling-cost: the printed bytes are the same, and with line markers its
-    // time the printer's before it; with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon,
-    // docs/c-preprocessor.md).
+    // (#649's control, benchmark-preprocessor --spelling-cost: the printed bytes are the same, and the copies are the
+    // printer's own, its batches with line markers too; docs/c-preprocessor.md).
     bool print_per_token;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
     uint32_t location_limit;
@@ -19025,16 +19024,22 @@ static __attribute__((noinline)) uint32_t pp_print_place_marking(Preprocessor* p
     return result;
 }
 
-// The common case of a line start, inline: in the same range as the line before, past the same line note (none passed
-// since, and none ahead of `location`), a jump forward of 1 to 8 lines is that many line breaks and no marker. Anything
-// else is pp_print_place_marking's.
-BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical, bool line_start, bool* written)
+// Whether a line start at `location` in `range`, at presumed line `line` (its physical line and the markers' delta), is
+// pp_print_place's common case: in the same range as the line before, past the same line note (none passed since, and
+// none ahead of `location`), a jump forward of 1 to 8 lines, which is that many line breaks and no marker.
+BUSTER_INLINE bool pp_print_place_common(const Preprocessor* pp, const PPMarkers* markers, uint32_t range, uint32_t location, uint32_t line)
 {
     const uint32_t at = markers->cursors[range];
     const uint32_t next = at == BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : pp->line_directives[at].next_in_range;
+    return !markers->keep_line && range == markers->range && (at == BUSTER_PP_NONE || pp->line_directives[at].location <= location) &&
+           (next == BUSTER_PP_NONE || pp->line_directives[next].location > location) && line > markers->line && line - markers->line <= 8;
+}
+
+// The common case of a line start (pp_print_place_common), inline; anything else is pp_print_place_marking's.
+BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical, bool line_start, bool* written)
+{
     const uint32_t line = (uint32_t)((int64_t)physical + markers->delta);
-    const bool same = !markers->keep_line && range == markers->range && (at == BUSTER_PP_NONE || pp->line_directives[at].location <= location) &&
-                      (next == BUSTER_PP_NONE || pp->line_directives[next].location > location) && line > markers->line && line - markers->line <= 8;
+    const bool same = pp_print_place_common(pp, markers, range, location, line);
     uint32_t result = line - markers->line;
     markers->length = 0;
     *written = true;
@@ -19476,11 +19481,14 @@ static uint32_t pp_print_line(Preprocessor* pp, PPPrintLines* lines, uint32_t ra
     return result;
 }
 
-// Output offsets for a -P batch of at most 64 nonempty spellings of at most 64 bytes, with at most one gap byte each.
-// Two 32-word prefix sums remove the dependence between successive stores. Inactive input lanes are never read and
-// only `count` offsets are written. The bounded batch needs at most 4160 bytes, so its word sums cannot overflow.
-// Zero means a spelling needs the general printer; the scalar printer remains the independent output oracle.
-static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64_t gaps, uint16_t* offsets)
+// Output offsets for a batch of at most 64 nonempty spellings of at most 64 bytes, each after its gap: one byte for
+// each bit of `ones` (a space, or with -P a line start's break), and with `breaks` not null its own count of bytes, at
+// most BUSTER_PP_PRINT_GAP (with line markers, a line start's breaks). Two 32-word prefix sums remove the dependence
+// between successive stores. Inactive input lanes are never read and only `count` offsets are written. The bounded
+// batch needs at most 64 * (64 + 1 + 8) bytes, so its word sums cannot overflow. Zero means a spelling needs the
+// general printer; the scalar printer remains the independent output oracle.
+#define BUSTER_PP_PRINT_GAP 8
+static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64_t ones, const uint8_t* breaks, uint16_t* offsets)
 {
     uint32_t total = 0;
     bool ordinary = true;
@@ -19494,7 +19502,9 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
         ordinary &= (_mm512_mask_cmplt_epu32_mask((__mmask16)_bzhi_u32(~0u, low), _mm512_sub_epi32(a, _mm512_set1_epi32(1)), _mm512_set1_epi32(64)) == (__mmask16)_bzhi_u32(~0u, low));
         ordinary &= (_mm512_mask_cmplt_epu32_mask((__mmask16)_bzhi_u32(~0u, high), _mm512_sub_epi32(b, _mm512_set1_epi32(1)), _mm512_set1_epi32(64)) == (__mmask16)_bzhi_u32(~0u, high));
         const __m512i words = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi32_epi16(a)), _mm512_cvtepi32_epi16(b), 1);
-        const __m512i sizes = _mm512_mask_add_epi16(words, (__mmask32)((gaps >> first) & _bzhi_u64(~0ull, take)), words, _mm512_set1_epi16(1));
+        const __mmask32 lanes = (__mmask32)_bzhi_u64(~0ull, take);
+        const __m512i counted = breaks != 0 ? _mm512_add_epi16(words, _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(lanes, breaks + first))) : words;
+        const __m512i sizes = _mm512_mask_add_epi16(counted, (__mmask32)((ones >> first) & lanes), counted, _mm512_set1_epi16(1));
         const __m512i ends = _mm512_add_epi16(pp_prefix_sum_words(sizes), _mm512_set1_epi16((short)total));
         _mm512_mask_storeu_epi16(offsets + first, (__mmask32)_bzhi_u64(~0ull, take), _mm512_sub_epi16(ends, sizes));
         // Inactive words are zero, so the final lane also holds the last active word's end.
@@ -19615,6 +19625,35 @@ static bool pp_print_unspliced(const uint8_t* const* spellings, const uint32_t* 
     return possible == 0;
 }
 
+// With line markers, the line breaks before each line start of `starts` (a chunk's, from its token `c`), in their
+// order, as pp_print_place puts them in its common case (pp_print_place_common): into `counts`, and the markers' state
+// and the printer's lines advanced past them as pp_print_place advances them. Returns the first line start it can't
+// place so (a marker, a jump of more than 8 lines, a place in no file, or a #pragma's line kept), with nothing of its
+// own placed but the idempotent steps the per-token copies take again (its expansion, its place's line), or 64.
+static uint32_t pp_print_place_lines(Preprocessor* pp, PPMarkers* markers, PPPrintLines* lines, const uint32_t* directory, uint32_t c, uint64_t starts, uint8_t* counts)
+{
+    uint32_t result = 64;
+    for (uint64_t bits = starts; result == 64 && bits != 0; bits &= bits - 1)
+    {
+        const uint32_t k = (uint32_t)__builtin_ctzll(bits);
+        uint32_t place = pp_print_location(pp, markers, c + k);
+        const uint32_t range = pp_directory_range(pp, directory, place);
+        bool common = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE;
+        if (common)
+        {
+            const PPRange* record = &pp->ranges[range];
+            place = record->base + pp_start_with_splices(record->bytes, place - record->base, pp->options.trigraphs);
+            const uint32_t line = (uint32_t)((int64_t)pp_print_line(pp, lines, range, place) + markers->delta);
+            common = pp_print_place_common(pp, markers, range, place, line);
+            counts[k] = (uint8_t)(line - markers->line);
+            markers->line = common ? line : markers->line;
+        }
+        result = common ? result : k;
+    }
+    markers->length = 0;
+    return result;
+}
+
 // Prints the output as pp_print_scalar does, byte for byte, 64 tokens at a time into one buffer that is written as it
 // fills. For each chunk: each token's spelling (pp_print_spellings: an identifier's from the intern table, else its
 // bytes in the location space, found a range at a time; or the general loop's, token by token, for a chunk with a
@@ -19622,12 +19661,12 @@ static bool pp_print_unspliced(const uint8_t* const* spellings, const uint32_t* 
 // start of a line gets none, any other one if whitespace was before it or if its first character would lex together
 // with the last character of the token before (pp_separation_table, indexed by the two characters' classes from
 // vpermi2b lookups), and then the copies, one masked 64-byte store per token (more for a longer spelling), with the
-// line breaks and line markers between.
-static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
+// line breaks and line markers between: in batches at prefix-sum offsets (pp_print_offsets), with line markers up to
+// each line start that needs a marker (pp_print_place_lines), and the rest token by token. pp_print_vector compiles it
+// for each value of `markers`: with -P, the batch's gaps are one bit each, as they were before the line markers' batch,
+// whose code in one copy for both cost -P 8-12% (#649, on an AVX-512 Xeon).
+BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bool markers)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_print_scalar(pp, stream, markers);
-#else
     // The columns and tables in locals: a store through a byte pointer may change any field, which the loops would load
     // again for every token.
     const uint8_t* out_kinds = pp->output.kinds;
@@ -19704,30 +19743,39 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         const uint64_t written = pragma_lines & ~pragma_starts & ~((pragma_starts << 1) | pragma_name) & identifiers & valid;
         pragma_inside = (pragma_lines >> (available - 1)) & 1;
         pragma_name = pragma_starts >> 63;
-        // 1. Spellings: an identifier's from the intern table, any other token's bytes at its location. Without a pragma
-        // line's identifiers, an integer or an #embed, pp_print_spellings gives them, with no branch on the kind (#649:
-        // the general loop's branch and directory lookup per token were 57-59% of -P's printing of sqlite3.c and main.c
-        // on an AVX-512 Xeon, docs/c-preprocessor.md). Its spellings are checked for line splices by the batch's copies,
-        // which load their bytes anyway, or else before step 3's copies (pp_print_unspliced); a chunk that may hold one
-        // goes through the general loop, token by token, which takes every case, and its spaces and copies are made
-        // again.
+        // 1. Spellings: an identifier's from the intern table, any other token's bytes at its location. Without a
+        // pragma line's identifiers, an integer or an #embed, pp_print_spellings gives them, with no branch on the kind
+        // (#649: the general loop's branch and directory lookup per token were 57-59% of -P's printing of sqlite3.c and
+        // main.c on an AVX-512 Xeon, docs/c-preprocessor.md). Its spellings are checked for line splices by the batch's
+        // copies, which load their bytes anyway, or else before step 3's copies (pp_print_unspliced); a chunk that may
+        // hold one goes through the general loop, token by token, which takes every case, and its spaces and the copies
+        // of its tokens not printed yet are made again.
         const uint64_t spare_mark = scratch.arena->length;
         const uint64_t internal = _mm512_mask_cmpge_epu8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
         bool general = per_token || (written | internal) != 0 ||
                        !pp_print_spellings(pp, directory, out_values + c, out_locations + c, identifiers, valid, records, spans, spellings, lengths, firsts, lasts);
-        bool settled = false;
-        uint64_t line_starts = 0;
-        uint64_t spaced = 0;
-        uint64_t batch_breaks = 0;
-        uint32_t batch_bytes = 0;
-        uint16_t offsets[64];
         const uint64_t embeds = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
         // With markers, the unknown tokens, whose line breaks the printer's line counts (pp_print_token_lines).
         const uint64_t unknowns = markers ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) : 0;
-        // At most twice: with pp_print_spellings' spellings, then with the general loop's if those may hold a splice.
-        while (result && !settled)
+        // With markers, the tokens that pp_print_moves may place on a line of their own, which the copies place.
+        const uint64_t line_spaces = markers ? _mm512_mask_test_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, out_flags + c), _mm512_set1_epi8(BUSTER_PP_LINE_SPACE)) : 0;
+        // The state before the chunk, which step 2 reads whenever it runs again.
+        const uint8_t entry_last = previous_last;
+        const uint8_t entry_kind = previous_kind;
+        const bool entry_force_line = force_line;
+        const bool entry_line_start = line_start;
+        uint64_t line_starts = 0;
+        uint64_t spaced = 0;
+        // With line markers, each line start's breaks in a batch (pp_print_place_lines).
+        uint8_t line_breaks[64] __attribute__((aligned(64)));
+        uint16_t offsets[64];
+        // Steps 1 and 2 run again when `stale`: once, with the general loop's spellings, if pp_print_spellings' may
+        // hold a splice. Step 3 prints the chunk's tokens from `from` on, a batch and token by token, in turns.
+        bool stale = true;
+        uint32_t from = 0;
+        while (result && from < available)
         {
-            for (uint32_t k = 0; general && result && k < available; k += 1)
+            for (uint32_t k = 0; stale && general && result && k < available; k += 1)
             {
                 const uint32_t i = c + k;
                 const uint8_t kind = out_kinds[i];
@@ -19785,37 +19833,65 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                     pp_embed_ends(pp, value, &firsts[k], &lasts[k]);
                 }
             }
-            // 2. Spaces, for the 64 tokens at once: line starts (a token that starts a line, or follows a pragma's end, or
-            // is the output's first), whitespace, and the separation table on the class of the last character before and
-            // of the first character after.
-            const __m512i flags = _mm512_maskz_loadu_epi8(valid, out_flags + c);
-            const __m512i first_bytes = _mm512_maskz_loadu_epi8(valid, firsts);
-            const __m512i last_bytes = _mm512_maskz_loadu_epi8(valid, lasts);
-            const uint64_t starts = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_START_OF_LINE));
-            const uint64_t spaces = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_SPACE));
-            const __m512i after = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(after_low, first_bytes, after_high), _mm512_movepi8_mask(first_bytes),
-                                                       _mm512_set1_epi8(BUSTER_PP_AFTER_WORD));
-            __m512i before = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(before_low, last_bytes, before_high), _mm512_movepi8_mask(last_bytes),
-                                                  _mm512_set1_epi8(BUSTER_PP_BEFORE_WORD));
-            // An #embed's text ends in a number.
-            const uint64_t numbers =
-                _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
-            before = _mm512_mask_mov_epi8(before, numbers, _mm512_set1_epi8(BUSTER_PP_BEFORE_NUMBER));
-            // Each token's before-class is its previous token's: the classes move up a lane, the chunk's first taking the
-            // class of the token before the chunk.
-            const uint8_t carried = previous_kind == C_TOKEN_NUMERIC_CONSTANT || previous_kind == BUSTER_PP_KIND_EMBED ? BUSTER_PP_BEFORE_NUMBER
-                                    : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
-                                    : dollar_punctuation && previous_last == '$' ? 0 : pp_before_classes[previous_last];
-            before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
-            const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
-            const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
-            line_starts = starts | (pragma_ends << 1) | (uint64_t)force_line | (uint64_t)(c == 0 && line_start);
-            spaced = (spaces | joins) & ~line_starts & valid;
-            // -P's common batch has no marker, pragma end or streamed embed. Its gaps are each at most one byte, and
-            // nonempty short spellings fit one bounded load/store. Prefix offsets let all copy addresses be independent.
-            batch_breaks = (line_starts & valid) & ~(uint64_t)line_start;
-            batch_bytes = result && !markers && pragma_ends == 0 && embeds == 0 ? pp_print_offsets(lengths, available, batch_breaks | spaced, offsets) : 0;
-            settled = true;
+            if (stale)
+            {
+                // 2. Spaces, for the 64 tokens at once: line starts (a token that starts a line, or follows a pragma's
+                // end, or is the output's first), whitespace, and the separation table on the class of the last
+                // character before and of the first character after.
+                const __m512i flags = _mm512_maskz_loadu_epi8(valid, out_flags + c);
+                const __m512i first_bytes = _mm512_maskz_loadu_epi8(valid, firsts);
+                const __m512i last_bytes = _mm512_maskz_loadu_epi8(valid, lasts);
+                const uint64_t starts = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_START_OF_LINE));
+                const uint64_t spaces = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_SPACE));
+                const __m512i after = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(after_low, first_bytes, after_high), _mm512_movepi8_mask(first_bytes),
+                                                           _mm512_set1_epi8(BUSTER_PP_AFTER_WORD));
+                __m512i before = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(before_low, last_bytes, before_high), _mm512_movepi8_mask(last_bytes),
+                                                      _mm512_set1_epi8(BUSTER_PP_BEFORE_WORD));
+                // An #embed's text ends in a number.
+                const uint64_t numbers =
+                    _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
+                before = _mm512_mask_mov_epi8(before, numbers, _mm512_set1_epi8(BUSTER_PP_BEFORE_NUMBER));
+                // Each token's before-class is its previous token's: the classes move up a lane, the chunk's first
+                // taking the class of the token before the chunk.
+                const uint8_t carried = entry_kind == C_TOKEN_NUMERIC_CONSTANT || entry_kind == BUSTER_PP_KIND_EMBED ? BUSTER_PP_BEFORE_NUMBER
+                                        : entry_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
+                                        : dollar_punctuation && entry_last == '$' ? 0 : pp_before_classes[entry_last];
+                before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
+                const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
+                const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
+                line_starts = starts | (pragma_ends << 1) | (uint64_t)entry_force_line | (uint64_t)(c == 0 && entry_line_start);
+                spaced = (spaces | joins) & ~line_starts & valid;
+                stale = false;
+            }
+            // 3. Copies. A batch of the tokens from `from` without a branch per token, their output offsets by a prefix
+            // sum (pp_print_offsets): with -P, every token of a chunk without a pragma end, an #embed or a spelling
+            // past 64 bytes; with line markers, of a chunk without those or what pp_print_moves, pp_print_include_exits
+            // or pp_print_token_lines would handle, every token up to the first line start that isn't pp_print_place's
+            // common case (pp_print_place_lines), whose line breaks are its gap. That one goes token by token, as every
+            // other token does, and the batch goes on after it.
+            const PPMarkers entry_marked = marked;
+            const PPPrintLines entry_lines = lines;
+            const uint64_t ahead = valid & ~_bzhi_u64(~0ull, from);
+            const bool batchable = result && pragma_ends == 0 && embeds == 0 &&
+                                   (!markers || ((unknowns | (line_spaces & ~line_starts)) == 0 && !(marked.include_exit != 0 && marked.include_exit->token < c + available) &&
+                                                 !(silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token < c + available)));
+            // With -P, a line start's one break, but the output's first token's; with markers, as many as it takes.
+            const uint64_t batch_breaks = (line_starts & ahead) & ~(uint64_t)(markers ? 0 : line_start);
+            // The tokens whose gap is one byte: a space, or with -P a break.
+            const uint64_t ones = (markers ? 0 : batch_breaks) | spaced;
+            uint32_t to = available;
+            uint32_t batch_bytes = 0;
+            bool printed = false;
+            if (batchable)
+            {
+                if (markers)
+                {
+                    _mm512_store_si512(line_breaks, _mm512_setzero_si512());
+                }
+                const uint32_t placed = markers ? pp_print_place_lines(pp, &marked, &lines, directory, c, batch_breaks, line_breaks) : 64;
+                to = placed < available ? placed : available;
+                batch_bytes = to > from ? pp_print_offsets(lengths + from, to - from, ones >> from, markers ? line_breaks + from : 0, offsets) : 0;
+            }
             if (batch_bytes != 0)
             {
                 if (used + batch_bytes > capacity)
@@ -19826,155 +19902,171 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 // pp_print_unspliced's check, on the bytes each copy loads: a backslash followed by a blank (the zero
                 // past a spelling of less than 64 bytes counts as one) or in the last lane may start a line splice, and
                 // with trigraphs so may any '?'. An identifier's interned spelling has none, and a lane checked in vain
-                // would only cost the general loop.
+                // would only cost the general loop. Most spellings have neither byte, so the rest of the check waits
+                // for one (#649: on an AVX-512 Xeon, 4-8% of -P's printing). A gap is written as one break or space, or
+                // with markers as 8, which the spelling and the next token's output write over.
                 uint64_t possible = 0;
-                for (uint32_t k = 0; result && k < available; k += 1)
+                for (uint32_t k = from; result && k < to; k += 1)
                 {
-                    const uint32_t newline = (uint32_t)((batch_breaks >> k) & 1);
-                    const uint32_t gap = (uint32_t)(((batch_breaks | spaced) >> k) & 1);
-                    uint8_t* destination = buffer + used + offsets[k];
-                    destination[0] = (uint8_t)(' ' + newline * ('\n' - ' '));
+                    const uint8_t fill = (batch_breaks >> k) & 1 ? '\n' : ' ';
+                    uint8_t* destination = buffer + used + offsets[k - from];
+                    if (markers)
+                    {
+                        const uint64_t eight = fill * 0x0101010101010101ull;
+                        memcpy(destination, &eight, sizeof(eight));
+                    }
+                    else
+                    {
+                        destination[0] = fill;
+                    }
                     const __mmask64 bytes = _bzhi_u64(~0ull, lengths[k]);
                     const __m512i spelling = _mm512_maskz_loadu_epi8(bytes, spellings[k]);
-                    _mm512_mask_storeu_epi8(destination + gap, bytes, spelling);
-                    possible |= (_mm512_cmpeq_epi8_mask(spelling, _mm512_set1_epi8('\\')) & ((_mm512_cmple_epu8_mask(spelling, _mm512_set1_epi8(' ')) >> 1) | (1ull << 63))) |
-                                _mm512_mask_cmpeq_epi8_mask(questions, spelling, _mm512_set1_epi8('?'));
+                    _mm512_mask_storeu_epi8(destination + ((ones >> k) & 1) + (markers ? line_breaks[k] : 0), bytes, spelling);
+                    const uint64_t backslashes = _mm512_cmpeq_epi8_mask(spelling, _mm512_set1_epi8('\\'));
+                    const uint64_t marks = _mm512_mask_cmpeq_epi8_mask(questions, spelling, _mm512_set1_epi8('?'));
+                    if (BUSTER_UNLIKELY((backslashes | marks) != 0))
+                    {
+                        possible |= (backslashes & ((_mm512_cmple_epu8_mask(spelling, _mm512_set1_epi8(' ')) >> 1) | (1ull << 63))) | marks;
+                    }
                 }
-                settled = general || possible == 0;
-                if (settled)
+                printed = result && (general || possible == 0);
+                if (printed)
                 {
                     used += batch_bytes;
                     line_start = false;
                     force_line = false;
-                    previous_last = lasts[available - 1];
-                    previous_kind = out_kinds[c + available - 1];
+                    previous_last = lasts[to - 1];
+                    previous_kind = out_kinds[c + to - 1];
+                    from = to;
+                }
+            }
+            if (markers && !printed)
+            {
+                marked = entry_marked;
+                lines = entry_lines;
+            }
+            // Token by token: the line start the batch stopped at (or started at), else every token left, once
+            // pp_print_unspliced finds no possible splice in their spellings.
+            const uint32_t last = batchable && to < available && to == from ? from + 1 : available;
+            const bool spliced = batch_bytes != 0 && !printed;
+            const uint64_t alone = valid & ~identifiers & ~_bzhi_u64(~0ull, from) & _bzhi_u64(~0ull, last);
+            const bool unspliced = !spliced && (general || from == last || pp_print_unspliced(spellings, lengths, alone, trigraphs));
+            general = general || !unspliced;
+            stale = !unspliced;
+            for (uint32_t k = unspliced ? from : last; result && k < last; k += 1)
+            {
+                const uint32_t i = c + k;
+                const uint32_t length = lengths[k];
+                const bool exited = markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i);
+                if (exited)
+                {
+                    result = result && fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, i, &line_start, stream);
+                    used = 0;
+                    if (!result)
+                    {
+                        break;
+                    }
+                }
+                if ((pragma_ends >> k) & 1)
+                {
+                    force_line = true;
+                    continue;
+                }
+                // Room for the breaks, a space and the spelling, or a write of what the buffer holds.
+                const uint64_t room = (uint64_t)length + 16 + 64;
+                if (used + room > capacity)
+                {
+                    result = fwrite(buffer, 1, used, stream) == used;
+                    used = 0;
+                }
+                const uint32_t moved = markers && !((line_starts >> k) & 1) &&
+                                               BUSTER_UNLIKELY((out_flags[i] & BUSTER_PP_LINE_SPACE) || (silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i))
+                                           ? pp_print_moves(pp, &marked, i, &silent)
+                                           : BUSTER_PP_NONE;
+                const bool moves = moved != BUSTER_PP_NONE;
+                const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited;
+                // A line start's break after something on the line; with markers, as many as pp_print_place puts.
+                uint32_t breaks = starts_line & (uint32_t)!line_start;
+                if (markers && starts_line)
+                {
+                    const uint32_t located = pp_print_location(pp, &marked, i);
+                    uint32_t place = moves ? moved : located;
+                    const uint32_t range = pp_directory_range(pp, directory, place);
+                    if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
+                    {
+                        place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base, pp->options.trigraphs);
+                        bool placed = true;
+                        breaks = pp_print_place(pp, &marked, range, place, pp_print_line(pp, &lines, range, place), line_start, &placed);
+                        // The markers go through the buffer, or past it when they are longer than its room.
+                        if (marked.length != 0 && used + marked.length + room > capacity)
+                        {
+                            result = result && fwrite(buffer, 1, used, stream) == used;
+                            used = 0;
+                        }
+                        if (marked.length != 0 && marked.length + room <= capacity)
+                        {
+                            memcpy(buffer + used, marked.text, marked.length);
+                            used += marked.length;
+                        }
+                        else if (marked.length != 0)
+                        {
+                            result = result && fwrite(marked.text, 1, marked.length, stream) == marked.length;
+                        }
+                        result = result && placed;
+                        line_start = line_start || marked.length != 0;
+                    }
+                }
+                if (BUSTER_LIKELY(breaks <= 1))
+                {
+                    buffer[used] = '\n';
+                    used += breaks;
                 }
                 else
                 {
-                    batch_bytes = 0;
+                    memset(buffer + used, '\n', breaks);
+                    used += breaks;
                 }
-            }
-            else if (!general)
-            {
-                // With markers, or a spelling past 64 bytes: step 3 copies them.
-                settled = pp_print_unspliced(spellings, lengths, valid & ~identifiers, trigraphs);
-            }
-            general = !settled;
-        }
-        // 3. Copies, with the line breaks and markers between: without a branch per token but for line markers (which
-        // -P doesn't print), the rare line of more than one break, and spellings past 64 bytes.
-        for (uint32_t k = batch_bytes != 0 ? available : 0; result && k < available; k += 1)
-        {
-            const uint32_t i = c + k;
-            const uint32_t length = lengths[k];
-            const bool exited = markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i);
-            if (exited)
-            {
-                result = result && fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, i, &line_start, stream);
-                used = 0;
-                if (!result)
-                {
-                    break;
-                }
-            }
-            if ((pragma_ends >> k) & 1)
-            {
-                force_line = true;
-                continue;
-            }
-            // Room for the breaks, a space and the spelling, or a write of what the buffer holds.
-            const uint64_t room = (uint64_t)length + 16 + 64;
-            if (used + room > capacity)
-            {
-                result = fwrite(buffer, 1, used, stream) == used;
-                used = 0;
-            }
-            const uint32_t moved = markers && !((line_starts >> k) & 1) &&
-                                           BUSTER_UNLIKELY((out_flags[i] & BUSTER_PP_LINE_SPACE) || (silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i))
-                                       ? pp_print_moves(pp, &marked, i, &silent)
-                                       : BUSTER_PP_NONE;
-            const bool moves = moved != BUSTER_PP_NONE;
-            const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited;
-            // A line start's break after something on the line; with markers, as many as pp_print_place puts.
-            uint32_t breaks = starts_line & (uint32_t)!line_start;
-            if (markers && starts_line)
-            {
-                const uint32_t located = pp_print_location(pp, &marked, i);
-                uint32_t place = moves ? moved : located;
-                const uint32_t range = pp_directory_range(pp, directory, place);
-                if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
-                {
-                    place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base, pp->options.trigraphs);
-                    bool placed = true;
-                    breaks = pp_print_place(pp, &marked, range, place, pp_print_line(pp, &lines, range, place), line_start, &placed);
-                    // The markers go through the buffer, or past it when they are longer than its room.
-                    if (marked.length != 0 && used + marked.length + room > capacity)
-                    {
-                        result = result && fwrite(buffer, 1, used, stream) == used;
-                        used = 0;
-                    }
-                    if (marked.length != 0 && marked.length + room <= capacity)
-                    {
-                        memcpy(buffer + used, marked.text, marked.length);
-                        used += marked.length;
-                    }
-                    else if (marked.length != 0)
-                    {
-                        result = result && fwrite(marked.text, 1, marked.length, stream) == marked.length;
-                    }
-                    result = result && placed;
-                    line_start = line_start || marked.length != 0;
-                }
-            }
-            if (BUSTER_LIKELY(breaks <= 1))
-            {
-                buffer[used] = '\n';
-                used += breaks;
-            }
-            else
-            {
-                memset(buffer + used, '\n', breaks);
-                used += breaks;
-            }
-            line_start = line_start || starts_line;
-            force_line = false;
-            buffer[used] = ' ';
-            used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited;
-            // The spelling: one masked 64-byte copy, or more for a longer one (written straight out past the buffer's
-            // room), or an #embed's text in pieces.
-            const uint8_t* spelling = spellings[k];
-            const __mmask64 head = _bzhi_u64(~0ull, length < 64 ? length : 64);
-            bool direct = BUSTER_UNLIKELY(out_kinds[i] == BUSTER_PP_KIND_EMBED);
-            if (direct)
-            {
-                result = result && pp_print_embed(pp, out_values[i], false, buffer, &used, capacity, stream);
-            }
-            else
-            {
-                _mm512_mask_storeu_epi8(buffer + used, head, _mm512_maskz_loadu_epi8(head, spelling));
-            }
-            if (BUSTER_UNLIKELY(!direct && length > 64))
-            {
-                direct = used + length > capacity;
-                for (uint32_t b = 64; !direct && b < length; b += 64)
-                {
-                    const __mmask64 bytes = _bzhi_u64(~0ull, length - b < 64 ? length - b : 64);
-                    _mm512_mask_storeu_epi8(buffer + used + b, bytes, _mm512_maskz_loadu_epi8(bytes, spelling + b));
-                }
+                line_start = line_start || starts_line;
+                force_line = false;
+                buffer[used] = ' ';
+                used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited;
+                // The spelling: one masked 64-byte copy, or more for a longer one (written straight out past the
+                // buffer's room), or an #embed's text in pieces.
+                const uint8_t* spelling = spellings[k];
+                const __mmask64 head = _bzhi_u64(~0ull, length < 64 ? length : 64);
+                bool direct = BUSTER_UNLIKELY(out_kinds[i] == BUSTER_PP_KIND_EMBED);
                 if (direct)
                 {
-                    result = fwrite(buffer, 1, used, stream) == used && fwrite(spelling, 1, length, stream) == length;
-                    used = 0;
+                    result = result && pp_print_embed(pp, out_values[i], false, buffer, &used, capacity, stream);
                 }
+                else
+                {
+                    _mm512_mask_storeu_epi8(buffer + used, head, _mm512_maskz_loadu_epi8(head, spelling));
+                }
+                if (BUSTER_UNLIKELY(!direct && length > 64))
+                {
+                    direct = used + length > capacity;
+                    for (uint32_t b = 64; !direct && b < length; b += 64)
+                    {
+                        const __mmask64 bytes = _bzhi_u64(~0ull, length - b < 64 ? length - b : 64);
+                        _mm512_mask_storeu_epi8(buffer + used + b, bytes, _mm512_maskz_loadu_epi8(bytes, spelling + b));
+                    }
+                    if (direct)
+                    {
+                        result = fwrite(buffer, 1, used, stream) == used && fwrite(spelling, 1, length, stream) == length;
+                        used = 0;
+                    }
+                }
+                used += direct ? 0 : length;
+                if (BUSTER_UNLIKELY((unknowns >> k) & 1))
+                {
+                    marked.line += pp_print_token_lines(spelling, length);
+                }
+                line_start = false;
+                previous_last = length != 0 ? lasts[k] : previous_last;
+                previous_kind = out_kinds[i];
             }
-            used += direct ? 0 : length;
-            if (BUSTER_UNLIKELY((unknowns >> k) & 1))
-            {
-                marked.line += pp_print_token_lines(spelling, length);
-            }
-            line_start = false;
-            previous_last = length != 0 ? lasts[k] : previous_last;
-            previous_kind = out_kinds[i];
+            from = unspliced ? last : from;
         }
         arena_pop_to(scratch.arena, spare_mark);
     }
@@ -19991,6 +20083,14 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     result = result && fwrite(buffer, 1, used, stream) == used;
     scratch_end(scratch);
     return result && ferror(stream) == 0;
+}
+
+static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
+{
+#if !BUSTER_HOST_VECTOR
+    return pp_print_scalar(pp, stream, markers);
+#else
+    return markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
 #endif
 }
 

@@ -3571,6 +3571,47 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             .standard = 2023
         },
+        // #1000: a comma's discarded operand is still evaluated in a constexpr initializer, which a
+        // variable's read fails where a constant would not — a scalar object's and an aggregate
+        // element's alike, block scope's automatic storage included.
+        {
+            "C23 constexpr: a discarded read isn't a constant expression",
+            "static int s;\n"
+            "void f(void) {\n"
+            "    constexpr double d =\n"
+            "        (s, 0.75);\n"
+            "    (void)d;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: an aggregate's discarded read isn't a constant expression",
+            "static int s;\n"
+            "void f(void) {\n"
+            "    constexpr double a[1] =\n"
+            "        { (s, 0.75) };\n"
+            "    (void)a;\n"
+            "}\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            "C23 constexpr: a discarded constant still initializes",
+            "void f(void) {\n"
+            "    constexpr double d =\n"
+            "        (1, 0.75);\n"
+            "    constexpr double a[1] =\n"
+            "        { (1, 0.75) };\n"
+            "    (void)d;\n"
+            "    (void)a;\n"
+            "}\n",
+            false,
+            false,
+            .standard = 2023
+        },
         {
             "C23 constexpr: without an initializer",
             "void f(void) {\n"
@@ -5608,6 +5649,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
 #include "c_check_program_bits_test.c"
+#include "c_check_program_generic_builtins_test.c"
 #include "c_check_program_align_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
@@ -5678,10 +5720,11 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
+static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
-static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
+static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -5932,7 +5975,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_diagnostic_policy(&test);
             check_test_lazy(&test);
             check_test_intrinsic_inputs(&test, clang);
-            check_test_x86_diagnostics(&test, clang);
+            check_test_x86_diagnostics(&test, &types.table, clang);
             check_test_initializers(&test, clang);
             check_test_embed_initializers(&test, clang);
             check_test_data_sources(&test);
@@ -5953,6 +5996,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_source_benchmark(&test);
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
+            check_test_check_lanes_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
         // The program harness's build directory, which the sections' programs share: removed after the last of them,

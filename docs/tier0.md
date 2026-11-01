@@ -58,7 +58,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on checked functions' typed streams
-  of C files, `sqlite3.c`'s among them ("Measurements", below).
+  of C files, `sqlite3.c`'s among them ("Measurements", below), compiled for the target their options give (`-march`
+  and the `-m` features), and each function with a target attribute for the attribute's, as `-c` compiles them (#1041).
   The source benchmark admits the reachable functions through typed emission.
   Static-data publication and object-section placement, including assembled
   file-scope atoms' section descriptors, are outside its validation scope.
@@ -583,8 +584,10 @@ decoration's role of another kind (both of its bits) or past the scratch registe
 with masks, and mask operands and scratch registers past the seven a borrowing row has (and, as in any row, a form with
 a segment override). `interpreter.c` runs mask entries (but rows and objects, which it doesn't model), each mask's bits
 in its value's low word and its bytes in the high word;
-`ir_lower.c` refuses a function with masks, since the IR's `m8` to `m64` have no conversion to or from an integer
-(`docs/ir-simd.md`), so that `--tier1` leaves it to Tier 0.
+`ir_lower.c` lowers them to the IR's `m8` to `m64`, its conversions through `bitcast` to and from the integer of the
+mask's bits, and the front end's `_k*` rows through `ir_simd_typed.c`'s decoder; a row it doesn't decode (a vector's, or
+one that names opmask registers by number) is refused, so that `--tier1` leaves that function to Tier 0
+(`docs/ir-simd.md`'s "Masks from the typed stream").
 
 The front end's AVX-512 builtins are the class's first user (`check_x86_lower_masks`, `c_check_program_x86.c`): a row
 whose mask operands its records move into opmask registers from their integers, and whose mask result one moves out,
@@ -978,8 +981,13 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,951 templates from the encoder's forms and compiles each into one cache line. A byte the
-template fixes is that byte; a hole's is its index in the hole block. Expansion is copy and patch:
+`tier0_initialize` builds 1,962 templates from the encoder's forms and compiles each into one cache line. A byte the
+template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1 MB, are separate static
+arrays, whose pages it commits first with one `MADV_POPULATE_WRITE` call each (`tier0_prepare_tables`, #590): a kernel
+whose transparent huge pages are only `madvise`d gave them 257 base pages' faults in every compile. Grouping them in
+one structure, in a huge page of its own, took `tier0_initialize` from 82 to 184 million instructions in 60 builds
+(callgrind, baseline x86-64), as LLVM can't tell that one object's members don't overlap.
+Expansion is copy and patch:
 
 1. one load of the line;
 2. one `vpermb` from the hole block;
@@ -1701,7 +1709,10 @@ path's 11.1.
   - the homes, the frame, the prologue and the per-function setup 15%.
 
 **On `sqlite3.c`** (`benchmark-backend-source`, [record](https://github.com/buster14a/buster-performance/tree/9a5bad45a0e39305ee4f426f98b171a105d0f659/docs/measurements/backend-source-136-2026-10-26)):
-the functions `-c` lowers of the frozen SQLite 3.53.2 amalgamation, with the 9700X job's options. That is 2,602
+the functions `-c` lowers of the frozen SQLite 3.53.2 amalgamation, with the 9700X job's options. Until #1041 the
+benchmark compiled every file for the baseline x86-64 profile, whatever `-march` said, so these numbers, and the
+job's before #1041's merge, are of baseline code, not of the `-march=znver5` code the job's options ask for; from
+that merge the job times znver5's, and its numbers are not comparable across it. That is 2,602
 functions, 400,995 typed entries and 366,044 records (0.91 per entry, against the generated programs' 1.15), with
 3.49% of the entries deferred. The 9700X, CPU 2, medians of 21 passes, the range over three processes:
 

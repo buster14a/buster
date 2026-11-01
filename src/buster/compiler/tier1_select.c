@@ -103,6 +103,11 @@ typedef enum Tier1SelectRule
     TIER1_RULE_MASK_COPY,
     TIER1_RULE_MASK_LOGIC,
     TIER1_RULE_MASK_NOT,
+    // A bitcast of an integer to a mask of its width, kmov k, r32 (r64 for a quadword), which kmovb, kmovw and kmovd read
+    // the low bits of alone; and of a mask to an integer of its width, kmov r32 (r64), k, which zero-extends past the
+    // mask's bits: a narrow integer's canonical 32-bit storage (tier1_select_canonical).
+    TIER1_RULE_MASK_FROM_INTEGER,
+    TIER1_RULE_MASK_TO_INTEGER,
     TIER1_RULE_MASK_LOAD,
     TIER1_RULE_MASK_LOAD_ADDRESS,
     TIER1_RULE_MASK_STORE,
@@ -112,6 +117,9 @@ typedef enum Tier1SelectRule
     // places its edges' moves after it, at its labels' blocks or in stubs where it defines their labels
     // (tier1_emit_cfg.c).
     TIER1_RULE_JUMP_INDIRECT,
+    // A frame slot's lifetime marker (IR_LIFETIME, #177): no records. The CFG consumer colors the frame's objects by the
+    // markers (tier1_emit_cfg_lifetimes).
+    TIER1_RULE_LIFETIME,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -516,6 +524,7 @@ struct Tier1SelectMaskForms
     uint16_t load;
     uint16_t store;
     uint16_t from_general;
+    uint16_t to_general;
     uint16_t and_forms;
     uint16_t or_forms;
     uint16_t xor_forms;
@@ -525,11 +534,11 @@ struct Tier1SelectMaskForms
 
 static const Tier1SelectMaskForms tier1_select_mask_forms_table[5] =
 {
-    { X86_FORM_KMOVB_K_K, X86_FORM_KMOVB_K_M8, X86_FORM_KMOVB_M8_K, X86_FORM_KMOVB_K_R32, X86_FORM_KANDB_K_K_K, X86_FORM_KORB_K_K_K, X86_FORM_KXORB_K_K_K, X86_FORM_KXNORB_K_K_K, X86_FORM_KNOTB_K_K },
-    { X86_FORM_KMOVW_K_K, X86_FORM_KMOVW_K_M16, X86_FORM_KMOVW_M16_K, X86_FORM_KMOVW_K_R32, X86_FORM_KANDW_K_K_K, X86_FORM_KORW_K_K_K, X86_FORM_KXORW_K_K_K, X86_FORM_KXNORW_K_K_K, X86_FORM_KNOTW_K_K },
-    { X86_FORM_KMOVD_K_K, X86_FORM_KMOVD_K_M32, X86_FORM_KMOVD_M32_K, X86_FORM_KMOVD_K_R32, X86_FORM_KANDD_K_K_K, X86_FORM_KORD_K_K_K, X86_FORM_KXORD_K_K_K, X86_FORM_KXNORD_K_K_K, X86_FORM_KNOTD_K_K },
-    { X86_FORM_KMOVQ_K_K, X86_FORM_KMOVQ_K_M64, X86_FORM_KMOVQ_M64_K, X86_FORM_KMOVQ_K_R64, X86_FORM_KANDQ_K_K_K, X86_FORM_KORQ_K_K_K, X86_FORM_KXORQ_K_K_K, X86_FORM_KXNORQ_K_K_K, X86_FORM_KNOTQ_K_K },
-    { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+    { X86_FORM_KMOVB_K_K, X86_FORM_KMOVB_K_M8, X86_FORM_KMOVB_M8_K, X86_FORM_KMOVB_K_R32, X86_FORM_KMOVB_R32_K, X86_FORM_KANDB_K_K_K, X86_FORM_KORB_K_K_K, X86_FORM_KXORB_K_K_K, X86_FORM_KXNORB_K_K_K, X86_FORM_KNOTB_K_K },
+    { X86_FORM_KMOVW_K_K, X86_FORM_KMOVW_K_M16, X86_FORM_KMOVW_M16_K, X86_FORM_KMOVW_K_R32, X86_FORM_KMOVW_R32_K, X86_FORM_KANDW_K_K_K, X86_FORM_KORW_K_K_K, X86_FORM_KXORW_K_K_K, X86_FORM_KXNORW_K_K_K, X86_FORM_KNOTW_K_K },
+    { X86_FORM_KMOVD_K_K, X86_FORM_KMOVD_K_M32, X86_FORM_KMOVD_M32_K, X86_FORM_KMOVD_K_R32, X86_FORM_KMOVD_R32_K, X86_FORM_KANDD_K_K_K, X86_FORM_KORD_K_K_K, X86_FORM_KXORD_K_K_K, X86_FORM_KXNORD_K_K_K, X86_FORM_KNOTD_K_K },
+    { X86_FORM_KMOVQ_K_K, X86_FORM_KMOVQ_K_M64, X86_FORM_KMOVQ_M64_K, X86_FORM_KMOVQ_K_R64, X86_FORM_KMOVQ_R64_K, X86_FORM_KANDQ_K_K_K, X86_FORM_KORQ_K_K_K, X86_FORM_KXORQ_K_K_K, X86_FORM_KXNORQ_K_K_K, X86_FORM_KNOTQ_K_K },
+    { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
 };
 
 // A mask width's forms: 1, 2, 4 or 8 bytes. Any other width, which no mask has, gets X86_FORM_NONE throughout rather than
@@ -554,6 +563,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
     case TIER1_RULE_LEAF:
     case TIER1_RULE_NONE:
+    case TIER1_RULE_LIFETIME:
         break;
     case TIER1_RULE_CONSTANT:
         tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
@@ -809,6 +819,13 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_MASK_NOT:
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_mask_forms(width)->not_forms, .reg = destination & 7, .rm = holes->left & 7 });
+        break;
+    // The integer's general register to the mask's opmask one, and back.
+    case TIER1_RULE_MASK_FROM_INTEGER:
+        tier1_select_append(&result, (X86Instruction){ .form = tier1_select_mask_forms(width)->from_general, .reg = destination & 7, .rm = holes->left });
+        break;
+    case TIER1_RULE_MASK_TO_INTEGER:
+        tier1_select_append(&result, (X86Instruction){ .form = tier1_select_mask_forms(width)->to_general, .reg = destination, .rm = holes->left & 7 });
         break;
     // One kmov each, the node's last record, which the CFG consumer's frame-object patch rewrites (`stack_object`).
     case TIER1_RULE_MASK_LOAD:
@@ -1151,52 +1168,11 @@ static uint32_t tier1_select_mask_width(uint32_t type)
     return type == IR_M8 ? 1 : type == IR_M16 ? 2 : type == IR_M32 ? 4 : type == IR_M64 ? 8 : 0;
 }
 
-// Whether a function has vectors, which the selector doesn't take (#141): a vector type anywhere, its constants or its
-// operations, in its instructions, its parameters, calls and slots. Masks (#179) it takes, as ir_function_has_simd
-// doesn't. The instructions 64 at a time on the vector path, one at a time on its scalar twin.
+// Whether a function has vectors, which the selector doesn't take (#141): ir_function_has_vectors_path's answer. Masks
+// (#179) it takes, as ir_function_has_simd doesn't.
 static bool tier1_select_has_vectors(const IrFunction* function, bool vector)
 {
-    (void)vector;
-
-    bool found = function->vector_constant_count != 0 || ir_vector_type(function->result_type);
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
-            const __mmask64 vectors = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) & ~_mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V16I32 + 1));
-            const __mmask64 operations = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) |
-                                         _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
-            found = (vectors | operations) != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = ir_vector_type(function->type[i]) || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
-        }
-    }
-    for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
-    {
-        found = ir_vector_type(function->parameter_types[i]);
-    }
-    for (uint32_t i = 0; !found && i < function->call_type_count; i += 1)
-    {
-        found = ir_vector_type(function->call_types[i]);
-    }
-    for (uint32_t i = 0; !found && i < function->call_count; i += 1)
-    {
-        found = ir_vector_type(function->calls[i].result_type);
-    }
-    for (uint32_t i = 0; !found && i < function->slot_count; i += 1)
-    {
-        found = ir_vector_type(function->slots[i].type);
-    }
-    return found;
+    return ir_function_has_vectors_path(function, vector);
 }
 
 // The width a narrow source's copy reads: I1's canonical storage is its 32 bits, I8 one byte and I16 two. Zero says the
@@ -1243,6 +1219,10 @@ static void tier1_select_canonical(const IrFunction* function, const uint32_t* b
             case IR_CALL:
             case IR_CALL_INDIRECT:
                 canonical[node] = 1;
+                break;
+            // A mask's kmovb or kmovw into a 32-bit register (TIER1_RULE_MASK_TO_INTEGER, #179) zero-extends.
+            case IR_BITCAST:
+                canonical[node] = function->a[node] < count && tier1_select_mask_width(function->type[function->a[node]]) != 0;
                 break;
             default:
                 break;
@@ -1471,11 +1451,20 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
 
 // A frame object's address the selector takes: a lea from the frame's base (TIER1_RULE_STACK_ADDRESS), or folded into
 // a user's memory operand (tier1_select_address), both filled at emission from the frame's layout. The frame's offsets
-// are 32-bit, and an over-aligned object realigns it.
+// are 32-bit, and an over-aligned object realigns it. A variadic definition's register save area (#789) is one: the
+// frame's own, which the prologue fills (tier1_emit_cfg.c). Its overflow area isn't (tier1_select_overflow_area).
 static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot)
 {
-    return slot < function->slot_count && (function->slots[slot].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0 &&
+    return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) == 0 &&
            function->slots[slot].size <= BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES && function->slots[slot].alignment <= BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT;
+}
+
+// A variadic definition's overflow area (#789), whose address is in its caller's frame, past the incoming stack
+// arguments: a lea the CFG consumer bases on the incoming frame (TIER1_RULE_STACK_ADDRESS, tier1_emit_cfg_incoming),
+// never a memory operand's base, which is the frame's.
+static bool tier1_select_overflow_area(const IrFunction* function, uint32_t slot)
+{
+    return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
 }
 
 // A memory operand's address: base + index * 2^scale + displacement, the frame object the walk reached instead of a
@@ -1639,7 +1628,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = base.immediate == 0 || base.immediate == every ? 1 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (mask_width != 0 && op == IR_COPY)
+    else if (mask_width != 0 && (op == IR_COPY || (op == IR_BITCAST && function->type[a] == type)))
     {
         base.rule = TIER1_RULE_MASK_COPY;
         base.width = (uint8_t)mask_width;
@@ -1660,6 +1649,23 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     {
         base.rule = TIER1_RULE_MASK_NOT;
         base.width = (uint8_t)mask_width;
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (mask_width != 0 && op == IR_BITCAST && ir_integer(function->type[a]))
+    {
+        // The verifier's rule: an integer of the mask's bits, i8 to i64.
+        base.rule = TIER1_RULE_MASK_FROM_INTEGER;
+        base.width = (uint8_t)mask_width;
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_BITCAST && ir_integer(type) && tier1_select_mask_width(function->type[a]) != 0)
+    {
+        base.rule = TIER1_RULE_MASK_TO_INTEGER;
+        base.width = (uint8_t)tier1_select_mask_width(function->type[a]);
         base.values[0] = a;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -2124,7 +2130,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_PHI;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
+    else if (op == IR_STACK_ADDR && (tier1_select_stack_object(function, a) || tier1_select_overflow_area(function, a)))
     {
         base.rule = TIER1_RULE_STACK_ADDRESS;
         base.immediate = a;
@@ -2136,6 +2142,12 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_SYMBOL_ADDRESS;
         base.immediate = a;
         base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_LIFETIME)
+    {
+        base.rule = TIER1_RULE_LIFETIME;
+        base.immediate = a;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;
@@ -2303,9 +2315,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
-    // By-value aggregates' ABI records and a variadic definition's incoming frame (#131, #789) aren't selected yet. Labels
-    // and br_indirect are: the CFG consumer defines the labels' symbols (tier1_emit_cfg.c).
-    if (error == TIER1_SELECT_OK && (function->parameter_passed != 0 || function->variadic))
+    // By-value aggregates' ABI records (#131, #789) aren't selected yet. Labels, br_indirect and a variadic definition's
+    // incoming frame are: the CFG consumer defines the labels' symbols and fills the register save area (tier1_emit_cfg.c).
+    if (error == TIER1_SELECT_OK && function->parameter_passed != 0)
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
     }
@@ -2670,15 +2682,17 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
     // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
     // plan before allocating records, even if earlier value locations are spilled. A memory operand through a frame
-    // object needs the frame's layout too, and an indirect jump's labels their symbols: the CFG consumer's.
-    if (error == TIER1_SELECT_OK && plan->function->label_count != 0)
+    // object needs the frame's layout too, an indirect jump's labels their symbols, and a variadic definition its register
+    // save area: the CFG consumer's.
+    if (error == TIER1_SELECT_OK && (plan->function->label_count != 0 || plan->function->variadic))
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
     }
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
-            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
+            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
+            tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
             tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE || plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;

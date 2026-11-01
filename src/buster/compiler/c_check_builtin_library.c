@@ -143,8 +143,10 @@ static void check_builtin_library_fold_call(TypeTable* types, CBuiltinLibraryFol
         CheckActionResult temporary = { 0 };
         converted[i] = check_action_operand(types, &operand, &temporary, 0);
         check_action_conversion(types, converted + i, conversions[i].type, 0, temporary.conversions, action->node);
+        // A discarded operand clang's evaluator can't take keeps the argument, and so the call, from folding
+        // (BUSTER_CHECK_DISCARDED_UNEVALUABLE: `(s, -3)`); folding would rebuild the value's flags and lose it.
         clean = temporary.diagnostic == CHECK_DIAG_NONE && converted[i].fault == CHECK_FAULT_NONE &&
-                (converted[i].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+                (converted[i].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
     }
     const CheckConstValues* values = action->const_values;
     const uint32_t position = action->source_position;

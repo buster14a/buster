@@ -37,10 +37,12 @@ no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
 with `IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c` checks actual C
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
-transactional refusal by the still-scalar SSA promoter, not successful
-promotion; ordinary corpus mode continues to require promotion. The shared
+the SSA promoter's transactional refusal of a function with vectors, not
+successful promotion, and promotion of one whose only SIMD values are masks,
+which the promoter takes (#179); ordinary corpus mode continues to require
+promotion. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
 vector/mask calls remain unsupported. Native selection of vectors is
@@ -393,6 +395,22 @@ inline so count mode can erase column writes and fill mode can erase null checks
 before general inlining decisions. Both scalar/vector paths use the same two
 instantiations, and all existing allocation, validation and rollback gates remain.
 
+### Slot lifetimes (#177)
+
+`lifetime` (void, `a` a slot, `b` 0 for `start` and 1 for `end`; printed
+`lifetime.void $N start` or `end`) marks where a frame slot's object's lifetime
+starts and ends. It reads and writes nothing: after a start the slot's bytes
+are indeterminate, and after an end nothing may access the slot until the next
+start. A slot without markers lives throughout its function. The lowering puts
+markers before the typed entries that `Tier0Function.lifetime_entries` names
+(the C driver's `--tier1` gives a block's objects its lifetime:
+[the frame guide](tier1-frame.md)'s "Slot sharing between objects"), and both
+verifiers check the slot and the edge by the slot rule. The optimizer keeps
+markers as roots and moves no load or store past them; SSA promotion drops a
+promoted slot's markers with its address and renumbers the others' slots. Tier
+1's selection gives them a rule with no records, and the CFG consumer colors
+the frame's objects by them (`tier1_emit_cfg_lifetimes`).
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |
@@ -477,12 +495,14 @@ The strict generated dynamic case uses integer expressions with VLA storage,
 calls and control flow, with memory and undefined-byte checking enabled.
 Handwritten fixtures separately cover floating memory and ordinary fixed
 objects surviving restores. Existing generated object/COPY tests remain intact.
-Mixed representation-copy execution has an independent consumer gap: the older
-COPY expansion uses ordinary integer loads, while the production interpreter
-diagnoses an undefined padding byte in such a load. A byte-representation
-transfer can legally copy padding without observing its value. That contract
-needs a separate repair; disabling undefined checks here would conceal real
-lifetime errors. The existing generator FP-to-integer/CVTT oracle boundary is
+Mixed representation-copy execution remains an independent consumer gap in the
+IR path: the typed stream's COPY expands to ordinary integer loads and stores
+(`ir_lower.c`), and the IR interpreter diagnoses an undefined padding byte in
+such a load. A byte-representation transfer can legally copy padding without
+observing its value; the typed interpreter now transfers the representation and
+its definedness directly (`docs/ir-tools.md`, "Execution contract"), while the
+IR expansion still needs the same repair. Disabling undefined checks here would
+conceal real lifetime errors. The existing generator FP-to-integer/CVTT oracle boundary is
 also excluded from the strict dynamic case. Neither gap is claimed resolved.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
