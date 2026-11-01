@@ -441,7 +441,7 @@ GNU C's vector types and the intrinsics' (`__m64`, `__m128`, `__m256i`, `__m512d
 (`BUSTER_TYPED_CLASS_VECTOR`, 14), of 4, 8, 16, 32 or 64 bytes. Like the memory classes, a value takes an integer depth and
 lives in that depth's slot (`Tier0Frame.vector_area`, 64 bytes per depth), its bytes from the slot's first, so that
 calls and the arms of `?:` need nothing of their own for it. The class doesn't carry the width (no class number is
-left below the vector path's 16: the masks took the last, below): each entry that makes or moves one has its own, and
+left below the vector path's 16: the masks took the last one): each entry that makes or moves one has its own, and
 `tier0_validate` follows each depth's width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than
 an entry's is refused, not miscompiled.
 
