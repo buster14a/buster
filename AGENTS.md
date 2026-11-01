@@ -1199,20 +1199,27 @@ designs and the compilers already built this way.
   with each handoff ([the binding handoff](docs/c-check-bindings.md), #336). `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
-  `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
+  `test-checker-driver --executable ./build/compiler [--part K/N]
+  [--lazy-system-headers]` and `test-checker-asm`
   check the driver and inline assembly against Clang (but for named UCNs,
-  which clang accepts and the driver refuses at their places, #452); `test-checker-corpus`
+  which clang accepts and the driver refuses at their places, #452; with
+  `--lazy-system-headers`, only the checks that pass the driver
+  `-flazy-system-headers`, since the others run the same either way, and
+  `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
+  `CheckDriverPart`); `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
+  `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
+  to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
@@ -1985,14 +1992,23 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
   no mwaitx), test-foreign 28.3 s on 2 CPUs rather than 6.5 s, and test-link
   0.8 s rather than 0.02 s (#526's first run). They come first, where nothing
   runs before them to wait for;
-- 4 or 2 for those whose processes keep that many busy for much of their run:
-  the parts that follow `BUSTER_PARALLEL_CPUS` (`test_process_cpus`), the
+- 4, 3 or 2 for those whose processes keep that many busy for much of their
+  run: the parts that follow `BUSTER_PARALLEL_CPUS` (`test_process_cpus`), the
   `--jobs` the step passes from it (test-preprocessor's fuzz workers,
-  test-c-testsuite's), and gdb's and perf's beside test-unwind's own. The 4s
-  come next, while the pool is empty;
-- the rest follow in the order of their times run alone, the longest first.
-  c-testsuite's self-test, about 7 s of waiting out its timeouts, is a command
-  of its own on one CPU, apart from the subset's four.
+  test-c-testsuite's), and gdb's and perf's beside test-unwind's own. They come
+  next, the most CPUs first, while the pool is emptiest. test-preprocessor's
+  cases, its repository's units and the SSA promotion of c-testsuite's programs
+  declared 4, 4 and 3 and kept about 2 busy on every machine (hosted, baseline,
+  TSan and the 9700X): they declare 2, which frees the rest for the commands of
+  one CPU;
+- the commands of one CPU follow, the longest first by their times on the hosted
+  runners and the 9700X. A long command that checks independent things runs as
+  parts, each a command of its own that the runner packs beside the others
+  (`--part K/N`): test-checker-driver as 4 (the list's longest, 197 s on a hosted
+  runner and 48 s on the 9700X, whose start late in the list ended the step) and
+  test-checker as 4 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
+  busy). c-testsuite's self-test, about 7 s of waiting out its timeouts, is a
+  command of its own on one CPU, apart from the subset's four.
 
 A heading declares the CPUs its command keeps busy for much of its run, which
 its CPU time over its time shows (the report gives both). Brief phases on more
