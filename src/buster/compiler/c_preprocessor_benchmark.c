@@ -6,8 +6,8 @@
 // The preprocessor benchmark: preprocesses translation units from scratch, as `-E` does without printing, with the
 // vectorized kernels and with their scalar twins, and reports per token what each costs.
 //
-// Usage: build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar] [--read-limit N,...]
-//        [-E's options] file...
+// Usage: build/compiler benchmark-preprocessor [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost]
+//        [--only vectorized|scalar] [--read-limit N,...] [-E's options] file...
 //        build/compiler benchmark-preprocessor --embed bytes
 //
 // Each pass preprocesses every file once with each implementation in turn, each run from nothing: a new intern table
@@ -26,7 +26,13 @@
 // --location-limit, which are ours; --buster-headers becomes ours' search) writing to /dev/null, a process per file, the median of as many runs, for scale.
 // --history-cost and --guard-cost replace the scalar twins with the vectorized kernels with their macro expansion
 // history deferred (PPOptions.defer_history, as -E and `parse` run them: a unit without diagnostics records none), or
-// without skipping the inclusions of guarded files (#120), whose output must be the same. --only
+// without skipping the inclusions of guarded files (#120), whose output must be the same. --spelling-cost replaces them
+// with the vectorized kernels whose printer gives every chunk's spellings by its general loop, token by token, as
+// before #649's pp_print_spellings (PPOptions.print_per_token), whose printed bytes must be the same (a digest of each
+// one's warm-up print, into memory). --markers runs and prints as -E without -P does: with the expansion starts its
+// line markers read and the history deferred (PPOptions.expansion_starts and defer_history, as the -E driver sets
+// them), the printing timed with its line markers; it doesn't go with --history-cost, which defers the history of
+// its second implementation alone, nor with --clang, which times `clang -E -P`. --only
 // runs one implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena
 // rather than maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each
 // pass runs each implementation with each of them in turn, which must all give the same output. It also reports the
@@ -100,6 +106,8 @@ struct PPBenchmarkSample
     // and --history-cost the second.
     uint64_t token_digest;
     uint64_t digest;
+    // With `print_digest`, of the printed text, from a print into memory after the timed one.
+    uint64_t print_digest;
 };
 
 static int pp_benchmark_open_counter(uint64_t config)
@@ -147,9 +155,10 @@ static void pp_benchmark_sort(uint64_t* values, uint64_t count)
 }
 
 // One pass of one implementation (its options) over the files: each preprocessed from nothing, its cache reading files
-// of up to `read_limit` bytes. Adds the files' input and output tokens to `tokens` (the first time).
-static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
-                              uint64_t* input_tokens, uint64_t* output_tokens)
+// of up to `read_limit` bytes, then printed (with line markers if `markers`), and with `print_digest` printed again into
+// memory for the text's digest. Adds the files' input and output tokens to `tokens` (the first time).
+static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** files, int file_count, int cycles_fd, int instructions_fd, bool markers,
+                              bool print_digest, PPBenchmarkSample* sample, uint64_t* input_tokens, uint64_t* output_tokens)
 {
     static InternTable table;
     static Preprocessor pp;
@@ -184,12 +193,25 @@ static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** 
         {
             sample->ticks[phase] += pp.ticks[phase];
         }
-        // Then -E -P's printing, timed apart (#124's throughput).
+        // Then -E -P's printing (or -E's, with `markers`), timed apart (#124's throughput).
         static FILE* null_stream;
         null_stream = null_stream != 0 ? null_stream : fopen("/dev/null", "w");
         const uint64_t printing = pp_benchmark_nanoseconds();
-        result = result && null_stream != 0 && pp_print(&pp, null_stream, false);
+        result = result && null_stream != 0 && pp_print(&pp, null_stream, markers);
         sample->print_nanoseconds += pp_benchmark_nanoseconds() - printing;
+        char* text = 0;
+        size_t text_length = 0;
+        FILE* memory = result && print_digest ? open_memstream(&text, &text_length) : 0;
+        result = result && (!print_digest || (memory != 0 && pp_print(&pp, memory, markers)));
+        if (memory != 0)
+        {
+            result = fclose(memory) == 0 && result;
+        }
+        for (size_t b = 0; result && b < text_length; b += 1)
+        {
+            sample->print_digest = (sample->print_digest ^ (uint8_t)text[b]) * 1099511628211ull;
+        }
+        free(text);
         for (uint32_t d = 0; d < pp.data_count; d += 1)
         {
             sample->input_bytes += pp.datas[d].prepared ? pp.datas[d].length : 0;
@@ -788,6 +810,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
     bool with_clang = false;
     bool history_cost = false;
     bool guard_cost = false;
+    bool spelling_cost = false;
+    bool with_markers = false;
     bool tables = false;
     bool defines = false;
     uint32_t only = 3;
@@ -830,6 +854,14 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--guard-cost") == 0)
         {
             guard_cost = true;
+        }
+        else if (strcmp(argument, "--spelling-cost") == 0)
+        {
+            spelling_cost = true;
+        }
+        else if (strcmp(argument, "--markers") == 0)
+        {
+            with_markers = true;
         }
         else if (strcmp(argument, "--defines") == 0)
         {
@@ -902,6 +934,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
+    // One control at a time; --markers defers every run's history, which --history-cost compares, and --clang times
+    // `clang -E -P`, without line markers.
+    valid = valid && (uint32_t)history_cost + (uint32_t)guard_cost + (uint32_t)spelling_cost <= 1 && !(with_markers && (history_cost || with_clang));
     const bool parsed = !tables && !defines && embed == 0 && valid && file_count != 0 && with_input != 0 && only != 0 &&
                         pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
     // clang's arguments (pp_clang_arguments): ours but --predefines, with ours' search for --buster-headers, whose links
@@ -923,7 +958,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     else if (!parsed || (with_clang && clang_arguments == 0))
     {
-        fprintf(stderr, "usage: %s [--clang] [--history-cost | --guard-cost] [--only vectorized|scalar] [--read-limit N] [-E's options] file...\n"
+        fprintf(stderr, "usage: %s [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost] [--only vectorized|scalar] [--read-limit N] "
+                        "[-E's options] file...\n"
                         "       %s --tables|--defines [--only vectorized|scalar] path... | --embed bytes\n", argv[0], argv[0]);
     }
     else
@@ -947,6 +983,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
         bool have_digest[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { false };
         uint64_t expected_token_digest = 0;
         bool have_token_digest = false;
+        uint64_t expected_print_digest = 0;
+        bool have_print_digest = false;
         const uint32_t variant_count = BUSTER_PP_BENCHMARK_IMPLEMENTATIONS * read_limit_count;
         for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
@@ -961,15 +999,19 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 {
                     continue;
                 }
-                // The second implementation: the scalar twins, or with --history-cost and --guard-cost the vectorized
-                // kernels with their history deferred or without skipping guarded files.
+                // The second implementation: the scalar twins, or with --history-cost, --guard-cost and --spelling-cost
+                // the vectorized kernels with their history deferred, without skipping guarded files, or with the
+                // printer's spellings token by token. With --markers, every run is -E's with its line markers.
                 PPBenchmarkSample sample;
                 PPOptions run = options;
-                const bool control = history_cost || guard_cost;
+                const bool control = history_cost || guard_cost || spelling_cost;
                 run.scalar = !control && implementation == 1;
-                run.defer_history = history_cost && implementation == 1;
+                run.defer_history = with_markers || (history_cost && implementation == 1);
+                run.expansion_starts = with_markers;
                 run.no_guard_skip = guard_cost && implementation == 1;
-                ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
+                run.print_per_token = spelling_cost && implementation == 1;
+                ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, with_markers, spelling_cost && pass == 0, &sample,
+                                        &input_tokens, &output_tokens);
                 const uint32_t compared = history_cost ? 0 : implementation;
                 if (!have_digest[compared])
                 {
@@ -979,6 +1021,17 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 else if (sample.digest != expected_digest[compared])
                 {
                     fprintf(stderr, history_cost ? "deferring the history changed the output token digest\n" : "the read limit changed the output token digest\n");
+                    ran = false;
+                }
+                // The warm-up's prints: --spelling-cost's two printers must print the same bytes.
+                if (spelling_cost && pass == 0 && !have_print_digest)
+                {
+                    expected_print_digest = sample.print_digest;
+                    have_print_digest = true;
+                }
+                else if (spelling_cost && pass == 0 && sample.print_digest != expected_print_digest)
+                {
+                    fprintf(stderr, "the printer's spellings token by token changed the printed text\n");
                     ran = false;
                 }
                 if (guard_cost && !have_token_digest)
@@ -1056,8 +1109,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const char* name = history_cost ? (implementation == 0 ? "history" : "deferred")
-                                   : guard_cost ? (implementation == 0 ? "guards" : "no-guards")
-                                                : names[implementation];
+                                   : guard_cost    ? (implementation == 0 ? "guards" : "no-guards")
+                                   : spelling_cost ? (implementation == 0 ? "spellings" : "per-token")
+                                                   : names[implementation];
                 if (read_limits_given)
                 {
                     printf("  %s, files of up to %u bytes read:\n", name, read_limits[limit]);
@@ -1116,7 +1170,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 pp_benchmark_sort(printing, BUSTER_PP_BENCHMARK_PASSES);
                 const double whole = (double)with_printing[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const uint64_t bytes = samples[implementation][limit][0].input_bytes;
-                printf("             -E -P with printing %.3f ms (printing %.3f ms): %.0f MB/s of input (%lu bytes), %.1f million output tokens/s\n", whole / 1e6,
+                printf("             %s with printing %.3f ms (printing %.3f ms): %.0f MB/s of input (%lu bytes), %.1f million output tokens/s\n",
+                       with_markers ? "-E" : "-E -P", whole / 1e6,
                        (double)printing[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, whole != 0 ? (double)bytes / whole * 1e3 : 0.0, (unsigned long)bytes,
                        whole != 0 ? (double)output_tokens / whole * 1e3 : 0.0);
                 printf("             history: %lu bytes total, %.1f bytes/TU mean, %lu bytes/TU maximum; temporary origins peak %lu bytes/TU\n",

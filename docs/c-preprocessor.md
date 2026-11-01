@@ -2344,6 +2344,18 @@ same size (setting its boundary bits), and isn't built; after
 `pp_print_spellings`, the copies are a quarter to a third of printing on that
 host, and the 9700X's numbers decide the next step.
 
+The 9700X job times the printer with `pp_print_spellings` against its general
+loop for every chunk (`benchmark-preprocessor --spelling-cost`), on `main.c`
+and the frozen `sqlite3.c`, with `-P` and with line markers (`--markers`, which
+runs and prints as the `-E` driver does), whose printed bytes must be the same.
+With line markers the general loop prints in the time the printer before
+`pp_print_spellings` took (on the Xeon: 145–151 against 146–149 ms on `main.c`,
+16.9–19.0 against 17.5–17.7 ms on `sqlite3.c`). With `-P` it printed 7–17%
+slower than that printer (80–84 against 86–91 ms on `main.c`), the cost of the
+loop's new shape to the rare chunks the general loop takes, so `-P`'s gain over
+it is that much smaller than it reads, and `main.c`'s `-P` history on main is
+the printer's before.
+
 `test-preprocessor` checks every 0–64-token prefix size with guarded input and
 output tails, arbitrary inactive gap bits, and zero/64/65/large lengths. Full
 printer fixtures move a pragma end through all 64 alignments, continue into

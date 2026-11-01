@@ -359,6 +359,11 @@ struct PPOptions
     bool defer_history;
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
+    // Give every chunk's spellings by the vector printer's general loop, token by token, as before pp_print_spellings
+    // (#649's control, benchmark-preprocessor --spelling-cost: the printed bytes are the same, and with line markers its
+    // time the printer's before it; with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon,
+    // docs/c-preprocessor.md).
+    bool print_per_token;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
     uint32_t location_limit;
     // The bytes of the windows a large file is lexed and refined in (pp_prepare_windows): 0 for BUSTER_PP_WINDOW_BYTES.
@@ -19635,6 +19640,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     // With trigraphs, any '?' in a fast spelling sends its chunk to the general loop, as a possible line splice does.
     const __mmask64 questions = trigraphs ? ~0ull : 0;
+    const bool per_token = pp->options.print_per_token;
     const __m512i hash_location = _mm512_set1_epi32((int)pp->hash_location);
     Scratch scratch = scratch_begin(0);
     const uint32_t* directory = pp_build_directory(pp, scratch.arena);
@@ -19707,7 +19713,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         // again.
         const uint64_t spare_mark = scratch.arena->length;
         const uint64_t internal = _mm512_mask_cmpge_epu8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
-        bool general = (written | internal) != 0 ||
+        bool general = per_token || (written | internal) != 0 ||
                        !pp_print_spellings(pp, directory, out_values + c, out_locations + c, identifiers, valid, records, spans, spellings, lengths, firsts, lasts);
         bool settled = false;
         uint64_t line_starts = 0;

@@ -991,6 +991,22 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
+      - name: Benchmark the printer on main.c and the frozen sqlite3.c, with line markers and without
+        # #649: -E -P's and -E's printing (--markers runs and prints as the -E driver does) by pp_print_spellings against
+        # the printer's general loop for every chunk (--spelling-cost), which with line markers prints in the time the
+        # printer before #649 took (with -P, it printed 7-17% slower than that printer on an AVX-512 Xeon: main.c's
+        # history in the step above is -P's before). About 10 s.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          sqlite=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost "${sqlite[@]}"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost "${sqlite[@]}"
+
       - name: Benchmark the directive tables on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
         run: |
