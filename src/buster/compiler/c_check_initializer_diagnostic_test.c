@@ -51,6 +51,8 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
             memset(prefix, 0xa5, 64);
             memset(scratch_prefix, 0x5a, 64);
             uint32_t declaration = BUSTER_CHECK_NONE;
+            // The hard-error oracle's own bound: warnings can now follow an unrelated earlier report (#992),
+            // so only the diagnosed initializer error must still precede the unit's first report.
             uint32_t cutoff = parser.tokens.count;
             for (uint32_t token = 0; token < input.token_count && declaration == BUSTER_CHECK_NONE; token += 1)
             {
@@ -99,9 +101,9 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
                            complete_warnings.token == diagnostic.token && output.length == 64 && scratch.length == 64;
             for (uint32_t i = 1; ordered && i < warnings.count; i += 1)
             {
-                ordered = warning_tokens[i] < cutoff && warning_tokens[i] > warning_tokens[i - 1];
+                ordered = warning_tokens[i] > warning_tokens[i - 1];
             }
-            check_test_expect(test, ordered, "bounded diagnostic sink retains all original warning tokens in source order before later errors");
+            check_test_expect(test, ordered, "bounded diagnostic sink retains all original warning tokens in source order");
             if (warning_count != 0)
             {
                 CheckInitWarningSink small = { .tokens = warning_tokens, .capacity = warning_count, .count = 1 };
@@ -163,7 +165,8 @@ static void check_init_test_diagnostics(CheckTest* test, const char* clang)
     check_init_test_diagnostic_source(test, "struct S{int *p;} a={3};\nint f(void){return missing;}\n", 1, true, false);
     check_init_test_diagnostic_source(test, "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} a={f};\nint g(void){return *1;}\n", 1, false, 0);
     check_init_test_diagnostic_source(test, "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} a={f};\nint g(void){return missing;}\n", 1, true, 0);
-    check_init_test_diagnostic_source(test, "int f(void){return *1;}\nint a[1]={1,2};\n", BUSTER_CHECK_NONE, false, false);
+    // The excess-element warning survives an unrelated error earlier in the unit (#992).
+    check_init_test_diagnostic_source(test, "int f(void){return *1;}\nint a[1]={1,2};\n", BUSTER_CHECK_NONE, false, true);
     check_init_test_diagnostic_source(test, "int a[1]={1};\nint f(void){return *1;}\n", BUSTER_CHECK_NONE, false, false);
     check_init_test_diagnostic_source(test, "int a[1]={1,*1};\n", BUSTER_CHECK_NONE, false, false);
     check_init_test_diagnostic_source(test, "int a[1]={1,2};int b[1]={3,4};\nint f(void){return missing;}\n", BUSTER_CHECK_NONE, true, 2);

@@ -615,7 +615,11 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
                     expected = CHECK_DATA_UNSUPPORTED;
                     break;
                 case 12:
+                    // A source-less undefined local is promoted to a global at publish now (#992); a local
+                    // already defined by a different unit's batch still refuses — no fixup reaches it.
                     test_link.link.symbols.flags[map[3]] = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL;
+                    test_link.link.symbols.source[map[3]] = BUSTER_LINK_SOURCE_PROGRAM;
+                    test_link.link.symbols.atom[map[3]] = link_add_atom(&test_link.link, BUSTER_LINK_CLASS_BSS, 2, 4, 0, 1);
                     expected = CHECK_DATA_SYMBOL;
                     break;
                 case 13:
@@ -801,7 +805,7 @@ static void check_data_test_composite(CheckTest* test, TypeTable* types)
             .object = 7,
         };
         objects[4] = (CheckDataObject){
-            .type = new_types[2],
+            .type = new_types[0],
             .object = 8,
             .initializer = 3,
             .token = 14,
@@ -966,7 +970,8 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
     const TypeId pointer = type_pointer(types, BUSTER_TYPE_UCHAR);
     const TypeId pointers = type_array(types, pointer, SIZE / 8);
     CheckDataTestLink fixture;
-    const bool ready = check_data_test_open(&fixture, COUNT + 1);
+    // One extra atom: the different-unit local the late binding failure targets (#992).
+    const bool ready = check_data_test_open(&fixture, COUNT + 2);
     check_test_expect(test, ready, "static-data retained-payload fixture allocation");
     if (ready)
     {
@@ -1063,7 +1068,7 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
             for (uint32_t failure = 0; fits && failure < 4; failure += 1)
             {
                 memcpy(table_copy, fixture.tables.base, fixture.tables.length);
-                const Link before = fixture.link;
+                Link before = fixture.link;
                 const uint32_t atoms = fixture.link.atoms.capacity;
                 const uint8_t flags = fixture.link.symbols.flags[map[COUNT + 1]];
                 const uint64_t byte_capacity = fixture.bytes.capacity;
@@ -1073,7 +1078,13 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
                 }
                 else if (failure == 1)
                 {
+                    // A source-less undefined local is promoted to a global at publish now (#992); a local
+                    // another unit's batch defined — its atom's unit differs from this emit's 11 — still
+                    // refuses, after every capacity check has passed.
                     fixture.link.symbols.flags[map[COUNT + 1]] = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL;
+                    fixture.link.symbols.source[map[COUNT + 1]] = BUSTER_LINK_SOURCE_PROGRAM;
+                    fixture.link.symbols.atom[map[COUNT + 1]] = link_add_atom(&fixture.link, BUSTER_LINK_CLASS_BSS, 6, 8, 0, 1);
+                    before = fixture.link;
                     memcpy(table_copy, fixture.tables.base, fixture.tables.length);
                 }
                 else if (failure == 2)
@@ -1139,6 +1150,8 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
                 }
                 fixture.link.atoms.capacity = atoms;
                 fixture.link.symbols.flags[map[COUNT + 1]] = flags;
+                fixture.link.symbols.atom[map[COUNT + 1]] = 0;
+                fixture.link.symbols.source[map[COUNT + 1]] = BUSTER_LINK_SOURCE_NONE;
                 fixture.bytes.capacity = byte_capacity;
             }
         }
