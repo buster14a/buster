@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Temporary workspace transport for #1054; removed before the implementation PR.
+name: Issue 1054 workspace
+on:
+  push:
+    branches: [chatgpt/1054-tier1-outcomes]
+    paths: [.github/workflows/issue-1054-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive tracked source without Git credentials or build products
+        run: git archive --format=tar HEAD > "$RUNNER_TEMP/buster-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1054-source
+          path: ${{ runner.temp }}/buster-source.tar
+          retention-days: 1
