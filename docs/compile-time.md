@@ -526,6 +526,116 @@ than this PR's merge; their medians' median):
   wall time and 0.2 M instructions. The comparison is no A/B of one build,
   but its differences are larger than that spread.
 
+### Pages held for nothing: the parse's tail, the graph, the rare columns, the scratch (#628)
+
+On main `92252c3` (after the section above), `-c` of the frozen `sqlite3.c` on
+this repository's scalar-host VM (`--lanes 1`) peaked at 379.6 MB. The peak
+came at two moments almost alike: at the end of the reader (367.8 MB, its own
+arena still mapped) and in the backend (379.6 MB). Measured page by page
+(`mincore` for what was mapped, `MADV_DONTNEED` for what that freed), much of
+what both held was pages that no stage would read again, or that held no
+entry:
+- **The parse's tail.** The parse's temporaries take the checker's scratch
+  first, then the reader takes their pages again for its own columns, as far
+  as those reach: 77 MB of `sqlite3.c`'s. K4's stack in memory, last of the
+  parse's buffers and touched at its slots' ends, kept three huge pages at 90
+  to 96 MB, and the statement pass's levels one at 82 MB. The buffers are now
+  pushed in the order of where they're touched: K4's slots first, the levels
+  and the twin statements' records last. The vector path leaves the statements'
+  13.9 MB alone, so that on the 9700X nothing the parse touches lies past the
+  reader's columns (on this VM, where the twins run, the statements' first
+  pages still do).
+- **The expression graph.** Its 13 columns have room for a node a token, of
+  which `sqlite3.c`'s graph holds 42% (323,557 of 774,038). Pushed one after
+  another, each column's unused tail shared its huge pages with the next
+  column's used start: 39 MB of huge pages for 17 MB of nodes. Each column of
+  a huge page or more now starts one (`check_graph_column`), and the byte
+  columns come first, beside the reader's output columns' end: 26 MB.
+- **The reader's rare columns.** Its arena of rare columns had them all in huge
+  pages but the scope stacks and the enumeration constants' values. Most take
+  a few hundred spread tokens on `sqlite3.c`, so that each took every huge page
+  of its column: 52 MB for under 4 MB of entries. The columns that only the
+  tokens writing them read (tags, sizeof types, specifiers, designators, the
+  initializers' finishes, the parameter shapes) are now in the arena's base
+  pages, where they take only the pages written: 1,880 more faults, and 15 MB
+  less at the reader's end. Those that the walks read at every token of a kind,
+  where nothing was written, stay in huge pages, whose reads take the huge zero
+  page: in base pages, they faulted 9,600 pages on reads alone.
+- **The sparse marks.** The expressions' walk's classes read seven sparse
+  columns at every token, 16 at a time, to say whether one has an entry there
+  (`check_input_expression_sparse`): 28 bytes a token. A bit a token now says it
+  (`CheckInputReader.sparse_marks`), kept by every write of those columns, and
+  the classes' vector path reads its word for 64 tokens. The cached constants,
+  the `va_arg` calls, the designators and the variable arrays' bounds, which
+  the walk then tests only where a mark says, move to the base pages too. The
+  scalar twin reads the columns, and counts every mark that they contradict
+  (`CheckInput.visit_misses`, which the tests require to be 0). On this VM only
+  the twin runs (`BUSTER_SCALAR_PATH`), which reads the four columns at every
+  token: 2,600 more faults on the zero page here, and none on the 9700X.
+- **The scratch through the backend.** `check_program` takes 51 MB of the
+  scratch, and the backend after it 24 MB, while their outputs and the
+  lowering take pages of their own. The 26 MB past `check_program`'s columns,
+  the parse's and the reader's, stayed resident through the backend's peak.
+  `check_program` now gives them back after it pushes its columns
+  (`arena_discard`, `lane.c`), which costs no fault: no later stage reaches
+  them.
+
+On this VM, with the objects the same bytes by both paths (three runs of each,
+which agree within 40 KB; the reader's end is the high-water mark when
+`check-input` ends, with its arena of rare columns still mapped):
+
+| build | peak RSS | at the reader's end | page faults |
+| --- | ---: | ---: | ---: |
+| main `92252c3` | 379,600 KB | 367,808 KB | 5,186 |
+| the parse's buffers, the graph's columns and the rare columns | 367,292 KB | 340,256 KB | 7,008 |
+| and `check_program`'s discard | 340,796 KB | 340,540 KB | 7,005 |
+| and the sparse marks | 340,784 KB | 336,160 KB | 9,620 |
+
+- **The parse's buffers and the graph's columns** took 1.4 and 10.3 MB off
+  the reader's end in a measurement of each alone, and **the rare columns**
+  15 MB. The backend's peak, 27 MB above the reader's end then, was the
+  compile's.
+- **The discard** takes the backend's peak below the reader's end, which sets
+  the compile's again, within 0.3 MB of the end of `check_program`.
+- **The sparse marks** take 4.4 MB more off the reader's end, the four columns'
+  huge pages, and the end of `check_program` is the compile's peak, 4.6 MB
+  above it. Here the twin's reads of the four columns are 2,600 faults on the
+  zero page, which the vector path doesn't make.
+
+**On the 9700X.** The `changes` job now selects the compile-time attribution
+when the checker's reader, graph, parser, program or arena sources change, so
+this PR's job ran the step's own `measure-compile --runs 11` on the frozen
+`sqlite3.c` with `-march=znver5`. Main's latest successful scheduled run of the
+same step (`ebee03e`) against this PR's merge (`f74aa39f`):
+
+| build | wall | user | system | peak RSS | check-input | check-expressions | check-program | lower |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| main `ebee03e` | 134.574 ms | 111.333 ms | 22.938 ms | 401,724 KiB | 58.902 ms | 14.033 ms | 13.824 ms | 14.125 ms |
+| this PR `f74aa39f` | 117.485 ms | 100.340 ms | 16.720 ms | 325,528 KiB | 49.142 ms | 14.281 ms | 10.066 ms | 13.565 ms |
+
+The kernel's cycles (`perf stat`'s `cycles:k`) were 110,131,476 on main and
+93,768,014 on this PR. Its minor faults rose from 2,139 to 5,098, the rare
+columns' base pages and the discard's first touches, for the 76,196 KiB lower
+peak. The PR's merge includes main's later checker changes, so this table is
+the final branch against main's latest successful scheduled run; the VM table
+above is the isolated PR change.
+
+What the reader's end still holds for little, besides the scratch and the
+front end, which their first users fill (the parse's temporaries, then the
+reader's columns, to 77 MB of `sqlite3.c`'s scratch):
+- **The `NONE` output columns.** Twelve of the reader's output columns hold
+  under 3% entries on `sqlite3.c` (`label_targets` 797, `control_owners` 3,012,
+  `declaration_bodies` 16,655, `case_ranges` none), but spread over every page,
+  so that each takes its 2.8 MB whatever its pages: 33 MB. The walk reads most
+  of them back by token (the initializers' and the parameters' 12 to 18 times),
+  so that records in their place, written as the walk goes, need its lookups to
+  change, and #592's passes' too.
+- **The graph's leaves.** Their 96-byte values take 14 MB for 144,720 leaves, of
+  which the identifiers' carry little but a type and an object: columns and
+  payload rows, as the stream's values have, would take about 8 MB less.
+- **The byte columns.** Twelve zero-default output columns of a byte a token,
+  8.3 MB, written at declarations, most of whose bits would fit one byte.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved

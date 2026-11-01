@@ -194,6 +194,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             reader->vla_bounds[first] = index + 1;
             check_input_rare_claim(reader, &reader->vla_ends[end]);
             reader->vla_ends[end] = index + 1;
+            check_input_sparse_mark(reader, end, true);
         }
     }
     if (valid && *definition == BUSTER_CHECK_NONE)
@@ -284,6 +285,7 @@ static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint
                         reader->vla_bounds[begin] = identity + 1;
                         check_input_rare_claim(reader, &reader->vla_ends[close]);
                         reader->vla_ends[close] = identity + 1;
+                        check_input_sparse_mark(reader, close, true);
                     }
                 }
                 if (valid)
