@@ -495,6 +495,30 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             0,
             false,
         },
+        {
+            // The leaves of the system builtins (#148): lzcnt_u16 of every 16-bit edge, rdtsc's order, the fences, a line
+            // flushed and read again, and MXCSR stored, its rounding changed, an inexact sum rounded by it, and restored.
+            "x86-rest-system-leaves",
+            "int tested(int n){unsigned h=2166136261u;\n"
+            "static const unsigned short v[]={0,1,2,3,0x7f,0x80,0xff,0x100,0x7fff,0x8000,0xffff,0x1234};"
+            "for(int i=0;i<12;i++){unsigned short r=__builtin_ia32_lzcnt_u16((unsigned short)(v[i]^(unsigned short)(n&i)));FOLD(r);}\n"
+            "unsigned long long t0=__builtin_ia32_rdtsc(),t1=__builtin_ia32_rdtsc();int ordered=t1>=t0;FOLD(ordered);\n"
+            "__builtin_ia32_lfence();__builtin_ia32_mfence();__builtin_ia32_sfence();\n"
+            "static int line[16];line[n&15]=n;__builtin_ia32_clflush(line);__builtin_ia32_mfence();int back=line[n&15];FOLD(back);\n"
+            "unsigned csr=__builtin_ia32_stmxcsr();unsigned bits=csr&0xffc0u;FOLD(bits);volatile float a=1.0f,b=(float)(n|1)*1e-8f;"
+            "for(unsigned mode=0;mode<4;mode++){__builtin_ia32_ldmxcsr((csr&~0x6000u)|mode<<13);float s=a+b,d=a-b;FOLD(s);FOLD(d);"
+            "unsigned now=__builtin_ia32_stmxcsr()&0x6000u;FOLD(now);}__builtin_ia32_ldmxcsr(csr);\n"
+            "return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // xsetbv, which only the kernel may run: compiled and linked against clang's build of the same.
+            "x86-rest-xsetbv",
+            "int tested(int n){if(n==12345)__builtin_ia32_xsetbv((unsigned)n,(unsigned long long)n<<33|7);return n;}",
+            0,
+            true,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

@@ -1284,6 +1284,12 @@ the existing families or of new ones:
   (`vcvtps2ph`, `vcvtps2ph256`, 0 to 255), each the immediate's whole byte, by
   VEX forms that require AVX. `x86_semantics.c` gained their VEX forms'
   effects, and Tier 0's legacy list SHA1RNDS4.
+- the system builtins whose instructions take fixed registers or memory, as
+  per-unit leaves (`c_builtin_x86_helpers.c`): `rdtsc` (`__rdtsc`'s records),
+  `lzcnt_u16` (BSR's index xored with 15, 16 for 0), the fences (`lfence`,
+  `mfence`, `sfence`), `clflush`, `ldmxcsr` and `stmxcsr` (through the leaf's
+  red zone) and `xsetbv`, which only the kernel may run and whose fixture only
+  compiles and links.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

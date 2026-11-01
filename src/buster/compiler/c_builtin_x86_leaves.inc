@@ -12,6 +12,15 @@
       vectors, extensions, branch_count, branch, target
 
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_RDTSC, BUSTER_CBUILTIN_X86_HELPER("__rdtsc", 0, true, cbuiltin_x86_helper_rdtsc, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_RDTSC_BUILTIN, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_rdtsc", 0, true, cbuiltin_x86_helper_rdtsc, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_LZCNT16, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_lzcnt_u16", 1, true, cbuiltin_x86_helper_lzcnt16, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_LFENCE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_lfence", 0, false, cbuiltin_x86_helper_lfence, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MFENCE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_mfence", 0, false, cbuiltin_x86_helper_mfence, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_SFENCE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_sfence", 0, false, cbuiltin_x86_helper_sfence, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_CLFLUSH, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_clflush", 1, false, cbuiltin_x86_helper_clflush, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_LDMXCSR, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_ldmxcsr", 1, false, cbuiltin_x86_helper_ldmxcsr, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_STMXCSR, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_stmxcsr", 0, true, cbuiltin_x86_helper_stmxcsr, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XSETBV, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_xsetbv", 2, false, cbuiltin_x86_helper_xsetbv, BUSTER_X86_FEATURE(XSAVE)))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_PAUSE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XGETBV, "__builtin_ia32_xgetbv", sizeof("__builtin_ia32_xgetbv") - 1, 1, true, cbuiltin_x86_helper_xgetbv,
                                      BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false, false)
