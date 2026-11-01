@@ -2819,8 +2819,8 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
 }
 
 // Reads --time-stages' report in `text` (check_clock_read): whether it has every row once, the stages adding up to the
-// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), and the process's lines.
-// Each stage's milliseconds go to `stages` (by CheckStage).
+// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), the reader's expressions' walk
+// once within the reader's stage (#1038), and the process's lines. Each stage's milliseconds go to `stages` (by CheckStage).
 static bool check_test_driver_time_report(const char* text, double* stages)
 {
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
@@ -2832,7 +2832,8 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
-    bool valid = check_clock_read(text, stages, phases, &total, NULL);
+    double walk = -1;
+    bool valid = check_clock_read(text, stages, phases, &total, &walk, NULL);
     double sum = 0;
     double phase_sum = 0;
     for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
@@ -2847,6 +2848,8 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     {
         valid = strstr(text, process[p]) != NULL;
     }
+    // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too.
+    valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL;
     const double stage_error = sum > total ? sum - total : total - sum;
     const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
     return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
@@ -3000,12 +3003,15 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks") != NULL;
+    // The reader's expressions' walk (#1038), under its stage.
+    const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
+    check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk under its stage");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
@@ -5748,6 +5754,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_array_alignment(&test, clang, executable, directory);
             check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
+            check_test_driver_tier1_gvn(&test, clang, executable, directory);
             check_test_driver_tier1_divide(&test, clang, executable, directory);
             check_test_driver_tier1_labels(&test, clang, executable, directory);
             check_test_driver_tier1_variadic(&test, clang, executable, directory);

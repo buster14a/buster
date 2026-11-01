@@ -959,6 +959,12 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                                 phase == 2 && extra[index].position != located ? extra[index].position :
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
+                    // An x86 builtin's call whose hard immediate constraint failed: clang's message at the call's begin,
+                    // published where the report's own token puts it (#1066).
+                    char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
+                    uint32_t x86_location = BUSTER_CHECK_NONE;
+                    const char* x86_message = phase == 1 ? check_diagnostic_x86_hard(input, stream, stream->reports + index, x86_text, sizeof(x86_text), &x86_location) :
+                                                           NULL;
                     if (source != BUSTER_CHECK_NONE)
                     {
                         const uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
@@ -1073,6 +1079,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
                                 "unsupported semantic '#pragma %.*s%s%.*s' directive",
                                 (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
+                        else if (x86_message != NULL && x86_location < count)
+                        {
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, "%s", x86_message);
                         }
                         else
                         {
@@ -2320,9 +2330,12 @@ struct CheckDriverCommand
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
-    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize and --tier1-no-lifetimes.
+    // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
+    // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
+    // --tier1-no-lifetimes.
     bool tier1;
     bool tier1_no_rematerialize;
+    bool tier1_gvn;
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
@@ -2480,6 +2493,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                          repairing ? repair.original_end : checking->tokens.count,
                                                          lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0);
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
+            if (stage_clock != NULL)
+            {
+                stage_clock->expression_ticks += input.expression_ticks;
+            }
             if (input.resource)
             {
                 fprintf(errors, "fatal error: checker input capacity exhausted\n");
@@ -3083,6 +3100,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // function Tier 0 compiled with the step that refused it, on standard error; --tier1-no-rematerialize compiles Tier
     // 1's functions spilling the values it would recompute (#178's comparison: the report's spills and frames).
     bool tier1_report = false;
+    bool tier1_gvn = false;
     // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
     // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
     const char* short_enums = NULL;
@@ -3213,6 +3231,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
         {
             lanes.tier1_no_rematerialize = true;
+        }
+        else if (strcmp(arguments[i], "--tier1-gvn") == 0)
+        {
+            lanes.tier1_gvn = true;
+            tier1_gvn = true;
         }
         else if (strcmp(arguments[i], "--tier1-no-lifetimes") == 0)
         {
@@ -3352,6 +3375,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .libraries = &libraries,
         .tier1 = lanes.tier1,
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
+        .tier1_gvn = lanes.tier1_gvn,
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
@@ -3375,7 +3399,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
     {
@@ -3390,10 +3414,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
-    else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || lanes.tier1_no_lifetimes) && !lanes.tier1)
+    else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
     {
         fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
-                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : "--tier1-no-lifetimes");
+                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" :
+                                                    tier1_gvn ? "--tier1-gvn" : "--tier1-no-lifetimes");
     }
     else if (lanes.tier1 && source_rows)
     {

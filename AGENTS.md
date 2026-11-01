@@ -398,7 +398,10 @@ designs and the compilers already built this way.
   them natively against clang -O0's build. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
-  bit builtins' and `expect`'s; `test-checker --program-align` runs them. The
+  bit builtins' and `expect`'s; `test-checker --program-align` runs them, and
+  `classify_type`, `eh_return_data_regno`, `dwarf_cfa`, `launder` and the
+  generic leaves (`debugtrap`, `memcpy_inline` and the others: the guide's
+  "Generic builtins of clang's own checks and of an instruction or two"). The
   signaling NaNs and the `_Float16` and `__float128` constants (`nans`,
   `nanf16`, `inff128` and the others) are floating builtins, their NaNs' bits
   exact in static data and code (`check_action_nan_bits`); `test-checker
@@ -654,6 +657,19 @@ designs and the compilers already built this way.
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
   process.
+  Each executable it links then writes itself with the backend's tables built
+  (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
+  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize` and
+  `unwind_initialize` write is in a section of its own (`buster_baked`:
+  `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
+  module's statics, baked in the checker's unit, the C driver's), so a compile
+  starts with them built; the file's build ID is recomputed over the baked
+  bytes. A new table those initializers write goes there too: the bake fails
+  the build when they write anything outside it, including when its own
+  tracking arrays fill. PIEs (the sanitizers' builds) and
+  `BUSTER_BAKE=0` build them when they run; `test-baked-tables` checks either
+  kind and fails, rather than skips, when the section is missing (the
+  compile-time guide's "Baked tables").
   `./build.sh shifts DIRECTORY SOURCE SHIFT...` also links the same objects
   into `DIRECTORY/compiler-SHIFT` for each SHIFT, with that many bytes of
   padding in `.text` before SOURCE's code, for `time-runs` to compare builds
@@ -1223,7 +1239,10 @@ designs and the compilers already built this way.
   `CheckOptions.level_order`, in stable dependency levels), with scalar
   barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
-  `c_check_binding.c` publishes each use's retained answer from those events
+  its expression graph's walk has a vector path, the coded walk
+  (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
+  each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
+  "The coded walk"); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
@@ -1503,6 +1522,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-preprocessor-fuzz --std c23
 ./build/compiler benchmark-preprocessor-fuzz
 ./build/compiler test-x86-encoder
+./build/compiler test-baked-tables
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-branch-sizing --cross-check
 ./build/compiler benchmark-branch-sizing
@@ -5114,12 +5134,11 @@ vectorized kernels with the printer's spellings by `pp_print_spellings`
 (`spellings`) and by its general loop for every chunk (`per-token`,
 `PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
 warm-up print, with markers or without, must give the same bytes, whatever the
-implementation and the read limit. With line markers the
-general loop prints in the time the printer before #649 took; with `-P`, it
-printed 7–17% slower than that printer on an AVX-512 Xeon and 6% slower a
-token on the 9700X, so `main.c`'s `-P` history is `-P`'s before. The 9700X
-job runs both, with and without `--markers`, on `main.c` and the frozen
-`sqlite3.c` where it measures the preprocessor, about 13 s.
+implementation and the read limit. Both take the printer's own copies, its
+line markers' batches among them, so the two rows differ in the spellings
+alone, and each row's history in the job is its before. The 9700X job runs
+both, with and without `--markers`, on `main.c` and the frozen `sqlite3.c`
+where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under

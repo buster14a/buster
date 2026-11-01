@@ -5,30 +5,36 @@
 static bool pp_test_print_offsets(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mapping = mmap(0, 4 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* mapping = mmap(0, 6 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool result = mapping != MAP_FAILED && mprotect(mapping, page, PROT_READ | PROT_WRITE) == 0 &&
-                  mprotect(mapping + 2 * page, page, PROT_READ | PROT_WRITE) == 0;
+                  mprotect(mapping + 2 * page, page, PROT_READ | PROT_WRITE) == 0 && mprotect(mapping + 4 * page, page, PROT_READ | PROT_WRITE) == 0;
     uint32_t checked = 0;
     for (uint32_t count = 0; result && count <= 64; count += 1)
     {
         uint32_t* lengths = (uint32_t*)(mapping + page) - count;
         uint16_t* offsets = (uint16_t*)(mapping + 3 * page) - count;
-        for (uint32_t pattern = 0; result && pattern < 5; pattern += 1)
+        // Each token's gap: a byte for each bit of `ones` (past `count` too, which mustn't count), and with line
+        // markers' counts 0 to BUSTER_PP_PRINT_GAP more.
+        uint8_t* breaks = mapping + 5 * page - count;
+        for (uint32_t pattern = 0; result && pattern < 14; pattern += 1)
         {
-            const uint64_t gaps = pattern == 0 ? 0 : pattern == 1 ? ~0ull : pattern == 2 ? 0xaaaaaaaaaaaaaaaaull :
-                                  pattern == 3 ? 0x8000000100000001ull : 0x75b6d1028ac94e3full;
+            const uint32_t shape = pattern % 7;
+            const bool counted = pattern >= 7;
+            const uint64_t ones = shape == 0 ? 0 : shape == 1 || shape == 5 ? ~0ull : shape == 2 ? 0xaaaaaaaaaaaaaaaaull :
+                                  shape == 3 ? 0x8000000100000001ull : 0x75b6d1028ac94e3full;
             uint32_t expected = 0;
             for (uint32_t i = 0; i < count; i += 1)
             {
-                lengths[i] = pattern == 0 ? 1 : pattern == 1 ? 64 : 1 + (i * 17 + count * 13 + pattern * 7) % 64;
+                lengths[i] = shape == 0 ? 1 : shape == 1 || shape == 5 ? 64 : 1 + (i * 17 + count * 13 + shape * 7) % 64;
+                breaks[i] = shape == 5 ? BUSTER_PP_PRINT_GAP : (uint8_t)((i * 5 + count + shape) % (BUSTER_PP_PRINT_GAP + 1));
                 offsets[i] = 0xfeed;
             }
             offsets[-1] = 0x19cd;
-            const uint32_t total = pp_print_offsets(lengths, count, gaps, offsets);
+            const uint32_t total = pp_print_offsets(lengths, count, ones, counted ? breaks : 0, offsets);
             for (uint32_t i = 0; result && i < count; i += 1)
             {
                 result = offsets[i] == expected;
-                expected += lengths[i] + (uint32_t)((gaps >> i) & 1);
+                expected += lengths[i] + (uint32_t)((ones >> i) & 1) + (counted ? breaks[i] : 0);
             }
             result = result && total == expected && offsets[-1] == 0x19cd;
             const uint32_t invalid[] =
@@ -42,7 +48,7 @@ static bool pp_test_print_offsets(void)
                 const uint32_t at = count / 2;
                 const uint32_t saved = lengths[at];
                 lengths[at] = invalid[value];
-                result = pp_print_offsets(lengths, count, gaps, offsets) == 0 && offsets[-1] == 0x19cd;
+                result = pp_print_offsets(lengths, count, ones, counted ? breaks : 0, offsets) == 0 && offsets[-1] == 0x19cd;
                 lengths[at] = saved;
             }
             checked += 1;
@@ -50,9 +56,10 @@ static bool pp_test_print_offsets(void)
     }
     if (mapping != MAP_FAILED)
     {
-        munmap(mapping, 4 * page);
+        munmap(mapping, 6 * page);
     }
-    printf("printer prefixes: %u batches, %s (guarded tails, inactive gaps, 0/64/65/large lengths)\n", checked, result ? "pass" : "FAIL");
+    printf("printer prefixes: %u batches, %s (guarded tails, inactive bits, gaps of one byte and of counts to %u, 0/64/65/large lengths)\n", checked,
+           result ? "pass" : "FAIL", BUSTER_PP_PRINT_GAP);
     return result;
 }
 
@@ -136,6 +143,121 @@ static uint64_t pp_print_test_random(uint64_t* state)
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     return z ^ (z >> 31);
+}
+
+// The line markers' batch (pp_print_place_lines, #649) against the scalar printer: random sources of lines of 1 to 6
+// tokens after 0 to 11 blank lines (jumps of 1 to 12, past pp_print_place's 8), comments of several lines, includes
+// of a header with lines of its own and a #line, #line directives with and without a name, invocations and
+// expansions over several lines, line splices before a line's first token, pragmas and null directives, after 0 to
+// 64 tokens of padding, so that the line starts the batch can't place fall at every place in a chunk. Printed by both
+// printers, with markers (expansion starts, as -E runs) and with -P, byte for byte.
+static bool pp_test_print_lines(const char* directory)
+{
+    char path[PATH_MAX];
+    char header[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/printer-lines.c", directory);
+    snprintf(header, sizeof(header), "%s/printer-lines.h", directory);
+    bool result = pp_test_write_file(header, "#define LINES(a, b) a +\\\n b\n#define TWO first\\\n second\nh1 h2 h3\n\n\n\nh4 /* a\nb */ h5\n#line 900\nh6\n\n\n\n\n\n\n\n\n\n\nh7\n");
+    // Among them a spelling past 64 bytes and one with a line splice, which stop a batch whose lines are placed.
+    static const char* const tokens[] =
+    {
+        "x", "y1", "+", "(", ")", "12", ".5", "\"s\"", "LINES(p, q)", "TWO", "'c'", "->", "a_longer_identifier", "__LINE__",
+        "\"a string literal of more than sixty-four bytes, which the copies take token by token\"", "\"spl\\\niced\"",
+    };
+    uint64_t state = 649;
+    uint32_t runs = 0;
+    for (uint32_t alignment = 0; result && alignment <= 64; alignment += 1)
+    {
+        FILE* source = fopen(path, "w");
+        result = source != 0;
+        if (source != 0)
+        {
+            fputs("#include \"printer-lines.h\"\n", source);
+            for (uint32_t i = 0; i < alignment; i += 1)
+            {
+                fputs("; ", source);
+            }
+            fputc('\n', source);
+            for (uint32_t line = 0; line < 600; line += 1)
+            {
+                const uint32_t choice = (uint32_t)(pp_print_test_random(&state) % 100);
+                if (choice < 30)
+                {
+                    for (uint64_t blank = pp_print_test_random(&state) % 12; blank != 0; blank -= 1)
+                    {
+                        fputc('\n', source);
+                    }
+                }
+                else if (choice < 34)
+                {
+                    fputs("/* a comment\n over\n three lines */ ", source);
+                }
+                else if (choice < 37)
+                {
+                    fputs("#include \"printer-lines.h\"\n", source);
+                }
+                else if (choice < 39)
+                {
+                    fprintf(source, "#line %u%s\n", (uint32_t)(1 + pp_print_test_random(&state) % 5000), choice == 38 ? " \"renamed.c\"" : "");
+                }
+                else if (choice < 42)
+                {
+                    fputs("LINES(\n first,\n\n second) after\n", source);
+                }
+                else if (choice < 44)
+                {
+                    fputs(choice == 42 ? "\\\nspliced_start x\n" : "   \\\n  \\\n continued y\n", source);
+                }
+                else if (choice < 45)
+                {
+                    fputs(choice == 44 && (line & 1) ? "#pragma custom line\n" : "#\n", source);
+                }
+                const uint64_t count = 1 + pp_print_test_random(&state) % 6;
+                for (uint64_t t = 0; t < count; t += 1)
+                {
+                    fprintf(source, "%s ", tokens[pp_print_test_random(&state) % BUSTER_ARRAY_LENGTH(tokens)]);
+                }
+                fputc('\n', source);
+            }
+            fputs("final_token\n", source);
+            result = fclose(source) == 0;
+        }
+        InternTable table = { 0 };
+        Preprocessor pp = { 0 };
+        const PPOptions options =
+        {
+            .language =
+            {
+                .standard = 2017,
+                .gnu = true,
+            },
+            .quiet = true,
+            .defer_history = true,
+        };
+        result = result && pp_test_run(&pp, &table, &options, path);
+        for (uint32_t markers = 0; result && markers < 2; markers += 1)
+        {
+            size_t vector_length = 0;
+            size_t scalar_length = 0;
+            char* vector = pp_test_print(&pp, true, markers != 0, &vector_length);
+            char* scalar = pp_test_print(&pp, false, markers != 0, &scalar_length);
+            result = vector != 0 && scalar != 0 && vector_length == scalar_length && memcmp(vector, scalar, vector_length) == 0;
+            if (!result)
+            {
+                printf("printer lines: alignment %u, markers %u differ\n", alignment, markers);
+            }
+            free(vector);
+            free(scalar);
+            runs += 1;
+        }
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    unlink(path);
+    unlink(header);
+    printf("printer lines: %u prints, %s (jumps of 1 to 12 lines, includes, #line, invocations over lines, splices before line starts, every place in a chunk)\n", runs,
+           result ? "pass" : "FAIL");
+    return result;
 }
 
 // pp_print_spellings against a reference of its own: a linear search of the ranges for each other token's location

@@ -360,12 +360,13 @@ static const ChangesModule changes_modules[] = {
         .sources = "c_files[a-z0-9_]*",
     },
     // #518's attribution of sqlite3.c's compile: the driver's stage clock, the places that mark its stages (the driver
-    // and the emission) and measure-compile, which time the whole compiler, the same for every pull request but one
-    // that changes how it is timed. The daily run measures main.
+    // and the emission), measure-compile, which time the whole compiler, and the baked tables a compile starts with
+    // (baked.c, #590), the same for every pull request but one that changes how it is timed. The daily run measures
+    // main.
     {
         .name = "compile_time",
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
-                   "compile_measure|c_check_input|c_checker|c_parser|lane|c_check_program",
+                   "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
     },
 };
 
