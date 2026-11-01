@@ -1071,6 +1071,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_STACK_ADDR:
                     value.low = frame->slots[a];
                     break;
+                case IR_LIFETIME:
+                    // A slot's lifetime marker reads and writes nothing: each slot has bytes of its own here.
+                    break;
                 case IR_ALLOCA:
                     result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
                     break;

@@ -5,7 +5,7 @@
 // arity/types and evaluates every runtime argument once into the supplied existing local; this stage evaluates no
 // source expression. EXPECT's two locals are I64 (target long), pointers and sizes are U64, and memset's value is I32.
 // Optional hint integers retain their checked integer machine class. Alignment promises remain producer metadata.
-// PREFETCH is a valid hint no-op; x86-64 extract/frob return-address representations are the pointer identity.
+// PREFETCH is a valid hint no-op; x86-64 extract/frob return-address representations and LAUNDER are the pointer identity.
 //
 // Runtime memcpy uses baseline SSE's 16-byte COPY; moves, fills and comparisons use 8-byte integer words, with exact byte
 // tails. Small constant sizes have bounded straight-line recipes. No runtime call or optional output ISA is needed.
@@ -20,8 +20,8 @@
 // and so are the alignment builtins' (cbuiltin_align, cbuiltin_misc_align), a pointer's descriptor its 64 bits.
 //
 // ALLOCA is Tier 0's ALLOCA of its U64 size, and FRAME_ADDRESS and RETURN_ADDRESS take no arguments: they are level 0's
-// (the producer refuses any other level and evaluates none), Tier 0's FRAME_ADDRESS and the word 8 bytes above it. Each
-// gives its function a frame pointer.
+// (the producer refuses any other level and evaluates none), Tier 0's FRAME_ADDRESS and the word 8 bytes above it, and
+// DWARF_CFA takes none, the FRAME_ADDRESS plus 16. Each gives its function a frame pointer.
 //
 // Publication has the same disjoint-column and transactional capacity contract as cbuiltin_lower, with exact scalar
 // and masked vector copy twins. TRAP and UNREACHABLE are explicitly refused: this module cannot invent a terminating
@@ -590,6 +590,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_PREFETCH: minimum = 1; maximum = 3; break;
         case CBUILTIN_EXTRACT_RETURN_ADDR:
         case CBUILTIN_FROB_RETURN_ADDR:
+        case CBUILTIN_LAUNDER:
         case CBUILTIN_ALLOCA:
         case CBUILTIN_STRLEN: minimum = maximum = 1; result_class = BUSTER_TYPED_CLASS_U64; break;
         case CBUILTIN_MEMCPY:
@@ -597,7 +598,8 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_MEMSET: minimum = maximum = 3; result_class = BUSTER_TYPED_CLASS_U64; break;
         case CBUILTIN_MEMCMP: minimum = maximum = 3; result_class = BUSTER_TYPED_CLASS_I32; break;
         case CBUILTIN_FRAME_ADDRESS:
-        case CBUILTIN_RETURN_ADDRESS: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
+        case CBUILTIN_RETURN_ADDRESS:
+        case CBUILTIN_DWARF_CFA: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
         default:
             if (cbuiltin_bits(call->id) || cbuiltin_align(call->id))
             {
@@ -692,6 +694,13 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
             // return (or an enclosing variable-length array scope's restore, where clang's stackrestore is) releases.
             cbuiltin_lower_local(&recipe, call->arguments[0]);
             cbuiltin_lower_emit(&recipe, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (call->id == CBUILTIN_DWARF_CFA)
+        {
+            // clang -O0's canonical frame address: the frame pointer, past the caller's rbp and the return address.
+            cbuiltin_lower_emit(&recipe, BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+            cbuiltin_lower_constant(&recipe, 16);
+            cbuiltin_lower_operation(&recipe, BUSTER_TYPED_ADD);
         }
         else if (call->id == CBUILTIN_FRAME_ADDRESS || call->id == CBUILTIN_RETURN_ADDRESS)
         {

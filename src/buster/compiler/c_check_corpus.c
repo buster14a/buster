@@ -638,11 +638,13 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     const CheckReport* diagnostic = result->stream.reports + report;
                     if (check_repair_graph_report(repair, &result->input.graph, diagnostic) && diagnostic->token < result->position)
                     {
-                        result->token = diagnostic->token;
-                        result->position = result->token;
+                        // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
+                        char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
+                        const char* x86 = check_diagnostic_x86_hard(&result->input, &result->stream, diagnostic, x86_text, sizeof(x86_text), &result->token);
+                        result->position = diagnostic->token;
                         result->pragma = 0;
                         result->phase = "expression";
-                        snprintf(result->message, sizeof(result->message), "%s", check_driver_report_message(diagnostic));
+                        snprintf(result->message, sizeof(result->message), "%s", x86 != NULL ? x86 : check_driver_report_message(diagnostic));
                     }
                 }
                 if (result->checked && !result->resource)
@@ -908,11 +910,13 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
+            // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
+            char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
+            const char* x86 = check_diagnostic_x86_hard(&path->input, &path->stream, path->stream.reports, x86_text, sizeof(x86_text), &path->token);
             path->phase = "expression";
-            path->token = path->stream.reports[0].token;
-            path->position = path->token;
+            path->position = path->stream.reports[0].token;
             path->pragma = 0;
-            snprintf(path->message, sizeof(path->message), "%s", check_driver_report_message(path->stream.reports));
+            snprintf(path->message, sizeof(path->message), "%s", x86 != NULL ? x86 : check_driver_report_message(path->stream.reports));
         }
     }
     bool assemblies = false;

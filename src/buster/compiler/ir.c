@@ -125,6 +125,11 @@ typedef enum IrOp
     IR_VCONST,
     IR_VCMP,
     IR_VSELECT,
+    // A frame slot's lifetime (#177): `a` the slot, `b` 0 where its object's lifetime starts and 1 where it ends. It
+    // reads and writes nothing: the slot's bytes are indeterminate after a start, and no access may come after an end
+    // until the next start. A slot with no marker lives throughout its function; one with markers is live where some
+    // path from a start reaches without an end, which Tier 1's frame planner colors (tier1_emit_cfg_lifetimes).
+    IR_LIFETIME,
     IR_OP_COUNT,
 } IrOp;
 
@@ -458,6 +463,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "vconst",
     "vcmp",
     "vselect",
+    "lifetime",
 };
 
 static bool ir_integer(uint32_t type)
@@ -659,7 +665,8 @@ typedef enum IrRule
     X(IR_BR_INDIRECT,   1, 7, 1u << IR_VOID, IR_RULE_INDIRECT, 1) \
     X(IR_VCONST,        0, 1, BUSTER_IR_VECTORS, IR_RULE_VECTOR_CONSTANT, 0) \
     X(IR_VCMP,          3, 7, BUSTER_IR_MASKS, IR_RULE_VECTOR_COMPARE, 0) \
-    X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0)
+    X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
+    X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -751,6 +758,64 @@ static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
         found = function->slots[i].type >= IR_V4I32;
     }
     return found;
+}
+
+// Whether a function has vectors (#141's, which the SSA promoter, the optimizers and Tier 1's selector refuse): a vector
+// type anywhere, its constants or its operations, in its instructions, its parameters, calls and slots. A function whose
+// only SIMD values are masks (#179) has none. The instructions 64 at a time on the vector path, one at a time on its
+// scalar twin, which must agree.
+static bool ir_function_has_vectors_path(const IrFunction* function, bool vector)
+{
+    (void)vector;
+
+    bool found = function->vector_constant_count != 0 || ir_vector_type(function->result_type);
+    if (BUSTER_VECTOR_PATH(vector))
+    {
+        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
+        {
+            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+            const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
+            const __mmask64 vectors = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) & ~_mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V16I32 + 1));
+            const __mmask64 operations = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) |
+                                         _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
+            found = (vectors | operations) != 0;
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
+        {
+            found = ir_vector_type(function->type[i]) || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
+        }
+    }
+    for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
+    {
+        found = ir_vector_type(function->parameter_types[i]);
+    }
+    for (uint32_t i = 0; !found && i < function->call_type_count; i += 1)
+    {
+        found = ir_vector_type(function->call_types[i]);
+    }
+    for (uint32_t i = 0; !found && i < function->call_count; i += 1)
+    {
+        found = ir_vector_type(function->calls[i].result_type);
+    }
+    for (uint32_t i = 0; !found && i < function->slot_count; i += 1)
+    {
+        found = ir_vector_type(function->slots[i].type);
+    }
+    return found;
+}
+
+static __attribute__((unused)) bool ir_function_has_vectors(const IrFunction* function)
+{
+#if !BUSTER_HOST_VECTOR
+    return ir_function_has_vectors_path(function, false);
+#else
+    return ir_function_has_vectors_path(function, true);
+#endif
 }
 
 static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function);
@@ -960,11 +1025,16 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_FROM_INT: valid = ir_integer(ta); break;
             case IR_RULE_FROM_FLOAT: valid = ir_floating(ta); break;
             case IR_RULE_FROM_POINTER: valid = ta == IR_PTR; break;
-            case IR_RULE_BITCAST: valid = ir_type_bits[ta] == ir_type_bits[type] && ((!ir_mask_type(ta) && !ir_mask_type(type)) || ta == type); break;
+            // Bits for bits of the same width; a mask (#179) only to or from an integer of its width (i8 to i64, the
+            // boundary an opmask's kmov to and from a general register is), or to itself.
+            case IR_RULE_BITCAST:
+                valid = ir_type_bits[ta] == ir_type_bits[type] &&
+                        ((!ir_mask_type(ta) && !ir_mask_type(type)) || ta == type || (ir_mask_type(ta) && ir_integer(type)) || (ir_integer(ta) && ir_mask_type(type)));
+                break;
             case IR_RULE_VECTOR_CONSTANT: valid = a < f->vector_constant_count && ir_simd_value_valid(f->vector_constants + a, ir_simd_shape(type)); break;
             case IR_RULE_VECTOR_COMPARE: valid = ir_vector_type(ta) && ta == tb && c < IR_PREDICATE_COUNT && type == (ta == IR_V16I32 ? IR_M16 : IR_M8); break;
             case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
-            case IR_RULE_SLOT: valid = a < f->slot_count; break;
+            case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -1905,6 +1975,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                     } break;
                     case IR_PARAM: fprintf(output, " %" PRIu32, a); break;
                     case IR_STACK_ADDR: fprintf(output, " $%" PRIu32, a); break;
+                    case IR_LIFETIME: fprintf(output, " $%" PRIu32 " %s", a, b != 0 ? "end" : "start"); break;
                     case IR_SYMBOL_ADDR: fprintf(output, " @%" PRIu32, a); break;
                     case IR_ADDRESS:
                     {

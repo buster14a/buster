@@ -81,7 +81,8 @@ static bool check_lower_half_fold(CheckLowerWriter* writer, uint32_t node, TypeI
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
-    const CheckValue* value = program->stream->values + node;
+    const CheckValue checked_value = check_stream_value(program->stream, node);
+    const CheckValue* value = &checked_value;
     const bool plain = (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING) && value->category == CHECK_RVALUE &&
                        value->fault == CHECK_FAULT_NONE && (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
                        value->overload_head == 0 && !check_lower_half_strict(writer);
@@ -473,7 +474,7 @@ static bool check_lower_half_link(const CheckLowerWriter* writer, uint32_t node,
     const CheckOp op = node < program->stream->count ? program->input->graph.ops[node] : CHECK_OP_VALUE;
     const bool arithmetic = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE || op == CHECK_OP_NEGATIVE ||
                             op == CHECK_OP_POSITIVE;
-    return arithmetic && check_lower_half(program->types, program->stream->values[node].type) == format;
+    return arithmetic && check_lower_half(program->types, check_stream_type(program->stream, node)) == format;
 }
 
 // Operand `operand` of node `node` (a chain's link, or an update's right operand) onto the stack as a float, as tasks: in a chain under
@@ -487,7 +488,7 @@ static void check_lower_half_operand(CheckLowerWriter* writer, uint32_t node, ui
     const CheckHalf format = check_lower_half(program->types, type);
     const uint32_t child = operand == 0 ? graph->operand0[node] : graph->operand1[node];
     uint16_t bits = 0;
-    if (chained && check_lower_half_link(writer, child, format) && program->stream->values[child].type == type &&
+    if (chained && check_lower_half_link(writer, child, format) && check_stream_type(program->stream, child) == type &&
         check_program_overload_address(program, node, operand) == NULL)
     {
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_HALF, .node = child });
@@ -520,7 +521,7 @@ static void check_lower_half_chain(CheckLowerWriter* writer, uint32_t node, bool
     }
     else if (op == CHECK_OP_POSITIVE)
     {
-        check_lower_half_operand(writer, node, 0, program->stream->values[node].type, chained);
+        check_lower_half_operand(writer, node, 0, check_stream_type(program->stream, node), chained);
     }
     else
     {
@@ -538,7 +539,7 @@ static void check_lower_half_expression(CheckLowerWriter* writer, uint32_t node,
 {
     const CheckProgram* program = writer->program;
     const CheckOp op = program->input->graph.ops[node];
-    const TypeId type = program->stream->values[node].type;
+    const TypeId type = check_stream_type(program->stream, node);
     const CheckNodeConversions* conversion = program->stream->conversions + node;
     if (!check_lower_half_excess(writer, format) && format == CHECK_HALF_BRAIN)
     {
@@ -569,12 +570,12 @@ static void check_lower_half_expression(CheckLowerWriter* writer, uint32_t node,
         {
             const uint32_t child = graph->operand0[link];
             negations += graph->ops[link] == CHECK_OP_NEGATIVE ? 1 : 0;
-            walking = check_lower_half_link(writer, child, format) && program->stream->values[child].type == program->stream->values[link].type &&
+            walking = check_lower_half_link(writer, child, format) && check_stream_type(program->stream, child) == check_stream_type(program->stream, link) &&
                       (graph->ops[child] == CHECK_OP_NEGATIVE || graph->ops[child] == CHECK_OP_POSITIVE);
             link = walking ? child : link;
         }
         const uint32_t operand = graph->operand0[link];
-        const bool sign = unary && !(check_lower_half_link(writer, operand, format) && program->stream->values[operand].type == program->stream->values[link].type) &&
+        const bool sign = unary && !(check_lower_half_link(writer, operand, format) && check_stream_type(program->stream, operand) == check_stream_type(program->stream, link)) &&
                           (format == CHECK_HALF_IEEE || negations % 2 == 0);
         if (sign)
         {
@@ -585,7 +586,7 @@ static void check_lower_half_expression(CheckLowerWriter* writer, uint32_t node,
                 check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 0x8000);
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
             }
-            check_lower_operand(writer, link, 0, false, program->stream->values[link].type);
+            check_lower_operand(writer, link, 0, false, check_stream_type(program->stream, link));
         }
         else
         {

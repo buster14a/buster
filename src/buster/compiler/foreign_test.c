@@ -105,6 +105,7 @@ static const char* const foreign_test_errors[] = {
     [FOREIGN_ERROR_FORMAT] = "format",
     [FOREIGN_ERROR_MALFORMED] = "malformed",
     [FOREIGN_ERROR_UNSUPPORTED] = "unsupported",
+    [FOREIGN_ERROR_PLUGIN] = "plugin",
     [FOREIGN_ERROR_MEMORY] = "memory",
     [FOREIGN_ERROR_LANES] = "lanes",
 };

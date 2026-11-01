@@ -7,10 +7,14 @@
 // name are injected, as the lowering benchmark's tests inject them: which constructs it refuses changes as it grows. So
 // are resources that run out (#514's review): the arena the corpus's records are compiled into, the timed runs'
 // scratch, and the corpus's room for functions, full at the second of a file's two and not at its last; and a file
-// whose one function lowers to no typed entry. Each case's corpus, counts, exit status and report lines are checked,
-// the totals last with the measurement's outcome. Then the command's repeated --only, and tier0_benchmark_add at its
-// corpus's capacity, which must write nothing. Include after tier0_source_benchmark.c and
-// c_lowering_source_benchmark_test.c; test-checker calls this through its forward declaration.
+// whose one function lowers to no typed entry. Then the options' target (#1041): a unit of <immintrin.h>'s 512-bit
+// intrinsics, which -march=znver5 compiles (its masks Tier 0's opmask class, #179) and the baseline profile refuses by
+// name, leaving it out; and, without -march, a function whose target("bmi2") attribute its BMI2 builtin needs, measured
+// as -c compiles it for its attribute's target (#1041's review), where the unit's would refuse the builtin by name.
+// Each case's corpus, counts, exit status and report lines are checked, the totals last with the measurement's
+// outcome. Then the command's repeated --only, and tier0_benchmark_add at its corpus's capacity, which must write
+// nothing. Include after tier0_source_benchmark.c and c_lowering_source_benchmark_test.c; test-checker calls this
+// through its forward declaration.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 
@@ -28,14 +32,19 @@ struct BackendSourceTestCase
     uint64_t failures;
     // Whether its corpus's functions lower to no typed entry (fixture 4's).
     bool no_entries;
+    // Whether it reads the standard headers (without -nostdinc), and its -march option (null for none: the baseline).
+    bool includes;
+    const char* march;
     int status;
     // What its report must hold, each once: null where it has fewer.
     const char* report[4];
 };
 
-// Runs the benchmark on `count` of `paths` with `fault`, its report captured: whether it ran, with the corpus and counts
-// in `source`, the exit status, and the report (malloc'd, the caller's to free).
-static bool backend_source_test_run(char** paths, uint32_t count, BackendSourceFault fault, BackendSource* source, int* status, char** report)
+// Runs the benchmark on `count` of `paths` with `fault` and the case's options (`includes` and `march`), its report
+// captured: whether it ran, with the corpus and counts in `source`, the exit status, and the report (malloc'd, the
+// caller's to free).
+static bool backend_source_test_run(char** paths, uint32_t count, BackendSourceFault fault, bool includes, const char* march, BackendSource* source,
+                                    int* status, char** report)
 {
     FILE* capture = tmpfile();
     fflush(stdout);
@@ -43,9 +52,18 @@ static bool backend_source_test_run(char** paths, uint32_t count, BackendSourceF
     const int saved[2] = { dup(STDOUT_FILENO), dup(STDERR_FILENO) };
     const int null = open("/dev/null", O_WRONLY);
     bool ran = capture != 0 && saved[0] >= 0 && saved[1] >= 0 && null >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0 && dup2(null, STDERR_FILENO) >= 0;
-    char* options[] = { "-nostdinc" };
+    char* options[2];
+    uint32_t option_count = 0;
+    if (!includes)
+    {
+        options[option_count++] = "-nostdinc";
+    }
+    if (march != 0)
+    {
+        options[option_count++] = (char*)march;
+    }
     *source = (BackendSource){ 0 };
-    const bool valid = ran && backend_source_files(source, paths, count, options, BUSTER_ARRAY_LENGTH(options), BUSTER_TIER0_BENCHMARK_VARIANTS, 0, fault);
+    const bool valid = ran && backend_source_files(source, paths, count, options, option_count, BUSTER_TIER0_BENCHMARK_VARIANTS, 0, fault);
     *status = backend_source_status(valid, source);
     fflush(stdout);
     fflush(stderr);
@@ -163,6 +181,15 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         // Its one function lowers to no typed entry (#514's review): falling off an int function's end returns nothing,
         // and Tier 0 makes only its prologue and epilogue.
         "int f(void) {}\n",
+        // 512-bit vectors and their masks, through <immintrin.h>'s intrinsics (#1041): what -march=znver5 compiles, its
+        // masks in Tier 0's opmask class (#179), and the baseline profile refuses by name.
+        "#include <immintrin.h>\n__m512i mix(__m512i a, __m512i b)\n{\n    const __mmask16 k = _mm512_cmpgt_epi32_mask(a, b);\n"
+        "    const __mmask16 m = _mm512_kand(k, _mm512_cmplt_epi32_mask(b, _mm512_set1_epi32(8)));\n    return _mm512_mask_add_epi32(a, m, a, b);\n}\n"
+        "int main(void)\n{\n    const __m512i c = mix(_mm512_set1_epi32(3), _mm512_set1_epi32(1));\n    return _mm512_cvtsi512_si32(c) - 4;\n}\n",
+        // A function whose target attribute its builtin needs (#1041's review): without -march the unit's target is the
+        // baseline's, which hasn't BMI2.
+        "__attribute__((target(\"bmi2\"))) unsigned deposit(unsigned x, unsigned m)\n{\n    return __builtin_ia32_pdep_si(x, m);\n}\n"
+        "int main(void)\n{\n    return (int)deposit(5u, 0xf0u) - 0x50;\n}\n",
     };
     enum { FIXTURES = BUSTER_ARRAY_LENGTH(fixtures) };
     static const BackendSourceTestCase cases[] = {
@@ -263,6 +290,35 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
                         "benchmark-backend-source: no typed entry in the corpus's functions (1), so nothing to measure per entry: no report\n",
                         " totals files=1 left_out=0 failures=0 measurement=none\n" },
         },
+        {
+            .label = "a unit of 512-bit intrinsics is measured for the options' -march=znver5",
+            .files = { 5, -1 },
+            .includes = true,
+            .march = "-march=znver5",
+            // mix, main and the five functions of the header they reach (its compares are macros).
+            .functions = 7,
+            .measured = 1,
+            .report = { "/5.c functions=7 entries=", "benchmark-backend-source: 7 functions, ",
+                        " totals files=1 left_out=0 failures=0 measurement=reported\n" },
+        },
+        {
+            .label = "a unit of 512-bit intrinsics is left out for the baseline profile, without -march",
+            .files = { 5, 0, -1 },
+            .includes = true,
+            .functions = 2,
+            .measured = 1,
+            .left_out = 1,
+            .report = { "/5.c unsupported=\"vector results wider than the target's registers\"\n", "/0.c functions=2 entries=",
+                        " totals files=1 left_out=1 failures=0 measurement=reported\n" },
+        },
+        {
+            .label = "a function's target(\"bmi2\") attribute gives its builtin's instruction without -march",
+            .files = { 6, -1 },
+            .functions = 2,
+            .measured = 1,
+            .report = { "/6.c functions=2 entries=", "benchmark-backend-source: 2 functions, ",
+                        " totals files=1 left_out=0 failures=0 measurement=reported\n" },
+        },
     };
     char directory[] = "/tmp/buster-backend-source-XXXXXX";
     char paths[FIXTURES][256];
@@ -286,7 +342,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         BackendSource source;
         int status = 0;
         char* report = 0;
-        const bool ran = backend_source_test_run(files, count, item->fault, &source, &status, &report);
+        const bool ran = backend_source_test_run(files, count, item->fault, item->includes, item->march, &source, &status, &report);
         bool reported = ran;
         for (uint32_t i = 0; reported && i < BUSTER_ARRAY_LENGTH(item->report) && item->report[i] != 0; i += 1)
         {

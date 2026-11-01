@@ -223,10 +223,22 @@ static bool check_const_append(CheckConstBuffer* buffer, CheckConstObject header
     {
         const uint64_t mark = buffer->arena->length;
         CheckConstBuffer next = *buffer;
-        next.objects = check_const_storage(next.arena, next.objects, next.count, next.count + 1, &next.capacity, sizeof(CheckConstObject), _Alignof(CheckConstObject));
-        next.parts = check_const_storage(next.arena, next.parts, next.part_count, next.part_count + part_count, &next.part_capacity, sizeof(CheckConstPart), _Alignof(CheckConstPart));
-        next.unions = check_const_storage(next.arena, next.unions, next.union_count, next.union_count + union_count, &next.union_capacity, sizeof(CheckConstUnion), _Alignof(CheckConstUnion));
-        next.hash = check_const_storage(next.arena, next.hash, next.hash_count, next.hash_count + 32, &next.hash_capacity, sizeof(CheckConstHash), _Alignof(CheckConstHash));
+        // The capacities that the storage calls grow are locals of their own, so that nothing takes `next`'s address:
+        // its fields are the compiler's to place, in registers or spill slots of their own, and its copy into `*buffer`
+        // is a store per field. With `next` in memory, that copy's wide loads reread the narrower stores of its counts
+        // right after them, which they can't take their data from (#873).
+        uint32_t object_capacity = next.capacity;
+        uint32_t part_capacity = next.part_capacity;
+        uint32_t union_capacity = next.union_capacity;
+        uint32_t hash_capacity = next.hash_capacity;
+        next.objects = check_const_storage(next.arena, next.objects, next.count, next.count + 1, &object_capacity, sizeof(CheckConstObject), _Alignof(CheckConstObject));
+        next.parts = check_const_storage(next.arena, next.parts, next.part_count, next.part_count + part_count, &part_capacity, sizeof(CheckConstPart), _Alignof(CheckConstPart));
+        next.unions = check_const_storage(next.arena, next.unions, next.union_count, next.union_count + union_count, &union_capacity, sizeof(CheckConstUnion), _Alignof(CheckConstUnion));
+        next.hash = check_const_storage(next.arena, next.hash, next.hash_count, next.hash_count + 32, &hash_capacity, sizeof(CheckConstHash), _Alignof(CheckConstHash));
+        next.capacity = object_capacity;
+        next.part_capacity = part_capacity;
+        next.union_capacity = union_capacity;
+        next.hash_capacity = hash_capacity;
         bool ready = next.objects != NULL && next.hash != NULL && (part_count == 0 || next.parts != NULL) && (union_count == 0 || next.unions != NULL);
         for (uint32_t i = 0; ready && i < part_count; i += 1)
         {
@@ -252,21 +264,39 @@ static bool check_const_append(CheckConstBuffer* buffer, CheckConstObject header
             {
                 memcpy(next.unions + next.union_count, unions, (uint64_t)union_count * sizeof(CheckConstUnion));
             }
+            // Each new node is its old node's two children as one word, the key's bit selecting the half to replace.
+            // Writing `child[bit]` into a copy of the old node kept that copy on the stack, and the 8-byte load that
+            // stored it into the trie reread it right after the 4-byte store, which the load can't take its data
+            // from: it waited for the store to reach the cache, at each of the 32 depths (#873).
+            CheckConstHash* const hash = next.hash;
+            const uint32_t first = next.hash_count;
+            const uint32_t leaf = next.count + 1;
             const uint32_t key = header.object * UINT32_C(2654435761);
             uint32_t old = next.hash_root;
             for (uint32_t depth = 0; depth < 32; depth += 1)
             {
-                CheckConstHash node = old != 0 ? next.hash[old - 1] : (CheckConstHash){ 0 };
-                const uint32_t bit = (key >> (31 - depth)) & 1;
-                old = node.child[bit];
-                node.child[bit] = depth == 31 ? next.count + 1 : next.hash_count + depth + 2;
-                next.hash[next.hash_count + depth] = node;
+                const CheckConstHash node = old != 0 ? hash[old - 1] : (CheckConstHash){ 0 };
+                const uint64_t pair = (uint64_t)node.child[1] << 32 | node.child[0];
+                const uint32_t shift = ((key >> (31 - depth)) & 1) * 32;
+                const uint64_t child = depth == 31 ? leaf : first + depth + 2;
+                const uint64_t written = (pair & ~(UINT64_C(0xffffffff) << shift)) | (child << shift);
+                old = (uint32_t)(pair >> shift);
+                hash[first + depth] = (CheckConstHash){
+                    .child = {
+                        (uint32_t)written,
+                        (uint32_t)(written >> 32),
+                    },
+                };
             }
-            header.part_first = next.part_count;
-            header.part_count = part_count;
-            header.union_first = next.union_count;
-            header.union_count = union_count;
-            next.objects[next.count++] = header;
+            // The header is copied whole and its places written after, in the array: setting them in the parameter
+            // first made the copy's wide loads reread its narrower stores (#873).
+            CheckConstObject* const stored = next.objects + next.count;
+            *stored = header;
+            stored->part_first = next.part_count;
+            stored->part_count = part_count;
+            stored->union_first = next.union_count;
+            stored->union_count = union_count;
+            next.count += 1;
             next.part_count += part_count;
             next.union_count += union_count;
             next.hash_root = next.hash_count + 1;

@@ -250,7 +250,7 @@ static void check_init_history_value(CheckInitWalker* walker, const CheckInitSel
     {
         const CheckInitFrame* frame = walker->frames + walker->depth - 1;
         const bool fill = frame->braced && frame->history == history && !check_init_aggregate(walker->types, frame->type);
-        const bool effects = (((node < walker->stream->count ? walker->stream->values[node].flags : 0) | flags) & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        const bool effects = (((node < walker->stream->count ? check_stream_flags(walker->stream, node) : 0) | flags) & BUSTER_CHECK_SIDE_EFFECT) != 0;
         if (fill)
         {
             const bool previous = check_init_history_effects(history);

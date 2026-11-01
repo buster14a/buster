@@ -363,7 +363,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     const CheckGraph* graph = valid ? &program->input->graph : NULL;
     for (uint32_t n = 0; atomic_types && n < graph->count; n += 1)
     {
-        const CheckValue* value = program->stream->values + n;
+        const CheckValue checked_value = check_stream_value(program->stream, n);
+        const CheckValue* value = &checked_value;
         const TypeId type = type_strip_aligned(program->types, value->type);
         if (value->category == CHECK_LVALUE && type_kind(program->types, type) == BUSTER_TYPE_KIND_ATOMIC &&
             program->parser != NULL && check_program_token_body(program, graph->tokens[n]) != 0)
@@ -491,7 +492,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         helper = (CheckProgramHelper){
                             .id = id,
                             .parameter_count = info->parameter_count,
-                            .result_type = vector_result ? stream->values[node].type : info->result ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID,
+                            .result_type = vector_result ? check_stream_type(stream, node) : info->result ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID,
                             .compiler_barrier = true,
                             .x86 = leaf,
                         };

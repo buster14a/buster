@@ -26,7 +26,7 @@
 // objects that clang -O0 -c's (--clang's) defines, no more and no fewer (#129's selection, c_lowering_symbols.c).
 //
 // --tier1 compiles every test with the driver's --tier1 (c_check_tier1.c: each function Tier 1's pipeline takes by
-// Tier 1, the others by Tier 0, without unwind tables, which Tier 1's frames don't have yet), whose vector and scalar
+// Tier 1, the others by Tier 0, both tiers' frames with unwind tables, #177), whose vector and scalar
 // paths assign registers by different algorithms (#140's interval coloring and its linear-scan twin), so that their
 // executables differ: the scalar path's is compiled a third time, with the ids in source order, and must be the same bytes
 // as with them in another order, and both paths' programs must run as expected. The report adds how many of the tests'
@@ -325,7 +325,6 @@ static void c_testsuite_compile_arguments(char** arguments, const CTestsuite* su
     {
         arguments[count++] = "--tier1";
         arguments[count++] = "--tier1-report";
-        arguments[count++] = "-fno-asynchronous-unwind-tables";
     }
     for (uint32_t i = 0; i < rest_count; i += 1)
     {

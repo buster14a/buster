@@ -8,8 +8,9 @@
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers, only
 // when the selected program has a body: its helpers also come only from those bodies. Data-only links need no tables.
-// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame, and
-// its tail calls' teardowns with unwind_tier0_frame_tails, #147), at
+// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it, or as Tier 1's code did
+// (check_tier1_frame, #177: its early returns' teardowns as tails, open where its code doesn't end in an epilogue)
+// (unwind_tier0_frame, and its tail calls' teardowns with unwind_tier0_frame_tails, #147), at
 // its records' ends after branch sizing, written after the last function (unwind_write) as one EH_FRAME atom, a CIE
 // and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with `verify`,
 // each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
@@ -296,6 +297,11 @@ struct CheckTier1Counts
     uint32_t edge_moves;
     uint32_t spill_slots;
     uint32_t frame_bytes;
+    // Its unwind table's shape (#177): an open frame (UnwindFunction.open), its returns published as tails, and whether
+    // its objects are in the red zone.
+    uint32_t open_frames;
+    uint32_t return_tails;
+    uint32_t red_zones;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -317,6 +323,9 @@ struct CheckTier1Report
     uint64_t edge_moves;
     uint64_t spill_slots;
     uint64_t frame_bytes;
+    uint64_t open_frames;
+    uint64_t return_tails;
+    uint64_t red_zones;
 };
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
@@ -383,9 +392,12 @@ struct CheckProgramLanes
     uint64_t merge_ns;
     // --tier1, and what became of the emissions' bodies, summed over them; with --tier1-refusals, the stream that each
     // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal). With
-    // --tier1-no-rematerialize, Tier 1's allocation spills what it would recompute (#178's comparison).
+    // --tier1-no-rematerialize, Tier 1's allocation spills what it would recompute (#178's comparison). With
+    // --tier1-no-lifetimes, the checked program gives its objects no lifetimes, and Tier 1's frame shares no object's slot
+    // (#177's comparison, c_check_program_lifetime.c).
     bool tier1;
     bool tier1_no_rematerialize;
+    bool tier1_no_lifetimes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -1612,6 +1624,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
         lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
         lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
+        lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
+        lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
+        lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.

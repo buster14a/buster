@@ -743,14 +743,114 @@ static uint32_t check_input_asm_attributed(const CheckInput* input, uint32_t fir
     return BUSTER_SCALAR_PATH(scalar) ? (uint32_t)check_input_scan_all(first, end) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, end);
 }
 
-// Of the next 16 tokens from `first` below `end`, those with a declaration: identifiers. The scalar path takes them all.
-static uint32_t check_input_asm_declared(const CheckInput* input, uint32_t first, uint32_t end, bool scalar)
+// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877): AVX-512 tests
+// the column's pointers 8 at a time; the scalar path, its twin, tests each token's. The asm labels' passes read them
+// rather than the column, which a unit's few attributed tokens left them sweeping three times.
+static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens, bool scalar)
 {
     (void)scalar;
 
-    return BUSTER_SCALAR_PATH(scalar) ? (uint32_t)check_input_scan_all(first, end) & 0xffff : check_input_scan_below(input->declarations, first, end, input->token_count);
+    uint32_t found = 0;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t token = 0; token < limit; token += 1)
+        {
+            if (input->attributes[token] != NULL)
+            {
+                tokens[found++] = token;
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t first = 0; first < limit; first += 8)
+        {
+            for (uint32_t selected = check_input_scan_pointers((const void* const*)input->attributes, first, limit); selected != 0; selected &= selected - 1)
+            {
+                tokens[found++] = first + (uint32_t)__builtin_ctz(selected);
+            }
+        }
+    }
+    return found;
 }
 
+// Whether bit `index` of `bits` is set: words of 32 bits, as the kernels below gather them.
+static bool check_input_asm_bit(const uint32_t* bits, uint32_t index)
+{
+    return ((bits[index / 32] >> (index % 32)) & 1) != 0;
+}
+
+// The tokens whose object (CheckInput.objects) is labelled, by `labelled`'s bits (an object's), as bits of `declared` (a
+// token's, (count + 31) / 32 words), which it writes whole (#877): a labelled object's declarations, to which the uses
+// below refer. AVX-512 gathers 16 tokens' words of `labelled` and stores their 16 bits at once; the scalar path, its
+// twin, tests each token's.
+static void check_input_asm_labelled_tokens(const CheckInput* input, const uint32_t* labelled, uint32_t* declared, bool scalar)
+{
+    (void)scalar;
+
+    const uint32_t count = input->token_count;
+    const uint32_t slots = count + 1;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        memset(declared, 0, ((uint64_t)count + 31) / 32 * sizeof(uint32_t));
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t object = input->objects[token];
+            if (object != 0 && object < slots && check_input_asm_bit(labelled, object))
+            {
+                declared[token / 32] |= UINT32_C(1) << (token % 32);
+            }
+        }
+    }
+    else
+    {
+        // A group's 16 bits are a 16-bit half of `declared`'s 32-bit words: on x86-64's little-endian words, group g is
+        // tokens 16g to 16g + 15, bits 16(g % 2) to 16(g % 2) + 15 of word g / 2, the scalar path's bits. The build's
+        // -fno-strict-aliasing allows the 16-bit stores into the words, and an odd last group's other half is zeroed
+        // below, so that every word the tokens reach is whole.
+        uint16_t* halves = (uint16_t*)declared;
+        const __m512i ones = _mm512_set1_epi32(1);
+        for (uint32_t first = 0; first < count; first += 16)
+        {
+            const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
+            const __m512i objects = _mm512_maskz_loadu_epi32(lanes, input->objects + first);
+            const __mmask16 named = _mm512_mask_test_epi32_mask(lanes, objects, objects) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int32_t)slots));
+            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), named, _mm512_srli_epi32(objects, 5), labelled, 4);
+            const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(objects, _mm512_set1_epi32(31)));
+            halves[first / 16] = _mm512_mask_test_epi32_mask(named, bits, ones);
+        }
+        // The last word's other half, past the tokens.
+        if (((count + 15) / 16) % 2 != 0)
+        {
+            halves[(count + 15) / 16] = 0;
+        }
+    }
+}
+
+// Of the next 16 tokens from `first` below `end`, those whose declaration (CheckInput.declarations) is a token `declared`
+// marks: the uses and declarations of labelled objects. AVX-512 gathers their words of `declared`; the scalar path, its
+// twin, takes every token, whose declaration the pass tests.
+static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uint32_t* declared, uint32_t first, uint32_t end, bool scalar)
+{
+    (void)scalar;
+
+    uint32_t lanes = (uint32_t)check_input_scan_all(first, end) & 0xffff;
+    if (!BUSTER_SCALAR_PATH(scalar))
+    {
+        const __m512i declarations = _mm512_maskz_loadu_epi32((__mmask16)lanes, input->declarations + first);
+        const __mmask16 named = _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, declarations, _mm512_set1_epi32((int32_t)input->token_count));
+        const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), named, _mm512_srli_epi32(declarations, 5), declared, 4);
+        const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(declarations, _mm512_set1_epi32(31)));
+        lanes = _mm512_mask_test_epi32_mask(named, bits, _mm512_set1_epi32(1));
+    }
+    return lanes;
+}
+
+// The asm labels' checks (GCC's and clang's rules for a declaration's linkage label), then register variables' labels'
+// names. The tokens with attributes are listed once (check_input_asm_attributed_tokens); a labelled object's state and
+// first label are kept for the labelled objects alone, which `labelled` marks, and the pass over the uses tests whether a
+// token's declaration is a labelled object's (`declared`) before it reads the object (#877), where it read every
+// identifier's object and state, and cleared both columns for every token.
 static void check_input_asm_labels(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
@@ -758,55 +858,64 @@ static void check_input_asm_labels(CheckInputReader* reader)
     const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
     const uint64_t slots = (uint64_t)input->token_count + 1;
+    const uint64_t words = (slots + 31) / 32;
     const uint32_t limit = reader->expression_limit;
+    // A label needs an asm keyword: without one, no token has a label to check.
+    uint32_t* attributed = input->asm_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)limit + 1) : NULL;
+    input->resource |= input->asm_capacity != 0 && attributed == NULL;
+    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed, scalar) : 0;
     bool present = false;
-    for (uint32_t first = 0; !present && input->asm_capacity != 0 && first < limit; first += 8)
+    for (uint32_t a = 0; !present && a < attributed_count; a += 1)
     {
-        for (uint32_t selected = check_input_asm_attributed(input, first, limit, scalar); selected != 0; selected &= selected - 1)
+        const uint32_t token = attributed[a];
+        const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
         {
-            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-            const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
-            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-            {
-                present |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && attributes->records[i].end <= limit;
-            }
+            present |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && attributes->records[i].end <= limit;
         }
     }
     const CheckInputAttribute** labels = present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const CheckInputAttribute*, slots) : NULL;
     uint8_t* states = labels != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, slots) : NULL;
-    input->resource |= present && states == NULL;
-    if (states != NULL)
+    uint32_t* labelled = states != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
+    uint32_t* declared = labelled != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
+    input->resource |= present && declared == NULL;
+    if (declared != NULL)
     {
-        memset(labels, 0, slots * sizeof(*labels));
-        memset(states, 0, slots);
+        memset(labelled, 0, words * sizeof(uint32_t));
         // Bit 0 marks only canonical objects with labels, bit 1 a preceding use and bit 2 a real definition.
-        // Tentative definitions deliberately do not make a later first label an ignored attribute.
-        for (uint32_t first = 0; first < limit; first += 8)
+        // Tentative definitions deliberately do not make a later first label an ignored attribute. An object's state and
+        // label are cleared where `labelled` first marks it: no other is read.
+        for (uint32_t a = 0; a < attributed_count; a += 1)
         {
-            for (uint32_t selected = check_input_asm_attributed(input, first, limit, scalar); selected != 0; selected &= selected - 1)
+            const uint32_t token = attributed[a];
+            const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+            const uint32_t object = input->objects[token];
+            for (uint32_t i = 0; object != 0 && object < slots && attributes != NULL && i < attributes->count; i += 1)
             {
-                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
-                const uint32_t object = input->objects[token];
-                for (uint32_t i = 0; object != 0 && object < slots && attributes != NULL && i < attributes->count; i += 1)
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= limit)
                 {
-                    const CheckInputAttribute* attribute = attributes->records + i;
-                    if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= limit)
+                    if (!check_input_asm_bit(labelled, object))
                     {
-                        states[object] |= 1;
+                        labelled[object / 32] |= UINT32_C(1) << (object % 32);
+                        states[object] = 0;
+                        labels[object] = NULL;
                     }
+                    states[object] |= 1;
                 }
             }
         }
+        check_input_asm_labelled_tokens(input, labelled, declared, scalar);
         for (uint32_t first = 0; first < limit && !input->resource; first += 16)
         {
-            for (uint32_t selected = check_input_asm_declared(input, first, limit, scalar); selected != 0 && !input->resource; selected &= selected - 1)
+            const uint32_t uses = check_input_asm_labelled_uses(input, declared, first, limit, scalar);
+            for (uint32_t selected = uses; selected != 0 && !input->resource; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t declaration = input->declarations[token];
-                const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
-                if (object != 0 && object < slots && (states[object] & 1) != 0)
+                if (declaration < input->token_count && check_input_asm_bit(declared, declaration))
                 {
+                    const uint32_t object = input->objects[declaration];
                     if (declaration == token)
                     {
                         CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
@@ -850,6 +959,28 @@ static void check_input_asm_labels(CheckInputReader* reader)
             }
         }
     }
+    // A register variable's label names its register.
+    for (uint32_t a = 0; a < attributed_count && !input->resource; a += 1)
+    {
+        const uint32_t token = attributed[a];
+        const CheckInputAttributes* attributes = input->registers[token] ? input->attributes[token] : NULL;
+        for (uint32_t i = 0; attributes != NULL && token < reader->expression_limit && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= reader->expression_limit)
+            {
+                const CheckAsmText name =
+                {
+                    .bytes = (const uint8_t*)attribute->text.pointer,
+                    .length = attribute->text.length,
+                };
+                if (!check_asm_register(name))
+                {
+                    check_input_report(reader, attribute->argument_first, CHECK_INPUT_DECLARATION);
+                }
+            }
+        }
+    }
     arena_pop_to(reader->scratch, mark);
 }
 
@@ -858,31 +989,6 @@ static void check_input_asm_finish(CheckInputReader* reader)
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     check_input_asm_labels(reader);
-    for (uint32_t first = 0; input->asm_capacity != 0 && first < reader->expression_limit && !input->resource; first += 8)
-    {
-        for (uint32_t selected = check_input_asm_attributed(input, first, reader->expression_limit, BUSTER_SCALAR_PATH(parser->options.scalar)); selected != 0 && !input->resource;
-             selected &= selected - 1)
-        {
-            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-            const CheckInputAttributes* attributes = input->registers[token] ? input->attributes[token] : NULL;
-            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-            {
-                const CheckInputAttribute* attribute = attributes->records + i;
-                if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= reader->expression_limit)
-                {
-                    const CheckAsmText name =
-                    {
-                        .bytes = (const uint8_t*)attribute->text.pointer,
-                        .length = attribute->text.length,
-                    };
-                    if (!check_asm_register(name))
-                    {
-                        check_input_report(reader, attribute->argument_first, CHECK_INPUT_DECLARATION);
-                    }
-                }
-            }
-        }
-    }
     for (uint32_t statement = 0; statement < input->asm_count && !input->resource; statement += 1)
     {
         CheckInputAsm* assembly = input->asm_statements + statement;
@@ -933,7 +1039,7 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
     CheckValue value = { 0 };
     if (valid)
     {
-        const CheckValue original = stream->values[source->node];
+        const CheckValue original = check_stream_value(stream, source->node);
         CheckAction action =
         {
             .node = source->node,
@@ -982,7 +1088,7 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;
             if (valid)
             {
-                const CheckValue target = stream->values[assembly->operands[source->match].node];
+                const CheckValue target = check_stream_value(stream, assembly->operands[source->match].node);
                 const uint8_t a_kind = check_action_kind(types, value.type);
                 const uint8_t b_kind = check_action_kind(types, target.type);
                 const bool a_float = a_kind == BUSTER_TYPE_KIND_FLOATING;
@@ -1030,7 +1136,7 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         valid = !input->resource && stream->status == CHECK_STATUS_OK && stream->count == input->graph.count &&
                 (input->report_count == 0 || (input->diagnostic_graph && input->reports != NULL)) &&
                 (stream->report_count == 0 || stream->reports != NULL) && (input->asm_count == 0 || input->asm_statements != NULL) &&
-                (stream->count == 0 || (stream->values != NULL && stream->diagnostics != NULL && input->graph.tokens != NULL &&
+                (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != NULL && input->graph.tokens != NULL &&
                  input->graph.ops != NULL && input->graph.operand0 != NULL && input->graph.operand1 != NULL && input->graph.operand2 != NULL));
     }
     if (!valid)
@@ -1062,7 +1168,7 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         const uint32_t local = check_input_diagnostic_limit(input, graph->tokens[node]);
         const uint32_t limit = local < cutoff ? local : cutoff;
         bool checked = graph->tokens[node] < limit && (graph->source_positions == NULL || graph->source_positions[node] <= limit) &&
-                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, stream->values[node].type);
+                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, check_stream_type(stream, node));
         const uint32_t operands[] =
         {
             graph->operand0[node],

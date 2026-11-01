@@ -7,7 +7,8 @@
 //   build/compiler benchmark-check-lanes [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...
 //
 // Each file is checked as the driver checks it (the vector path, check_corpus_check_policy), its static data and checked
-// program prepared and its referenced definitions selected, outside the time. Then each pass times, in an order that
+// program prepared for the target its options give (-march and the -m flags, as -c compiles it) and its referenced
+// definitions selected, outside the time. Then each pass times, in an order that
 // rotates by pass, the emission on each lane count of --lanes (1,2,3,4,6,8 by default), every lane forced
 // (CheckProgramLanes.every_lane), and on the lanes the default rule takes with room for the largest count: everything
 // -c's check_program_emit does (the lowering, Tier 0, branch sizing, encoding and the link's code), from arenas put back
@@ -88,7 +89,9 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
     {
         own[i] = options[i];
     }
-    PPOptions pp_options;
+    // Zeroed: pp_parse_options sets every field, but where the option arena can't push its arguments it doesn't run, and
+    // the program's options below read the target and the predefines whether or not the file could be read.
+    PPOptions pp_options = { 0 };
     const char* input = 0;
     const char* output_file = 0;
     bool markers = false;
@@ -113,6 +116,9 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
         .identifiers = pp.table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
+        // The options' target and predefines, as the driver passes them: -c's code for -march, not the baseline's.
+        .target = pp_options.target,
+        .predefines = &pp_options.predefines,
     };
     valid = valid && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch) &&
             check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
