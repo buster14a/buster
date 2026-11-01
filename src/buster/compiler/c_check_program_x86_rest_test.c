@@ -513,12 +513,23 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             false,
         },
         {
-            // A builtin under the program's own file-scope declarations, which keep it the builtin as clang keeps it,
-            // and a local variable of one's name, which hides it.
+            // A builtin under the program's own declarations with external linkage, at file scope and at block scope,
+            // which keep it the builtin as clang keeps it, and a local variable of one's name, which hides it.
             "x86-rest-declared-builtins",
             "void _mm_pause(void);unsigned _mm_getcsr(void);void _mm_lfence(void);\n"
             "int tested(int n){unsigned h=2166136261u;_mm_pause();_mm_lfence();unsigned c=_mm_getcsr()&0xffc0u;FOLD(c);"
-            "{int _mm_lfence=n*7;FOLD(_mm_lfence);}return (int)h;}",
+            "{int _mm_lfence=n*7;FOLD(_mm_lfence);}{void _mm_sfence(void);_mm_sfence();void _mm_clflush(const void*);static int l[4];l[n&3]=n;"
+            "_mm_clflush(l);int b=l[n&3];FOLD(b);}return (int)h;}",
+            0,
+            false,
+        },
+        {
+            // Definitions with internal linkage of builtins' names, which are the program's functions, as clang takes
+            // them: a call of each calls it.
+            "x86-rest-static-builtin-names",
+            "static unsigned _mm_getcsr(void){return 42;}static int fenced;static void _mm_sfence(void){fenced+=3;}\n"
+            "int tested(int n){unsigned h=2166136261u;unsigned c=_mm_getcsr()+(unsigned)n;FOLD(c);_mm_sfence();_mm_sfence();FOLD(fenced);"
+            "return (int)h;}",
             0,
             false,
         },

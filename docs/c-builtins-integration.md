@@ -1293,10 +1293,17 @@ the existing families or of new ones:
 - the header builtins, leaves too: the names `<xmmintrin.h>`, `<emmintrin.h>`
   and `<prfchwintrin.h>` declare (`_mm_lfence`, `_mm_mfence`, `_mm_sfence`,
   `_mm_pause`, `_mm_clflush`, `_mm_getcsr`, `_mm_setcsr`, `_m_prefetch` and
-  `_m_prefetchw`), whose calls were calls of undefined functions. A builtin this
-  compiler implements that isn't a library function's (no `f` attribute) stays
-  the builtin under a file-scope declaration of it, as clang keeps it
-  (`check_input_intrinsic_prepare`); a local binding of its name hides it.
+  `_m_prefetchw`), whose calls were calls of undefined functions. An x86 builtin
+  of the intrinsic catalogue's rows and leaves (`cbuiltin_source_intrinsic`)
+  stays the builtin under a declaration of it with external linkage, at file
+  scope or at block scope, as clang keeps it (`check_input_intrinsic_prepare`,
+  each catalogue row's verdict remembered in `CheckInputReader.intrinsic_source`);
+  a definition with internal linkage is the program's function, and a local
+  object of the name hides it. Pending: clang refuses a definition of one with
+  external linkage (`definition of builtin function`), which this compiler
+  takes as the builtin; and the builtins of the dedicated paths
+  (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
+  declaration too, become calls of their names here.
   `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
   modes, and stays out of the scope.
 
