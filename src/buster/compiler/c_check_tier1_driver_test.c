@@ -5,8 +5,9 @@
 // constants live than there are registers, each recipe among them: statics' addresses from rip, a static array's
 // member's at an addend, extern variables' from their GOT slots, frame objects' addresses and a member's of one, and
 // constants of each encoding (a zero, a 32-bit one, a sign-extended and a 64-bit one), each a value the C driver's typed
-// stream converts (its pointers are 64-bit integers). Clang's build of the same source is the oracle. Included by
-// c_checker_driver_test.c after its ELF readers.
+// stream converts (its pointers are 64-bit integers). A second fixture's loop divides by constants and by a register
+// while such values stay live across the divisions, whose sequences take rax and rdx (#141). Clang's build of the same
+// source is each one's oracle. Included by c_checker_driver_test.c after its ELF readers.
 
 // The fixture: tier1_remat is the function under test, main prints its results.
 static const char check_test_tier1_remat_source[] =
@@ -54,6 +55,64 @@ static const char check_test_tier1_remat_source[] =
     "    return 0;\n"
     "}\n";
 
+// The division fixture: tier1_divide is the function under test. Its loop divides by eight constants, each a reciprocal's
+// sequence of another shape (64-bit signed by 10 and its remainder by 641, unsigned remainder by 1000003, the add
+// sequence's division by 7 and the even divisor's pre-shift by 14; 32-bit signed by -7, unsigned remainder by 10 and
+// division by 7), and by a register, while statics' and frame objects' addresses and constants stay live. main's calls
+// leave nothing live across them, so the saves its build reports are tier1_divide's (check_test_tier1_divide_main).
+static const char check_test_tier1_divide_source[] =
+    "#include <stdio.h>\n"
+    "static long s0, s1, s2, s3;\n"
+    "static unsigned long su[4];\n"
+    "unsigned long tier1_divide(long n, long d)\n"
+    "{\n"
+    "    long a0[2], a1[2], a2[2];\n"
+    "    long *p0 = a0, *p1 = a1, *p2 = a2;\n"
+    "    long *q0 = &s0, *q1 = &s1, *q2 = &s2, *q3 = &s3;\n"
+    "    unsigned long* u = &su[1];\n"
+    "    const unsigned long wide = 0x123456789abcdefull;\n"
+    "    const unsigned long middle = 0x87654321ull;\n"
+    "    unsigned long total = 0;\n"
+    "    for (long k = 0; k < 2; k += 1)\n"
+    "    {\n"
+    "        p0[k] = k; p1[k] = k + 1; p2[k] = k + 2;\n"
+    "    }\n"
+    "    for (long i = 1; i <= n; i += 1)\n"
+    "    {\n"
+    "        const long k = i & 1;\n"
+    "        const unsigned long x = (unsigned long)i * wide;\n"
+    "        p0[k] += i / 10;\n"
+    "        p1[k] ^= (long)(x % 1000003u);\n"
+    "        p2[k] -= (int)i / -7;\n"
+    "        q0[0] += (unsigned)x % 10u;\n"
+    "        q1[0] ^= i / d;\n"
+    "        q2[0] += i % 641;\n"
+    "        q3[0] ^= (long)(x / 7u);\n"
+    "        u[k] += x / 14u + (unsigned)x / 7u;\n"
+    "        total = total * 31u + wide + middle + (unsigned long)p0[k];\n"
+    "    }\n"
+    "    return total + (unsigned long)(p0[0] + p0[1] + p1[0] + p1[1] + p2[0] + p2[1]) + (unsigned long)(s0 + s1 + s2 + s3) + su[1] + su[2];\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    printf(\"%lu\\n\", tier1_divide(0, 3));\n"
+    "    printf(\"%lu\\n\", tier1_divide(7, 3));\n"
+    "    printf(\"%lu\\n\", tier1_divide(1000, 7));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The division fixture's main alone, whose build must save nothing.
+static const char check_test_tier1_divide_main[] =
+    "#include <stdio.h>\n"
+    "unsigned long tier1_divide(long n, long d);\n"
+    "int main(void)\n"
+    "{\n"
+    "    printf(\"%lu\\n\", tier1_divide(0, 3));\n"
+    "    printf(\"%lu\\n\", tier1_divide(7, 3));\n"
+    "    printf(\"%lu\\n\", tier1_divide(1000, 7));\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -67,10 +126,10 @@ static bool check_test_tier1_field(const char* text, const char* name, uint64_t*
     return found;
 }
 
-// The fixture's function in `-c`'s object at `path`: its bytes, decoded by the scalar disassembler into `records` (room
-// for `capacity`), and its relocations, each one's offset from the function's start and type (as R_X86_64_PC32) in
+// The function `name` in `-c`'s object at `path`: its bytes, decoded by the scalar disassembler into `records` (room for
+// `capacity`), and its relocations, each one's offset from the function's start and type (as R_X86_64_PC32) in
 // `offsets` and `types` (room for `capacity` too). Returns how many records, *relocation_count set, or 0 on a failure.
-static uint32_t check_test_tier1_function(const char* path, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* relocation_count)
+static uint32_t check_test_tier1_function(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* relocation_count)
 {
     uint64_t length = 0;
     uint8_t* bytes = check_test_driver_read_aligned(path, &length);
@@ -80,8 +139,8 @@ static uint32_t check_test_tier1_function(const char* path, X86Decoded* records,
     for (uint64_t i = 1; valid && function == NULL && i < elf.symbol_count; i += 1)
     {
         const Elf64_Sym* symbol = &elf.symbols[i];
-        const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
-        const bool named = name != NULL && strcmp(name, "tier1_remat") == 0 && ELF64_ST_TYPE(symbol->st_info) == STT_FUNC && symbol->st_shndx != SHN_UNDEF &&
+        const char* symbol_name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+        const bool named = symbol_name != NULL && strcmp(symbol_name, name) == 0 && ELF64_ST_TYPE(symbol->st_info) == STT_FUNC && symbol->st_shndx != SHN_UNDEF &&
                            symbol->st_shndx < elf.section_count;
         function = named ? symbol : NULL;
     }
@@ -182,13 +241,14 @@ struct CheckTestTier1Build
     uint64_t loads;
     uint64_t slots;
     uint64_t frame;
+    uint64_t call_stores;
     bool reported;
 };
 
-// The fixture compiled by --tier1 with and without rematerialization (`rematerialize`) by each path, into an executable
-// (`-o output`) or with `object` an object (-c), whose report goes into *build: whether it compiled with tier1_remat by
-// Tier 1 (no refusal line names it).
-static bool check_test_tier1_build(const char* executable, const char* source, const char* output, bool rematerialize, bool scalar, bool object, CheckTestTier1Build* build)
+// A fixture compiled by --tier1 with and without rematerialization (`rematerialize`) by each path, into an executable
+// (`-o output`) or with `object` an object (-c), whose report goes into *build: whether it compiled with its function
+// `name` by Tier 1 (no refusal line names it).
+static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, CheckTestTier1Build* build)
 {
     char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "-fno-asynchronous-unwind-tables", "--verify" };
     uint32_t count = 6;
@@ -213,8 +273,11 @@ static bool check_test_tier1_build(const char* executable, const char* source, c
     *build = (CheckTestTier1Build){ 0 };
     build->reported = check_test_tier1_field(text, "rematerializations", &build->rematerializations) && check_test_tier1_field(text, "dropped_definitions", &build->dropped) &&
                       check_test_tier1_field(text, "spill_stores", &build->stores) && check_test_tier1_field(text, "spill_loads", &build->loads) &&
-                      check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame);
-    const bool taken = text != NULL && strstr(text, "tier1-refused\ttier1_remat\t") == NULL;
+                      check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
+                      check_test_tier1_field(text, "call_stores", &build->call_stores);
+    char refused[128];
+    snprintf(refused, sizeof(refused), "tier1-refused\t%s\t", name);
+    const bool taken = text != NULL && strstr(text, refused) == NULL;
     if (status != 0 && text != NULL)
     {
         fprintf(stderr, "%s", text);
@@ -240,7 +303,7 @@ static bool check_test_tier1_code(CheckTest* test, const char* object, uint32_t*
     uint32_t* types = calloc(CHECK_TEST_TIER1_RECORDS, sizeof(uint32_t));
     uint8_t* live = calloc(CHECK_TEST_TIER1_RECORDS, 1);
     uint32_t relocations = 0;
-    const uint32_t count = records != NULL && offsets != NULL && types != NULL && live != NULL ? check_test_tier1_function(object, records, CHECK_TEST_TIER1_RECORDS, offsets, types, &relocations) : 0;
+    const uint32_t count = records != NULL && offsets != NULL && types != NULL && live != NULL ? check_test_tier1_function(object, "tier1_remat", records, CHECK_TEST_TIER1_RECORDS, offsets, types, &relocations) : 0;
     check_test_expect(test, count != 0, "the fixture's function decodes, with its relocations");
     if (count != 0)
     {
@@ -335,8 +398,8 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
             snprintf(linked, sizeof(linked), "%s/tier1-remat-%u-%u-cc", directory, rematerialize, path);
             // The executable by the direct path, and the object, which cc links.
             CheckTestTier1Build object_build;
-            const bool built = check_test_tier1_build(executable, source, output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
-            const bool compiled = check_test_tier1_build(executable, source, object, rematerialize != 0, path != 0, true, &object_build);
+            const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_remat", object, rematerialize != 0, path != 0, true, &object_build);
             check_test_expect(test, built && compiled, "the fixture compiles by --tier1, its function Tier 1's");
             char* cc_arguments[] = { "cc", "-o", linked, object, NULL };
             char* cc_text = NULL;
@@ -369,5 +432,92 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
                with->rematerializations, with->dropped, addresses[1][path], zeroing[1][path]);
     }
     unlink(source);
+    unlink(reference);
+}
+
+// The division fixture (#141), by each path, with and without rematerialization: it prints clang's build's output; its
+// function's object has a one-operand multiplication for each of the eight constant divisors and one div, for the
+// register; values left in rax and rdx past the divisions are saved around them (main alone saves nothing); and with
+// rematerialization (#178) values are recomputed and definitions left out among the divisions, without it none.
+static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_DIVIDE_RECORDS = 4096,
+    };
+    char source[512];
+    char main_source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-divide.c", directory);
+    snprintf(main_source, sizeof(main_source), "%s/tier1-divide-main.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-divide-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_divide_source, sizeof(check_test_tier1_divide_source) - 1) &&
+                         parse_test_write(main_source, check_test_tier1_divide_main, sizeof(check_test_tier1_divide_main) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the division fixture runs");
+    const bool ready = ran && x86_disassembler_initialize();
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_DIVIDE_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_DIVIDE_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_DIVIDE_RECORDS, sizeof(uint32_t));
+    CheckTestTier1Build builds[2][2] = { { { 0 } } };
+    for (uint32_t rematerialize = 0; ready && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            char object[512];
+            char main_object[512];
+            snprintf(output, sizeof(output), "%s/tier1-divide-%u-%u", directory, rematerialize, path);
+            snprintf(object, sizeof(object), "%s/tier1-divide-%u-%u.o", directory, rematerialize, path);
+            snprintf(main_object, sizeof(main_object), "%s/tier1-divide-main-%u-%u.o", directory, rematerialize, path);
+            CheckTestTier1Build object_build;
+            CheckTestTier1Build main_build;
+            const bool built = check_test_tier1_build(executable, source, "tier1_divide", output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_divide", object, rematerialize != 0, path != 0, true, &object_build);
+            const bool main_compiled = check_test_tier1_build(executable, main_source, "main", main_object, rematerialize != 0, path != 0, true, &main_build);
+            check_test_expect(test, built && compiled && main_compiled, "the division fixture compiles by --tier1, its functions Tier 1's");
+            check_test_expect(test, main_compiled && main_build.call_stores == 0, "the division fixture's main alone saves nothing around its calls");
+            char actual[256] = { 0 };
+            check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "the division fixture prints clang's build's output");
+            uint32_t relocations = 0;
+            const uint32_t count = compiled && records != NULL && offsets != NULL && types != NULL ?
+                                       check_test_tier1_function(object, "tier1_divide", records, CHECK_TEST_TIER1_DIVIDE_RECORDS, offsets, types, &relocations) : 0;
+            uint32_t multiplications = 0;
+            uint32_t divisions = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t form = records[i].instruction.form & BUSTER_X86_FORM_NUMBER;
+                multiplications += form == X86_FORM_MUL_RM32 || form == X86_FORM_MUL_RM64 || form == X86_FORM_IMUL_RM32 || form == X86_FORM_IMUL_RM64;
+                divisions += form == X86_FORM_DIV_RM32 || form == X86_FORM_DIV_RM64 || form == X86_FORM_IDIV_RM32 || form == X86_FORM_IDIV_RM64;
+            }
+            check_test_expect(test, count != 0 && multiplications == 8 && divisions == 1,
+                              "each of the fixture's eight constant divisors is a reciprocal's multiplication, its register divisor a div");
+            unlink(output);
+            unlink(object);
+            unlink(main_object);
+        }
+    }
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        const CheckTestTier1Build* with = &builds[1][path];
+        const CheckTestTier1Build* without = &builds[0][path];
+        check_test_expect(test, with->call_stores != 0 && without->call_stores != 0, "values left in rax and rdx past the divisions are saved around them");
+        check_test_expect(test, with->rematerializations != 0 && with->dropped != 0 && without->rematerializations == 0 && without->dropped == 0,
+                          "with rematerialization, values are recomputed and definitions left out among the divisions, and without it none");
+        printf("  Tier 1's divisions, %s path: %" PRIu64 " saves around them (%" PRIu64 " without rematerialization), %" PRIu64 " recomputed values, %" PRIu64
+               " definitions left out\n",
+               path == 0 ? "vector" : "scalar", with->call_stores, without->call_stores, with->rematerializations, with->dropped);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(main_source);
     unlink(reference);
 }
