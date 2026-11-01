@@ -400,6 +400,15 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "void f(void) { (void)(int[2]){ 1, 2 }; }\n",
     },
     {
+        // #1000: a file-scope compound literal's elements are constant expressions; a comma's discarded
+        // read the evaluator cannot take rejects them.
+        "6.5.2.5p5", "a file-scope compound literal's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "int *p = (int[]){ (s, 3) };\n",
+        "static int s;\n"
+        "int *p = (int[]){ (&s, 3) };\n",
+    },
+    {
         "6.5.3.1p1", "a prefix increment's operand is real or a pointer", CHECK_CONSTRAINT_ERROR, 0,
         "struct S { int x; } s;\n"
         "void f(void) { ++s; }\n",
@@ -941,6 +950,55 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a[(1 + 2)];\n",
     },
     {
+        // #1000: clang's constant evaluator evaluates a comma's discarded left operand, which must itself
+        // be a constant expression: a variable's read fails where a constant, an address or a const
+        // object's read would not.
+        "6.6p3", "a comma's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "enum { E = (s, 3) };\n",
+        "static int s;\n"
+        "enum { E = (&s, 3) };\n",
+    },
+    {
+        "6.6p3", "a comma's discarded read is a constant expression under a void cast", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "enum { E = ((void)s, 3) };\n",
+        "static int s;\n"
+        "enum { E = ((void)0, 3) };\n",
+    },
+    {
+        "6.6p3", "a comma's discarded modification is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "enum { E = ((s = 1), 3) };\n",
+        "static int s;\n"
+        "enum { E = (1, 3) };\n",
+    },
+    {
+        "6.6p3", "a comma's discarded call is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "int g(void);\n"
+        "enum { E = (g(), 3) };\n",
+        "int g(void);\n"
+        "enum { E = (sizeof(g()), 3) };\n",
+    },
+    {
+        // The fold still extends to a discarded operand the evaluator can take, like an address constant:
+        // #1000 refuses only the operand it can't.
+        "6.6p3", "a comma's discarded address still folds as a GNU extension", CHECK_CONSTRAINT_WARNING, 0,
+        "static int s;\n"
+        "int a[(&s, 3)];\n",
+        "static int s;\n"
+        "int a[sizeof(s) - 1];\n", 2
+    },
+    {
+        // #1000: a library builtin's fold still evaluates its argument in an enumeration's value, so a
+        // discarded read the evaluator cannot take keeps the call from folding.
+        "6.6p3", "a library fold's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "enum { E = __builtin_abs((s, -3)) };\n",
+        "static int s;\n"
+        "enum { E = __builtin_abs((&s, -3)) };\n",
+    },
+    {
         "6.6p4", "a constant expression's value in range of its type", CHECK_CONSTRAINT_WARNING, 0,
         "int x;\n"
         "_Static_assert(0x7fffffff + 1 < 0, \"\");\n",
@@ -988,6 +1046,84 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int x = g();\n",
         "int g(void);\n"
         "int (*x)(void) = g;\n",
+    },
+    {
+        // #1000: the discarded operand of a comma in a static initializer is still a constant expression,
+        // so a read the evaluator cannot take rejects the initializer.
+        "6.6p7", "a static initializer's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int d = (s, 3);\n",
+        "static int s;\n"
+        "static int d = (&s, 3);\n",
+    },
+    {
+        "6.6p7", "a static initializer's discarded read is a constant expression under a void cast", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int d = ((void)s, 3);\n",
+        "static int s;\n"
+        "static int d = ((void)0, 3);\n",
+    },
+    {
+        "6.6p7", "a floating static initializer's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static double d = (s, 0.75);\n",
+        "static int s;\n"
+        "static double d = (&s, 0.75);\n",
+    },
+    {
+        "6.6p7", "a static initializer's operand keeps a discarded read", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int d = (s, 3) + 0;\n",
+        "static int s;\n"
+        "static int d = (1, 3) + 0;\n",
+    },
+    {
+        "6.6p7", "a nested comma's discarded read in a static initializer", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int d = ((void)0, (s, 3));\n",
+        "static int s;\n"
+        "static int d = ((void)0, (1, 3));\n",
+    },
+    {
+        "6.6p7", "a static initializer's discarded modification is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int d = ((s = 1), 3);\n",
+        "static int s;\n"
+        "static int d = (1, 3);\n",
+    },
+    {
+        // #1000: a vector conditional's condition in a static initializer is still a constant expression,
+        // which a discarded read the evaluator cannot take fails where an address would not.
+        "6.6p7", "a vector static initializer's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "typedef int v4si __attribute__((vector_size(16)));\n"
+        "static int s;\n"
+        "static v4si v = (s, 3) ? (v4si){ 1, 2, 3, 4 } : (v4si){ 5, 6, 7, 8 };\n",
+        "typedef int v4si __attribute__((vector_size(16)));\n"
+        "static int s;\n"
+        "static v4si v = (&s, 3) ? (v4si){ 1, 2, 3, 4 } : (v4si){ 5, 6, 7, 8 };\n",
+    },
+    {
+        // #1000: a library builtin's fold still evaluates its argument, so a discarded read the evaluator
+        // cannot take keeps the call, and the static initializer, from being a constant.
+        "6.6p7", "a library fold's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int a = __builtin_abs((s, -3));\n",
+        "static int s;\n"
+        "static int a = __builtin_abs((&s, -3));\n",
+    },
+    {
+        "6.6p7", "a library fold's discarded read under a void cast is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static double d = __builtin_fmax(((void)s, 1.0), 2.0);\n",
+        "static int s;\n"
+        "static double d = __builtin_fmax(((void)0, 1.0), 2.0);\n",
+    },
+    {
+        "6.6p7", "a string fold's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int b = __builtin_strlen((s, \"abc\"));\n",
+        "static int s;\n"
+        "static int b = __builtin_strlen((\"x\", \"abc\"));\n",
     },
     {
         "6.6p9", "a block-scope static's address constant of an automatic object", CHECK_CONSTRAINT_ERROR, 0,
@@ -1269,6 +1405,15 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "struct S { int b : w; };\n",
         "enum { W = 3 };\n"
         "struct S { int b : W; };\n",
+    },
+    {
+        // #1000: a comma's discarded operand is still evaluated in a bit-field's width, which a
+        // variable's read fails where an address or a constant would not.
+        "6.7.2.1p4", "a bit-field width's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "struct S { int b : (s, 3) };\n",
+        "static int s;\n"
+        "struct S { int b : (&s, 3) };\n",
     },
     {
         "6.7.2.1p4", "a bit-field width of integer type", CHECK_CONSTRAINT_ERROR, 0,
@@ -1611,6 +1756,29 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "}\n",
     },
     {
+        // #1000: a comma's discarded operand is still evaluated in a bound, so a read the evaluator cannot
+        // take makes the bound a variable length array's rather than a foldable constant's at file scope.
+        "6.7.6.2p2", "a bound's discarded read makes a variable length array at file scope", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "int a[(s, 3)];\n",
+        "static int s;\n"
+        "void f(void) { int a[(s, 3)]; (void)a; }\n",
+    },
+    {
+        "6.7.6.2p2", "a bound's discarded read under a void cast at file scope", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "int a[((void)s, 3)];\n",
+        "const int c = 3;\n"
+        "int a[((void)c, 3)];\n",
+    },
+    {
+        "6.7.6.2p2", "a bound's discarded modification makes a variable length array at file scope", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "int a[((s = 1), 3)];\n",
+        "static int s;\n"
+        "int a[((void)0, 3)];\n",
+    },
+    {
         "6.7.6.3p1", "a function returning an array", CHECK_CONSTRAINT_ERROR, 0,
         "typedef int A[2];\n"
         "A g(void);\n",
@@ -1736,6 +1904,22 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int *b[2] = { 0, &y };\n",
     },
     {
+        // #1000: a comma's discarded operand is still evaluated in a static aggregate's elements, which a
+        // variable's read fails where an address would not.
+        "6.7.9p4", "a static aggregate's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int b[2] = { (s, 3), 4 };\n",
+        "static int s;\n"
+        "static int b[2] = { (&s, 3), 4 };\n",
+    },
+    {
+        "6.7.9p4", "a static aggregate's designated discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "struct Q { int x; } q = { .x = (s, 3) };\n",
+        "static int s;\n"
+        "struct Q { int x; } q = { .x = (&s, 3) };\n",
+    },
+    {
         "6.7.9p5", "a block-scope extern without an initializer", CHECK_CONSTRAINT_ERROR, 0,
         "int a;\n"
         "void f(void) { extern int x = 1; }\n",
@@ -1755,6 +1939,15 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int b[2] = { [n] = 1 };\n",
         "enum { N = 1 };\n"
         "int b[2] = { [N] = 1 };\n",
+    },
+    {
+        // #1000: a comma's discarded operand is still evaluated in an array designator, which a variable's
+        // read fails where a constant would not.
+        "6.7.9p6", "an array designator's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "static int b[4] = { [(s, 3)] = 4 };\n",
+        "static int s;\n"
+        "static int b[4] = { [(1, 3)] = 4 };\n",
     },
     {
         "6.7.9p6", "an array designator is nonnegative", CHECK_CONSTRAINT_ERROR, 0,
@@ -1818,6 +2011,33 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "_Static_assert(x, \"\");\n",
         "enum { X = 1 };\n"
         "_Static_assert(X, \"\");\n",
+    },
+    {
+        // #1000: a comma's discarded operand is still evaluated in a static assertion, which a variable's
+        // read fails where an address would not.
+        "6.7.10p2", "a static assertion's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "_Static_assert((s, 3), \"\");\n",
+        "static int s;\n"
+        "_Static_assert((&s, 3), \"\");\n",
+    },
+    {
+        // #1000: a floating static assertion's discarded operand is still evaluated, which a variable's
+        // read fails where an address the evaluator takes would not.
+        "6.7.10p2", "a floating static assertion's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "_Static_assert((s, 0.5), \"\");\n",
+        "static int s;\n"
+        "_Static_assert((&s, 0.5), \"\");\n",
+    },
+    {
+        // #1000: a library builtin's fold still evaluates its argument in a static assertion, so a
+        // discarded read the evaluator cannot take rejects it.
+        "6.7.10p2", "a static assertion's library fold keeps a discarded read", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "_Static_assert(__builtin_abs((s, -3)) == 3, \"\");\n",
+        "static int s;\n"
+        "_Static_assert(__builtin_abs((&s, -3)) == 3, \"\");\n",
     },
     {
         "6.7.10p2", "a static assertion of floating type", CHECK_CONSTRAINT_ACCEPT, 0,
@@ -1894,6 +2114,15 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "void f(int x, int y) { switch (x) { case y: ; } }\n",
         "enum { Y = 2 };\n"
         "void f(int x) { switch (x) { case Y: ; } }\n",
+    },
+    {
+        // #1000: a comma's discarded operand is still evaluated in a case label, which a variable's read
+        // fails where an address would not.
+        "6.8.4.2p3", "a case label's discarded read is a constant expression", CHECK_CONSTRAINT_ERROR, 0,
+        "static int s;\n"
+        "void f(int x) { switch (x) { case (s, 3): break; } }\n",
+        "static int s;\n"
+        "void f(int x) { switch (x) { case (&s, 3): break; } }\n",
     },
     {
         "6.8.4.2p3", "case values differ", CHECK_CONSTRAINT_ERROR, 0,

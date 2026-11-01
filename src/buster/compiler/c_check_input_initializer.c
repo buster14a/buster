@@ -384,7 +384,7 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
         // GNU's constant form, not an integer constant expression.
         const bool integer_object = check_action_is_integer(types, qualified);
         const bool constant = evaluated && value.constant_kind != CHECK_CONSTANT_NONE && value.fault == CHECK_FAULT_NONE &&
-                              (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
+                              (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                               (!integer_object || (value.flags & BUSTER_CHECK_ICE) != 0);
         if (!evaluated)
         {
@@ -466,7 +466,7 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
             values[expression] = (CheckValue){ 0 };
             valid = check_input_evaluate_cached_at(reader, expressions[expression].first, expressions[expression].end, &values[expression], NULL) &&
                     values[expression].constant_kind != CHECK_CONSTANT_NONE && values[expression].fault == CHECK_FAULT_NONE &&
-                    (values[expression].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
+                    (values[expression].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                     (values[expression].constant_kind != CHECK_CONSTANT_INTEGER || (values[expression].flags & BUSTER_CHECK_ICE) != 0) &&
                     (values[expression].constant_kind != CHECK_CONSTANT_ADDRESS || values[expression].object == 0 ||
                      (values[expression].flags & BUSTER_CHECK_STATIC_OBJECT) != 0);

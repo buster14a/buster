@@ -1793,7 +1793,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
         }
         else if (walker->static_storage && (converted.value.constant_kind == CHECK_CONSTANT_NONE || converted.value.fault != CHECK_FAULT_NONE ||
-                 (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0))
+                 (converted.value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0))
         {
             check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
         }
@@ -2147,7 +2147,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
             }
             else if (walker->static_storage && !walker->defer_constants && (converted.value.constant_kind == CHECK_CONSTANT_NONE ||
-                     converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 ||
+                     converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0 ||
                      (converted.value.constant_kind == CHECK_CONSTANT_ADDRESS && converted.value.object != 0 &&
                      ((converted.value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || selected->width != 0))))
             {
@@ -2596,7 +2596,8 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                 const CheckInitPart* part = result->parts + p;
                 const CheckValue* value = &part->value;
                 if (part->kind == CHECK_INIT_VALUE && (value->constant_kind == CHECK_CONSTANT_NONE || value->fault != CHECK_FAULT_NONE ||
-                    (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 || (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 &&
+                    (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) != 0 ||
+                    (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 &&
                     ((value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || part->bit_width != 0))))
                 {
                     result->status = CHECK_INIT_NON_CONSTANT;
@@ -2835,29 +2836,44 @@ static CheckInitStatus check_initializer_live(const TypeTable* types, const Chec
             }
         }
     }
+    // As in check_initializer_live_writes (#873): a stable pass over a digit that every candidate shares keeps their
+    // order, and so does every pass over candidates in order already, as a table's pointers in source order are. So
+    // only the digits in which some offset differs from the first candidate's are sorted, and none for candidates in
+    // order, which saves each skipped pass's 1 KiB of counts, zeroed and read back, and their prefix sum.
+    uint64_t varying = 0;
+    bool unordered = false;
+    for (uint32_t i = 1; status == CHECK_INIT_OK && i < candidates; i += 1)
+    {
+        varying |= references[i].offset ^ references[0].offset;
+        unordered |= references[i].offset < references[i - 1].offset;
+    }
+    const uint64_t sorted_digits = unordered ? varying : 0;
     for (uint32_t shift = 0; status == CHECK_INIT_OK && candidates > 1 && shift < 64; shift += 8)
     {
-        uint32_t counts[256] = { 0 };
-        for (uint32_t i = 0; i < candidates; i += 1)
+        if (((sorted_digits >> shift) & 255) != 0)
         {
-            counts[(references[i].offset >> shift) & 255] += 1;
+            uint32_t counts[256] = { 0 };
+            for (uint32_t i = 0; i < candidates; i += 1)
+            {
+                counts[(references[i].offset >> shift) & 255] += 1;
+            }
+            uint32_t total = 0;
+            for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+            {
+                const uint32_t size = counts[bucket];
+                counts[bucket] = total;
+                total += size;
+            }
+            for (uint32_t i = 0; i < candidates; i += 1)
+            {
+                const uint32_t bucket = (uint32_t)((references[i].offset >> shift) & 255);
+                temporary[counts[bucket]] = references[i];
+                counts[bucket] += 1;
+            }
+            CheckInitReference* swap = references;
+            references = temporary;
+            temporary = swap;
         }
-        uint32_t total = 0;
-        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
-        {
-            const uint32_t size = counts[bucket];
-            counts[bucket] = total;
-            total += size;
-        }
-        for (uint32_t i = 0; i < candidates; i += 1)
-        {
-            const uint32_t bucket = (uint32_t)((references[i].offset >> shift) & 255);
-            temporary[counts[bucket]] = references[i];
-            counts[bucket] += 1;
-        }
-        CheckInitReference* swap = references;
-        references = temporary;
-        temporary = swap;
     }
     uint32_t unique = 0;
     for (uint32_t i = 0; status == CHECK_INIT_OK && i < candidates; i += 1)
