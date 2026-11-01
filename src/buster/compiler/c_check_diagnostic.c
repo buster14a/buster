@@ -240,6 +240,54 @@ static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t nod
     return result;
 }
 
+// An x86 builtin's call whose hard immediate constraint failed, as clang reports it (#1066): Sema's BuiltinConstantArg
+// and SemaX86's rounding and scale checks put the error at the call's begin, the builtin's name, and name the builtin
+// for an immediate that isn't an integer constant expression. The report keeps its own token, the call's `)`, which
+// orders it among the other diagnostics, as clang reports the call once its arguments' own diagnostics are out.
+// Returns the message, written into `text` (`capacity` bytes), with the name's token in `location`; or NULL for any
+// other report, whose message and place are its own. The node's effect is found by a search: the stream keeps the
+// effects in their nodes' order (check_graph_validate takes the graph's x86 calls only so), as the lowering finds them,
+// and this runs once per error reported, never per node.
+static const char* check_diagnostic_x86_hard(const CheckInput* input, const CheckStream* stream, const CheckReport* report, char* text, uint32_t capacity,
+                                             uint32_t* location)
+{
+    const char* result = NULL;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && report->node < input->graph.count &&
+                           input->graph.ops[report->node] == CHECK_OP_BUILTIN_X86;
+    uint32_t low = 0;
+    uint32_t high = candidate ? stream->x86_count : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (stream->x86[middle].node < report->node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const CheckBuiltinX86Effect* effect = candidate && low < stream->x86_count && stream->x86[low].node == report->node ? stream->x86 + low : NULL;
+    if (effect != NULL && effect->status == CHECK_BUILTIN_X86_ERROR && effect->info != NULL)
+    {
+        switch (effect->constraint)
+        {
+            case CHECK_BUILTIN_X86_CONSTRAINT_ICE:
+                snprintf(text, capacity, "argument to '%.*s' must be a constant integer", (int)effect->info->name_length, effect->info->name);
+                result = text;
+                break;
+            case CHECK_BUILTIN_X86_CONSTRAINT_RC:
+            case CHECK_BUILTIN_X86_CONSTRAINT_SAE: result = "invalid rounding argument"; break;
+            case CHECK_BUILTIN_X86_CONSTRAINT_SCALE: result = "scale argument must be 1, 2, 4, or 8"; break;
+            case CHECK_BUILTIN_X86_CONSTRAINT_NONE:
+            case CHECK_BUILTIN_X86_CONSTRAINT_RANGE: break;
+        }
+    }
+    *location = result != NULL ? check_diagnostic_x86_token(input, report->node) : report->token;
+    return result;
+}
+
 static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, uint32_t* token)
 {
     uint32_t first = BUSTER_CHECK_NONE;
