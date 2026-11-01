@@ -521,7 +521,11 @@ struct CheckLowerWriter
     uint32_t* label_heads;
     uint32_t* stack_parents;
     uint8_t* stack_classes;
+    // Each object's local in the body being lowered, read through check_lower_local_of: where `locals` has the object's
+    // bit, its entry, and for every other object none, since nothing writes its entry (#877). Without `locals` (a test's
+    // writer) every entry is read.
     uint32_t* local_map;
+    const uint64_t* locals;
     uint32_t* switch_locals;
     // The switch whose CASE controls come next (the last SWITCH control's token), its jump table or BUSTER_CHECK_NONE
     // where its cases' compares dispatch it (check_lower_table_of, by its control), and whether its first CASE control is
@@ -688,6 +692,11 @@ struct CheckLowerWriter
     uint32_t* label_tables;
     uint32_t* table_jumps;
     uint32_t table_jump_count;
+    // The function's lifetime events (#177, Tier0Function.lifetime_entries and lifetime_locals): each LIFETIME control's,
+    // one per local of its block, at the entry the control comes before, with room for the program's.
+    uint32_t* lifetime_entries;
+    uint32_t* lifetime_locals;
+    uint32_t lifetime_count;
     // The writer's room for the program's label symbols (CheckProgramLowered.label_symbols), which its parts take one after
     // another (check_lower_part): `label_symbol_used` of it kept by the parts before the current one.
     SymbolId* label_symbol_room;
@@ -705,6 +714,12 @@ struct CheckLowerWriter
     // until the writer first asks.
     uint64_t first_classification;
 };
+
+// The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
+static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t object)
+{
+    return writer->locals == NULL || check_program_bit(writer->locals, object) ? writer->local_map[object] : BUSTER_CHECK_NONE;
+}
 
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
@@ -2255,7 +2270,7 @@ static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64
     }
     else
     {
-        const uint32_t local = writer->local_map[object];
+        const uint32_t local = check_lower_local_of(writer, object);
         const SymbolId symbol = writer->program->object_symbols[object];
         if (local != BUSTER_CHECK_NONE && writer->indirect[local] != BUSTER_CHECK_LOWER_VLA_NONE)
         {
@@ -5922,7 +5937,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT || op == CHECK_OP_SUBTRACT_ASSIGN;
     const bool pointer = (check_lower_facts(writer, stored) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
     const uint32_t object = graph->ops[left] == CHECK_OP_VALUE ? check_stream_object(stream, left) : 0;
-    const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
+    const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
     const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
     // A global of a memory class goes through its address, as memory does (a local's object takes LOCAL and STORE_LOCAL),
     // and a postfix one's old value through a temporary, a frame object of its own.
@@ -8832,7 +8847,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
              program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
     {
         const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
-        if (writer->local_map[value->object] == BUSTER_CHECK_NONE && check_lower_classless_vector(writer, value->type))
+        if (check_lower_local_of(writer, value->object) == BUSTER_CHECK_NONE && check_lower_classless_vector(writer, value->type))
         {
             // One the locals left without an object (a narrowing shuffle's constant is never evaluated).
             check_lower_unsupported(writer, check_lower_type_feature(types, value->type));
@@ -8877,7 +8892,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             check_lower_address(writer, object, value->offset);
         }
         else if (value->category == CHECK_LVALUE && object != 0 && object < program->object_count && check_lower_memory_class(class) &&
-                 writer->local_map[object] == BUSTER_CHECK_NONE)
+                 check_lower_local_of(writer, object) == BUSTER_CHECK_NONE)
         {
             // A global of a memory class, through its address (a local's object takes LOCAL below).
             check_lower_address(writer, object, value->offset);
@@ -8885,7 +8900,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (value->category == CHECK_LVALUE && object != 0 && object < program->object_count)
         {
-            const uint32_t local = writer->local_map[object];
+            const uint32_t local = check_lower_local_of(writer, object);
             const SymbolId symbol = program->object_symbols[object];
             if (local != BUSTER_CHECK_NONE)
             {
@@ -9246,7 +9261,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
         const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
-        const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
+        const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
         const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
         // A global of a memory class is stored through its address, which goes first (check_lower_memory_class).
         const bool memory = check_lower_memory_class(class);
@@ -9676,7 +9691,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
     else
     {
         const CheckInitializer* plan = &initializers->plans[control.target];
-        const uint32_t local = writer->local_map[program->input->objects[declaration]];
+        const uint32_t local = check_lower_local_of(writer, program->input->objects[declaration]);
         const bool object = local != BUSTER_CHECK_NONE && writer->local_sizes[local] != 0;
         const uint32_t pool = object ? check_lower_init_pool(&writer->output->initializers, control.target, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
         const uint8_t class = check_lower_class(writer, plan->type);
@@ -10126,7 +10141,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const CheckInput* input = program->input;
     const uint32_t declaration = control.token;
     const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
-    const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
+    const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
     const uint8_t role = control.target < input->token_count ? program->parser->tree.roles[control.target] : 0;
     const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
@@ -10452,6 +10467,31 @@ static void check_lower_tail_return(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// A block's objects' lifetimes (CHECK_CONTROL_LIFETIME, #177): an event of each of its locals before the entry that comes
+// next (Tier0Function.lifetime_entries), their start where the control's node is 0 and their end where it is 1.
+static void check_lower_lifetime(CheckLowerWriter* writer, CheckControl control)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const uint32_t end = control.node != 0 ? BUSTER_TIER0_LIFETIME_END : 0;
+    for (uint32_t d = program->lifetime_first != NULL && control.target < input->token_count ? program->lifetime_first[control.target] : BUSTER_CHECK_NONE;
+         d != BUSTER_CHECK_NONE && writer->output->status == CHECK_PROGRAM_OK; d = program->lifetime_next[d])
+    {
+        const uint32_t object = input->objects[d];
+        const uint32_t local = object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
+        if (local < writer->local_count && writer->lifetime_count < program->lifetime_event_count)
+        {
+            writer->lifetime_entries[writer->lifetime_count] = writer->count;
+            writer->lifetime_locals[writer->lifetime_count] = local | end;
+            writer->lifetime_count += 1;
+        }
+        else if (local < writer->local_count)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+}
+
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -10510,6 +10550,10 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_CLEANUP)
     {
         check_lower_cleanup(writer, control);
+    }
+    else if (control.kind == CHECK_CONTROL_LIFETIME)
+    {
+        check_lower_lifetime(writer, control);
     }
     else if (control.kind == CHECK_CONTROL_RESULT)
     {
@@ -10727,7 +10771,9 @@ struct CheckLowerShared
     // Whether the program's type table has a _BitInt type (CheckLowerWriter.bit_ints).
     bool bit_ints;
     uint32_t* initializer_declarations;
+    // local_map's entries and the objects whose entries are kept, the bodies' parameters' and locals' (CheckLowerWriter).
     uint32_t* local_map;
+    uint64_t* locals;
     uint32_t* switch_locals;
     uint32_t* vla_identities;
     uint32_t* save_locals;
@@ -10853,6 +10899,16 @@ static bool check_lower_local_declaration(const CheckInput* input, uint32_t toke
 {
     return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count &&
            input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
+}
+
+// Keeps `object`'s local_map entry (CheckLowerShared.locals): marked, and none until a body writes it.
+static void check_lower_local_keep(CheckLowerShared* shared, uint32_t object, uint32_t count)
+{
+    if (object <= count && !check_program_bit(shared->locals, object))
+    {
+        check_program_bit_set(shared->locals, object);
+        shared->local_map[object] = BUSTER_CHECK_NONE;
+    }
 }
 
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
@@ -11017,6 +11073,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->provisional_tables = valid ? (SymbolId)(provisional64 + CHECK_LOWER_RUNTIMES) : 0;
 #define BUSTER_CHECK_LOWER_TABLE(field, type, length) shared->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= shared->field != 0
     BUSTER_CHECK_LOWER_TABLE(local_map, uint32_t, (uint64_t)count + 1);
+    BUSTER_CHECK_LOWER_TABLE(locals, uint64_t, ((uint64_t)count + 64) / 64);
     BUSTER_CHECK_LOWER_TABLE(switch_locals, uint32_t, (uint64_t)count + 1);
     BUSTER_CHECK_LOWER_TABLE(vla_identities, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
     BUSTER_CHECK_LOWER_TABLE(save_locals, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
@@ -11088,7 +11145,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     if (valid)
     {
         memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
-        memset(shared->local_map, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(shared->locals, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
         // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
         // than every token (#877).
@@ -11139,6 +11196,22 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             {
                 shared->local_next[token] = shared->local_first[body];
                 shared->local_first[body] = token;
+            }
+        }
+        // The objects whose local_map entries a body writes, its parameters' and its locals' (check_lower_part sets them as
+        // the body starts and puts them back to none as it ends): each cleared and marked in `locals` before any body is
+        // lowered, after which the bodies' writers only read the bits (#877). Every other object's entry, which nothing
+        // writes, reads as none without being cleared.
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            const uint32_t opening = program->bodies[b].opening;
+            for (uint32_t parameter = input->parameters[opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+            {
+                check_lower_local_keep(shared, input->objects[parameter], count);
+            }
+            for (uint32_t declaration = shared->local_first[opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
+            {
+                check_lower_local_keep(shared, input->objects[declaration], count);
             }
         }
         // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
@@ -11235,6 +11308,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .type_templates = shared->type_templates,
         .type_count = shared->type_count,
         .local_map = shared->local_map,
+        .locals = shared->locals,
         .switch_locals = shared->switch_locals,
         .vla_identities = shared->vla_identities,
         .save_locals = shared->save_locals,
@@ -11289,6 +11363,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -11416,6 +11492,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->count = 0;
         writer->label_entry_count = 0;
         writer->table_jump_count = 0;
+        writer->lifetime_count = 0;
         writer->table_current = BUSTER_CHECK_NONE;
         writer->table_pending = false;
         writer->depth = 0;
@@ -11585,7 +11662,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 const uint32_t natural = type_alignment_log2(types, declared_type);
                 const uint32_t alignment = requested > natural ? requested : natural;
                 const uint8_t class = check_lower_class(writer, declared_type);
-                const uint32_t incoming = writer->local_map[input->objects[parameter]];
+                const uint32_t incoming = check_lower_local_of(writer, input->objects[parameter]);
                 writer->token = parameter;
                 check_lower_source(writer, parameter);
                 if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
@@ -11653,7 +11730,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         for (uint32_t declaration = bare ? BUSTER_CHECK_NONE : shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
         {
-            if (writer->local_map[input->objects[declaration]] == BUSTER_CHECK_NONE)
+            if (check_lower_local_of(writer, input->objects[declaration]) == BUSTER_CHECK_NONE)
             {
                 const TypeId local_type = input->declared_types[declaration];
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
@@ -11917,6 +11994,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         BUSTER_CHECK_LOWER_COPY(label_tables, label_tables, uint32_t, writer->table_jump_count != 0 ? writer->label_entry_count : 0);
         BUSTER_CHECK_LOWER_COPY(table_jumps, table_jumps, uint32_t, writer->table_jump_count);
         function->table_count = writer->table_jump_count;
+        // The lifetime events before an entry: one after the last entry has nothing to come before, and is left out.
+        uint32_t lifetimes = writer->lifetime_count;
+        while (lifetimes != 0 && writer->lifetime_entries[lifetimes - 1] >= writer->count)
+        {
+            lifetimes -= 1;
+        }
+        BUSTER_CHECK_LOWER_COPY(lifetime_entries, lifetime_entries, uint32_t, lifetimes);
+        BUSTER_CHECK_LOWER_COPY(lifetime_locals, lifetime_locals, uint32_t, lifetimes);
+        function->lifetime_count = lifetimes;
 #undef BUSTER_CHECK_LOWER_COPY
         if (sources && status->status == CHECK_PROGRAM_OK)
         {

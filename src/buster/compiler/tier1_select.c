@@ -117,6 +117,9 @@ typedef enum Tier1SelectRule
     // places its edges' moves after it, at its labels' blocks or in stubs where it defines their labels
     // (tier1_emit_cfg.c).
     TIER1_RULE_JUMP_INDIRECT,
+    // A frame slot's lifetime marker (IR_LIFETIME, #177): no records. The CFG consumer colors the frame's objects by the
+    // markers (tier1_emit_cfg_lifetimes).
+    TIER1_RULE_LIFETIME,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -560,6 +563,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
     case TIER1_RULE_LEAF:
     case TIER1_RULE_NONE:
+    case TIER1_RULE_LIFETIME:
         break;
     case TIER1_RULE_CONSTANT:
         tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
@@ -1447,11 +1451,20 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
 
 // A frame object's address the selector takes: a lea from the frame's base (TIER1_RULE_STACK_ADDRESS), or folded into
 // a user's memory operand (tier1_select_address), both filled at emission from the frame's layout. The frame's offsets
-// are 32-bit, and an over-aligned object realigns it.
+// are 32-bit, and an over-aligned object realigns it. A variadic definition's register save area (#789) is one: the
+// frame's own, which the prologue fills (tier1_emit_cfg.c). Its overflow area isn't (tier1_select_overflow_area).
 static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot)
 {
-    return slot < function->slot_count && (function->slots[slot].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0 &&
+    return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) == 0 &&
            function->slots[slot].size <= BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES && function->slots[slot].alignment <= BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT;
+}
+
+// A variadic definition's overflow area (#789), whose address is in its caller's frame, past the incoming stack
+// arguments: a lea the CFG consumer bases on the incoming frame (TIER1_RULE_STACK_ADDRESS, tier1_emit_cfg_incoming),
+// never a memory operand's base, which is the frame's.
+static bool tier1_select_overflow_area(const IrFunction* function, uint32_t slot)
+{
+    return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
 }
 
 // A memory operand's address: base + index * 2^scale + displacement, the frame object the walk reached instead of a
@@ -2117,7 +2130,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_PHI;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
+    else if (op == IR_STACK_ADDR && (tier1_select_stack_object(function, a) || tier1_select_overflow_area(function, a)))
     {
         base.rule = TIER1_RULE_STACK_ADDRESS;
         base.immediate = a;
@@ -2129,6 +2142,12 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_SYMBOL_ADDRESS;
         base.immediate = a;
         base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_LIFETIME)
+    {
+        base.rule = TIER1_RULE_LIFETIME;
+        base.immediate = a;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;
@@ -2296,9 +2315,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
-    // By-value aggregates' ABI records and a variadic definition's incoming frame (#131, #789) aren't selected yet. Labels
-    // and br_indirect are: the CFG consumer defines the labels' symbols (tier1_emit_cfg.c).
-    if (error == TIER1_SELECT_OK && (function->parameter_passed != 0 || function->variadic))
+    // By-value aggregates' ABI records (#131, #789) aren't selected yet. Labels, br_indirect and a variadic definition's
+    // incoming frame are: the CFG consumer defines the labels' symbols and fills the register save area (tier1_emit_cfg.c).
+    if (error == TIER1_SELECT_OK && function->parameter_passed != 0)
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
     }
@@ -2663,15 +2682,17 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
     // edge moves a phi needs, nor the saves around a fixed-register sequence's (tier1_select_fixed). Reject the complete
     // plan before allocating records, even if earlier value locations are spilled. A memory operand through a frame
-    // object needs the frame's layout too, and an indirect jump's labels their symbols: the CFG consumer's.
-    if (error == TIER1_SELECT_OK && plan->function->label_count != 0)
+    // object needs the frame's layout too, an indirect jump's labels their symbols, and a variadic definition its register
+    // save area: the CFG consumer's.
+    if (error == TIER1_SELECT_OK && (plan->function->label_count != 0 || plan->function->variadic))
     {
         error = TIER1_SELECT_ERROR_UNSUPPORTED;
     }
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
-            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
+            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
+            tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
             tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE || plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;

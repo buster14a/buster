@@ -35,6 +35,10 @@ typedef enum CheckProgramStatus
 // no node and target BUSTER_CHECK_CONTROL_KEPT, then returns. A for statement's own variables' cleanups come after its
 // end's label, which its break reaches, and a statement expression's block's after its END, which its region counts
 // (CheckProgramRegion.cleanups): its value is computed before them.
+// A block's objects' lifetimes (#177, c_check_program_lifetime.c), in a program asked for them: CHECK_CONTROL_LIFETIME
+// (`target` the block's closing brace, whose locals CheckProgram.lifetime_first lists, `node` 0 for their start and 1 for
+// their end, `token` where) where the block's statements begin, where they end, after its cleanups, and before each
+// break, continue or goto that leaves it, after the jump's cleanups.
 typedef enum CheckControlKind
 {
     CHECK_CONTROL_EVALUATE,
@@ -52,6 +56,7 @@ typedef enum CheckControlKind
     CHECK_CONTROL_JUMP_INDIRECT,
     CHECK_CONTROL_CLEANUP,
     CHECK_CONTROL_RESULT,
+    CHECK_CONTROL_LIFETIME,
     // The kinds from here on go to a label: their `target`.
     CHECK_CONTROL_BRANCH_FALSE,
     CHECK_CONTROL_BRANCH_TRUE,
@@ -133,6 +138,9 @@ struct CheckProgramOptions
     // The options it came from (c_predefines.c), against which a function's target attribute resolves (#180); null leaves
     // every function the unit's target.
     const PredefinesOptions* predefines;
+    // The blocks' objects' lifetimes (#177, c_check_program_lifetime.c): CHECK_CONTROL_LIFETIME entries, which the
+    // lowering turns into its functions' lifetime events, for Tier 1's frame (the C driver's --tier1).
+    bool lifetimes;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -315,6 +323,13 @@ struct CheckProgram
     // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
     // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
     uint8_t* body_eager;
+    // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
+    // lifetime_first (by the block's closing brace, BUSTER_CHECK_NONE for a block without them) through lifetime_next (by
+    // declaration), in token order; null otherwise.
+    uint32_t* lifetime_first;
+    uint32_t* lifetime_next;
+    // The lifetime events the lowering makes of the controls at most: one per local of each LIFETIME control's block.
+    uint32_t lifetime_event_count;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -350,8 +365,12 @@ struct CheckControlWriter
     uint32_t* previous;
     const uint32_t* token_first;
     const uint32_t* node_next;
+    // Each initializer node's declaration token, where `initialized` has the node's bit (check_program_openings), and each
+    // statement's first initializer plan, where `planned` has its token's bit: no other entry is written (#877).
     const uint32_t* initializers;
+    const uint64_t* initialized;
     const uint32_t* plan_first;
+    const uint64_t* planned;
     const uint32_t* plan_next;
     // Whether the unit may have variable-length arrays' bounds or objects (check_program_variable): only then does it have
     // vla_first, allocation_first, allocation_next, vla_blocks and vla_saves, which are null otherwise (#877).
@@ -924,6 +943,18 @@ static void check_control_token(CheckControlWriter* writer, uint32_t token)
     check_control_push(writer, (CheckControlTask){ .kind = CHECK_CONTROL_TASK_TOKEN, .token = token });
 }
 
+// Whether bit `index` of `bits` is set, and setting it: the bitsets that mark which entries of a sparse column were
+// written, so that the column needn't be cleared at every index (#877).
+static bool check_program_bit(const uint64_t* bits, uint32_t index)
+{
+    return ((bits[index / 64] >> (index % 64)) & 1) != 0;
+}
+
+static void check_program_bit_set(uint64_t* bits, uint32_t index)
+{
+    bits[index / 64] |= UINT64_C(1) << (index % 64);
+}
+
 static bool check_control_static(const CheckControlWriter* writer, uint32_t node)
 {
     const CheckInput* input = writer->program->input;
@@ -933,7 +964,8 @@ static bool check_control_static(const CheckControlWriter* writer, uint32_t node
     {
         cursor = graph->operand0[cursor];
     }
-    const uint32_t declaration = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE ? writer->initializers[cursor] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE && check_program_bit(writer->initialized, cursor) ?
+                                 writer->initializers[cursor] : BUSTER_CHECK_NONE;
     return declaration != BUSTER_CHECK_NONE && input->static_objects[declaration];
 }
 
@@ -1018,6 +1050,33 @@ static uint32_t check_control_opening(const CheckControlWriter* writer, uint32_t
         child = writer->next[child];
     }
     return child;
+}
+
+// The CHECK_CONTROL_LIFETIME ends of a jump at `jump` (#177): one for each block with lifetimes that it leaves. A break or
+// a continue leaves the blocks inside its loop or switch, the ancestor whose label in `targets` (stops or repeats) is its
+// `target`; a goto (`targets` 0) those that don't hold `label`, a token, and every block outside the innermost that holds
+// it holds it too.
+static void check_control_lifetimes_left(CheckControlWriter* writer, uint32_t jump, uint32_t label, const uint32_t* targets, uint32_t target)
+{
+    const Parser* parser = writer->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t* first = writer->program->lifetime_first;
+    bool past = first == NULL;
+    uint32_t steps = 0;
+    for (uint32_t ancestor = past ? count : parser->tree.parents[jump]; !past && ancestor < count && steps < count; ancestor = parser->tree.parents[ancestor])
+    {
+        past = (targets != 0 && targets[ancestor] == target) || ancestor == writer->closing;
+        if (!past && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BLOCK && first[ancestor] != BUSTER_CHECK_NONE)
+        {
+            const uint32_t opening = check_control_opening(writer, ancestor, PARSE_ROLE_OPEN_BLOCK);
+            past = targets == 0 && opening != BUSTER_CHECK_NONE && label > opening && label < ancestor;
+            if (!past)
+            {
+                check_control_entry(writer, CHECK_CONTROL_LIFETIME, jump, 1, ancestor);
+            }
+        }
+        steps += 1;
+    }
 }
 
 static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high);
@@ -1151,6 +1210,12 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         {
             check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
         }
+        // Its objects' lifetimes (#177): their end after its statements and its cleanups, their start before its statements.
+        const bool lifetimes = role == PARSE_ROLE_CLOSE_BLOCK && writer->program->lifetime_first != NULL && writer->program->lifetime_first[token] != BUSTER_CHECK_NONE;
+        if (lifetimes)
+        {
+            check_control_entry(writer, CHECK_CONTROL_LIFETIME, token, 1, token);
+        }
         const uint32_t block = role == PARSE_ROLE_CLOSE_BLOCK && writer->cleanup_count != 0 ? check_control_opening(writer, token, PARSE_ROLE_OPEN_BLOCK) :
                                                                                             BUSTER_CHECK_NONE;
         if (block != BUSTER_CHECK_NONE)
@@ -1163,6 +1228,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             {
                 check_control_statement(writer, child, task.stop, task.repeat);
             }
+        }
+        if (lifetimes)
+        {
+            check_control_entry(writer, CHECK_CONTROL_LIFETIME, token, 0, token);
         }
     }
     else if (role == PARSE_ROLE_CLOSE_CONDITION)
@@ -1401,6 +1470,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 const uint32_t* targets = stops ? writer->stops : writer->repeats;
                 const uint32_t label = stops ? task.stop : task.repeat;
                 check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, label);
+                check_control_lifetimes_left(writer, jump, BUSTER_CHECK_NONE, targets, label);
                 check_control_leave(writer, jump, BUSTER_CHECK_NONE, targets, label);
                 if (writer->cleanup_count != 0)
                 {
@@ -1425,6 +1495,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 if (target > writer->opening && target < writer->closing && writer->source_labels[target] != BUSTER_CHECK_NONE)
                 {
                     check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, writer->source_labels[target]);
+                    check_control_lifetimes_left(writer, jump, target, 0, BUSTER_CHECK_NONE);
                     check_control_leave(writer, jump, target, 0, BUSTER_CHECK_NONE);
                     check_control_cleanups(writer, jump, target, BUSTER_CHECK_NONE);
                 }
@@ -1605,7 +1676,7 @@ static void check_control_drain(CheckControlWriter* writer)
                     check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
                 }
             }
-            const uint32_t plan = writer->plan_first[task.token];
+            const uint32_t plan = check_program_bit(writer->planned, task.token) ? writer->plan_first[task.token] : BUSTER_CHECK_NONE;
             uint32_t i = plan;
             uint32_t v = writer->variable ? writer->vla_first[task.token] : BUSTER_CHECK_NONE;
             uint32_t a = writer->variable ? writer->allocation_first[task.token] : BUSTER_CHECK_NONE;
@@ -2362,9 +2433,11 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
 
 // The bodies to build and the initializers' declaration tokens by node, in one pass over the tokens (#530): each body's
 // opening brace (a token with a body declaration, unless deferred) into `openings` in token order, and each initializer
-// node's token into `initializers`, the last as a scan in token order leaves it. AVX-512 tests 16 tokens at a time, the
-// rest and the `scalar` path one at a time. Returns the number of bodies.
-static uint32_t check_program_openings(const CheckInput* input, uint32_t node_count, uint32_t* openings, uint32_t* initializers, bool scalar)
+// node's token into `initializers`, the last as a scan in token order leaves it, with the node's bit in `initialized`
+// (zeroed), which says which entries were written (#877). AVX-512 tests 16 tokens at a time, the rest and the `scalar`
+// path one at a time. Returns the number of bodies.
+static uint32_t check_program_openings(const CheckInput* input, uint32_t node_count, uint32_t* openings, uint32_t* initializers, uint64_t* initialized,
+                                       bool scalar)
 {
     (void)scalar;
 
@@ -2384,11 +2457,12 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t node_co
         {
             openings[bodies++] = token + (uint32_t)__builtin_ctz(lanes);
         }
-        const __mmask16 initialized = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_nodes + token), nodes);
-        for (uint32_t lanes = initialized; lanes != 0; lanes &= lanes - 1)
+        const __mmask16 initializing = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_nodes + token), nodes);
+        for (uint32_t lanes = initializing; lanes != 0; lanes &= lanes - 1)
         {
             const uint32_t at = token + (uint32_t)__builtin_ctz(lanes);
             initializers[input->initializer_nodes[at]] = at;
+            check_program_bit_set(initialized, input->initializer_nodes[at]);
         }
     }
     for (; token < count; token += 1)
@@ -2400,6 +2474,7 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t node_co
         if (input->initializer_nodes[token] < node_count)
         {
             initializers[input->initializer_nodes[token]] = token;
+            check_program_bit_set(initialized, input->initializer_nodes[token]);
         }
     }
     return bodies;
@@ -2435,6 +2510,51 @@ static bool check_program_runtime_object(const CheckInput* input, const TypeTabl
 {
     return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
            !input->static_objects[token] && check_action_runtime_size(types, input->declared_types[token]);
+}
+
+// Each statement's initializer plans, linked from the last back so that a statement's list is in declaration order: a
+// statement's first entry is written, and its bit set in `planned`, at its first plan, and no other entry of plan_first is
+// (#877). A compound literal's plan joins no statement's list; true when one of a runtime object does.
+static bool check_program_plans(CheckProgram* program, const Parser* parser, const CheckInitializers* initializers, uint32_t* plan_first, uint64_t* planned,
+                                uint32_t* plan_next)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    bool compound_initializers = false;
+    for (uint32_t i = initializers != 0 ? initializers->count : 0; i-- > 0;)
+    {
+        const uint32_t declaration = initializers->declaration_tokens[i];
+        const bool compound = declaration < count && input->compound_objects[declaration];
+        uint32_t token = declaration < count && input->initializer_begins[declaration] != 0 ? input->initializer_begins[declaration] - 1 : BUSTER_CHECK_NONE;
+        uint32_t steps = 0;
+        while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
+        {
+            token = parser->tree.parents[token];
+            steps += 1;
+        }
+        if (compound)
+        {
+            // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
+            // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
+            plan_next[i] = BUSTER_CHECK_NONE;
+            compound_initializers |= !input->static_objects[declaration];
+        }
+        else if (token < count && steps < count)
+        {
+            if (!check_program_bit(planned, token))
+            {
+                check_program_bit_set(planned, token);
+                plan_first[token] = BUSTER_CHECK_NONE;
+            }
+            plan_next[i] = plan_first[token];
+            plan_first[token] = i;
+        }
+        else
+        {
+            check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
+        }
+    }
+    return compound_initializers;
 }
 
 // The variable-length arrays' objects, by their statements, and each block's first, from the last token back, so that the
@@ -2814,6 +2934,7 @@ static void check_program_needed_number(const uint8_t* needed, uint32_t objects,
 #include "c_check_x86_diagnostic.c"
 #include "c_check_target_feature.c"
 #include "c_check_program_alias.c"
+#include "c_check_program_lifetime.c"
 
 // The entries that cleanups add at most (#147): a CHECK_CONTROL_CLEANUP at each exit from a variable's scope, its end and
 // each jump inside it (whose keywords have the role RETURN), counted from a running count of those tokens, and a RESULT
@@ -2874,8 +2995,16 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, scratch) : 0;
-    valid = valid && cleanup_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
-    const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room) : 0;
+    // The blocks' objects' lifetimes, asked for (#177): each block's locals, the room their controls take, and the stamps
+    // of the walks that find the blocks a jump enters.
+    const bool lifetimes = valid && options.lifetimes;
+    uint32_t* lifetime_first = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* lifetime_next = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* lifetime_stamps = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    valid = valid && (!lifetimes || (lifetime_first != 0 && lifetime_next != 0 && lifetime_stamps != 0));
+    const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next) : 0;
+    valid = valid && cleanup_room + lifetime_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
+    const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room + lifetime_room) : 0;
     // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
     // takes the labels and the worklist again from their start, and the controls follow each other. They are in an arena
     // of their own, which check_program unmaps when it returns (#572). In the scratch, their starts and the columns pushed
@@ -2887,8 +3016,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* previous = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* token_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* node_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+    // The initializers by node and the plans by statement, written at few entries, which their bits mark, rather than
+    // cleared at every one: 4 bytes a node and 4 a token, against a bit of each (#877).
     uint32_t* initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+    uint64_t* initialized = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)node_count + 64) / 64) : 0;
     uint32_t* plan_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint64_t* planned = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)count + 64) / 64) : 0;
     uint32_t* plan_next = valid && options.initializers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)options.initializers->count + 1) : 0;
     // The variable-length arrays' columns, the asm statements' and the regions', only for a unit that may have them: each
     // is 4 bytes a token, which its fill touched in every unit (#877).
@@ -2925,8 +3058,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControlTask, capacity) : 0;
-    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
-            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
+    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && initialized != 0 && labels != 0 &&
+            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && (!regions || region_first != 0) && region_next != 0 && openings != 0 && vla_next != 0 && (!assemblies || asm_statements != 0) &&
@@ -2949,8 +3082,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
         memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(initializers, 0xff, ((uint64_t)node_count + 1) * sizeof(uint32_t));
-        memset(plan_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(initialized, 0, ((uint64_t)node_count + 64) / 64 * sizeof(uint64_t));
+        memset(planned, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         if (variable)
         {
             memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -2975,6 +3108,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             check_program_addressed(parser, input, addressed, BUSTER_SCALAR_PATH(options.scalar));
         }
+        if (lifetime_first != 0)
+        {
+            check_program_lifetime_entered(program, parser, addressed, lifetime_stamps, lifetime_first);
+            program->lifetime_first = lifetime_first;
+            program->lifetime_next = lifetime_next;
+        }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         if (options.return_flow_work != NULL)
@@ -2998,42 +3137,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 region_first[body] = r;
             }
         }
-        body_count = check_program_openings(input, node_count, openings, initializers, BUSTER_SCALAR_PATH(options.scalar));
+        body_count = check_program_openings(input, node_count, openings, initializers, initialized, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t node = node_count; node-- > 0;)
         {
             const uint32_t token = input->graph.tokens[node];
             node_next[node] = token_first[token];
             token_first[token] = node;
         }
-        bool compound_initializers = false;
-        for (uint32_t i = options.initializers != 0 ? options.initializers->count : 0; i-- > 0;)
-        {
-            const uint32_t declaration = options.initializers->declaration_tokens[i];
-            const bool compound = declaration < count && input->compound_objects[declaration];
-            uint32_t token = declaration < count && input->initializer_begins[declaration] != 0 ? input->initializer_begins[declaration] - 1 : BUSTER_CHECK_NONE;
-            uint32_t steps = 0;
-            while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
-            {
-                token = parser->tree.parents[token];
-                steps += 1;
-            }
-            if (compound)
-            {
-                // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
-                // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
-                plan_next[i] = BUSTER_CHECK_NONE;
-                compound_initializers |= !input->static_objects[declaration];
-            }
-            else if (token < count && steps < count)
-            {
-                plan_next[i] = plan_first[token];
-                plan_first[token] = i;
-            }
-            else
-            {
-                check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
-            }
-        }
+        const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next);
         if (compound_initializers && program->status == CHECK_PROGRAM_OK)
         {
             program->compound_initializers = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, options.initializers->count);
@@ -3125,7 +3236,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .token_first = token_first,
         .node_next = node_next,
         .initializers = initializers,
+        .initialized = initialized,
         .plan_first = plan_first,
+        .planned = planned,
         .plan_next = plan_next,
         .variable = variable,
         .vla_first = vla_first,
@@ -3245,6 +3358,21 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         if (writer.count != 0)
         {
             memcpy(program->controls, entries, (uint64_t)writer.count * sizeof(CheckControl));
+        }
+        // The lifetime events the lowering makes of the LIFETIME controls at most (#177): one per local of each one's block.
+        uint64_t events = 0;
+        for (uint32_t i = 0; program->lifetime_first != NULL && i < writer.count; i += 1)
+        {
+            for (uint32_t d = entries[i].kind == CHECK_CONTROL_LIFETIME && entries[i].target < count ? program->lifetime_first[entries[i].target] : BUSTER_CHECK_NONE;
+                 d != BUSTER_CHECK_NONE; d = program->lifetime_next[d])
+            {
+                events += 1;
+            }
+        }
+        program->lifetime_event_count = events <= UINT32_MAX - 1 ? (uint32_t)events : UINT32_MAX;
+        if (events > UINT32_MAX - 1)
+        {
+            check_program_fail(program, CHECK_PROGRAM_RESOURCE, BUSTER_CHECK_NONE);
         }
         memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));

@@ -160,7 +160,7 @@ static inline __attribute__((always_inline)) bool check_lower_value_payload(cons
     }
     else if (valid && op == CHECK_OP_VALUE && value->category == CHECK_LVALUE && known)
     {
-        const uint32_t local = writer->local_map[object];
+        const uint32_t local = check_lower_local_of(writer, object);
         const SymbolId symbol = program->object_symbols[object];
         valid = local != BUSTER_CHECK_NONE || symbol != 0;
         *kind = local != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL;

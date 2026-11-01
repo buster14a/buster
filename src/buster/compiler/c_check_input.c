@@ -6766,6 +6766,13 @@ static void check_input_expressions(CheckInputReader* reader)
                         .object = reader->objects[declaration],
                     };
                 }
+                // A file-scope compound literal's elements are constant expressions, like a static
+                // initializer's: their constant evaluation supplies no context report of its own.
+                for (uint32_t value = reader->static_objects[declaration] ? first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE;
+                     value = reader->value_next[value])
+                {
+                    graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+                }
             }
         }
         else if (role == PARSE_ROLE_RANGE)
@@ -7096,6 +7103,15 @@ static void check_input_expressions(CheckInputReader* reader)
             reader->first_value[token] = first;
             reader->last_value[token] = last;
             reader->value_counts[token] = count;
+            if (reader->static_initializers[token])
+            {
+                // A braced static initializer's elements are constant expressions, which initializer
+                // planning diagnoses: the same constant evaluation its scalar form's INITIALIZE gets.
+                for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+                {
+                    graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+                }
+            }
         }
     }
 }

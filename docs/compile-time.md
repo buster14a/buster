@@ -910,10 +910,15 @@ Every change keeps both paths' objects and diagnostics byte for byte.
   `check_lower_prepare` already did for `vla_identities`. A jump's search for the blocks it leaves
   (`check_control_leave`) is skipped without the variable-length arrays' columns. Each column is 4 bytes a token, 2.9 MB
   for `sqlite3.c`. Six of them were filled whole, 17 MB together; `allocation_next` took address space only.
+  Then `plan_first` (each statement's first initializer plan, 4 bytes a token) and `initializers` (each initializer
+  node's declaration, 4 bytes a node) are written at few entries. A bitset marks them (`planned`, `initialized`: a bit of
+  each), and the readers test it, rather than reading a column cleared at every entry (`check_program_bit`).
 - **The lowering's tables.** `switch_locals` is set to none only at the cases' owners, its only reads. `local_first` is
   set to none only at the bodies' openings, where it is read, and at the locals' bodies, where it is written. Both used
-  to be filled at every token. `local_map` keeps its fill: an expression's object may be any object (a global's
-  included), which it reads as none.
+  to be filled at every token. `local_map` is read for any object an expression names, a global's included, and must
+  read as none for all but the body's own. Only its parameters' and locals' entries are ever written, so preparation
+  clears just those and marks them in a bitset (`locals`, a bit an object), before any lane lowers a body. Its readers
+  go through `check_lower_local_of`, which reads none for an unmarked object; the lanes only read the bits.
 - **The asm labels** (`check_input_asm_labels`). The reader swept the `attributes` column three times for its
   attributed tokens: for any label, for the labelled objects, and for the register variables' labels (which moved
   here from `check_input_asm_finish`, in the same order).
@@ -929,7 +934,13 @@ Every change keeps both paths' objects and diagnostics byte for byte.
 `test-checker` checks the selections' kernel against a reading of random forests of up to 1,100 tokens, and the asm
 labels' three kernels against a reading of random columns. Every column ends at a `PROT_NONE` page, and both paths
 run. The existing program fixtures of variable-length arrays (jumps out of their blocks among them), asm statements and
-statement expressions run through the columns, and every unit without them skips them.
+statement expressions run through the columns, and every unit without them skips them. The bitsets are checked against
+readings of their own too, each ending at a `PROT_NONE` page: `initialized` against the tokens' initializer nodes on
+random columns; `planned` against a walk of random initializers' parents to their statements, whose lists must be their
+plans in order and which may write no other entry of `plan_first` or `plan_next` (`check_program_plans`), with as many
+plans as tokens, fewer, and none; and `locals`
+against each program fixture's bodies' parameters and automatic declarations, and through its accessors on random
+objects.
 
 **On the 9700X.** The pull request's `compile_time` step, at its first head (`f0084098`,
 [job 124825289835](https://github.com/buster14a/buster/actions/runs/41297067398/job/124825289835)), on the frozen
@@ -961,6 +972,16 @@ other three are on both paths. Both wrote the same object.
 `check_program_allocations` (6.1 M) no longer runs, and `check_control_leave` fell from 391 K to 7.5 K. These are
 instruction counts, not time: the fills cost the 9700X mostly memory traffic and fresh pages, which only its own
 comparison shows. Callgrind needs a finite address space to run the compiler (`ulimit -v 67108864`, docs/arena-memory.md).
+
+The later bitsets (`planned`, `initialized` and `locals`), counted the same way on baseline builds of `main`
+(`92252c30`) and of that change, which wrote the same object:
+
+| | `main` | the bitsets | change |
+| --- | ---: | ---: | ---: |
+| the whole compile | 5,868.9 M | 5,862.8 M | -6.1 M (-0.10%) |
+| glibc's `memset` | 137.9 M | 131.1 M | -6.8 M |
+| `check_program`, inclusive | 148.2 M | 145.1 M | -3.1 M |
+| `check_lower_prepare`, inclusive | 51.0 M | 49.0 M | -2.0 M |
 
 ## Linking is not in the 194.8 ms
 
