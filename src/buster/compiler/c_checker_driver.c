@@ -589,6 +589,41 @@ static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const
     }
 }
 
+// Clang completes a K&R definition's warning when the function's checking does, including the lookahead past its
+// closing brace: the body's own diagnostics publish first, then this warning ahead of the boundary's deferred and
+// return ones (#992). A repaired tree proves that boundary only when its brace and the lookahead are both original;
+// a genuinely unfinished body publishes at the repaired unit's end instead.
+static void check_driver_kr_definition(const Parser* parser, const Parser* original, Preprocessor* pp, const CheckInput* input,
+                                       const CheckInputKrDiagnostic* diagnostic, uint32_t publication_end)
+{
+    const uint32_t token = diagnostic->token;
+    const CheckWarningSeverity severity = check_diagnostic_kr_severity(input, token, diagnostic->warning);
+    if (token < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        const Parser* publication_parser = parser;
+        const uint32_t original_end = original != parser ? check_diagnostic_parse_end(original) : 0;
+        const uint32_t walk_end = original != parser && original_end < original->tokens.count ? original_end : original->tokens.count;
+        uint32_t boundary = parser->tokens.count + 1u;
+        for (uint32_t parent = diagnostic->body, steps = 0; parent < walk_end && steps < original->tokens.count; steps += 1)
+        {
+            if (original->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY && original->tokens.kinds[parent] == PARSE_KIND_R_BRACE &&
+                (original == parser || parent + 1u < original_end))
+            {
+                boundary = parent + 1u;
+                publication_parser = original;
+                break;
+            }
+            parent = original->tree.parents[parent];
+        }
+        const uint32_t publication = check_driver_publication_position(publication_parser, pp, boundary,
+                                                                       publication_parser == parser ? publication_end : pp->output.count);
+        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_LEXICAL,
+                                 "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(diagnostic->warning));
+    }
+}
+
 // An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
 // C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
 // with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t, and then its spelling without it), and
@@ -919,7 +954,15 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 }
                 else if (sequence >= (uint32_t)kr_offset64)
                 {
-                    check_driver_kr_report(parser, pp, input, token, input->kr_diagnostics[sequence - (uint32_t)kr_offset64].warning);
+                    const CheckInputKrDiagnostic* diagnostic = input->kr_diagnostics + (sequence - (uint32_t)kr_offset64);
+                    if (diagnostic->warning == CHECK_WARNING_KR_DEFINITION)
+                    {
+                        check_driver_kr_definition(parser, original, pp, input, diagnostic, publication_end);
+                    }
+                    else
+                    {
+                        check_driver_kr_report(parser, pp, input, token, diagnostic->warning);
+                    }
                 }
                 else if (sequence >= offset)
                 {

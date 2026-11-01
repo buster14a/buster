@@ -48,6 +48,104 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
+// One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
+// the unit has unnamed tags, a `file:line:col` or typedef-name text by tag index. Both are built once before the
+// pass's events take their marks, so per-event release cannot invalidate them; `anonymous` stays empty where
+// the unit's tags are all named or the input keeps no declaration columns.
+typedef struct CheckWarningSpelling CheckWarningSpelling;
+struct CheckWarningSpelling
+{
+    const uint8_t** bytes;
+    uint32_t* lengths;
+    uint32_t count;
+    String8* anonymous;
+    uint32_t anonymous_count;
+};
+
+// Each unnamed tag's diagnostic name (#992): the first typedef naming it, as clang's `T`/`T *` and `T2 *`'s
+// `T *` aka do, else `(unnamed at file:line:col)` where the declaration was written — the expansion's own
+// location for a macro body's tag, as clang's expansion-point answer is (#992). One scan of the input's tag-
+// and typedef-kind declarations per publication pass; the rows sit under the pass's event marks in the
+// caller's scratch, so they survive until the pass ends. Returns false on an allocation failure, which the
+// caller reports like the renderer's other allocations rather than dropping the spelling.
+static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                        CheckWarningSpelling* spell, Arena* scratch)
+{
+    bool valid = true;
+    if (input != NULL && input->declaration_kinds != NULL && input->declared_types != NULL)
+    {
+        const uint32_t tag_count = types->tags.count;
+        const uint32_t named_words = tag_count / 64 + 1;
+        uint64_t* named = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, named_words);
+        String8* anonymous = named != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, tag_count) : NULL;
+        valid = anonymous != NULL;
+        if (anonymous != NULL)
+        {
+            // The history is already ensured for the diagnostic the pass is about to publish; an expanded
+            // tag's location is the expansion's then, not the definition's (#992).
+            const bool history = pp_history_ensure(pp);
+            memset(named, 0, (uint64_t)named_words * sizeof(*named));
+            memset(anonymous, 0, (uint64_t)tag_count * sizeof(*anonymous));
+            const uint32_t count = input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
+            for (uint32_t i = 0; valid && i < count; i += 1)
+            {
+                const uint8_t binding = input->declaration_kinds[i];
+                if (binding == C_BINDING_TAG_KIND || binding == C_BINDING_TYPEDEF)
+                {
+                    const TypeId declared = type_unqualified(type_strip_aligned(types, input->declared_types[i]));
+                    const uint32_t index = type_is_valid(types, declared) ? type_index(declared) : types->types.count;
+                    if (index < types->types.count)
+                    {
+                        const uint8_t kind = type_kind(types, declared);
+                        const uint32_t tag = types->types.index[index];
+                        if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM) &&
+                            tag < tag_count && types->tags.name[tag] == 0)
+                        {
+                            if (binding == C_BINDING_TYPEDEF)
+                            {
+                                // The typedef is the anonymous record's canonical name; its first one wins.
+                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0)
+                                {
+                                    named[tag / 64] |= (uint64_t)1 << (tag & 63);
+                                    const uint32_t name = parser->tokens.names[i];
+                                    if (name < pp->table->count)
+                                    {
+                                        anonymous[tag] = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+                                    }
+                                }
+                            }
+                            else if (anonymous[tag].length == 0)
+                            {
+                                const uint32_t source = parser->tokens.sources[i];
+                                const uint32_t origin = history ? pp_history_at(pp, source) : 0;
+                                const uint32_t location = source < pp->output.count ? pp_expansion_location(pp, source, origin) : 0;
+                                const char* file = NULL;
+                                uint32_t file_length = 0;
+                                const uint32_t line = pp_presumed(pp, location, &file, &file_length);
+                                const uint32_t range = pp_find_range(pp, location);
+                                uint32_t column = 1;
+                                if (range != BUSTER_PP_NONE)
+                                {
+                                    (void)pp_line_of(pp, range, location, &column);
+                                }
+                                const char* text = check_warning_text(scratch, "(unnamed at %.*s:%u:%u)", (int)file_length, file, line, column);
+                                valid = text != NULL;
+                                if (valid)
+                                {
+                                    anonymous[tag] = (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            spell->anonymous = anonymous;
+            spell->anonymous_count = tag_count;
+        }
+    }
+    return valid;
+}
+
 static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* input, const CheckWarningEvents* view, const CheckRepair* repair)
 {
     bool promoted = false;
@@ -60,30 +158,83 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
     return promoted;
 }
 
-static String8 check_driver_warning_type(const Preprocessor* pp, const TypeTable* types, Arena* scratch, TypeId type)
+// A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
+// specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
+// BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
+// unnamed tag's typedef name or its `(unnamed at file:line:col)`.
+static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling)
 {
     String8 result = { 0 };
     if (type != 0 && type_is_valid(types, type))
     {
         // Only diagnostic rendering needs these spelling arrays; clean checking retains no identifier-sized view.
-        const uint32_t count = pp->table->count;
-        const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, count);
-        uint32_t* lengths = bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
-        if (lengths != NULL)
+        // The pass's columns live in `spell`, built before the events' marks (#992).
+        if (spell->bytes != NULL)
         {
-            for (uint32_t i = 0; i < count; i += 1)
+            TypeNames names = {
+                .bytes = spell->bytes,
+                .lengths = spell->lengths,
+                .count = spell->count,
+                .anonymous = spell->anonymous,
+                .anonymous_count = spell->anonymous_count,
+            };
+            TypeId alias_type = 0;
+            String8 alias_name = { 0 };
+            if (spelling == BUSTER_CHECK_NONE)
             {
-                bytes[i] = intern_bytes(pp->table, i);
-                lengths[i] = intern_length(pp->table, i);
+                alias_type = type_unqualified(type_strip_aligned(types, type));
+                alias_name = BUSTER_S8("__size_t");
             }
-            const TypeNames names = { .bytes = bytes, .lengths = lengths, .count = count };
-            result = type_print(types, scratch, type, (String8){ 0 }, &names, pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0);
+            else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
+            {
+                const TypeId declared = input->declared_types[spelling];
+                const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
+                if (type_is_valid(types, declared) && name < spell->count)
+                {
+                    alias_type = declared;
+                    alias_name = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+                }
+            }
+            const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+            if (alias_type != 0)
+            {
+                names.alias_types = &alias_type;
+                names.alias_names = &alias_name;
+                names.alias_count = 1;
+            }
+            const String8 sugared = type_print(types, scratch, type, (String8){ 0 }, &names, options);
+            String8 canonical = { 0 };
+            if (names.alias_count != 0)
+            {
+                // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
+                // typedef stays, since it is that record's own name.
+                TypeNames expand = names;
+                expand.alias_count = 0;
+                canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
+            }
+            // The returned text carries its own quotes: clang's `(aka '...')` sits outside the type's, so the
+            // messages print `%.*s` without quoting it themselves.
+            result = sugared;
+            if (sugared.length != 0 && canonical.length != 0 &&
+                (canonical.length != sugared.length || memcmp(canonical.pointer, sugared.pointer, canonical.length) != 0))
+            {
+                const char* combined = check_warning_text(scratch, "'%.*s' (aka '%.*s')", (int)sugared.length, sugared.pointer,
+                                                          (int)canonical.length, canonical.pointer);
+                result = combined != NULL ? (String8){ .pointer = (char*)combined, .length = (uint64_t)strlen(combined) } : (String8){ 0 };
+            }
+            else if (sugared.length != 0)
+            {
+                const char* quoted = check_warning_text(scratch, "'%.*s'", (int)sugared.length, sugared.pointer);
+                result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
+            }
         }
     }
     return result;
 }
 
-static const char* check_driver_warning_message(const Preprocessor* pp, const TypeTable* types, const CheckWarningEvent* event, Arena* scratch)
+static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
     const CheckWarningPayload* payload = &event->payload;
     const String8 name = check_driver_warning_name(pp, payload->name);
@@ -101,8 +252,9 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
             break;
         case CHECK_WARNING_EVENT_NON_LITERAL_NULL:
         {
-            const String8 type = check_driver_warning_type(pp, types, scratch, payload->first_type);
-            result = type.length != 0 ? check_warning_text(scratch, "expression which evaluates to zero treated as a null pointer constant of type '%.*s'",
+            // payload.data is the destination operand's typedef-specifier declaration, or NONE for `__size_t` (#992).
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "expression which evaluates to zero treated as a null pointer constant of type %.*s",
                 (int)type.length, type.pointer) : NULL;
             break;
         }
@@ -123,16 +275,17 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
         }
         case CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER:
         {
-            const String8 first = check_driver_warning_type(pp, types, scratch, payload->first_type);
-            const String8 second = check_driver_warning_type(pp, types, scratch, payload->second_type);
-            result = first.length != 0 && second.length != 0 ? check_warning_text(scratch, "ordered comparison between pointer and integer ('%.*s' and '%.*s')",
+            // payload.name/payload.data are the operands' own typedef-specifier declarations, or NONE (#992).
+            const String8 first = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            const String8 second = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
+            result = first.length != 0 && second.length != 0 ? check_warning_text(scratch, "ordered comparison between pointer and integer (%.*s and %.*s)",
                 (int)first.length, first.pointer, (int)second.length, second.pointer) : NULL;
             break;
         }
         case CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER:
         {
-            const String8 type = check_driver_warning_type(pp, types, scratch, payload->first_type);
-            result = type.length != 0 ? check_warning_text(scratch, "field '%.*s' with variable sized type '%.*s' not at the end of a struct or class is a GNU extension",
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "field '%.*s' with variable sized type %.*s not at the end of a struct or class is a GNU extension",
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
@@ -184,6 +337,53 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                             const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch)
 {
     bool valid = view != NULL && (view->count == 0 || view->events != NULL) && (view->note_count == 0 || view->notes != NULL);
+    // A pass with no event publishes nothing and builds nothing (#992): an empty view returns before any
+    // allocation, so a clean unit pays neither the name columns nor a token scan.
+    if (!valid || view->count == 0)
+    {
+        return valid;
+    }
+    // Only these three facts render a type (#992); a pass of typeless messages, pragmas or notes needs no
+    // spelling rows at all.
+    bool renders = false;
+    for (uint32_t i = 0; !renders && i < view->count; i += 1)
+    {
+        const CheckWarningEvent* event = view->events + i;
+        renders = event->kind != CHECK_WARNING_EVENT_MESSAGE &&
+                  (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
+                  (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+                  (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
+                   event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER);
+    }
+    // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks when some
+    // event renders a type: every event's mark then sits above them, so per-event release keeps them, and each
+    // rendered type pays nothing for what the pass already scanned. A unit with no unnamed tag skips the
+    // spelling rows entirely.
+    const uint64_t spelling_mark = scratch->length;
+    CheckWarningSpelling spell = { .count = pp->table->count };
+    if (renders)
+    {
+        spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+        spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+        if (spell.count != 0)
+        {
+            valid = spell.lengths != NULL;
+        }
+        for (uint32_t i = 0; valid && i < spell.count; i += 1)
+        {
+            spell.bytes[i] = intern_bytes(pp->table, i);
+            spell.lengths[i] = intern_length(pp->table, i);
+        }
+        bool unnamed = false;
+        for (uint32_t t = 1; types != NULL && t < types->tags.count; t += 1)
+        {
+            unnamed |= types->tags.name[t] == 0;
+        }
+        if (valid && unnamed)
+        {
+            valid = check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+        }
+    }
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
@@ -203,7 +403,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
             if (valid && severity != CHECK_WARNING_IGNORE)
             {
                 const uint64_t mark = scratch->length;
-                const char* message = check_driver_warning_message(pp, types, event, scratch);
+                const char* message = check_driver_warning_message(parser, pp, input, types, &spell, event, scratch);
                 PPOutputDiagnosticNote* notes = event->note_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, event->note_count) : NULL;
                 valid = message != NULL && (event->note_count == 0 || notes != NULL);
                 for (uint32_t n = 0; valid && n < event->note_count; n += 1)
@@ -241,6 +441,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
             }
         }
     }
+    arena_pop_to(scratch, spelling_mark);
     return valid;
 }
 
