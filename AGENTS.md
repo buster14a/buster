@@ -6125,7 +6125,23 @@ arguments', the parameters' and the result's tables at its edges, on a plain
 function and one with a result object; and in every program above, the
 vector path must take each function, and one change of each in every fourth
 program (a kind, a class or a value, two entries swapped, one removed or
-repeated) only where the scalar validator takes it.
+repeated) only where the scalar validator takes it. Then the `masks` check
+(`tier0_mask_test.c`, #179): `--count` random programs over the mask class,
+each compiled by both paths into the same records and both encoders into the
+same bytes, linked with a callee whose masks fill k1 to k7, and run natively
+where the host has AVX-512 F, VL, BW and DQ, every output byte against the
+check's stack machine and, for the programs without rows or frame objects,
+`interpreter.c`'s: masks of every width loaded, converted from every integer
+class (constants, loads and calls' results) and back, in frame objects, under
+DUP, STORE's kept value and `?:`, chains of 6 to 12 live masks (past k7, where
+the logic meets masks in their slots), calls with masks live and past k7, and
+rows by role (with scratch registers, from and to integers, past k7) and by
+number (under live masks). Its coverage must reach every mask kind of each
+width, conversions from each, every row, both arms, the mask stack past 9,
+both kinds of call and a row past k7. A zero-masked vector move whose
+decoration is a role runs under no live mask and under seven, against C; and
+each of the class's rules is refused (`tier0_validate`'s and
+`tier0_operation_valid`'s), with its valid neighbours taken.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
