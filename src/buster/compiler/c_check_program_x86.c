@@ -58,6 +58,9 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_MASK_VECTOR,
     // (vector a): the form's integer of a's low element, a truncating conversion (VCVTTSD2SI, VCVTTSS2SI).
     CHECK_X86_LOWER_CONVERT,
+    // (vector a, T b, int rounding): b, an integer of `other` bytes (signed, or unsigned with `is_signed` false), converted
+    // into a's low element by its rounding, a's others kept (VCVTSI2SD, VCVTUSI2SS).
+    CHECK_X86_LOWER_INT_CONVERT,
     // (vector a, int index, vector w, mask m): the form's lane of a at the index, an immediate, merged into w under m
     // (VEXTRACTI32X4, VEXTRACTI64X4), of `other` bytes.
     CHECK_X86_LOWER_EXTRACT_LANE,
@@ -81,6 +84,9 @@ typedef enum CheckX86LowerFamily
     // (void* p, mask m, vector index, vector a, int scale): VPSCATTER's of a's elements to p + index * scale under m; a
     // of `other` bytes.
     CHECK_X86_LOWER_SCATTER,
+    // (vector w, const T* p, vector index, vector m, int scale): AVX2's VPGATHER's elements at p + index * scale where m's
+    // have their top bits, merged into w, m zeroed; the index of `other` bytes.
+    CHECK_X86_LOWER_GATHER_VECTOR,
     // (vector a, vector b, vector m): VPBLENDVB's b's bytes where m's have their top bits, a's elsewhere.
     CHECK_X86_LOWER_BLENDV,
     // (vector a, vector b, mask m): VPSHUFBITQMB's mask under m; or (vector a, int immediate, mask m): VFPCLASS's of a.
@@ -906,6 +912,17 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             row->result_class = rule->other == 8 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
             row->result_bytes = 0;
         }
+        else if (rule->family == CHECK_X86_LOWER_INT_CONVERT)
+        {
+            row->records[0] = check_x86_lower_record(rule->form, v0, v0, BUSTER_TIER0_ROLE_INTEGER(1));
+            check_x86_lower_round(rule, round, &row->records[0]);
+            row->record_count = 1;
+            row->operand_count = 2;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = rule->other == 8 ? (rule->is_signed ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64) :
+                                                         (rule->is_signed ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U32);
+        }
         else if (rule->family == CHECK_X86_LOWER_EXTRACT_LANE || rule->family == CHECK_X86_LOWER_TRUNCATE)
         {
             // The lane at the index (its low bits), or the truncation, into w's register under the mask (the form's rm
@@ -935,7 +952,9 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             const bool fcmp = rule->fixed == CHECK_X86_PREDICATE_FCMP;
             bool swap = false;
             const uint64_t value = fcmp ? check_x86_lower_float_predicate(immediate, strict, &swap) : immediate & (lanes_in - 1);
-            row->records[0] = check_x86_lower_record(rule->form, v0, swap ? v1 : v0, swap ? v0 : v1);
+            // A form without vvvv (SHA1RNDS4's) has its reg a and the destination, as BINARY's.
+            const bool two = x86_form_description(rule->form)->vvvv == BUSTER_X86_OPERAND_NONE;
+            row->records[0] = check_x86_lower_record(rule->form, v0, two ? 0 : swap ? v1 : v0, swap ? v0 : v1);
             row->records[0].immediate = (int32_t)value;
             row->record_count = 1;
             row->operand_count = 2;
@@ -1083,6 +1102,22 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
                 row->result_class = BUSTER_TYPED_CLASS_VOID;
                 row->result_bytes = 0;
             }
+        }
+        else if (rule->family == CHECK_X86_LOWER_GATHER_VECTOR)
+        {
+            const uint32_t scale = immediate == 1 ? 0 : immediate == 2 ? 1 : immediate == 4 ? 2 : immediate == 8 ? 3 : 4;
+            reason = scale == 4 ? "x86 builtins' gathers and scatters of a scale other than 1, 2, 4 or 8" : reason;
+            row->records[0] = (X86Instruction){ .form = rule->form, .reg = v0, .vvvv = v3, .rm = BUSTER_TIER0_ROLE_INTEGER(1), .index = v2,
+                                                .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale & 3) };
+            row->record_count = 1;
+            row->operand_count = 4;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+            row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[2] = rule->other;
+            row->operand_classes[3] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[3] = rule->bytes;
         }
         else if (rule->family == CHECK_X86_LOWER_BLENDV)
         {

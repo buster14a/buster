@@ -3613,14 +3613,14 @@ static void check_lower_quad_call(CheckLowerWriter* writer, CheckLowerRuntime ru
 }
 
 // A folded __float128 constant: a frame object of its 16 bytes, whose address it leaves, the value converted from the
-// checker's long double exactly. The checker folds none of __float128's arithmetic (check_action_float_supported), but
-// gives a real value's __imag__ as a constant zero of its type (c_check_complex.c), which comes here.
+// checker's long double exactly, or a NaN's bits from its place there (check_action_quad_bits). The checker folds none of
+// __float128's arithmetic (check_action_float_supported), but gives a real value's __imag__ as a constant zero of its
+// type (c_check_complex.c), and __builtin_inff128, __builtin_nanf128 and the others their values, which come here.
 static void check_lower_quad_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const uint32_t result = check_lower_quad_object(writer);
-    const __float128 quad = (__float128)value->floating;
-    uint64_t halves[2];
-    memcpy(halves, &quad, sizeof(halves));
+    uint64_t halves[2] = { 0 };
+    check_action_quad_bits(value->floating, halves);
     for (uint32_t half = 0; half < 2; half += 1)
     {
         check_lower_complex_place(writer, result, half, 8);
@@ -4996,12 +4996,21 @@ static uint64_t check_lower_float_bits(CheckLowerWriter* writer, uint8_t class, 
     {
         bits = check_lower_x87_constant(writer, value);
     }
+    else if (class == BUSTER_TYPED_CLASS_F32 && isnan(value))
+    {
+        // A NaN's bits (check_action_nan_bits): the x87's conversion would quiet a signaling one.
+        bits = check_action_nan_bits(value, 23, 8);
+    }
     else if (class == BUSTER_TYPED_CLASS_F32)
     {
         const float number = (float)value;
         uint32_t small;
         memcpy(&small, &number, sizeof(small));
         bits = small;
+    }
+    else if (isnan(value))
+    {
+        bits = check_action_nan_bits(value, 52, 11);
     }
     else
     {
