@@ -1279,6 +1279,15 @@ static bool type_kind_is_array(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
 }
 
+// Whether the x86-64 psABI aligns a variable of `type` to at least 16 bytes (§3.1.2, clang's large arrays in
+// ASTContext::getDeclAlign): an array of 16 bytes or more. A declaration with an alignment attribute or specifier takes
+// that instead, and a compound literal and a string literal their types' alignment (#978).
+static __attribute__((unused)) bool type_large_array(const TypeTable* table, TypeId type)
+{
+    const bool result = type_kind_is_array(type_kind(table, type_strip_aligned(table, type))) && type_size(table, type) >= 16;
+    return result;
+}
+
 static TypeId type_element(const TypeTable* table, TypeId type)
 {
     const uint8_t kind = type_kind(table, type);

@@ -482,6 +482,76 @@ mingw's `fmaxl`. Separate programs check float/double subnormals with DAZ on
 and off, and each ordered builtin's signaling-NaN exception after a second
 argument clears the flags, including quiet-NaN/signaling-NaN pairs.
 
+### The rest of clang's classifications (#148)
+
+`isnormal`, `issubnormal`, `iszero`, `issignaling` and `isfpclass` take a real
+floating argument unconverted, as clang's `BuiltinFPClassification` does.
+`isfpclass` also takes a vector of them, whose result is the signed vector of
+its elements' width (`check_vector_mask_type`), and a mask, unconverted and
+never evaluated, that must be an integer constant expression. Clang's
+`BuiltinConstantArgRange` takes the mask's value sign-extended from its own
+type's width, whatever its signedness, and that must be in [0, 1023]:
+`(unsigned char)200` and `(_Bool)1` are errors. The mask's bits are LLVM's
+`FPClassTest`: 1 signaling NaN, 2 quiet NaN, 4 -infinity, 8 -normal,
+16 -subnormal, 32 -0, 64 +0, 128 +subnormal, 256 +normal and 512 +infinity.
+The other classifiers are `isfpclass` of their own masks (264, 144, 96 and 1),
+as clang's code is (`createIsFPClass`). `signbitf` and `signbitl` convert
+their argument to `float` and `long double`, as their prototypes say, then
+take its sign. Each folds as clang's evaluator does (APFloat's `isNormal`,
+`isDenormal`, `isZero`, `isSignaling`, `classify() & mask` and `isNegative`),
+an integer constant expression; a vector never folds. `canonicalize`,
+`canonicalizef` and `canonicalizel` take their prototypes' conversions and
+never fold: clang's rows aren't constexpr, so a call in a static initializer
+is an error. Under `FENV_ACCESS` they may raise invalid
+(`check_builtin_float_strict`), as fpclassify's and isinf_sign's compares do.
+
+The lowering tests a classification's mask by a table of 64 bits, which the
+recipe indexes by six bits of the argument's representation
+(`cbuiltin_float_lower_class_table`): the exponent zero, the exponent all
+ones, the integer bit (a float's or double's implicit one, its exponent's
+being nonzero), the fraction below it zero, the fraction's top bit, and the
+sign. A float's or double's entry is its class's bit in the mask. An x87
+one's is what clang 23's -O0 code gives, which isn't the classes' bits.
+LLVM's `expandIS_FPCLASS` tests a mask that one quiet compare can test by the
+x87's compare (NaNs alone, zeros or NaNs, one infinity or NaNs, zeros,
+subnormals or NaNs, or those masks' inverses), unless `FENV_ACCESS` makes the
+code strict. It tests any other mask by integer tests of the encoding's
+fields. In those, an unsupported encoding or a pseudo-denormal is a NaN when
+the mask holds both NaNs, a pseudo-denormal is a zero or subnormal when the
+mask holds both of those, and either is in no class otherwise: of a
+pseudo-denormal, `isfpclass(x, 0xf0)` is 1, and `isfpclass(x, 0x60)` and
+`isfpclass(x, 0x90)` are 0. `cbuiltin_float_lower_x87_class` models that for
+x86's rules (`SETOEQ` and `SETUNE` aren't legal, `fabs` isn't free), and
+gives clang's answers for all 1024 masks on every class of encoding, under
+`FENV_ACCESS` and not. `signbitf` and `signbitl` are `signbit`'s recipes of
+their converted arguments. `canonicalize` is the argument times 1.0 of its
+class, as clang's `mulss`, `mulsd` and `fld1`, `fmulp` are: a signaling NaN
+comes out quiet, an unsupported x87 encoding the default NaN, and a
+pseudo-denormal normalized. `isfpclass` of a vector of floats or doubles
+stores the vector into a frame object and classifies each lane by the scalar
+recipe, the lane loaded into the recipe's argument, storing its 1 or 0 into
+the result's frame object as an `int` or a `long long`, as clang's zero
+extension of `llvm.is.fpclass`'s lanes gives (`check_lower_floating_lanes`);
+a vector of half-precision or `__bf16` lanes stays refused, as their scalars
+are, and so does one of `long double` elements, whose 16-byte lanes clang
+gives a vector of `__int128` results.
+
+`test-check-builtins-float` checks each fold against the host compiler's own
+builtins in each format (`isfpclass`'s with every mask), the mask's rules and
+the signbits' conversions, and clang's acceptance of the sources behind those
+checks. `test-builtin-float-lowering` runs each recipe by both paths on float,
+double and x87 inputs: the classifiers', the signbits' and canonicalize's
+against the host's builtins and the x87 fixture of clang -O0's results, and
+`isfpclass`'s, with every mask LLVM treats apart and every 37th, against the
+model. `test-checker` (`c_check_program_classify_test.c`) checks the rules'
+sources by both paths against clang, and runs programs natively against clang
+-O0's builds: `isfpclass` with all 1024 masks on every class of float, double
+and x87 encoding, under `FENV_ACCESS` and not; the other classifiers, the
+signbits and canonicalize's results; folds; operands evaluated once; and
+vectors of 4 to 64 bytes of floats and doubles, GNU's and clang's extended
+ones, at x86-64-v4. Clang -O3's code differs from -O0's for eight masks of x87
+values, so -O0's builds are the oracle.
+
 ## Atomic and terminal helper calls
 
 `c_check_builtin_atomic_c11.c` supplies the C11 `__c11_atomic_*` family used by
@@ -763,12 +833,15 @@ active #141 owner and needs its own exact-revision acceptance evidence.
 
 ## Corpus-driven typed overflow and rounding
 
-`c_check_builtin_typed_overflow.c` implements `umull_overflow` through ordinary
-`unsigned long`, `unsigned long`, `unsigned long*` parameter conversions before
-the generic multiply-overflow action. Its formal destination is unqualified;
-discarded pointer qualifiers remain diagnostics. A successful action always
-retains the destination write. Wider or complex conversion payloads without a
-real implementation remain explicit unsupported cases.
+`c_check_builtin_typed_overflow.c` implements clang's 18 typed overflow
+builtins, `sadd_overflow` to `umulll_overflow` (`umull_overflow` among them): each has
+the ordinary `T`, `T`, `T*` prototype of its signedness and width (int, long or
+long long), whose parameter conversions precede the generic add, sub or
+multiply-overflow action (`check_builtin_typed_overflows` names each one's).
+Its formal destination is unqualified; discarded pointer qualifiers remain
+diagnostics. A successful action always retains the destination write. Wider or
+complex conversion payloads without a real implementation remain explicit
+unsupported cases.
 
 `c_check_builtin_rounds.c` treats `flt_rounds` as a zero-argument, nonconstant
 `int` query of the floating environment. Its helper reads x87 rounding control
@@ -798,6 +871,79 @@ thread's genuine writable `int32` errno address and uses the Linux SysV
 No helper calls a math symbol that could recurse when the source defines it.
 The helper body requires normal branch sizing and unknown-effect call
 semantics. These adapters do not establish source or Tier1 acceptance.
+
+## Bit builtins
+
+`c_check_builtin_bits.c` checks clang's other bit builtins as the graph's
+miscellaneous builtins (`cbuiltin_bits`, catalog codes 0x3a0 to 0x3c7):
+`bitreverse8` to `bitreverse64` and `bitreverseg`, `bswapg`, `clrsb`, `clrsbl`
+and `clrsbll`, `clzs` and `ctzs`, `popcountg`, `clzg` and `ctzg`, C23's 16
+`__builtin_stdc_` builtins, and the carry chains `addcb` to `addcll` and
+`subcb` to `subcll`. Their rules are clang 23's Sema:
+
+- a fixed prototype (`bitreverse8` to 64, `clrsb`, `clzs`, `ctzs`, the carry
+  chains) converts each argument as if by assignment, with the ordinary pointer
+  rules for a carry's pointer: another signedness or a lost qualifier warns,
+  another pointee is an error, as clang 23's `-Wincompatible-pointer-types` is;
+- `popcountg` and `clzg`'s and `ctzg`'s first argument take an unsigned
+  integer type unconverted (bool, plain char where it is unsigned, an
+  enumeration of an unsigned type and unsigned `_BitInt`s among them);
+  `clzg`'s and `ctzg`'s optional second argument, the result for zero, takes
+  its integer promotions (a bit-field's by its width), which must give `int`;
+- `bitreverseg` and `bswapg` take any integer type and give it, `bswapg`'s
+  `_BitInt`s of a multiple of 16 bits, of 8 or of 1;
+- the stdc ones take an unsigned integer type that is no bool or enumeration
+  and give `unsigned int`, `bool` (`has_single_bit`) or the argument's type
+  (`bit_floor`, `bit_ceil`); `rotate_left` and `rotate_right` take an unsigned
+  integer type (bools and enumerations admitted) and a count of any integer
+  type, which counts modulo the width, a negative one's mathematical remainder.
+
+Each folds as clang's evaluator does, in its operand's width of up to 128 bits,
+where every argument it reads is a constant: `clzs`, `ctzs`, and `clzg` and
+`ctzg` without a second argument, of zero are undefined (a fault, as
+`check_builtins` gives `clz` of zero), and a carry chain, whose store of its
+carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
+is refused by name.
+
+`c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
+zero-extended from its width, as clang's code computes on its `iN`: SWAR
+popcounts (a smear for leading zeros), reversals by masked swaps of halves,
+selections by multiplying with a compare's 0 or 1, without branches. A rotation
+masks its count for a width that is a power of two and takes a remainder for
+another `_BitInt`'s. A carry chain adds or subtracts twice, each carry a
+compare of the wrapped sum, and stores their OR at its pointer before its
+result, as clang's code does.
+
+An operand of 65 to 128 bits (`__int128`, a `_BitInt`) is a 16-byte frame
+object whose two limbs the recipe loads, as the overflow builtins' are: it
+counts limb by limb (the second limb's count added where the first is zero),
+reverses and swaps bytes limb by limb, exchanging the limbs and shifting the
+128 bits down past its width, and rotates by 128-bit shifts of a variable
+count (each limb shifted by the count's part below 64, the crossing bits
+carried, a whole limb moved where the count is 64 or more). A wide result is
+written to a frame object of its own, its high limb extended from its width,
+and read back as one I128 or U128 value. A wide rotation count's remainder
+comes from its limbs': 2^64's and 2^128's remainders are constants of the
+width.
+
+clang 23's code generation, and LLVM's main, evaluates `bitreverseg`'s
+argument twice, and `bswapg`'s for widths other than 1 and 8: `EmitScalarExpr`
+reads its width, then `emitBuiltinWithOneOverloadedType` emits the argument
+again, which repeats its side effects and volatile reads. This compiler
+evaluates it once, as a call does. test-checker's
+`bits-reversal-and-swap-arguments-evaluated-once` agrees with clang's build of
+a model that evaluates each argument first, and
+`bits-clang-evaluates-reversal-and-swap-arguments-twice` differs from clang's
+build of the same source, so that a fix in clang shows.
+
+`test-check-builtins-bits` checks every fold, result type and conversion
+against the host compiler's own builtins on boundary and random values of 27
+operand types and 7 count types, the refusals and the carry chains' pointer
+rules; `test-checker --program-bits` checks source fixtures by both paths
+against clang and runs programs of every builtin natively against clang -O0's
+build, 128-bit and wide `_BitInt` operands, results and counts among them. No
+unit of the corpora calls these builtins, so the folds stay scalar: the checker
+asks once per call, in source order, as for the other miscellaneous builtins.
 
 ## Intrinsic checking contracts
 
@@ -1104,6 +1250,124 @@ vector nontemporal destination is rejected; matching complex memory types
 retain their explicit payload gap. System-macro-specific conversion exceptions
 are not attested by this ordinary source contract.
 
+## Library builtins
+
+#148's library builtins are clang 23's rows with attribute `F`, `__builtin_X`
+for a C library function X, and its rows with attribute `f`, X itself where
+clang makes the name a builtin of the unit. `c_builtin_library.c` holds both
+lists, `c_check_builtin_library.c` their folds.
+
+**Calls.** `c_builtin_library_calls.inc` lists the 352 `F` rows that compile as
+calls of their functions: the math library's (`sin` to `tgammaf128`, the complex
+functions, `powi`'s aside), the string and memory functions, the formatted
+input and output that takes no `FILE` (`printf`, `snprintf`, `vsscanf`), the
+allocation functions, `abort`, the wide-character functions and
+`__get_unsafe_stack_*`. The checker gives each call its row's ordinary
+prototype (`c_builtin_intrinsic_types.c` decodes it) and checks it as a call
+of that prototype, through `check_x86_action`'s ordinary path, as the
+fortified builtins are: the arguments convert to the parameters, a variadic
+one's take the default promotions, and its diagnostics are a call's. The
+lowering calls X by name (`check_lower_call_to` with a runtime function of the
+lowering, `CHECK_LOWER_RUNTIME_LIBRARY` and the list's index), through the
+unit's own declaration's symbol where the unit declares X with linkage, as
+clang's call shares the module's one function of that name, or through the
+lowering's own runtime function of that name where it has one (`fmax`,
+`memcpy`, `strcpy`, `sprintf`, ...: `check_lower_library_runtime`), so that a
+unit has one symbol of each name. `__builtin_powi`, `powif` and `powil` are
+`llvm.powi`'s, whose code calls libgcc's `__powidf2`, `__powisf2` and
+`__powixf2` (x raised to an `int` by repeated squaring, not `pow`'s value), and
+so do theirs.
+
+**Where clang's code is no call.** clang -O0 compiles many of these rows to
+LLVM intrinsics rather than calls: `llvm.maxnum` and `llvm.minnum` for `fmax`
+and `fmin`, `llvm.maximumnum` and `llvm.minimumnum` for the `_num` ones,
+`llvm.floor`, `ceil`, `trunc`, `round`, `roundeven`, `rint` and `nearbyint`
+for the `long double` and `_Float128` roundings, `llvm.copysign` and
+`llvm.fabs`, `llvm.fma`, `llvm.frexp`, `llvm.modf` and `llvm.abs`. On x86-64
+most come back as calls of the same library functions; the rest (`fabs`,
+`copysign`, `abs`, `maxnum` and `minnum` of `float` and `double`) are computed
+inline. The library's functions give the same values but `fmax`'s, `fmin`'s
+and their `_num` kin's of `float` and `double`: clang's code of `llvm.maxnum` and
+`llvm.minnum`, `maxsd` or `minsd` beside a select of the second operand where
+the first is a NaN, gives its first operand of two zeros and the other operand
+of a signaling NaN, where glibc's `fmax` and `fmin` give the second zero and a
+quiet NaN; and its code of `llvm.maximumnum` and `llvm.minimumnum` gives a
+signaling first operand unquieted where the other is a NaN too, where glibc's
+`fmaximum_num` and `fminimum_num` give a quiet NaN. C allows both (F.10.9.2 leaves the zero's sign open, and a
+signaling NaN's result), and the plain calls of `fmax` and `fmin` (#927's)
+differ so too; computing them as clang's code does waits for rows of those
+instructions at every target (#775). `test-checker`'s programs compare the rest
+bit for bit, on the harness's signaling and quiet NaNs, zeros of both signs,
+infinities and subnormals among them.
+
+**Folds.** The rows with attribute `E` that clang's constant evaluator folds,
+this folds too, in constant contexts (static initializers, `_Static_assert`,
+array bounds, enumerators and case labels) and in code, where clang folds a
+builtin call whose operands evaluate (its CodeGen's `EmitBuiltinExpr` tries
+`EvaluateAsRValue` first): `strcmp`, `strncmp`, `memcmp`, `bcmp` and their wide
+kin (`wcscmp`, `wcsncmp`, `wmemcmp`, which compare `wchar_t`s as `int`s) to
+clang's -1, 0 or 1, not the library's differences; `strlen` and `wcslen`;
+`abs`, `labs` and `llabs`; the `fmax`, `fmin`, `fmaximum_num` and
+`fminimum_num` families; and `copysignl`. Strings are literals, at constant
+offsets, and `const` arrays whose initializers are constant (clang's GNU
+folding, for which its `-pedantic` warns; this doesn't). Pointer results
+(`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
+side effects never are. `__has_constexpr_builtin` answers 1 for these.
+
+**Plain names.** `c_builtin_library_plain.inc` lists the 354 `f` rows of C's
+modes but those whose prototypes need the unit's `FILE`, `jmp_buf` or
+`ucontext_t`, or that have none to check (`setjmp` and its kin, `vfork`,
+`umask`, `pthread_create`), and `<stdarg.h>`'s `va_start`, `va_end` and
+`va_copy`. Each is a builtin of the unit unless `-fno-builtin`,
+`-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
+`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
+(`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
+`no_builtin_functions`, which the driver's options set), which `__has_builtin`
+answers by. A declaration of such a name is the library's function, which calls
+reach as any function's; where it has external linkage and the row's
+prototype, its calls fold as `__builtin_X`'s do (Sema's `BuiltinAttr`:
+`check_input_library_call` marks them, `check_builtin_library_fold_plain` folds
+them). An undeclared one's use declares it with its catalog row's prototype
+(#927's `check_input_implicit_function`, `c_check_implicit_input.c`, clang's
+`LazilyCreateBuiltin`), which the driver reports as clang does
+(`check_driver_implicit_library`): from C99 on, an error, `call to undeclared
+library function 'sin' with type 'double (double)'; ISO C99 and later do not
+support implicit function declarations`, and before C99 a warning, `implicitly
+declaring library function 'sin' with type 'double (double)'`, each with
+clang's note `include the header <math.h> or explicitly provide a declaration
+for 'sin'`, both under `-Wimplicit-function-declaration`, and a prototype with
+`size_t` spelled as clang's (`'__size_t (const char *)' (aka 'unsigned long
+(const char *)')`). The call then converts its arguments to the prototype's
+parameters (`sin(1)` passes 1.0), in C89 as clang's does.
+
+**Refused.** The classification builtins of custom checking
+(`__builtin_isnormal` and its kin) and `__builtin_signbitf` and `signbitl`,
+which clang tests inline, are the floating builtins' ("Floating checking"),
+not calls. The table's other `F` rows stay refused, and `__has_builtin`
+answers 0 for them. The lowering refuses by name those the checker can type:
+`__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
+Tier 0's allocation doesn't take), and the signaling NaNs' and the `_Float128`
+and `_Float16` NaNs' (constants clang folds that no library function makes).
+The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
+function takes or returns `__fp16`), the matrix builtins, and the `FILE`
+builtins (`fprintf` and its kin).
+
+`test-checker` (`c_check_program_library_test.c`, alone with
+`--program-library`) checks the lists against clang's table and accounts for
+every `F` and `f` row of C's modes; checks the folds' constant contexts by both
+paths against clang's acceptance; and runs programs of each family (`double`,
+`float`, `long double` and `_Float128` math, `powi`, complex, strings, wide
+characters, formatted output and input, allocation, the folds in code, special
+values and `errno`) by both paths against clang -O0's builds.
+`test-checker-driver` (`c_check_library_driver_test.c`) compares the implicit
+declarations' diagnostics of every plain name with clang's, line for line, in
+twelve configurations of language modes and the options above; runs programs
+of C89's implicit library declarations and of `strcmp`'s fold under each
+option against clang's builds; and checks each refusal by name at `-c`.
+`test-preprocessor --clang` compares `__has_builtin` and
+`__has_constexpr_builtin` with clang's (the preprocessor guide's "feature
+queries").
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -1133,10 +1397,14 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-atomic-rmw-helpers
 ./build/compiler test-builtin-terminal-helpers
 ./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-bits
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-rounds-helper
 ./build/compiler test-check-builtins-math
 ./build/compiler test-builtin-math-helpers
+./build/compiler test-checker --program-library
+./build/compiler test-checker-driver --executable ./build/compiler
+./build/compiler test-preprocessor --clang
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution

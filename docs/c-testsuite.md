@@ -13,7 +13,7 @@ harness.
 ## The command
 
 ```sh
-./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--id-order N] [--cross-check] [--keep] DIR
+./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--id-order N] [--tier1] [--cross-check] [--keep] DIR
 ./build/compiler test-c-testsuite --self-test
 ```
 
@@ -42,6 +42,17 @@ For each, the harness:
    [#129](https://github.com/buster14a/buster/issues/129)'s selection of what to
    lower, compared as [the lowering guide](c-lowering.md) describes ("Against
    clang -O0's objects").
+
+With `--tier1`, every compile adds the driver's `--tier1 --tier1-report
+-fno-asynchronous-unwind-tables` (each function Tier 1's pipeline takes by Tier
+1, the others by Tier 0: [the Tier 1 guide](tier1.md)'s "The C driver's
+`--tier1`"). Its vector and scalar paths allocate registers by different
+algorithms, so their executables differ: the scalar path compiles a third time,
+with the IDs in source order, which must give the same bytes as with them in
+another order, and both paths' programs must run as expected. The report's last
+line adds how many of the compiled tests' functions Tier 1 compiled. On the
+subset at its introduction: 220 passed, Tier 1 compiling 350 of the 430
+functions.
 
 A test passes when everything it was put through gave the expected status and
 output. A refusal that names a feature (`error: unsupported: FEATURE`) makes it

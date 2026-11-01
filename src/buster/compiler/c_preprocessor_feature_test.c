@@ -73,10 +73,13 @@ static bool pp_test_source_feature_matrix(void)
             }
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused_fortify); i += 1)
             {
+                // __builtin___memccpy_chk is no fortified builtin of the fortify module's but a library builtin (#148):
+                // clang calls __memccpy_chk, which it checks itself.
                 const uint8_t* name = (const uint8_t*)refused_fortify[i];
                 const uint32_t length = (uint32_t)strlen(refused_fortify[i]);
                 result &= !cbuiltin_fortify_source(name, length);
-                result &= pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, length) == 0;
+                result &= pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, length) == (i == 0);
+                result &= cbuiltin_library_source(name, length) == (i == 0);
                 result &= pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == 0;
             }
             static const char* const unknown_features[] = { "c_static_assert_typo", "cxx_exceptions", "address_sanitizer", "objc_arc", "c_blocks" };
@@ -152,9 +155,11 @@ static bool pp_test_source_feature_matrix(void)
 }
 
 // #148: __has_builtin of every builtin buster implements answers as clang's does: where clang makes the name a builtin
-// of the unit's language modes and its required target features hold (pp_builtin_language, pp_builtin_features), and 0
-// for every name buster doesn't implement. Each of clang's 3,775 builtin names, in eleven target and language
-// configurations, against `clang -E`'s own answers; then the scopes' and the catalog's gates against clang's table.
+// of the unit's language modes and its required target features hold (pp_builtin_language, pp_builtin_features), a plain
+// library name where -fno-builtin, -fno-builtin-NAME and -ffreestanding leave it one (pp_library_builtin), and 0 for every
+// name buster doesn't implement; __has_constexpr_builtin answers 1 only where clang's does. Each of clang's 3,775 builtin
+// names, in seventeen target, language and -f option configurations, against `clang -E`'s own answers; then the scopes',
+// the catalog's and the library lists' gates against clang's table.
 static bool pp_test_builtin_targets(const char* directory)
 {
     static const char* const configurations[] = {
@@ -169,25 +174,33 @@ static bool pp_test_builtin_targets(const char* directory)
         "-std=gnu17 -march=sapphirerapids",
         "-std=gnu23 -march=diamondrapids",
         "-std=gnu17 -march=x86-64-v3 -mno-avx2 -mfma4",
+        // The plain library builtins' conditions (pp_library_builtin): their -f options, and GNU's modes against C's.
+        "-std=gnu17 -march=znver5 -fno-builtin",
+        "-std=gnu17 -march=znver5 -fno-builtin-sin -fno-builtin-strlen -fno-builtin-alloca -fbuiltin",
+        "-std=c17 -march=znver5 -ffreestanding",
+        "-std=gnu17 -march=znver5 -ffreestanding -fhosted",
+        "-std=gnu89 -march=x86-64 -fno-builtin -fbuiltin",
+        "-std=c99 -march=x86-64",
     };
     char path[4200];
     snprintf(path, sizeof(path), "%s/builtin-targets.c", directory);
-    // Each name on a line of its own: `HB name answer`, as clang -E prints it.
+    // Each name on a line of its own: `HB name answer constexpr`, as clang -E prints it, the second __has_constexpr_builtin's.
     const uint32_t count = BUSTER_BUILTIN_INTRINSIC_COUNT;
-    const size_t capacity = (size_t)count * 160;
+    const size_t capacity = (size_t)count * 240;
     char* source = malloc(capacity);
     bool result = source != 0;
     size_t used = 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_at(i);
-        used += (size_t)snprintf(source + used, capacity - used, "HB %s __has_builtin(%s)\n", info->name, info->name);
+        used += (size_t)snprintf(source + used, capacity - used, "HB %s __has_builtin(%s) __has_constexpr_builtin(%s)\n", info->name, info->name, info->name);
         result = used < capacity;
     }
     result = result && pp_test_write_file(path, source);
     uint64_t implemented_answers = 0;
     uint64_t compared = 0;
     uint64_t available = 0;
+    uint64_t constants = 0;
     for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(configurations); c += 1)
     {
         char text[512];
@@ -223,14 +236,21 @@ static bool pp_test_builtin_targets(const char* directory)
                 const bool clang_yes = result && *answer != '0';
                 const uint8_t* name = (const uint8_t*)info->name;
                 const bool implemented = cbuiltin_has_capability(name, info->name_length, BUSTER_CBUILTIN_CAP_SOURCE) ||
-                                         cbuiltin_source_intrinsic(name, info->name_length) || cbuiltin_fortify_source(name, info->name_length);
+                                         cbuiltin_source_intrinsic(name, info->name_length) || cbuiltin_fortify_source(name, info->name_length) ||
+                                         cbuiltin_library_source(name, info->name_length) || cbuiltin_library_plain(info->name, info->name_length) != NULL;
                 const uint32_t ours = pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, info->name_length);
-                const bool right = implemented ? (ours != 0) == clang_yes : ours == 0;
+                // __has_constexpr_builtin answers 1 only where clang's does: for the folds buster has of clang's (#148).
+                const char* constant = answer + 1 < end ? answer + 1 : end;
+                const bool clang_constant = result && constant < end && *constant == ' ' && constant[1] != '0';
+                const uint32_t ours_constant = pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, info->name_length);
+                const bool right = (implemented ? (ours != 0) == clang_yes : ours == 0) && (ours_constant == 0 || clang_constant);
                 if (result && !right)
                 {
-                    printf("builtin targets: %s under %s: %u, clang %s\n", info->name, configurations[c], ours, clang_yes ? "1" : "0");
+                    printf("builtin targets: %s under %s: %u %u, clang %s %s\n", info->name, configurations[c], ours, ours_constant, clang_yes ? "1" : "0",
+                           clang_constant ? "1" : "0");
                 }
                 result &= right;
+                constants += ours_constant != 0;
                 implemented_answers += implemented;
                 available += implemented && ours != 0;
                 compared += 1;
@@ -260,12 +280,25 @@ static bool pp_test_builtin_targets(const char* directory)
             result &= strcmp(cbuiltin_languages(name, info->name_length), info->language_token) == 0 && info->features[0] == 0;
             facts += 1;
         }
+        // A library builtin (#148) is one of every language without features, as pp_implemented_builtin_query takes it, and a
+        // plain one's row says whether it is GNU's alone, as pp_library_builtin reads it.
+        if (cbuiltin_library_source(name, info->name_length))
+        {
+            result &= strcmp(info->language_token, "ALL_LANGUAGES") == 0 && info->features[0] == 0;
+            facts += 1;
+        }
+        const CBuiltinLibraryPlain* plain = cbuiltin_library_plain(info->name, info->name_length);
+        if (plain != NULL)
+        {
+            result &= strcmp(info->language_token, plain->gnu ? "ALL_GNU_LANGUAGES" : "ALL_LANGUAGES") == 0 && info->features[0] == 0;
+            facts += 1;
+        }
     }
     unlink(path);
     free(source);
-    printf("builtin targets: %llu answers in %lu configurations, %llu of implemented builtins (%llu available), as clang's; %u gates' facts as "
-           "clang's table: %s\n",
+    printf("builtin targets: %llu answers in %lu configurations, %llu of implemented builtins (%llu available, %llu constant where clang's are), as "
+           "clang's; %u gates' facts as clang's table: %s\n",
            (unsigned long long)compared, (unsigned long)BUSTER_ARRAY_LENGTH(configurations), (unsigned long long)implemented_answers,
-           (unsigned long long)available, facts, result ? "pass" : "FAIL");
+           (unsigned long long)available, (unsigned long long)constants, facts, result ? "pass" : "FAIL");
     return result;
 }

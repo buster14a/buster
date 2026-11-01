@@ -1492,6 +1492,7 @@ static void check_control_children(CheckControlWriter* writer, uint32_t opening,
     memset(last + opening, 0xff, extent * sizeof(uint32_t));
     writer->case_start = BUSTER_CHECK_NONE;
     writer->case_end = 0;
+    const uint32_t sink = writer->parser->tokens.count;
     for (uint32_t token = opening; token <= closing; token += 1)
     {
         const uint32_t parent = parents[token];
@@ -1499,18 +1500,11 @@ static void check_control_children(CheckControlWriter* writer, uint32_t opening,
         const uint32_t sibling = inside ? last[parent] : BUSTER_CHECK_NONE;
         previous[token] = sibling;
         next[token] = BUSTER_CHECK_NONE;
-        if (inside && sibling != BUSTER_CHECK_NONE)
-        {
-            next[sibling] = token;
-        }
-        else if (inside)
-        {
-            first[parent] = token;
-        }
-        if (inside)
-        {
-            last[parent] = token;
-        }
+        // #892: unconditional stores at a selected index — the columns have count + 1 entries and nothing reads index
+        // `sink`, which is never a token — where 44% of these branches' taken instances used to mispredict.
+        next[inside && sibling != BUSTER_CHECK_NONE ? sibling : sink] = token;
+        first[inside && sibling == BUSTER_CHECK_NONE ? parent : sink] = token;
+        last[inside ? parent : sink] = token;
         const uint8_t role = roles[token];
         uint32_t label = BUSTER_CHECK_NONE;
         if (token != opening && token != closing && (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE))

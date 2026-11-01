@@ -114,3 +114,40 @@ static void check_test_warning_deferred(CheckTest* test)
     arena_release(&private_output);
     arena_release(&output);
 }
+
+static void check_test_warning_set(CheckTest* test)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    Arena private_arena = arena_reserve(UINT64_C(1) << 20);
+    CheckWarningSet set = { .arena = &arena };
+    check_test_expect(test, !check_warning_set_contains(&set, 1) && arena.length == 0, "an empty exceptional fact set allocates nothing");
+    bool valid = true;
+    for (uint32_t i = 1; valid && i <= 257; i += 1)
+    {
+        valid = check_warning_set_add(&set, i * 17);
+    }
+    check_test_expect(test, valid && set.count == 257, "exceptional fact hashes retain independent keys across capacity boundaries");
+    CheckWarningSet lane = set;
+    lane.arena = &private_arena;
+    lane.borrowed = true;
+    const uint64_t* prefix = set.keys;
+    valid = valid && check_warning_set_contains(&lane, 17) && check_warning_set_add(&lane, 7) && check_warning_set_add(&lane, 7);
+    check_test_expect(test, valid && lane.count == 258 && set.count == 257 && lane.keys != prefix && set.keys == prefix &&
+                           !check_warning_set_contains(&set, 7) && check_warning_set_contains(&lane, 7),
+                      "a lane's first insertion copies its frozen table and repeated source facts are idempotent");
+    const uint64_t first_kind = UINT64_C(3) << 32 | 7;
+    const uint64_t second_kind = UINT64_C(9) << 32 | 7;
+    check_test_expect(test, check_warning_set_add(&lane, first_kind) && check_warning_set_add(&lane, second_kind) && lane.count == 260 &&
+                           check_warning_set_contains(&lane, first_kind) && check_warning_set_contains(&lane, second_kind) &&
+                           !check_warning_set_contains(&set, first_kind), "different semantic kinds at one source token retain independent full-width identities");
+    Arena limited = private_arena;
+    limited.capacity = limited.length;
+    CheckWarningSet failed = set;
+    failed.arena = &limited;
+    failed.borrowed = true;
+    const CheckWarningSet before = failed;
+    check_test_expect(test, !check_warning_set_add(&failed, 9) && memcmp(&failed, &before, sizeof(before)) == 0 &&
+                           !check_warning_set_contains(&set, 9), "a failed private fact-table allocation preserves the borrowed prefix and state");
+    arena_release(&private_arena);
+    arena_release(&arena);
+}

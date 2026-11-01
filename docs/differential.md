@@ -33,13 +33,15 @@ working native C toolchain and runtime. A real Buster campaign also requires:
 - The actual generator and compiler revisions, a controlled host, and preserved
   external runtime/header installations for reproducibility.
 
-No tier flag is guessed for the unfinished driver. Once its owner supplies the
-real options, a campaign looks like this (each environment variable is set to
-the actual executable, option, directory or revision):
+The driver compiles by Tier 0 by default (`--tier0-default`), and by Tier 1
+with `--tier1`, which needs `-fno-asynchronous-unwind-tables` (Tier 1's frames
+have no unwind tables yet: [the Tier 1 guide](tier1.md)'s "The C driver's
+`--tier1`"), each its own `--tier1-arg`. A campaign looks like this (each
+environment variable is set to the actual executable, directory or revision):
 
 ```sh
 ./build/compiler test-differential \
-  --buster "$BUSTER" --tier0-arg "$BUSTER_TIER0_FLAG" --tier1-arg "$BUSTER_TIER1_FLAG" \
+  --buster "$BUSTER" --tier0-default --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables \
   --csmith "$CSMITH" --csmith-include "$CSMITH_INCLUDE" --yarpgen "$YARPGEN" \
   --clang clang --generator both --seed 138 --count 10 \
   --revision "$BUSTER_REVISION" --generator-revision "$GENERATOR_REVISIONS" \
@@ -165,7 +167,10 @@ triage, not silently attributed to a compiler bug.
 ## Resource and process lifetime
 
 `--timeout-ms` applies separately to generation, version probes, compilation and
-execution (default 30,000 ms; maximum one hour). `--output-limit` bounds each
+execution (default 30,000 ms; maximum one hour). A command that has already
+exited when the supervisor next runs keeps its exit or signal status, even when
+test load delayed that check past the deadline; a timeout means the command was
+still running at the deadline. `--output-limit` bounds each
 captured stream (default 1 MiB), and `--source-limit` bounds generated input
 (default 16 MiB total). Both accept at most 64 MiB. Csmith's source stream uses
 the source limit. YARPGen files must be regular nonempty files with a combined

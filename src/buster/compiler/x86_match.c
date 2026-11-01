@@ -286,6 +286,8 @@ static bool x86_match_supported(const X86FormDescription* form)
             "call",
             "jmp",
             "ret",
+            "rep ret",
+            "repne ret",
             "leave",
             "nop",
             "int3",

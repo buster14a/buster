@@ -184,14 +184,16 @@ static void* check_const_storage(Arena* arena, const void* previous, uint32_t co
 
 // Invalid facts/duplicates return false without resource failure. Allocation failure rolls back arena and
 // builder publication, setting only resource. The caller plans first; this function never evaluates a source.
+// A fresh object's identity was never appended to this buffer or its prefix (a string literal's token, seen once
+// through the reader's string cache, or a merge into an empty buffer), so it skips the duplicate search.
 static bool check_const_append(CheckConstBuffer* buffer, CheckConstObject header, const CheckConstPart* parts, uint32_t part_count,
-                                const CheckConstUnion* unions, uint32_t union_count)
+                                const CheckConstUnion* unions, uint32_t union_count, bool fresh)
 {
     bool valid = buffer != NULL && buffer->arena != NULL && !buffer->resource && header.object != 0 && header.type != 0 &&
                  header.byte_size <= UINT64_MAX / 8 && (part_count == 0 || parts != NULL) && (union_count == 0 || unions != NULL);
     const CheckConstValues before = check_const_view(buffer);
     valid = valid && (before.prefix == NULL || (before.prefix != &before && before.prefix->prefix == NULL)) &&
-            check_const_find(&before, header.object, UINT32_MAX, NULL) == NULL;
+            (fresh || check_const_find(&before, header.object, UINT32_MAX, NULL) == NULL);
     const uint64_t bits = valid ? header.byte_size * 8 : 0;
     for (uint32_t i = 0; valid && i < part_count; i += 1)
     {

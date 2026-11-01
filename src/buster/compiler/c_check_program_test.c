@@ -1427,7 +1427,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                     .initializer = input->initializer_nodes[selected],
                     .token = selected,
                     .initializer_plan = plan,
-                    .alignment_log2 = alignments[object] != 0 ? (uint8_t)(alignments[object] - 1) : 0,
+                    .alignment_log2 = check_data_declared_alignment(input, types, object, type, alignments[object]),
                 };
                 result->reference_offsets[at] = result->reference_count;
                 const uint64_t reference_mark = scratch->length;
@@ -2943,8 +2943,32 @@ static void check_test_program_builtin_scratch(CheckTest* test, const char* clan
         "atomic-captures-and-integer-recipe-scratch", clang);
 }
 
+// #978: arrays of 16 bytes or more aligned to 16, as the x86-64 psABI and clang align them, a char before each so that
+// an alignment of 1 would misalign them: global, initialized, two-dimensional, static, record arrays, a thread-local and a
+// static local one, and in the frame a local array, a two-dimensional one, an array of records and a VLA; an attribute's
+// 4 alone; and __alignof__ of such an array still its element's (clang's getDeclAlign for alignof).
+static void check_test_program_array_alignment(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        "char g_pad1;char g_big[16];char g_pad2;char g_rows[4][4];char g_pad3=1;char g_init[16]=\"abc\";"
+        "static char g_pad4;static char g_static[32];struct small{char c[20];};char g_pad5;struct small g_records[2];"
+        "char g_pad6;__attribute__((aligned(4))) char g_attr[64];_Thread_local char g_pad7;_Thread_local char g_thread[64];"
+        "static long low(const void*p,unsigned long mask){return (long)((unsigned long)p&mask);}"
+        "char*keep(char*p){return p;}"
+        "int tested(int n){static char s_pad;static char s_local[32];char pad1=(char)n;char l_big[16];char pad2=(char)(n+1);"
+        "char l_rows[2][8];char pad3=(char)(n+2);struct small l_records[2];char l_vla[n>0?n+16:17];"
+        "keep(&pad1);keep(&pad2);keep(&pad3);keep(&s_pad);keep(&g_pad1);keep(&g_pad2);keep(&g_pad4);keep(&g_pad5);keep(&g_pad6);keep(&g_pad7);"
+        "l_big[0]=pad1;l_rows[0][0]=pad2;l_records[0].c[0]=pad3;l_vla[0]=g_pad3;"
+        "long low_bits=low(g_big,15)+low(g_rows,15)+low(g_init,15)+low(g_static,15)+low(g_records,15)+low(g_attr,3)+low(g_thread,15)"
+        "+low(s_local,15)+low(l_big,15)+low(l_rows,15)+low(l_records,15)+low(l_vla,15);"
+        "int alignof_kept=__alignof__(g_big)==1&&__alignof__(l_big)==1&&_Alignof(char[64])==1&&__alignof__(g_attr)==4;"
+        "return (int)low_bits*16+(alignof_kept?n:-n)+l_big[0]+l_rows[0][0]+l_records[0].c[0]+l_vla[0];}",
+        "arrays-of-16-bytes-aligned-to-16", clang);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_array_alignment(test, clang);
     check_test_program_return_marks(test);
     check_test_literal_tables(test, clang);
     check_test_program_builtin_scratch(test, clang);
@@ -3775,6 +3799,27 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){unsigned long a=(unsigned long)n,b=3,out=0;int overflow=__builtin_umull_overflow(a++,b++,&out);"
         "return (int)(out%97)+overflow*100+(int)(a%13)+(int)b;}", "typed-overflow-prototype-conversions-and-effects", clang);
+    // The other typed overflow builtins (#148) of boundary values, each from long long operands that convert to its
+    // prototype's type, the overflow and the stored value hashed; then a fold of constants and operands evaluated once.
+    check_test_program_source(test,
+        "static unsigned long h;static void mix(long long v){h=(h^(unsigned long)v)*1099511628211UL;}"
+        "int tested(int n){h=14695981039346656037UL;"
+        "const long long v[]={0,1,-1,2147483647LL,-2147483647LL-1,4294967295LL,9223372036854775807LL,-9223372036854775807LL-1,n,-n,n*1000003LL};"
+        "for(int i=0;i<11;i++)for(int j=0;j<11;j++){long long a=v[i],b=v[j];int si;long sl;long long sll;unsigned ui;unsigned long ul;unsigned long long ull;"
+        "mix(__builtin_sadd_overflow(a,b,&si));mix(si);mix(__builtin_saddl_overflow(a,b,&sl));mix(sl);mix(__builtin_saddll_overflow(a,b,&sll));mix(sll);"
+        "mix(__builtin_ssub_overflow(a,b,&si));mix(si);mix(__builtin_ssubl_overflow(a,b,&sl));mix(sl);mix(__builtin_ssubll_overflow(a,b,&sll));mix(sll);"
+        "mix(__builtin_smul_overflow(a,b,&si));mix(si);mix(__builtin_smull_overflow(a,b,&sl));mix(sl);mix(__builtin_smulll_overflow(a,b,&sll));mix(sll);"
+        "mix(__builtin_uadd_overflow(a,b,&ui));mix(ui);mix(__builtin_uaddl_overflow(a,b,&ul));mix((long long)ul);"
+        "mix(__builtin_uaddll_overflow(a,b,&ull));mix((long long)ull);mix(__builtin_usub_overflow(a,b,&ui));mix(ui);"
+        "mix(__builtin_usubl_overflow(a,b,&ul));mix((long long)ul);mix(__builtin_usubll_overflow(a,b,&ull));mix((long long)ull);"
+        "mix(__builtin_umul_overflow(a,b,&ui));mix(ui);mix(__builtin_umulll_overflow(a,b,&ull));mix((long long)ull);}"
+        "return (int)(h^(h>>32));}",
+        "typed-overflow-every-builtin-of-boundary-values", clang);
+    check_test_program_source(test,
+        "int tested(int n){int a=n,b=n*2,si=0;unsigned ui=0;long long sll=0;"
+        "int r=__builtin_sadd_overflow(a++,b++,&si)*1000+__builtin_usub_overflow(3u,4u,&ui)*100+__builtin_smulll_overflow(3037000500LL,3037000500LL,&sll)*10;"
+        "r+=__builtin_ssub_overflow(-2147483647-1,1,&si)+si%1000;return r+a+b+(int)(ui%1000)+(int)(sll%1000);}",
+        "typed-overflow-folds-and-operands-evaluated-once", clang);
     check_test_program_source(test,
         "int absent(void);int tested(int n){unsigned long a=__builtin_object_size(\"abc\",0);"
         "unsigned long b=__builtin_object_size(\"abc\",2);int ignored=__builtin_object_size((n++,(char*)0),0)==~0UL;"

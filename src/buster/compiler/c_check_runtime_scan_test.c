@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Runtime declaration lookup: reuse the existing compact producer, retain an independent full-token traversal,
-// and check both against a runtime-first oracle. Include after check_test_program_guarded.
+// and check both against a runtime-first oracle, which reads every runtime function's name where the lookup reads the
+// list of the spelled ones (#148). Include after check_test_program_guarded.
 #ifndef BUSTER_C_CHECK_RUNTIME_SCAN_TEST_INCLUDED
 #define BUSTER_C_CHECK_RUNTIME_SCAN_TEST_INCLUDED
 
@@ -31,6 +32,15 @@ static void check_test_runtime_scan(CheckTest* test)
             {
                 identifiers[r] = r % 4 != 0 ? 100 + r : 0;
                 initial[r] = r == CHECK_LOWER_RUNTIME_ERRNO || r % 7 == 0 ? 900 + r : 0;
+            }
+            IdentId spelled_identifiers[CHECK_LOWER_RUNTIMES];
+            uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
+            uint32_t spelled = 0;
+            for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; r < CHECK_LOWER_RUNTIMES; r += 1)
+            {
+                spelled_identifiers[spelled] = identifiers[r];
+                spelled_runtimes[spelled] = (uint16_t)r;
+                spelled += identifiers[r] != 0;
             }
             for (uint32_t t = 0; ready && t < count; t += 1)
             {
@@ -80,7 +90,8 @@ static void check_test_runtime_scan(CheckTest* test)
                     {
                         SymbolId actual[CHECK_LOWER_RUNTIMES];
                         memcpy(actual, initial, sizeof(actual));
-                        check_lower_declared_runtimes(&program, path == 0 ? NULL : compact, declared, identifiers, actual, path == 0);
+                        check_lower_declared_runtimes(&program, path == 0 ? NULL : compact, declared, spelled_identifiers, spelled_runtimes, spelled, actual,
+                                                      path == 0);
                         check_test_expect(test, memcmp(actual, expected, sizeof(actual)) == 0,
                                           "compact and full runtime scans preserve first symbols, linkage, absent names and preseeded slots at protected tails");
                     }
@@ -114,14 +125,14 @@ static void check_test_runtime_scan(CheckTest* test)
     parser.tokens.names = names;
     const CheckInput input = { .token_count = 8, .declarations = declarations, .objects = objects, .linkage = linkage };
     const CheckProgram program = { .input = &input, .parser = &parser, .object_count = 4, .object_symbols = object_symbols };
-    IdentId identifiers[CHECK_LOWER_RUNTIMES] = { 0 };
-    identifiers[CHECK_LOWER_RUNTIME_ERRNO + 1] = 77;
+    const IdentId identifiers[1] = { 77 };
+    const uint16_t runtimes[1] = { CHECK_LOWER_RUNTIME_ERRNO + 1 };
     const uint32_t declared = check_program_declaring(declarations, nodes, 1, 8, tokens, false);
     for (uint32_t path = 0; path < 2; path += 1)
     {
         SymbolId actual[CHECK_LOWER_RUNTIMES] = { 0 };
         actual[CHECK_LOWER_RUNTIME_ERRNO] = 123;
-        check_lower_declared_runtimes(&program, tokens, declared, identifiers, actual, path == 0);
+        check_lower_declared_runtimes(&program, tokens, declared, identifiers, runtimes, 1, actual, path == 0);
         check_test_expect(test, actual[CHECK_LOWER_RUNTIME_ERRNO + 1] == 51 && actual[CHECK_LOWER_RUNTIME_ERRNO] == 123,
                           "runtime lookup keeps the first nonzero external symbol and does not touch errno");
     }

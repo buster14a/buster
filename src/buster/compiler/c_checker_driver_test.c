@@ -1592,6 +1592,69 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
     free(program);
 }
 
+// #978: arrays of 16 bytes or more, which the x86-64 psABI aligns to 16, after a char each so that an alignment of 1 would
+// misalign them: a global one, which clang -O2's code clears with movaps through its `extern` declaration, a static one
+// it clears through a pointer it may assume aligned, and a thread-local one it clears through its own declaration. The
+// object, the same by both paths, linked with clang's must run to 0, where it faulted on the first movaps before.
+static void check_test_driver_array_alignment(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "char pad1 = 1;\nchar big[64];\nchar pad2 = 2;\nstatic char pad3 = 3;\nstatic char hidden[48];\n"
+                                  "_Thread_local char pad4 = 4;\n_Thread_local char tls[32];\n"
+                                  "char* hidden_address(void) { return hidden; }\nvoid clear_all(void);\n"
+                                  "int main(void)\n{\n    big[0] = 1;\n    hidden[47] = 2;\n    tls[31] = 3;\n    clear_all();\n"
+                                  "    return big[0] + hidden[47] + tls[31] + pad1 + pad2 + pad3 + pad4 - 10;\n}\n";
+    static const char clear[] = "extern char big[64];\nextern _Thread_local char tls[32];\nchar* hidden_address(void);\n"
+                                "void clear_all(void)\n{\n    char* hidden = __builtin_assume_aligned(hidden_address(), 16);\n"
+                                "    for (int i = 0; i < 64; i += 1) big[i] = 0;\n    for (int i = 0; i < 48; i += 1) hidden[i] = 0;\n"
+                                "    for (int i = 0; i < 32; i += 1) tls[i] = 0;\n}\n";
+    char sources[2][256];
+    char objects[3][256];
+    char linked[256];
+    snprintf(sources[0], sizeof(sources[0]), "%s/alignment.c", directory);
+    snprintf(sources[1], sizeof(sources[1]), "%s/alignment-clear.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/alignment.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/alignment-scalar.o", directory);
+    snprintf(objects[2], sizeof(objects[2]), "%s/alignment-clear.o", directory);
+    snprintf(linked, sizeof(linked), "%s/alignment-linked", directory);
+    const bool written = parse_test_write(sources[0], program, sizeof(program) - 1) && parse_test_write(sources[1], clear, sizeof(clear) - 1);
+    check_test_expect(test, written, "the arrays' alignment program is written");
+    char* text = NULL;
+    char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], sources[0], NULL };
+    char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], sources[0], NULL };
+    char* const clear_arguments[] = { (char*)clang, "-O2", "-c", "-o", objects[2], sources[1], NULL };
+    char* const* compiles[3] = {
+        vector_arguments,
+        scalar_arguments,
+        clear_arguments,
+    };
+    bool compiled = written;
+    for (uint32_t i = 0; written && i < 3; i += 1)
+    {
+        const int status = check_test_driver_spawn(compiles[i], &text);
+        compiled = compiled && status == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), "both paths write the same object of the arrays' alignment program");
+    char* const link_arguments[] = { (char*)clang, "-o", linked, objects[0], objects[2], NULL };
+    const int link_status = compiled ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* const run_arguments[] = { linked, NULL };
+    const int run_status = link_status == 0 ? check_test_driver_spawn(run_arguments, &text) : -1;
+    free(text);
+    check_test_expect(test, run_status == 0, "arrays of 16 bytes or more are aligned to 16: clang -O2's aligned stores into them run");
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        unlink(sources[i]);
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        unlink(objects[i]);
+    }
+    unlink(linked);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -4208,6 +4271,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
 #include "c_check_fortify_driver_test.c"
+#include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
@@ -4547,6 +4611,60 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
     const int status = built == 0 ? check_test_driver_spawn(run, &text) : -1;
     free(text);
     check_test_expect(test, status == 7, "GNU89 plain inline definition links and runs in the direct path");
+    // A same-translation-unit GNU inline definition and the ordinary definition after it: the ordinary one is the
+    // external definition, in GNU89 and with -fgnu89-inline or gnu_inline in later modes.
+    static const struct
+    {
+        const char* name;
+        const char* standard;
+        const char* flag;
+        const char* source;
+        int status;
+    } same_unit[] = {
+        { "GNU89 extern inline then ordinary", "-std=gnu89", "-w",
+          "extern inline int same(int x){return x+1;}\nint same(int x){return x+2;}\nint same_user(int x){return same(x);}\nint main(void){return same(6);}\n", 8 },
+        { "C17 -fgnu89-inline extern inline then ordinary", "-std=c17", "-fgnu89-inline",
+          "extern inline int same(int x){return x+1;}\nint same(int x){return x+2;}\nint same_user(int x){return same(x);}\nint main(void){return same(6);}\n", 8 },
+        { "C17 gnu_inline extern inline then ordinary", "-std=c17", "-w",
+          "extern inline __attribute__((gnu_inline)) int same(int x){return x+1;}\nint same(int x){return x+2;}\nint same_user(int x){return same(x);}\nint main(void){return same(6);}\n", 8 },
+    };
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(same_unit); m += 1)
+    {
+        char same_source[256];
+        snprintf(same_source, sizeof(same_source), "%s/inline-same-%u.c", directory, m);
+        const bool same_written = parse_test_write(same_source, same_unit[m].source, strlen(same_unit[m].source));
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char same_executable[256];
+            snprintf(same_executable, sizeof(same_executable), "%s/inline-same-%u-%u", directory, m, scalar);
+            char* same_build[] = { (char*)executable, (char*)same_unit[m].standard, (char*)same_unit[m].flag, scalar ? "--scalar" : "-w",
+                                   "-o", same_executable, same_source, NULL };
+            char* same_run[] = { same_executable, NULL };
+            char* same_text = NULL;
+            const int same_built = same_written ? check_test_driver_spawn(same_build, &same_text) : -1;
+            free(same_text); same_text = NULL;
+            const int same_status = same_built == 0 ? check_test_driver_spawn(same_run, &same_text) : -1;
+            free(same_text);
+            char description[256];
+            snprintf(description, sizeof(description), "%s %s links and the ordinary definition runs", same_unit[m].name, scalar ? "scalar" : "vector");
+            check_test_expect(test, same_status == same_unit[m].status, description);
+            unlink(same_executable);
+        }
+        unlink(same_source);
+    }
+    // The same shape is still a redefinition where GNU inline doesn't apply.
+    static const char same_conflict[] = "extern inline int same(void){return 1;} int same(void){return 2;}\n";
+    char conflict_source[256];
+    snprintf(conflict_source, sizeof(conflict_source), "%s/inline-conflict.c", directory);
+    const bool conflict_written = parse_test_write(conflict_source, same_conflict, sizeof(same_conflict) - 1);
+    char* conflict[] = { (char*)executable, "-std=c17", "-fsyntax-only", conflict_source, NULL };
+    char* conflict_text = NULL;
+    const int conflict_status = conflict_written ? check_test_driver_spawn(conflict, &conflict_text) : -1;
+    const bool conflict_said = conflict_text != NULL && strstr(conflict_text, "conflicting declaration") != NULL;
+    free(conflict_text);
+    check_test_expect(test, conflict_status == 1 && conflict_said, "C17 keeps the extern inline followed by a definition a redefinition");
+    unlink(conflict_source);
+
     static const char header_user[] = "extern inline int value(void){return 99;} int main(void){return value();}\n";
     static const char external_body[] = "int value(void){return 7;}\n";
     char second[256], second_object[256];
@@ -4941,6 +5059,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
         unlink(source);
     }
 }
+#include "c_check_initializer_warning_test.c"
+#include "c_check_warning_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -4985,6 +5105,48 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
                           "a reusable command's rejected options release mappings after an earlier successful compile");
     }
     unlink(source);
+}
+
+// isfpclass of a vector of long doubles (#148): clang accepts it, its result a vector of __int128 whose lanes are the
+// element's 16 bytes. The lowering's int and long long lane stores can't hold those, so it must refuse by name rather
+// than write garbage; a vector of floats still compiles, as the guard against refusing too much.
+static void check_test_driver_float_classify(CheckTest* test, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/classify-vector.c", directory);
+    snprintf(object, sizeof(object), "%s/classify-vector.o", directory);
+    static const char refused[] = "typedef long double v2ld __attribute__((vector_size(32)));\n"
+                                  "typedef __int128 v2i __attribute__((vector_size(32)));\n"
+                                  "v2i f(v2ld v)\n{\nreturn __builtin_isfpclass(v, 0x108);\n}\n";
+    static const char accepted[] = "typedef float v4f __attribute__((vector_size(16)));\n"
+                                   "typedef int v4i __attribute__((vector_size(16)));\n"
+                                   "v4i f(v4f v)\n{\nreturn __builtin_isfpclass(v, 0x108);\n}\n";
+    bool written = parse_test_write(source, refused, sizeof(refused) - 1);
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: isfpclass of a vector whose elements are not 4 or 8 bytes") != NULL,
+                          path == 0 ? "isfpclass of a vector of long doubles is refused, not miscompiled" :
+                                      "isfpclass of a vector of long doubles is refused, not miscompiled, scalar");
+        free(text);
+    }
+    written = written && parse_test_write(source, accepted, sizeof(accepted) - 1);
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0,
+                          path == 0 ? "isfpclass of a vector of floats still compiles" : "isfpclass of a vector of floats still compiles, scalar");
+        free(text);
+    }
+    unlink(source);
+    unlink(object);
 }
 
 static int run_checker_driver_tests(int argc, char** argv)
@@ -5545,6 +5707,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_cleanup_errors(&test, clang, executable, directory);
         check_test_driver_musttail_errors(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
+        check_test_driver_initializer_warnings(&test, clang, executable, directory);
+        check_test_driver_default_warnings(&test, clang, executable, directory);
+        check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
@@ -5571,6 +5736,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_fortify(&test, clang, executable, directory);
+            check_test_driver_library(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
             check_test_driver_sockets(&test, clang, executable, directory);
@@ -5579,6 +5745,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_halves(&test, clang, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
+            check_test_driver_array_alignment(&test, clang, executable, directory);
+            check_test_driver_float_classify(&test, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);

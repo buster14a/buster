@@ -2306,11 +2306,20 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promoted_function);
         ir_lower_test_expect(tally, check.error == IR_OK && promoted_function.label_count == 2 && promoted_function.labels[0] != BUSTER_IR_NONE && promoted_function.labels[1] != BUSTER_IR_NONE,
                              "promotion keeps both labels' blocks", 0, 1);
+        // The promoted join's address is a phi of the arms' (a depth slot #983 promotes), which this executor has no
+        // phis for: the shared IR's interpreter runs it, its labels symbols 2 and 3.
+        static const SymbolId computed_label_symbols[2] =
+        {
+            2,
+            3
+        };
+        const IrInterpreterFunction computed_code = { .symbol = 1, .function = &promoted_function, .labels = computed_label_symbols };
+        const IrInterpreterProgram computed_program = { .functions = &computed_code, .function_count = 1 };
         for (uint64_t p = 0; check.error == IR_OK && p < 2; p += 1)
         {
-            bool fault = false;
-            const uint64_t actual = ir_lower_test_interpret(&promoted_function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
-            ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "the promoted computed goto goes to the same labels", 0, (uint32_t)p);
+            const InterpreterValue argument = { .low = p };
+            const InterpreterResult result = ir_interpret(&computed_program, 1, &argument, 1, 0, &execution);
+            ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == (p != 0 ? 10 : 20), "the promoted computed goto goes to the same labels", 0, (uint32_t)p);
         }
     }
     arena_pop_to(&output, 0);
