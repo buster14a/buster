@@ -508,9 +508,30 @@ cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 
-Issue #141 remains open. Full pattern-state generation, the remaining
-scalar/ABI/spill consumers, and whole-C integration are outstanding. The native fixtures are real generated code but are not
-`c-testsuite`, Csmith/YARPGen, the full corpora, SQLite or `speedtest1`. The
-required 9700X comparisons against Tier 0 and Clang `-O2`, runtime and size,
-selection core cycles per IR instruction, and complete #142 campaigns still
-need the completed upstream source path and those recorded workloads.
+Issue #141 remains open. The 9700X measurements its Done-when asks for are
+recorded in [buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01), at #1001's
+heads and at its merge with main, `cc3387f`:
+
+- **Programs**, by the driver's `--tier1` (each function Tier 1's pipeline
+  takes by Tier 1, the others by Tier 0), against Tier 0, clang -O0 and clang
+  -O2: speedtest1 in 223.5 ms against 256.8, 291.0 and 131.8; Lua 5.4.8's
+  interpreter, five scripts, in 286.1 ms against 337.6, 376.0 and 167.1;
+  c-testsuite's one long program (00040) in 23.6 ms against 25.6, 33.2 and
+  12.6. In user-space instructions, `--tier1` runs 4,413 M of speedtest1
+  against Tier 0's 5,694 M and clang -O2's 2,010 M, and 8,749 M of Lua's
+  scripts against 10,763 M and 4,281 M. Each program's hottest function
+  (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
+- **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
+  the frozen `sqlite3.c`: 338 by the vector path and 340 by the scalar twin. A
+  quarter of each is the plan's `ir_verify` of its input, which the pipeline
+  has verified already.
+- **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
+  `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
+  others fail in clang's own steps (links past the small code model, which
+  Buster refuses too, compiles past the output limit, runs past 30 s), none in
+  Buster's.
+
+Full pattern-state generation, the remaining scalar/ABI/spill consumers, and
+whole-C integration (the functions selection refuses whole: labels as values,
+switches, aggregates by value and variadic definitions among them) are
+outstanding.
