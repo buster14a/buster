@@ -1865,13 +1865,15 @@ static void* lane_thread_main(void* parameter)
 {
     LaneStart* start = parameter;
     start->pinned = start->cpu < 0 || lane_pin((uint32_t)start->cpu);
+    // The lane is the group's before the gate, which a group that shares CPUs then waits at with lane_sleep (lane_wait):
+    // the lanes created so far would otherwise hold their CPUs while the others are created.
+    thread_context.lane = (Lane){
+        .index = start->index,
+        .count = start->count,
+        .group = start->group,
+    };
     if (lane_wait(&start->group->gate, 0) == BUSTER_LANE_GATE_RUN)
     {
-        thread_context.lane = (Lane){
-            .index = start->index,
-            .count = start->count,
-            .group = start->group,
-        };
         thread_context.running = true;
         start->group->entry(start->group->argument);
     }
@@ -2286,10 +2288,13 @@ static uint32_t lane_session_settle(void)
         {
             pthread_join(session->threads[i], 0);
         }
+        // Whether the lanes that run share the CPUs they run on, whichever group lane 0 is in as it settles: the
+        // session's, or a flow's, which lane 0 began before it settled (lane_flow_begin makes it a group of one, as the C
+        // driver's and link-foreign's flows do), and whose rounds then narrow from the session's answer.
+        session->group.shares_cpus = lane_group_shares_cpus(run ? session->count : 1, session->has_cpus);
         // The lanes that run: with one per core, fewer than the capacity lane 0 started on.
         if (thread_context.lane.group == &session->group)
         {
-            session->group.shares_cpus = lane_group_shares_cpus(run ? session->count : 1, session->has_cpus);
             thread_context.lane = run ? (Lane){ .index = 0, .count = session->count, .group = &session->group } : (Lane){ .count = 1 };
         }
     }

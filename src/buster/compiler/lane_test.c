@@ -72,8 +72,10 @@
 //     a flow of rounds that lane 0 begins before it settles, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
 //     of this process's CPUs in pairs, in fours and all one core: as many lanes as the capacity and the cores allow, each
 //     round on them, each lane's lane_session_asked as many, a lazy session's lane 1 created though it runs on one,
-//     where one core leaves it no other lane; and in a child, a session that leaves its lanes parked at its end (but in
-//     sanitizer builds, which join them).
+//     where one core leaves it no other lane; a lazy session of two lanes on one CPU, whose flow of rounds lane 0 begins
+//     before it settles, which must read its lanes as sharing the CPU in each round's narrowed group, and every narrowed
+//     group and round of the sessions' flows must read what its session's lanes do; and in a child, a session that leaves
+//     its lanes parked at its end (but in sanitizer builds, which join them).
 //   - Cores (#905): lane_cores on a test topology of SMT siblings n and n + 8 (Linux's numbering of AMD's), adjacent
 //     pairs (Intel's), single threads (efficient cores), CPUs without a list, lists that don't parse (a dash without a
 //     number, letters, nothing, a range backwards, a letter after it), that leave their CPU out or that the read's buffer
@@ -2430,6 +2432,9 @@ struct LaneSessionTest
     uint32_t forbidden_calls;
     // Whether lane 0 forks a child in the flow.
     bool forks;
+    // Whether the lanes of a narrowed group or a round must read their group as sharing the CPUs they run on
+    // (LaneGroup.shares_cpus), as the session's lanes do: true for a session of more lanes than the CPUs it may run on.
+    bool shares_cpus;
 };
 
 // The thread that handled the sessions check's signal.
@@ -2473,6 +2478,9 @@ static void lane_test_session_round(LaneSessionTest* test, uint32_t kind)
     lane_sync();
     const uint32_t lanes = lane_count();
     uint64_t failures = lane_broadcast(index + kind, lanes - 1) != lanes - 1 + kind ? 1 : 0;
+    // The group a round narrows from the session's must read whether its lanes share CPUs as the session's do.
+    const LaneGroup* group = thread_context.lane.group;
+    failures += group != 0 && group->shares_cpus != test->shares_cpus ? 1 : 0;
     failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
     test->failures[index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += failures;
 }
@@ -2487,6 +2495,9 @@ static uint64_t lane_test_session_narrow(LaneSessionTest* test, uint32_t lanes)
     if (lane_narrow(lanes))
     {
         failures += lane_count() != expected || lane_index() != outer.index ? 1 : 0;
+        // A narrowed group of several lanes shares the CPUs its session's lanes do.
+        const LaneGroup* group = thread_context.lane.group;
+        failures += group != 0 && group->shares_cpus != test->shares_cpus ? 1 : 0;
         lane_sync();
         failures += lane_broadcast(lane_index() * 3, expected - 1) != (expected - 1) * 3 ? 1 : 0;
         for (uint64_t part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS); part < BUSTER_LANE_TEST_SESSION_PARTS; part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS))
@@ -2704,6 +2715,7 @@ static uint64_t lane_test_sessions(void)
             .expected = capacities[i],
             .asked = capacities[i],
             .forks = i == 2,
+            .shares_cpus = lane_group_shares_cpus(capacities[i], false),
         };
         const uint64_t created = lane_process.threads_created;
         const uint32_t flags = i >= 4 ? BUSTER_LANE_SESSION_LAZY : 0;
@@ -2768,6 +2780,7 @@ static uint64_t lane_test_sessions(void)
                 .caller = caller,
                 .expected = expected,
                 .asked = expected,
+                .shares_cpus = lane_group_shares_cpus(expected, false),
             };
             const uint64_t created = lane_process.threads_created;
             const uint32_t flags = BUSTER_LANE_SESSION_PER_CORE | (lazy ? BUSTER_LANE_SESSION_LAZY : 0);
@@ -2785,6 +2798,39 @@ static uint64_t lane_test_sessions(void)
         {
             lane_test_topology_remove(root, end);
         }
+    }
+    // A lazy session of two lanes on one CPU, whose flow of rounds begins before lane 0 settles: lane 0 begins the flow as a
+    // group of one (lane_flow_begin), so the session settles its answer with no group of its own, and each round's narrowed
+    // group must still read that its lanes share the CPU. This thread's mask is cut to one CPU while it runs.
+    uint64_t one[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    uint32_t cpu = 0;
+    while (known && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64 && (allowed[cpu / 64] & (UINT64_C(1) << (cpu % 64))) == 0)
+    {
+        cpu += 1;
+    }
+    if (cpu < BUSTER_LANE_CPU_MASK_WORDS * 64)
+    {
+        one[cpu / 64] = UINT64_C(1) << (cpu % 64);
+    }
+    const bool cut = known && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64 && syscall(SYS_sched_setaffinity, 0, sizeof(one), one) == 0;
+    failures += cut ? 0 : 1;
+    if (cut)
+    {
+        LaneSessionTest test = {
+            .caller = caller,
+            .expected = 2,
+            .asked = 2,
+            .shares_cpus = true,
+        };
+        const uint64_t created = lane_process.threads_created;
+        const uint32_t ran = lane_session_run(&session, 2, 0, lane_test_session_early_flow, &test, BUSTER_LANE_SESSION_LAZY);
+        failures += ran != 2 || lane_process.threads_created != created + 1 ? 1 : 0;
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += test.calls[lane] != (lane < 2 ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+        }
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+        failures += syscall(SYS_sched_setaffinity, 0, sizeof(allowed), allowed) == 0 ? 0 : 1;
     }
     // In a child, a session that leaves its lanes parked at its end, for the child's exit to end; a sanitizer build joins
     // them.
@@ -2809,8 +2855,8 @@ static uint64_t lane_test_sessions(void)
         sigaction(SIGUSR1, &previous_action, 0);
     }
     failures += lane_test_unwatch() ? 0 : 1;
-    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies and one "
-           "parked at its end, %lu wrong\n",
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies, one of two "
+           "lanes on one CPU whose flow began before lane 0 settled and one parked at its end, %lu wrong\n",
            BUSTER_LANE_TEST_MAX_LANES, (unsigned long)failures);
     return failures;
 }
