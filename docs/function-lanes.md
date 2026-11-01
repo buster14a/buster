@@ -395,13 +395,14 @@ vector, measured only with the predefines.
 The 9700X CI job's `benchmark-check-lanes` step (#1069): under the host's
 lock, lane 0 on CPU 2 and the others on one CPU of each other core
 (`--cpus 2,$others`), medians of 11 runs. Clang 23.1.4 built the compiler
-(`BUSTER_HOST_ARCH=znver5`). The frozen `sqlite3.c` uses the CI step's options,
-`-march=znver5` among them, for which the benchmark emits znver5 code, as `-c`
-compiles it (#1045): 2,602 functions, 554,920 tokens in their bodies, the
-largest 28,603, and 1,227,192 bytes of code. The run is #1072's, at
+(`BUSTER_HOST_ARCH=znver5`, `BUSTER_DEBUG_INFO=0`). The frozen `sqlite3.c`
+uses the CI step's options, `-march=znver5` among them, for which the
+benchmark emits znver5 code, as `-c` compiles it (#1045): 2,602 functions,
+554,920 tokens in their bodies, the largest 28,603, and 1,227,192 bytes of
+code. The run is #1072's, at
 `c8a4838b`; [the record](https://github.com/buster14a/buster-performance/tree/29d000e41628428f478785fc6d4c5e20f40603c2/docs/measurements/function-lanes-znver5-1069-2026-11-01)
-has its log and an earlier run's. Times are in milliseconds, with each row's
-fastest and slowest of the 11.
+has its log and an earlier run's. Times are in milliseconds, with each
+row's fastest and slowest of the 11.
 
 | Lanes | Emission | Fastest | Slowest | Speedup | Preparation | Lanes' part | Merge |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -415,16 +416,16 @@ fastest and slowest of the 11.
 
 The lanes' part takes 3.6 times less time on 8 lanes than on one. The
 preparation and the merge stay serial, 3.6 ms, 44% of 8 lanes' time; most of
-both is passes over every token of the unit. The 8-lane rows vary most from
-run to run: their slowest runs are up to 60% over their medians, and the
-earlier run's forced 8-lane median was 8.8 ms, its lanes' part 5.2 ms (3.1
-times less than one lane's), where its 1, 2 and 4 lanes and the rule's row
-came within 0.6% of these.
+both is passes over every token of the unit. The 8-lane rows have the widest
+spread: their slowest runs are up to 60% over their medians. The earlier
+run's forced 8-lane median was 8.8 ms, its lanes' part 5.2 ms (3.1 times less
+than one lane's); its 1, 2 and 4 lanes and the rule's row stayed within 0.6%
+of this table's medians (8.07 against 8.02 ms for the rule's row).
 
 The table before #1069 (clang 23.1.1) timed baseline x86-64 code, though the
 step passed `-march=znver5`, and an earlier compiler: 36.6 ms on one lane and
 11.9 on 8, the lanes' part 4.9 times less. Its difference from this one mixes
-the target with the compiler's other changes since.
+the target, the toolchain and the compiler's other changes since.
 
 The whole driver, `-c` of #136's frozen copy of `sqlite3.c`, 11 rounds in a
 rotating order, against main (`e04462c1`). The objects are byte-identical:
