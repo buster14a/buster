@@ -1402,12 +1402,18 @@ are stored outside the leaf's graph operands. Nested compound literals use
 the same bounded worklist, while dead or unevaluated literals supply no roots.
 The driver reports each surviving event at the builtin's source
 location, with the converted immediate and its valid bounds, through
-`-Wargument-outside-range`'s default-error policy. The ordered command-line
-mappings start from that error baseline (`-Wno-error=`, `-Wno-`, `-Werror=`,
-re-enabling it after `-Wno-`, and `-Weverything`/`-Wno-everything`), and
-diagnostic pragmas then downgrade or suppress it at their locations; `-w`
-suppresses it over any pragma, as clang does. A failed or incomplete program
-leaves unknown events for conservative reporting rather than dropping them.
+`-Wargument-outside-range`'s default-error policy. Its message ends in
+` [-Wargument-outside-range]` wherever the driver reports it, as clang's does
+under every mapping: clang's printer adds `-Werror,` only to a warning that
+isn't an error by default, so the option is alone whether the diagnostic is a
+warning, an error or a fatal error, by pragma or with `-Werror` (#1079). The
+ordered command-line mappings start from that error baseline (`-Wno-error=`,
+`-Wno-`, `-Werror=`, re-enabling it after `-Wno-`, and
+`-Weverything`/`-Wno-everything`), and diagnostic pragmas then downgrade or
+suppress it at their locations; `-w` suppresses it over any pragma, as clang
+does. The driver's general `-Wfatal-errors` is #1081. A failed or incomplete
+program leaves unknown events for conservative reporting rather than dropping
+them.
 
 Only an actual range event allocates the temporary reachability worklist.
 It uses one visited byte and one 64-bit stack slot per graph node/control,
@@ -1416,9 +1422,15 @@ scalar walk handles the dependent edges of this exceptional diagnostic path;
 ordinary valid inputs retain the existing scalar/vector checking kernels.
 `test-checker` compares independent source fixtures with Clang, one translation
 unit per fixture, through both production driver schedules. It checks
-acceptance, severity, complete range messages and source locations, including
-negative immediates, dead control flow, unevaluated operands, pragma state and
-the command-line mappings above.
+acceptance, severity, complete range messages (their option's suffix too) and
+source locations, including negative immediates, dead control flow,
+unevaluated operands, pragma state and the command-line mappings above.
+`check_test_x86_range_mappings` holds clang 23's text, each diagnostic and note
+line for line, for the default, `-Werror`, `-Werror=argument-outside-range`,
+clang's and GCC's warning, error and fatal pragmas, a push and a pop, and
+deferred reports, which clang and both paths must give. The command-line
+mapping fixtures compare status, severity, location and range message for the
+ordered mappings and their pragma combinations.
 
 For #562, `check_input_x86_contexts` supplies source diagnostic context before
 `check_x86_action` consumes the sparse `CheckX86Call` records. An unselected
