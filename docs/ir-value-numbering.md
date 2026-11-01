@@ -178,9 +178,9 @@ lowered IR before promotion, which is where Tier 1 can exercise it. Measured on
 a local `sqlite3.c` of 2,604 functions and on c-testsuite's 430 functions, it
 should stay off: the congruence classes it merges lengthen live ranges across
 blocks, and Tier 1's allocation pays for that in moves and spills. The object's
-text grows 12.1% on that file and its compile 33.0% to 21.2% across two pairs of
-five-run sets (525 to 698 ms and 751 to 910 ms, on a Ryzen 9 7940HS, not the
-locked 9700X); on c-testsuite the objects are
+text grows 12.1% on that file and its compile time by 33.0% and 21.2% across
+two pairs of five-run sets (525 to 698 ms and 751 to 910 ms, on a Ryzen 9
+7940HS, not the locked 9700X); on c-testsuite the objects are
 1.2% smaller but carry 13.9% more instructions and 25 spill stores and 25
 reloads where there were none, with Tier 1's coverage unchanged (350 functions
 either way). After `ir_optimize` the same pass is worse (text +15.8%,

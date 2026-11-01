@@ -1530,6 +1530,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->edge_moves, unit_report->edge_moves, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->spill_slots, unit_report->spill_slots, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->frame_bytes, unit_report->frame_bytes, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->open_frames, unit_report->open_frames, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->return_tails, unit_report->return_tails, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };

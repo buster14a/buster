@@ -141,7 +141,9 @@ static bool check_init_scalar_bytes(const TypeTable* types, const CheckValue* va
     }
     else if (valid)
     {
-        valid = type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(type) != CHECK_HALF_NONE;
+        // A __float128's constants are the constant builtins' (check_action_quad_bits).
+        valid = type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE || type == BUSTER_TYPE_FLOAT128 ||
+                check_action_half_format(type) != CHECK_HALF_NONE;
         if (valid)
         {
             const long double rounded = check_action_round_float(type, value->floating);

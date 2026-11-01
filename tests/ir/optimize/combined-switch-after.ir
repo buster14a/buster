@@ -1,0 +1,8 @@
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = br.void b1
+b1:
+  %2 = add.i64 %0, %0
+  %3 = ret.void %2
+}

@@ -540,6 +540,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ssa_ir_test.c"
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
+#include "buster/compiler/tier0_mask_test.c"
 #include "buster/compiler/interpreter_native_test.c"
 #include "buster/compiler/interpreter_link_test.c"
 #include "buster/compiler/ir_interpreter_test.c"
@@ -569,6 +570,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_licm_test.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
+// #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
+#include "buster/compiler/ir_optimize_text_test.c"
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #include "buster/compiler/ir_source_benchmark.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"

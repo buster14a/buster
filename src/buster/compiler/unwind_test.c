@@ -114,12 +114,17 @@ static bool unwind_test_fixed_row(const UnwindFunction* function, uint32_t pc, c
 }
 
 // The row at `pc`: the stack's as the function's transitions before it leave it, a tail call's teardown (#147) from its
-// first transition to its jump's end read as an epilogue of its own, the body's frame again after the jump.
+// first transition to its jump's end read as an epilogue of its own, the body's frame again after the jump. An open
+// function (#177) has no epilogue at its end: its epilogue's transitions are past every pc.
 static bool unwind_test_row(const UnwindFunction* function, uint32_t pc, const UnwindTestRow* row)
 {
     UnwindFunction effective = *function;
     const uint32_t per = unwind_tail_events(function);
     const uint32_t prologue = unwind_prologue_events(function);
+    for (uint32_t event = prologue; function->open != 0 && event < prologue + per - 1; event += 1)
+    {
+        effective.offsets[event] = UINT32_MAX;
+    }
     for (uint32_t tail = 0; tail < function->tail_count; tail += 1)
     {
         const uint32_t* events = function->tails + (uint64_t)tail * per;
@@ -359,14 +364,28 @@ static UnwindFunction unwind_test_tail_description(uint32_t saved, uint32_t fram
     return function;
 }
 
-// Every save mask's descriptions across the CFA LEB's widths, and each frame pointer's mask among them, and with tail
-// calls (#147), so that the vector path's batches leave their lanes to the exact writer here and there: written as pairs
-// and with one shared CIE, by both writers into the same bytes, each read back by the independent interpreter.
+// An open description (UnwindFunction.open, #177): unwind_test_tail_description's without the epilogue at its end, its
+// `tail_count` returns or tail calls each a teardown of its own.
+static UnwindFunction unwind_test_open_description(uint32_t saved, uint32_t frame, bool pointer, uint32_t tail_count, uint32_t* tails)
+{
+    UnwindFunction function = unwind_test_tail_description(saved, frame, pointer, tail_count, tails);
+    function.open = 1;
+    function.event_count = (uint8_t)unwind_prologue_events(&function);
+    for (uint32_t event = function.event_count; event < BUSTER_UNWIND_EVENTS; event += 1)
+    {
+        function.offsets[event] = 0;
+    }
+    return function;
+}
+
+// Every save mask's descriptions across the CFA LEB's widths, and each frame pointer's mask among them, with tail calls
+// (#147) and open (#177), so that the vector path's batches leave their lanes to the exact writer here and there: written
+// as pairs and with one shared CIE, by both writers into the same bytes, each read back by the independent interpreter.
 static bool unwind_test_emitters(void)
 {
     const uint32_t thresholds[] = { 128, 16384, 2097152, 268435456 };
-    static UnwindFunction functions[64 * 14];
-    static uint32_t tail_events[64 * 2][3 * 8];
+    static UnwindFunction functions[64 * 16];
+    static uint32_t tail_events[64 * 4][3 * 8];
     uint32_t count = 0;
     uint32_t tailed = 0;
     for (uint32_t saved = 0; saved < 64; saved += 1)
@@ -391,10 +410,16 @@ static bool unwind_test_emitters(void)
         {
             functions[count++] = unwind_test_tail_description(saved, 0, true, (saved + 1) % 3 + 1, tail_events[tailed++]);
         }
+        // Open, with no returns to three of them, with a frame or none, and a frame pointer's.
+        functions[count++] = unwind_test_open_description(saved, frames[(saved + 1) % 4], false, saved % 4, tail_events[tailed++]);
+        if ((saved & 2) == 0)
+        {
+            functions[count++] = unwind_test_open_description(saved, 0, true, (saved + 2) % 4, tail_events[tailed++]);
+        }
     }
     bool valid = unwind_check(functions, count) == UNWIND_OK;
-    static uint8_t bytes[2][64 * 14 * 384];
-    static uint32_t locations[2][64 * 14];
+    static uint8_t bytes[2][64 * 16 * 384];
+    static uint32_t locations[2][64 * 16];
     for (uint32_t shared = 0; shared < 2; shared += 1)
     {
         UnwindOutput outputs[2] = { 0 };
@@ -445,8 +470,8 @@ static bool unwind_test_emitters(void)
     UnwindOutput shared = { .location_capacity = count, .shared = true };
     valid &= unwind_write(functions, count, &pairs, false) == UNWIND_ERROR_CAPACITY && unwind_write(functions, count, &shared, true) == UNWIND_ERROR_CAPACITY &&
              shared.size == pairs.size - (uint64_t)(count - 1) * BUSTER_UNWIND_CIE_BYTES;
-    printf("unwind emitters: %u save/frame combinations, frame pointers and %u with tail calls among them, as pairs and with one CIE, independent CFI rows and "
-           "atomic capacity refusal: %s\n",
+    printf("unwind emitters: %u save/frame combinations, frame pointers and %u with tail calls or open among them, as pairs and with one CIE, independent CFI "
+           "rows and atomic capacity refusal: %s\n",
            count, tailed, valid ? "pass" : "FAIL");
     return valid;
 }
@@ -462,7 +487,7 @@ static bool unwind_test_diagnostics(void)
         {
             case 0: bad.size = 0; break;
             case 1: bad.saved = 64; break;
-            case 2: bad.reserved = 1; break;
+            case 2: bad.open = 2; break;
             case 3: bad.event_count -= 1; break;
             case 4: bad.offsets[1] = bad.offsets[0]; break;
             case 5: bad.offsets[13] = bad.size; break;
@@ -540,7 +565,30 @@ static bool unwind_test_diagnostics(void)
             valid &= unwind_check(&bad, 1) == UNWIND_ERROR_INVALID;
         }
     }
-    printf("unwind descriptor diagnostics, frame pointers' and tail calls' among them, and representability refusal: %s\n", valid ? "pass" : "FAIL");
+    // An open function's (#177): its prologue's events alone, its tails' bound its size, and no epilogue's events past them.
+    for (uint32_t shape = 0; shape < 2; shape += 1)
+    {
+        uint32_t events[2 * 8];
+        const UnwindFunction opened = unwind_test_open_description(45, shape == 0 ? 4096 : 0, shape != 0, 2, events);
+        const uint32_t prologue = unwind_prologue_events(&opened);
+        valid &= unwind_check(&opened, 1) == UNWIND_OK;
+        for (uint32_t change = 0; change < 4; change += 1)
+        {
+            UnwindFunction bad = opened;
+            uint32_t moved[2 * 8];
+            memcpy(moved, events, sizeof(moved));
+            bad.tails = moved;
+            switch (change)
+            {
+                case 0: bad.event_count += 1; bad.offsets[prologue] = bad.size - 1; break;
+                case 1: bad.event_count -= 1; bad.offsets[prologue - 1] = 0; break;
+                case 2: bad.offsets[prologue] = bad.size - 1; break;
+                case 3: moved[2 * unwind_tail_events(&opened) - 1] = bad.size; break;
+            }
+            valid &= unwind_check(&bad, 1) == UNWIND_ERROR_INVALID;
+        }
+    }
+    printf("unwind descriptor diagnostics, frame pointers', tail calls' and open functions' among them, and representability refusal: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -560,9 +608,10 @@ static bool unwind_test_guards(void)
             UnwindFunction* functions = (UnwindFunction*)(mapping + region - count * sizeof(UnwindFunction));
             for (uint32_t i = 0; i < count; i += 1)
             {
-                // Every third a frame pointer's and every fifth with a tail call, so that a batch's last lanes are the
-                // exact writer's too.
-                functions[i] = i % 5 == 4 ? unwind_test_tail_description(i & 61, i % 2 != 0 ? 64 : 0, i % 3 == 2, 1, tail_events[i]) :
+                // Every third a frame pointer's, every fifth with a tail call and every seventh open, so that a batch's
+                // last lanes are the exact writer's too.
+                functions[i] = i % 7 == 6 ? unwind_test_open_description(i & 61, i % 2 != 0 ? 64 : 0, i % 3 == 2, 1, tail_events[i]) :
+                               i % 5 == 4 ? unwind_test_tail_description(i & 61, i % 2 != 0 ? 64 : 0, i % 3 == 2, 1, tail_events[i]) :
                                i % 3 == 2 ? unwind_test_pointer_description(i & 61) : unwind_test_description(i & 63, i % 2 != 0 ? INT32_MAX : 0);
             }
             for (uint32_t way = 0; valid && way < 4; way += 1)

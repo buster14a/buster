@@ -75,7 +75,7 @@ The component issues retain their individual acceptance criteria:
 | Differential testing | [#142](https://github.com/buster14a/buster/issues/142) | Recorded real Csmith and YARPGen programs compiled by Buster at both tiers and Clang at both optimization levels |
 | Scheduling | [#172](https://github.com/buster14a/buster/issues/172) | Dependency validity and measured program benefit relative to compilation cost; retain only if it pays |
 | Dominators and loops | [#174](https://github.com/buster14a/buster/issues/174) | Agreement with independent definitions and actual SSA, optimizer and allocator consumers |
-| Frame layout | [#177](https://github.com/buster14a/buster/issues/177) | Valid slot sharing, call alignment, variadic/over-aligned ABI cross-linking, unwind integration and program results |
+| Frame layout | [#177](https://github.com/buster14a/buster/issues/177) | Valid slot sharing, call alignment, variadic/over-aligned ABI cross-linking and program results; unwind integration is done (the driver's unwind tables) |
 | Rematerialization | [#178](https://github.com/buster14a/buster/issues/178) | Flags-safe recipes at actual uses, spill/frame reduction and generated-program correctness and cost |
 | Zen 5 costs | [#181](https://github.com/buster14a/buster/issues/181) | Independent emitter coverage and real consumers; unknown measurements remain unknown |
 
@@ -94,7 +94,7 @@ and execution following lighter work. CI retains priority between runs.
 
 ## The C driver's `--tier1`
 
-`./build/compiler --tier1 -fno-asynchronous-unwind-tables [options] file.c...`
+`./build/compiler --tier1 [options] file.c...`
 compiles each function the pipeline takes by Tier 1 and every other function by
 Tier 0, as without the option, into one System V program
 (`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
@@ -110,8 +110,9 @@ and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
 that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
 1's code: its records, its spills' stores and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
-definitions of them it left out, its edges' moves, its spill slots and its
-frames' bytes. `--tier1-no-rematerialize` compiles Tier 1's functions spilling
+definitions of them it left out, its edges' moves, its spill slots, its
+frames' bytes, and its unwind tables' shapes: open frames, returns published as
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`). `--tier1-no-rematerialize` compiles Tier 1's functions spilling
 what they would recompute (#178's comparison: [the allocation
 guide](tier1-allocation.md)'s "Rematerialization"):
 
@@ -147,11 +148,17 @@ allocation cost. [The measurement record](https://github.com/buster14a/buster-pe
 has the commands, the host and the raw logs; [the value-numbering
 guide](ir-value-numbering.md) has the rest of the figures.
 
-The driver refuses what Tier 1's code can't carry yet: unwind tables (Tier 1's
-frames save registers with stores, which the push-based unwind descriptor doesn't
-describe), hence the required `-fno-asynchronous-unwind-tables`, and `-g`'s
-rows. Several source files compile as without the option, each unit's report
-added to the command's.
+Tier 1's functions have unwind tables as Tier 0's do, by default and under the
+same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables"):
+their frames are Tier 0's frame protocol (callee-saved registers pushed, one
+subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
+realignment after the subtraction), which Tier 1's code publishes to the
+emission (`check_tier1_frame`), its early returns' epilogues as teardowns the
+tables remember and restore around, and a function whose code doesn't end in its
+last epilogue (a loop's latch last) as an open frame ([the frame
+guide](tier1-frame.md)'s "Unwind tables", #177). The driver refuses what Tier
+1's code can't carry yet: `-g`'s rows. Several source files compile as without
+the option, each unit's report added to the command's.
 
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
@@ -184,14 +191,15 @@ records) and the spills' stores and reloads (15,028 to 7,550). A constant, a
 symbol's address or a frame object's address, or a copy of one, is recomputed
 where the allocator takes it out of a register, rather than stored and reloaded
 (#178), which took a third of those stores and reloads again, with no change in
-speedtest1's run time. Still refused: floating point, narrow
-call arguments (the IR doesn't keep their signedness, which the callee's
-extension needs), stack arguments, labels, switches, aggregates by value and
-variadic definitions.
+speedtest1's run time. Labels and indirect jumps (#789) go through the CFG
+consumer too: an indirect jump's edge moves at each label's block, or in a stub
+after the jump, and each label's symbol where the jump enters it. Still refused:
+floating point, narrow call arguments (the IR doesn't keep their signedness,
+which the callee's extension needs), stack arguments, switches, aggregates by
+value and variadic definitions.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
-`test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
-#142's campaigns.
+`test-differential --tier1-arg --tier1` #142's campaigns.
 
 Measured on the 9700X ([step 5's
 record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)
