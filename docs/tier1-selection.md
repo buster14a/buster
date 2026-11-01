@@ -117,6 +117,19 @@ patterns are:
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
+- Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
+  and the jump tables C's switches lower to. A label's address is its symbol's
+  (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
+  register (`TIER1_RULE_JUMP_INDIRECT`). Its target is never a load in its own
+  block that the jump could fold. Computed gotos go through their function's
+  dispatch block, which the lowering puts last and the optimizer keeps. A jump
+  table's entry is an offset added to the table's address. The CFG consumer takes
+  every function with labels. It places the jump's edges' moves at its labels'
+  blocks, which that edge alone enters, or in stubs after the jump. Each label's
+  first record, where the driver defines its symbol, is its block's, or its
+  stub's where that edge has one (`tier1_emit_cfg_labels`), since the jump
+  enters it through the label's address. A `br_indirect` that can go to one label
+  alone jumps there.
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and
 four-byte spill slots. Their logical memory widths remain one/two bytes.
@@ -137,9 +150,10 @@ six integer/pointer parameters in the System V registers RDI, RSI, RDX, RCX,
 R8 and R9. Their intervals start at function entry, because parameter nodes
 emit no late copies. This emitter has no frame or callee-saved-register changes.
 
-Calls, phis, switches, floating values, byte/word arithmetic, dynamic shifts,
-division/remainder, stack/symbol addresses, spill fragments and rematerialized
-fragments are explicit unsupported/allocation results in `tier1_select_emit`:
+Calls, phis, switches, labels and indirect jumps, floating values, byte/word
+arithmetic, dynamic shifts, division/remainder, stack/symbol addresses, spill
+fragments and rematerialized fragments are explicit unsupported/allocation
+results in `tier1_select_emit`:
 it has neither call preservation nor the edge moves a phi needs.
 No semantic error silently falls back to another tier. The separate
 `tier1_emit.c` consumer described below handles allocated spill fragments
@@ -159,9 +173,11 @@ result, which `ir_optimize` verifies before it returns (`c_check_tier1.c`). On
 the frozen `sqlite3.c`, the verification was a quarter of selection's cycles
 (#141). The selector's tests plan their functions both ways, and the pipeline
 test plans each optimized function as the driver does and checks it against the
-verifying plan, field by field. This slice
-requires value definitions to precede uses in physical instruction order, but
-for a phi's operands, which may follow it (a loop's back edge). An integer phi
+verifying plan, field by field. A value defined in a node's own block must
+precede the node in physical instruction order. With dominance supplied, a value
+of another block may follow it: a computed goto's dispatch block, which the
+lowering puts last, defines phis that the labels' blocks read (#789). A phi's
+operands may follow it too (a loop's back edge). An integer phi
 selects `TIER1_RULE_PHI` (#140): no records and no effective uses, since its
 operands are uses on its block's incoming edges, which the CFG consumer's edge
 moves read (`tier1_emit_cfg.c`, in the [pipeline guide](tier1-pipeline.md)).

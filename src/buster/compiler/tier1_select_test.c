@@ -2839,6 +2839,135 @@ static void tier1_select_test_room(Tier1SelectTest* test)
     }
 }
 
+// Labels and an indirect jump (#789), for this test and tier1_labels_test.c: f(x, y) takes s = x & 3, and with s == 0
+// goes to label 0 directly with r = y; otherwise it takes label s - 1's address (a select of three labels' symbols, 1 to
+// 3) to its dispatch block, last in the layout, which defines d = x + y and jumps there. Label 0 is r = phi(y, x), whose
+// x and y stay live, 2r + (x ^ y); label 1 is d - x and label 2 d ^ y, reading d before its definition in the layout.
+static bool tier1_select_test_indirect_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 28,
+        .block_count = 6,
+        .constant_count = 4,
+        .parameter_count = 2,
+        .extra_count = 4,
+        .label_count = 3,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        static const uint32_t offsets[] = { 0, 7, 17, 22, 24, 26, 28 };
+        static const uint32_t extra[] = { 0, 1, 5, 0 };
+        static const uint32_t labels[] = { 2, 3, 4 };
+        memcpy(function->block_offsets, offsets, sizeof(offsets));
+        memcpy(function->extra, extra, sizeof(extra));
+        memcpy(function->labels, labels, sizeof(labels));
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->symbol_count = 4;
+        function->constants[0].low = 3;
+        function->constants[1].low = 0;
+        function->constants[2].low = 1;
+        function->constants[3].low = 2;
+        tier1_select_test_node(function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 3, IR_AND, IR_I64, 0, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 4, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 5, IR_ICMP, IR_I1, 3, 4, IR_EQ);
+        tier1_select_test_node(function, 6, IR_CBR, IR_VOID, 5, 2, 1);
+        tier1_select_test_node(function, 7, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 8, IR_ICMP, IR_I1, 3, 7, IR_EQ);
+        tier1_select_test_node(function, 9, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 10, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 11, IR_SYMBOL_ADDR, IR_PTR, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 12, IR_CONST, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 13, IR_ICMP, IR_I1, 3, 12, IR_EQ);
+        tier1_select_test_node(function, 14, IR_SELECT, IR_PTR, 13, 10, 11);
+        tier1_select_test_node(function, 15, IR_SELECT, IR_PTR, 8, 9, 14);
+        tier1_select_test_node(function, 16, IR_BR, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 17, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 18, IR_ADD, IR_I64, 17, 17, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 19, IR_XOR, IR_I64, 0, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 20, IR_ADD, IR_I64, 18, 19, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 21, IR_RET, IR_VOID, 20, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 22, IR_SUB, IR_I64, 26, 0, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 23, IR_RET, IR_VOID, 22, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 24, IR_XOR, IR_I64, 26, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 25, IR_RET, IR_VOID, 24, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 26, IR_ADD, IR_I64, 0, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 27, IR_BR_INDIRECT, IR_VOID, 15, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// tier1_select_test_indirect_function's result, from the inputs alone.
+static uint64_t tier1_select_test_indirect_oracle(uint64_t x, uint64_t y)
+{
+    const uint64_t s = x & 3;
+    const uint64_t d = x + y;
+    return s == 0 ? 2 * y + (x ^ y) : s == 1 ? 2 * x + (x ^ y) : s == 2 ? d - x : d ^ y;
+}
+
+// The indirect jump's plan (#789): refused without dominance, its labels' blocks reading the dispatch block's value
+// before its definition in the layout; with it, the jump through the select's register by both paths, the same plan
+// without the verification, and the uniform-register consumer, which has no labels' symbols, refusing it.
+static void tier1_select_test_indirect(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    IrFunction function;
+    const bool created = tier1_select_test_indirect_function(&input, &function);
+    tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the indirect jump's fixture is valid IR");
+    Tier1SelectPlan plan;
+    uint32_t failed = 0;
+    tier1_select_test_expect(test, created && tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_INVALID && output.length == 0 && scratch.length == 0,
+                             "values of other blocks need their dominance");
+    IrCfg cfg = { 0 };
+    Dominators dominators = { 0 };
+    bool planned = created && ir_build_cfg(&function, &output, &scratch, &cfg) == IR_OK;
+    if (planned)
+    {
+        const DominatorCfg graph =
+        {
+            .block_count = cfg.block_count,
+            .edge_count = cfg.edge_count,
+            .entry = 0,
+            .successor_offsets = cfg.successor_offsets,
+            .successors = cfg.successors,
+            .predecessor_offsets = cfg.predecessor_offsets,
+            .predecessors = cfg.predecessors,
+        };
+        DominatorOptions options = dominators_options();
+        options.outputs = 0;
+        planned = dominators_analyze(&output, &scratch, &graph, options, &dominators) == DOMINATOR_OK;
+    }
+    const IrDominance dominance = planned ? (IrDominance){ .enter = dominators.preorder, .leave = dominators.subtree_end, .block_count = dominators.block_count } : (IrDominance){ 0 };
+    Tier1SelectPlan plans[2];
+    const uint64_t scratch_mark = scratch.length;
+    for (uint32_t path = 0; planned && path < 2; path += 1)
+    {
+        planned = tier1_select_plan(&function, &dominance, &output, &scratch, path == 0, &plans[path], &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
+    }
+    tier1_select_test_expect(test, planned, "a function of labels and an indirect jump selects by both paths");
+    for (uint32_t path = 0; planned && path < 2; path += 1)
+    {
+        const Tier1SelectPattern* jump = &plans[path].patterns[27];
+        tier1_select_test_expect(test, jump->rule == TIER1_RULE_JUMP_INDIRECT && jump->values[0] == 15 && jump->values[1] == BUSTER_IR_NONE && !plans[path].covered[15],
+                                 "the indirect jump goes through its target's register");
+        tier1_select_test_expect(test, tier1_select_test_plan_again(&function, &dominance, &plans[path], false, &output, &scratch), "the indirect jump's plan without verification is the same");
+        Tier1SelectCode code;
+        const uint64_t mark = output.length;
+        tier1_select_test_expect(test, tier1_select_emit(&plans[path], (const uint8_t[28]){ 0 }, test->allowed, &output, &code, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED && output.length == mark,
+                                 "the uniform-register consumer refuses a function with labels");
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 // #989's review: a node's sequence at its room and past it, in the selector's emitter. Each node of s = a + b, then
 // s < b (unsigned) ? s ^ a : s - b, its branch's comparison folded, takes no-ops before its records
 // (Tier1SelectPattern.nops) up to its room: the function emits, with that many more records, and runs as before. One
@@ -3276,6 +3405,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_walks(&test);
             tier1_select_test_room(&test);
             tier1_select_test_overlong(&test);
+            tier1_select_test_indirect(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);

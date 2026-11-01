@@ -147,6 +147,11 @@ struct Tier1EmitResult
     // Recomputed values' definitions that nothing read, which the CFG consumer leaves out (tier1_emit_cfg_dead_definition).
     uint32_t dropped_definitions;
     uint32_t jumps;
+    // In the CFG consumer, each of the function's labels' first record (IrFunction.labels, #789), where the driver defines
+    // its symbol: its block's first record, or where the indirect jump that may go to it has a stub for that edge, the
+    // stub's (tier1_emit_cfg_labels); label_count of them, the function's, and none in a function without labels.
+    uint32_t* label_records;
+    uint32_t label_count;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
