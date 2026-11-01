@@ -200,15 +200,28 @@ static void check_test_program_scans(CheckTest* test)
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint64_t initialized[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
             uint32_t bodies[2];
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 memset(initializers[path], 0xff, sizeof(initializers[path]));
-                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], path == 0);
+                memset(initialized[path], 0, sizeof(initialized[path]));
+                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], initialized[path], path == 0);
+            }
+            // A node's bit says that some token's initializer it is, and its entry is then the last such token's (#877).
+            bool marked = memcmp(initialized[0], initialized[1], sizeof(initialized[0])) == 0;
+            for (uint32_t node = 0; node <= node_count; node += 1)
+            {
+                uint32_t last = BUSTER_CHECK_NONE;
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    last = initializer_nodes[token] == node && node < node_count ? token : last;
+                }
+                marked &= check_program_bit(initialized[0], node) == (last != BUSTER_CHECK_NONE) && (last == BUSTER_CHECK_NONE || initializers[0][node] == last);
             }
             check_test_expect(test, bodies[0] == bodies[1] && memcmp(openings[0], openings[1], bodies[0] * sizeof(uint32_t)) == 0 &&
-                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0,
-                              "check_program's openings and initializers agree with their scalar twin at every guarded tail");
+                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0 && marked,
+                              "check_program's openings, initializers and their bits agree with their scalar twin at every guarded tail");
             Parser parser = { 0 };
             parser.tree.roles = roles;
             parser.tree.parents = parents;
