@@ -161,6 +161,19 @@ struct CheckTargetFeatureMaps
     CheckTargetFeatureBuiltins builtins;
 };
 
+typedef struct CheckTargetFeatureEmission CheckTargetFeatureEmission;
+
+// CheckTargetFeatureEmission.subtree_bits: the subtree holds a label, a case of a switch outside it is implied by
+// min_case_owner, and it holds a `do` (check_target_feature_label_root's terminator test).
+#define BUSTER_CHECK_TARGET_FEATURE_LABEL 1u
+#define BUSTER_CHECK_TARGET_FEATURE_DO 2u
+
+// CheckTargetFeatureEmission.type_names: `jmp_buf` and `sigjmp_buf`, the typedefs the noreturn library builtins'
+// signatures' named types resolve to (Sema::LookupNecessaryTypesForBuiltin).
+#define BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES 2u
+#define BUSTER_CHECK_TARGET_FEATURE_JMP_BUF 0u
+#define BUSTER_CHECK_TARGET_FEATURE_SIGJMP_BUF 1u
+
 // `object`'s attributes from its declarations before token `limit` (CheckProgram.attribute_keys: each object's target
 // attributes' declarations come first, in token order, so the first that applies is the first read).
 static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckProgram* program, uint32_t object, uint32_t limit)
@@ -340,11 +353,10 @@ static uint32_t check_target_feature_noreturn_object(const CheckProgram* program
     {
         operand = graph->operand0[operand];
     }
-    const CheckValue* value = operand < graph->count ? program->stream->values + operand : NULL;
+    const CheckValue value = operand < graph->count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
     *name = operand < graph->count ? graph->tokens[operand] : 0;
-    return value != NULL && graph->ops[operand] == CHECK_OP_VALUE && value->category == CHECK_FUNCTION &&
-                   value->object < program->object_count ?
-               value->object :
+    return operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && value.category == CHECK_FUNCTION && value.object < program->object_count ?
+               value.object :
                0;
 }
 
@@ -354,7 +366,17 @@ static uint32_t check_target_feature_noreturn_object(const CheckProgram* program
 // external linkage, under the options that keep the library builtins (check_input_library_enabled's gate: the
 // language's, no features, not -fno-builtin, -ffreestanding or -fno-builtin-NAME). The callee's own noreturn
 // attribute, which needs no name, is asked separately.
-static bool check_target_feature_library_noreturn(const CheckProgram* program, const PPOptions* options, uint32_t object)
+//
+// It isn't the declaration's signature that decides but the builtin declaration clang creates to redeclare it
+// (Sema::LazilyCreateBuiltin), whose noreturn the redeclaration merge propagates (SemaDecl.cpp's
+// mergeTypeWithPrevious: `OldTypeInfo.getNoReturn() && !NewTypeInfo.getNoReturn()`): the declaration merges it
+// whatever its parameters — `void exit(void *)` doesn't return — where the builtin's type can be built at all, and
+// where the declaration is unprototyped or its result is the builtin's — `int exit(int)` returns. The builtin's type
+// needs the typedef names its signature's letters name (LookupNecessaryTypesForBuiltin: `jmp_buf`, `sigjmp_buf`), or
+// clang's allowTypeMismatch still leaves the declaration alone — `void longjmp(void *, int)` without `jmp_buf`
+// declared before it returns.
+static bool check_target_feature_library_noreturn(const CheckProgram* program, const PPOptions* options, const uint32_t* type_names,
+                                                  uint32_t object)
 {
     const CheckInput* input = program->input;
     const Parser* parser = program->parser;
@@ -367,7 +389,36 @@ static bool check_target_feature_library_noreturn(const CheckProgram* program, c
                                                NULL;
     const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL &&
                          memchr(info->attributes, 'r', info->attributes_length) != NULL;
-    return library && check_input_library_enabled(info, options);
+    bool noreturn = library && check_input_library_enabled(info, options);
+    if (noreturn)
+    {
+        // The named types the builtin's signature needs (LookupNecessaryTypesForBuiltin): each must be declared before
+        // the function's declaration, or the builtin's declaration is never made to merge noreturn from.
+        for (uint32_t e = 0; noreturn && e < info->encoding_length; e += 1)
+        {
+            const uint32_t needed = e != 0 && info->encoding[e - 1] == 'S' && info->encoding[e] == 'J' ?
+                                        BUSTER_CHECK_TARGET_FEATURE_SIGJMP_BUF :
+                                    info->encoding[e] == 'J' ? BUSTER_CHECK_TARGET_FEATURE_JMP_BUF :
+                                        BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES;
+            noreturn = needed == BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES ||
+                       (type_names != NULL && type_names[needed] < declaration);
+        }
+    }
+    if (noreturn)
+    {
+        // The merge skips noreturn only where the declaration has a prototype whose result isn't the builtin's —
+        // all the noreturn library builtins' results are void.
+        const TypeId declared = input->declared_types[declaration];
+        const TypeId stripped = declared != 0 ? type_strip_aligned(program->types, declared) : 0;
+        const uint8_t flags = stripped != 0 && type_kind(program->types, stripped) == BUSTER_TYPE_KIND_FUNCTION ?
+                              program->types->types.flags[type_index(stripped)] :
+                              0;
+        const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 &&
+                               !(input->kr_parameter_count != 0 && input->function_flags != NULL &&
+                                 declaration < input->token_count && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0);
+        noreturn = !prototype || info->encoding[0] != 'v' || type_return(program->types, stripped) == BUSTER_TYPE_VOID;
+    }
+    return noreturn;
 }
 
 // Whether x86 builtin call `node` doesn't return, as clang's EmitBuiltinExpr of a builtin whose attributes say so
@@ -519,11 +570,11 @@ static uint32_t check_target_feature_cleanup_token(const CheckInput* input, cons
 //   (CheckProgram.label_positions), a statement expression's own where its expression's statement emits
 //   (check_target_feature_emission_prepare's extra edges), and a statement that holds one emits from its start, as
 //   clang's ContainsLabel leaves no statement's code out.
-typedef struct CheckTargetFeatureEmission CheckTargetFeatureEmission;
 struct CheckTargetFeatureEmission
 {
-    // The dead-end analysis's bits per node, its stack of `capacity` items, and the stack's live length: a statement
-    // expression's own analysis nests inside its statement's, and each frame uses the tail beyond `depth`.
+    // The dead-end analysis's bits per node, its stack of `capacity` items (each node at most twice: before and after
+    // its operands), and the stack's live length: the region analysis's calls run inside the body's own, so a call
+    // keeps the tail beyond `depth` and the length restores on return.
     uint8_t* bits;
     uint64_t* stack;
     uint64_t capacity;
@@ -533,15 +584,38 @@ struct CheckTargetFeatureEmission
     uint32_t* first;
     uint32_t* next;
     // Per statement expression, whether its block's emission reaches its end's block through a path with a
-    // predecessor: 0 uncomputed, 1 where it does (its statement's code goes on), 2 where it doesn't (an orphan block,
-    // as clang's EnsureInsertPoint leaves the result's, or none).
+    // predecessor: 1 where it does (its statement's code goes on), 2 where it doesn't (an orphan block, as clang's
+    // EnsureInsertPoint leaves the result's, or none). check_target_feature_emission_prepare computes the body's
+    // regions innermost first, so the analysis never descends into a statement expression's own walk.
     uint8_t* regions;
+    // The parse tree's subtree answers, computed once per program (check_target_feature_columns): per token, its
+    // subtree's first token (the extent's low end) and last token (the high end), the subtree bits below, and the
+    // smallest switch token owning a case label inside the subtree, BUSTER_CHECK_NONE for none; and its first child
+    // and next sibling, which check_target_feature_arms reads. The C driver's parse is tree_only and the reader's own
+    // columns are its scratch's, so the check derives the three columns it keeps from the parents.
+    uint32_t* extent_first;
+    uint32_t* ends;
+    uint32_t* first_child;
+    uint32_t* next_child;
+    uint8_t* subtree_bits;
+    uint32_t* min_case_owner;
+    // A prefix count of the unit's labels (check_target_feature_label_between's ranges are arbitrary, not subtrees).
+    uint32_t* label_prefix;
+    // Per expression, whether its subtree holds a label: a statement expression's whose block does
+    // (check_target_feature_labeled's answer, memoized over the graph, whose operands precede their node).
+    uint8_t* node_labeled;
+    // The typedefs the library builtins' types need (clang's LookupNecessaryTypesForBuiltin): `jmp_buf` for longjmp's
+    // and `sigjmp_buf` for siglongjmp's, each its name token's declaration, or BUSTER_CHECK_NONE where the unit
+    // declares none before the function's. BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES entries.
+    uint32_t* type_names;
     // The unit's options, for the library builtins' gate (check_target_feature_library_noreturn).
     const PPOptions* options;
 };
 
 #define BUSTER_CHECK_TARGET_FEATURE_DEAD 1u
 #define BUSTER_CHECK_TARGET_FEATURE_STRAIGHT 2u
+// The analysis computed the node's bits (emission->bits's memo: a node with none of the other bits still counts).
+#define BUSTER_CHECK_TARGET_FEATURE_COMPUTED 4u
 
 // Whether ?: `node` is a select, which branches nowhere (ScalarExprEmitter's isCheapEnoughToEvaluateUnconditionally):
 // both its arms constants, of a scalar type or void.
@@ -564,7 +638,7 @@ static bool check_target_feature_select(const CheckProgram* program, uint32_t no
 // Whether code generation's code of `node` joins branches, whatever precedes it (its operands then don't decide where
 // its statement ends): &&, || and ?: whose condition isn't a constant, but a ?: that is a select, va_arg (the System V
 // ABI's register and stack paths), and a statement expression with statements before its value.
-static bool check_target_feature_join(CheckProgram* program, uint32_t node)
+static bool check_target_feature_join(CheckTargetFeatureEmission* emission, CheckProgram* program, uint32_t node)
 {
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
@@ -572,15 +646,19 @@ static bool check_target_feature_join(CheckProgram* program, uint32_t node)
     bool truth = false;
     const bool decided = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL;
     const bool select = op == CHECK_OP_CONDITIONAL && check_target_feature_select(program, node);
-    const uint32_t region = op == CHECK_OP_STATEMENT_VALUE ? input->expression_regions[graph->tokens[node]] : 0;
+    const uint32_t condition = decided ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const bool labeled = condition < graph->count && emission->node_labeled[condition] != 0;
+    const uint32_t region = op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < input->token_count ?
+                            input->expression_regions[graph->tokens[node]] : 0;
     const bool statements = region != 0 && (region > program->region_count || program->regions[region - 1].count != 1);
-    return (decided && !select && !check_program_runtime_truth(program, node, graph->operand0[node], &truth)) || op == CHECK_OP_VARARGS || statements;
+    return (decided && !select && (labeled || !check_program_runtime_truth(program, node, graph->operand0[node], &truth))) ||
+           op == CHECK_OP_VARARGS || statements;
 }
 
 // The `k`th operand of `node` that code generation's code evaluates, in its order, or BUSTER_CHECK_NONE: an assignment's
 // right side before its left, a call's callee before its arguments, the operand a constant condition selects alone, and
 // none of a join's (check_target_feature_join), nor of an operand that isn't evaluated (sizeof's, a builtin's query).
-static uint32_t check_target_feature_operand(CheckProgram* program, uint32_t node, uint32_t k)
+static uint32_t check_target_feature_operand(CheckTargetFeatureEmission* emission, CheckProgram* program, uint32_t node, uint32_t k)
 {
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
@@ -589,19 +667,21 @@ static uint32_t check_target_feature_operand(CheckProgram* program, uint32_t nod
     bool truth = false;
     const bool assignment = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN);
     const bool decided = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL;
+    const bool labeled = decided && operands[0] < graph->count && emission->node_labeled[operands[0]] != 0;
     uint32_t result = BUSTER_CHECK_NONE;
-    if (op == CHECK_OP_VALUE || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY || check_target_feature_join(program, node))
+    if (op == CHECK_OP_VALUE || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY || check_target_feature_join(emission, program, node))
     {
         result = BUSTER_CHECK_NONE;
     }
     else if (op == CHECK_OP_STATEMENT_VALUE)
     {
-        const uint32_t region = input->expression_regions[graph->tokens[node]];
+        const uint32_t region = graph->tokens[node] < input->token_count ? input->expression_regions[graph->tokens[node]] : 0;
         result = k == 0 && region != 0 && region <= program->region_count ? program->regions[region - 1].result : BUSTER_CHECK_NONE;
     }
-    else if (decided && check_program_runtime_truth(program, node, operands[0], &truth))
+    else if (decided && !labeled && check_program_runtime_truth(program, node, operands[0], &truth))
     {
-        // `1 && x` and `0 || x` emit x alone, `0 && x` and `1 || x` nothing; `c ? a : b` the arm c selects.
+        // `1 && x` and `0 || x` emit x alone, `0 && x` and `1 || x` nothing; `c ? a : b` the arm c selects — a label
+        // inside the condition keeps the fold out, so every operand's code goes.
         const uint32_t live = op == CHECK_OP_CONDITIONAL ? operands[truth ? 1 : 2] : truth == (op == CHECK_OP_LOGICAL_AND) ? operands[1] : BUSTER_CHECK_NONE;
         result = k == 0 ? live : BUSTER_CHECK_NONE;
     }
@@ -637,6 +717,9 @@ static uint32_t check_target_feature_operand(CheckProgram* program, uint32_t nod
 // (check_target_feature_region_dead). Without room on its stack, false: the statement goes on.
 static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t root);
 
+// Whether the body's control `index`, visited, always leaves its code into the next one's.
+static bool check_target_feature_falls(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t index);
+
 // Whether statement expression `region`'s emission reaches its end's block through a path with a predecessor
 // (CheckTargetFeatureEmission.regions): clang's EmitCompoundStmtWithoutScope evaluates the block's last expression
 // where the block's code ends, or in a fresh block that nothing reaches (EnsureInsertPoint) where it doesn't, which
@@ -649,7 +732,8 @@ static bool check_target_feature_region_dead(CheckX86DiagnosticWalk* walk, Check
     const CheckProgramBody* body = walk->body;
     const CheckControl* controls = program->controls + body->first;
     const CheckProgramRegion* item = program->regions + region - 1;
-    const uint32_t end = item->first + item->count - item->cleanups - 1;
+    const uint32_t kept = item->count - item->cleanups;
+    const uint32_t end = kept != 0 ? item->first + kept - 1 : BUSTER_CHECK_NONE;
     const uint64_t mark = walk->calls->length;
     uint8_t* states = BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint8_t, body->count);
     uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint32_t, (uint64_t)body->count * 2);
@@ -716,7 +800,7 @@ static bool check_target_feature_region_dead(CheckX86DiagnosticWalk* walk, Check
             stack[depth++] = index + 1;
         }
     }
-    const bool dead = states != NULL && states[end] != 2;
+    const bool dead = states != NULL && end < body->count && states[end] != 2;
     arena_pop_to(walk->calls, mark);
     return valid && dead;
 }
@@ -739,11 +823,15 @@ static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTar
         emission->depth = depth;
         const uint32_t node = (uint32_t)item;
         uint32_t operand = 0;
+        if ((emission->bits[node] & BUSTER_CHECK_TARGET_FEATURE_COMPUTED) != 0)
+        {
+            continue;
+        }
         if ((item >> 32) == 0)
         {
             // The node's turn after its operands', which go on the stack above it.
             emission->stack[depth++] = ((uint64_t)1 << 32) | node;
-            for (uint32_t k = 0; room && (operand = check_target_feature_operand(program, node, k)) != BUSTER_CHECK_NONE; k += 1)
+            for (uint32_t k = 0; room && (operand = check_target_feature_operand(emission, program, node, k)) != BUSTER_CHECK_NONE; k += 1)
             {
                 room = depth < emission->capacity;
                 if (room)
@@ -756,10 +844,10 @@ static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTar
         {
             // Its operands' code in order, each ending in such a block, or after one with only straight-line code; then
             // its own: a join's ends where code goes on.
-            const bool join = check_target_feature_join(program, node);
+            const bool join = check_target_feature_join(emission, program, node);
             bool dead = false;
             bool straight = !join;
-            for (uint32_t k = 0; (operand = check_target_feature_operand(program, node, k)) != BUSTER_CHECK_NONE; k += 1)
+            for (uint32_t k = 0; (operand = check_target_feature_operand(emission, program, node, k)) != BUSTER_CHECK_NONE; k += 1)
             {
                 const uint8_t bits = emission->bits[operand];
                 dead = (bits & BUSTER_CHECK_TARGET_FEATURE_DEAD) != 0 || (dead && (bits & BUSTER_CHECK_TARGET_FEATURE_STRAIGHT) != 0);
@@ -772,19 +860,17 @@ static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTar
             const uint32_t callee = op == CHECK_OP_CALL ? check_target_feature_noreturn_object(program, node, &name) : 0;
             const bool noreturn = callee != 0 && (check_target_feature_attributes(program, callee, name).noreturn ||
                                                 (emission->options != NULL &&
-                                                 check_target_feature_library_noreturn(program, emission->options, callee)));
+                                                 check_target_feature_library_noreturn(program, emission->options, emission->type_names, callee)));
             const bool unreachable = op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_UNREACHABLE;
             const bool builtin = op == CHECK_OP_BUILTIN_X86 && check_target_feature_intrinsic_noreturn(program, node);
             const uint32_t region = op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < input->token_count ?
                                     input->expression_regions[graph->tokens[node]] : 0;
-            const bool region_dead = region != 0 && region <= program->region_count &&
-                                     (emission->regions[region - 1] == 0 ?
-                                          (emission->regions[region - 1] =
-                                               check_target_feature_region_dead(walk, emission, region) ? 2 : 1) == 2 :
-                                          emission->regions[region - 1] == 2);
+            const bool region_dead = region != 0 && region <= program->region_count && emission->regions[region - 1] == 2;
             // A join's branches still go on, but a statement expression's whose block ends dead has none left.
             dead = (!join || region_dead) && (dead || noreturn || unreachable || builtin || region_dead);
-            emission->bits[node] = (uint8_t)((dead ? BUSTER_CHECK_TARGET_FEATURE_DEAD : 0) | (straight ? BUSTER_CHECK_TARGET_FEATURE_STRAIGHT : 0));
+            emission->bits[node] = (uint8_t)((dead ? BUSTER_CHECK_TARGET_FEATURE_DEAD : 0) |
+                                             (straight ? BUSTER_CHECK_TARGET_FEATURE_STRAIGHT : 0) |
+                                             BUSTER_CHECK_TARGET_FEATURE_COMPUTED);
         }
     }
     emission->depth = base;
@@ -792,89 +878,167 @@ static bool check_target_feature_dead_end(CheckX86DiagnosticWalk* walk, CheckTar
 }
 
 // The tokens `low`..`high` of `token`'s subtree: the parse tree nests, so a token's descendants are the contiguous
-// tokens whose ancestors pass through it.
-static void check_target_feature_extent(const CheckProgram* program, uint32_t token, uint32_t* low, uint32_t* high)
+// tokens whose ancestors pass through it — extent_first's, ending at the parser's ends, computed once
+// (check_target_feature_columns).
+static void check_target_feature_extent(const CheckTargetFeatureEmission* emission, const CheckProgram* program, uint32_t token,
+                                        uint32_t* low, uint32_t* high)
 {
-    const Parser* parser = program->parser;
-    const uint32_t* parents = parser->tree.parents;
-    const uint32_t count = parser->tokens.count;
-    uint32_t lo = token;
-    uint32_t hi = token;
-    bool bound = false;
-    while (!bound && lo != 0)
-    {
-        uint32_t ancestor = lo - 1;
-        for (uint32_t steps = 0; ancestor < count && ancestor != token && steps++ < count; ancestor = parents[ancestor])
-        {
-        }
-        bound = ancestor != token;
-        lo -= ancestor == token ? 1 : 0;
-    }
-    bound = false;
-    while (!bound && hi + 1 < count)
-    {
-        uint32_t ancestor = hi + 1;
-        for (uint32_t steps = 0; ancestor < count && ancestor != token && steps++ < count; ancestor = parents[ancestor])
-        {
-        }
-        bound = ancestor != token;
-        hi += ancestor == token ? 1 : 0;
-    }
-    *low = lo;
-    *high = hi;
+    *low = token < program->parser->tokens.count ? emission->extent_first[token] : 0;
+    *high = token < program->parser->tokens.count ? emission->ends[token] : 0;
 }
 
-// Whether a jump can enter the statement of tokens `low`..`high` other than at its start: it holds a label, or a case
-// of a switch outside it (check_control_enterable, clang's ContainsLabel).
-static bool check_target_feature_enterable(const CheckProgram* program, uint32_t low, uint32_t high)
+// Whether a jump can enter `token`'s subtree other than at its start: it holds a label, or a case of a switch outside
+// it (check_control_enterable, clang's ContainsLabel). The subtree's answers are computed once: a label inside it, or
+// a case label whose switch is outside it, which is an owner before the subtree's first token — a case's owner is
+// its ancestor, so it cannot come after the subtree's end.
+static bool check_target_feature_enterable(const CheckTargetFeatureEmission* emission, const CheckProgram* program, uint32_t token)
+{
+    return token < program->parser->tokens.count &&
+           ((emission->subtree_bits[token] & BUSTER_CHECK_TARGET_FEATURE_LABEL) != 0 ||
+            emission->min_case_owner[token] < emission->extent_first[token]);
+}
+
+// The answers `check_target_feature_columns` computes once for the program, where the check's repeated parent walks
+// and token scans were quadratic in a deeply nested function (#891): each token's subtree's first token, the subtree
+// bits (a label inside; a `do`), each subtree's smallest case owner, the labels' prefix count, and each expression's
+// label answer. Regions' statement expressions nest only inward, so a region's answer's parts precede it in the
+// postorder; an expression's operands precede it in the graph. Returns false without room.
+static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatureEmission* emission, Arena* scratch)
 {
     const Parser* parser = program->parser;
-    const uint8_t* roles = parser->tree.roles;
-    const uint32_t* owners = program->input->control_owners;
-    bool enterable = false;
-    for (uint32_t token = low; !enterable && token <= high && token < parser->tokens.count; token += 1)
+    const CheckInput* input = program->input;
+    const uint32_t count = parser->tokens.count;
+    bool valid = true;
+    if (emission->extent_first == NULL)
     {
-        enterable = roles[token] == PARSE_ROLE_LABEL ||
-                    (roles[token] == PARSE_ROLE_CLOSE_CASE && (owners[token] < low || owners[token] > high));
+        const uint64_t slots = (uint64_t)count + 1;
+        emission->extent_first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->first_child = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->next_child = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->subtree_bits = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots);
+        emission->min_case_owner = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->label_prefix = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->type_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES);
+        emission->node_labeled = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->graph.count);
+        // The postorder and the positions column parse_tree_links writes are this fill's alone: the kept columns
+        // precede them in the scratch, so they go back to it after the fill.
+        const uint64_t mark = scratch->length;
+        uint32_t* postorder = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        valid = emission->extent_first != NULL && emission->ends != NULL && emission->first_child != NULL &&
+                emission->next_child != NULL && emission->subtree_bits != NULL && emission->min_case_owner != NULL &&
+                emission->label_prefix != NULL && emission->type_names != NULL && emission->node_labeled != NULL &&
+                postorder != NULL && positions != NULL && last_children != NULL;
+        if (valid)
+        {
+            // The tree's columns the tree_only parse did not keep (parse_postorder and parse_tree_links, the checker
+            // reader's own pair), which the subtree answers' bottom-up fill below consumes.
+            const uint32_t written = parse_postorder(parser->tree.parents, count, last_children, postorder);
+            parse_tree_links(parser->tree.parents, postorder, count, positions, emission->ends, emission->first_child,
+                             emission->next_child);
+            valid = written == count;
+        }
+        if (valid)
+        {
+            memset(emission->subtree_bits, 0, (uint64_t)count + 1);
+            memset(emission->min_case_owner, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(emission->type_names, 0xff, BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES * sizeof(uint32_t));
+            memset(emission->node_labeled, 0, input->graph.count);
+            // The postorder computes the subtree answers bottom up: a token's children all precede it.
+            for (uint32_t p = 0; p < count; p += 1)
+            {
+                const uint32_t token = postorder[p];
+                const uint8_t role = parser->tree.roles[token];
+                uint32_t first = token;
+                uint8_t bits = role == PARSE_ROLE_LABEL ? BUSTER_CHECK_TARGET_FEATURE_LABEL :
+                               role == PARSE_ROLE_DO ? BUSTER_CHECK_TARGET_FEATURE_DO : 0;
+                uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? input->control_owners[token] : BUSTER_CHECK_NONE;
+                for (uint32_t child = emission->first_child[token]; child != BUSTER_CHECK_NONE; child = emission->next_child[child])
+                {
+                    first = emission->extent_first[child] < first ? emission->extent_first[child] : first;
+                    bits |= emission->subtree_bits[child];
+                    owner = emission->min_case_owner[child] < owner ? emission->min_case_owner[child] : owner;
+                }
+                emission->extent_first[token] = first;
+                emission->subtree_bits[token] = bits;
+                emission->min_case_owner[token] = owner;
+            }
+            emission->extent_first[count] = count;
+            uint32_t labels = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                labels += parser->tree.roles[token] == PARSE_ROLE_LABEL;
+                emission->label_prefix[token] = labels;
+            }
+            emission->label_prefix[count] = labels;
+            // The library builtins' named typedefs (Sema::LookupNecessaryTypesForBuiltin): the first `jmp_buf` or
+            // `sigjmp_buf` typedef declaration, which the noreturn gate compares with the function's declaration.
+            static const char* const names[BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES] = { "jmp_buf", "sigjmp_buf" };
+            for (uint32_t n = 0; n < BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES; n += 1)
+            {
+                const IdentId name = intern_find(program->identifiers, (const uint8_t*)names[n], (uint32_t)strlen(names[n]));
+                for (uint32_t token = 0; name != 0 && emission->type_names[n] == BUSTER_CHECK_NONE && token < count; token += 1)
+                {
+                    const bool found = input->declaration_kinds[token] == C_BINDING_TYPEDEF && parser->tokens.names[token] == name;
+                    emission->type_names[n] = found ? token : emission->type_names[n];
+                }
+            }
+            // Each expression's label answer: an operand precedes its node, so a node's is its operands' answers' or,
+            // for a statement expression, whether its block's subtree is enterable.
+            for (uint32_t node = 0; node < input->graph.count; node += 1)
+            {
+                const CheckOp op = input->graph.ops[node];
+                bool labeled = false;
+                if (op == CHECK_OP_STATEMENT_VALUE && input->graph.tokens[node] < input->token_count)
+                {
+                    const uint32_t region = input->expression_regions[input->graph.tokens[node]];
+                    labeled = region != 0 && region <= input->region_count &&
+                              check_target_feature_enterable(emission, program, input->regions[region - 1].block);
+                }
+                else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+                {
+                    const uint32_t operands[] = { input->graph.operand0[node], input->graph.operand1[node], input->graph.operand2[node] };
+                    for (uint32_t k = 0; !labeled && k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+                    {
+                        labeled = operands[k] < node && emission->node_labeled[operands[k]] != 0;
+                    }
+                    for (uint32_t a = 0; !labeled && check_graph_has_arguments(op) && a < input->graph.argument_counts[node]; a += 1)
+                    {
+                        const uint32_t argument = input->graph.argument_nodes[input->graph.argument_offsets[node] + a];
+                        labeled = argument < node && emission->node_labeled[argument] != 0;
+                    }
+                }
+                emission->node_labeled[node] = labeled;
+            }
+        }
+        // The fill's own columns go back; the kept ones were pushed before them.
+        arena_pop_to(scratch, mark);
     }
-    return enterable;
+    return valid;
 }
 
 // The `)` condition's arms: `*body` the statement it always runs, `*alternate` an if statement's else's, or
-// BUSTER_CHECK_NONE.
-static void check_target_feature_arms(const CheckProgram* program, uint32_t paren, uint32_t* body, uint32_t* alternate)
+// BUSTER_CHECK_NONE. `paren`'s children give both directly: the arm is the child whose subtree holds the token after
+// `paren`, and an else is the child so roled, whose own first child is its arm.
+static void check_target_feature_arms(const CheckTargetFeatureEmission* emission, const CheckProgram* program, uint32_t paren,
+                                      uint32_t* body, uint32_t* alternate)
 {
     const Parser* parser = program->parser;
-    const uint32_t* parents = parser->tree.parents;
     const uint8_t* roles = parser->tree.roles;
-    const uint32_t count = parser->tokens.count;
     *body = BUSTER_CHECK_NONE;
     *alternate = BUSTER_CHECK_NONE;
-    // The token after the closing parenthesis is inside the body: its ancestors' child of `paren` is the body's root.
-    uint32_t arm = paren + 1;
-    for (uint32_t steps = 0; arm < count && parents[arm] != paren && steps++ < count; arm = parents[arm])
+    for (uint32_t child = paren < parser->tokens.count ? emission->first_child[paren] : BUSTER_CHECK_NONE; child != BUSTER_CHECK_NONE;
+         child = emission->next_child[child])
     {
-    }
-    uint32_t low = 0;
-    uint32_t high = 0;
-    if (arm < count && arm > paren)
-    {
-        *body = arm;
-        check_target_feature_extent(program, arm, &low, &high);
-    }
-    // An else token is `paren`'s other child; its own child is its arm's root.
-    for (uint32_t token = high + 1; arm != BUSTER_CHECK_NONE && token < count && *alternate == BUSTER_CHECK_NONE; token += 1)
-    {
-        if (parents[token] == paren && roles[token] == PARSE_ROLE_ELSE)
+        if (emission->extent_first[child] <= paren + 1 && paren + 1 <= emission->ends[child])
         {
-            for (uint32_t child = token + 1; child < count && *alternate == BUSTER_CHECK_NONE; child += 1)
-            {
-                *alternate = parents[child] == token ? child : BUSTER_CHECK_NONE;
-            }
+            *body = child;
         }
-        else if (parents[token] <= paren)
+        else if (roles[child] == PARSE_ROLE_ELSE)
         {
-            break;
+            *alternate = emission->first_child[child];
         }
     }
 }
@@ -882,7 +1046,8 @@ static void check_target_feature_arms(const CheckProgram* program, uint32_t pare
 // The control where clang emits the statement of head token `head` from its start: the statement's first control. An
 // if or while statement starts at its condition's branch, a switch at its dispatch, a do statement at its body's start,
 // a for statement at its init or condition, and any other statement at its first control (`index` bound).
-static uint32_t check_target_feature_start(const CheckProgram* program, const CheckProgramBody* body, uint32_t head, uint32_t index)
+static uint32_t check_target_feature_start(const CheckTargetFeatureEmission* emission, const CheckProgram* program,
+                                           const CheckProgramBody* body, uint32_t head, uint32_t index)
 {
     const Parser* parser = program->parser;
     const uint8_t* roles = parser->tree.roles;
@@ -905,7 +1070,7 @@ static uint32_t check_target_feature_start(const CheckProgram* program, const Ch
         {
             uint32_t low = 0;
             uint32_t high = 0;
-            check_target_feature_extent(program, head, &low, &high);
+            check_target_feature_extent(emission, program, head, &low, &high);
             for (uint32_t i = 0; i < count; i += 1)
             {
                 if (low <= controls[i].token && controls[i].token <= high)
@@ -953,7 +1118,8 @@ static uint32_t check_target_feature_start(const CheckProgram* program, const Ch
 // (ContainsLabel's whole statements): the outermost control statement it is in — an if, while, for, do or switch — is
 // emitted from its start; a block, a label, a case or a statement expression holds it only through the statement that
 // does, and a plain statement's from its first control.
-static uint32_t check_target_feature_label_root(const CheckProgram* program, const CheckProgramBody* body, uint32_t position)
+static uint32_t check_target_feature_label_root(const CheckTargetFeatureEmission* emission, const CheckProgram* program,
+                                                const CheckProgramBody* body, uint32_t position)
 {
     const Parser* parser = program->parser;
     const uint8_t* roles = parser->tree.roles;
@@ -974,15 +1140,7 @@ static uint32_t check_target_feature_label_root(const CheckProgram* program, con
         }
         else if (role == PARSE_ROLE_TERMINATOR)
         {
-            uint32_t low = 0;
-            uint32_t high = 0;
-            check_target_feature_extent(program, ancestor, &low, &high);
-            bool do_while = false;
-            for (uint32_t t = low; !do_while && t <= high && t < count; t += 1)
-            {
-                do_while = roles[t] == PARSE_ROLE_DO;
-            }
-            if (do_while)
+            if ((emission->subtree_bits[ancestor] & BUSTER_CHECK_TARGET_FEATURE_DO) != 0)
             {
                 outermost = ancestor;
             }
@@ -998,8 +1156,8 @@ static uint32_t check_target_feature_label_root(const CheckProgram* program, con
             continue;
         }
     }
-    return outermost != BUSTER_CHECK_NONE ? check_target_feature_start(program, body, outermost, position) :
-           statement != BUSTER_CHECK_NONE ? check_target_feature_start(program, body, statement, position) :
+    return outermost != BUSTER_CHECK_NONE ? check_target_feature_start(emission, program, body, outermost, position) :
+           statement != BUSTER_CHECK_NONE ? check_target_feature_start(emission, program, body, statement, position) :
            position;
 }
 
@@ -1032,7 +1190,7 @@ static bool check_target_feature_emission_prepare(CheckX86DiagnosticWalk* walk, 
     const uint32_t count = body->count;
     emission->first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
     emission->next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
-    const bool valid = emission->first != 0 && emission->next != 0;
+    bool valid = emission->first != 0 && emission->next != 0;
     if (valid)
     {
         memset(emission->first, 0xff, (uint64_t)count * sizeof(uint32_t));
@@ -1070,7 +1228,7 @@ static bool check_target_feature_emission_prepare(CheckX86DiagnosticWalk* walk, 
             // The statement that holds the label emits from its start, as clang's ContainsLabel emits a statement that
             // holds one (check_target_feature_label_root); and the label's own block emits wherever the code before it
             // stopped — EmitLabel's block always stands, a predecessor or not.
-            check_x86_diagnostic_push(walk, check_target_feature_label_root(program, body, position), true);
+            check_x86_diagnostic_push(walk, check_target_feature_label_root(emission, program, body, position), true);
             check_x86_diagnostic_push(walk, position, true);
         }
         else if (position < body->count)
@@ -1094,27 +1252,55 @@ static bool check_target_feature_emission_prepare(CheckX86DiagnosticWalk* walk, 
             }
         }
     }
+    // The body's statement expressions' block states, innermost first: a statement expression's own analysis asks its
+    // nested regions' states, which an expression's can only reference where they nest inside it — never its own —
+    // so the dead-end analysis reads finished answers, and this never recurses into it (check-call-graph).
+    if (valid && program->region_count != 0)
+    {
+        uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->region_count);
+        valid = order != NULL;
+        uint32_t order_count = 0;
+        for (uint32_t r = 0; valid && r < program->region_count; r += 1)
+        {
+            const CheckProgramRegion* item = program->regions + r;
+            if (item->body == (uint32_t)(body - program->bodies) && emission->regions[r] == 0)
+            {
+                uint32_t place = order_count;
+                while (place != 0 && program->regions[order[place - 1]].count > item->count)
+                {
+                    order[place] = order[place - 1];
+                    place -= 1;
+                }
+                order[place] = r;
+                order_count += 1;
+            }
+        }
+        for (uint32_t r = 0; r < order_count; r += 1)
+        {
+            emission->regions[order[r]] = check_target_feature_region_dead(walk, emission, order[r] + 1) ? 2 : 1;
+        }
+    }
     return valid;
 }
 
 // A label a jump could enter in the body's tokens in [low, high) — what clang's ContainsLabel reports of a skipped
 // statement, or of the whole switch (case labels aren't labels for it: the collection sees them itself).
-static bool check_target_feature_label_between(const Parser* parser, uint32_t low, uint32_t high)
+static bool check_target_feature_label_between(const CheckTargetFeatureEmission* emission, const Parser* parser, uint32_t low, uint32_t high)
 {
-    bool labeled = false;
-    for (uint32_t token = low; !labeled && token < high; token += 1)
-    {
-        labeled = parser->tree.roles[token] == PARSE_ROLE_LABEL;
-    }
-    return labeled;
+    const uint32_t count = parser->tokens.count;
+    return high <= count && low <= high && emission->label_prefix[high] != emission->label_prefix[low];
 }
 
 // Whether `token`'s statement is the switch body's own of head `body` — its parents to `body` its statement ends, the
-// case labels and, `compounds` for a break, a nested compound's ends, which still ends the kept statements there, or,
-// a declaration's, a `label:`'s and a statement's attributes — not inside a statement that opens a scope, a compound's,
-// an if's, a loop's or a switch's, which clang's collection can't skip a declaration for (mightAddDeclToScope) or keep
-// a break under (containsBreak: a break under a label or a scope fails it).
-static bool check_target_feature_top_level(const Parser* parser, uint32_t token, uint32_t body, bool compounds)
+// case labels and, `allow`'s bits say, a nested compound's ends (BUSTER_CHECK_TARGET_FEATURE_TOP_COMPOUND, for a
+// break, which still ends the kept statements there) or a `label:`'s and a statement's attributes
+// (BUSTER_CHECK_TARGET_FEATURE_TOP_LABEL, for a declaration) — not inside a statement that opens a scope other than a
+// compound's, an if's, a loop's or a switch's, which clang's collection can't skip a declaration for
+// (mightAddDeclToScope, which descends compounds and labels) or keep a break under (containsBreak: a break under a
+// label or a scope fails it).
+#define BUSTER_CHECK_TARGET_FEATURE_TOP_LABEL 1u
+#define BUSTER_CHECK_TARGET_FEATURE_TOP_COMPOUND 2u
+static bool check_target_feature_top_level(const Parser* parser, uint32_t token, uint32_t body, uint32_t allow)
 {
     const uint8_t* roles = parser->tree.roles;
     const uint32_t* parents = parser->tree.parents;
@@ -1130,8 +1316,9 @@ static bool check_target_feature_top_level(const Parser* parser, uint32_t token,
         else
         {
             top = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_CASE ||
-                  (compounds ? role == PARSE_ROLE_CLOSE_BLOCK :
-                   role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER);
+                  ((allow & BUSTER_CHECK_TARGET_FEATURE_TOP_COMPOUND) != 0 && role == PARSE_ROLE_CLOSE_BLOCK) ||
+                  ((allow & BUSTER_CHECK_TARGET_FEATURE_TOP_LABEL) != 0 &&
+                   (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER));
         }
     }
     return top;
@@ -1143,7 +1330,7 @@ static bool check_target_feature_top_level(const Parser* parser, uint32_t token,
 // the body's scope gains (mightAddDeclToScope), or a break something other than a compound or a case holds
 // (containsBreak), the collection fails and the whole body emits instead, save the dead statements before its
 // first case label.
-static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t index)
+static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t index)
 {
     CheckProgram* program = walk->program;
     const Parser* parser = program->parser;
@@ -1152,7 +1339,10 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
     const uint32_t node = entry->node;
     uint32_t next = index + 1;
     unsigned __int128 value = 0;
-    const bool known = check_program_case_value(program, node, program->stream->values[node].type, &value);
+    // A label inside the selector's expression keeps clang's ConstantFoldsToSimpleInteger from folding it: the
+    // switch's cases all emit, as an unknown one's do.
+    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value) &&
+                       !(node < program->input->graph.count && emission->node_labeled[node] != 0);
     while (next < walk->body->count && controls[next].kind == CHECK_CONTROL_CASE)
     {
         next += 1;
@@ -1192,9 +1382,9 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
     }
     // The control after the case table jumps to the default label or the switch's end.
     const CheckProgramCase* fallback = NULL;
-    for (uint32_t c = 0; c < program->case_count; c += 1)
+    for (uint32_t i = index + 1; i < next; i += 1)
     {
-        const CheckProgramCase* item = program->cases + c;
+        const CheckProgramCase* item = program->cases + controls[i].target;
         fallback = item->fallback && item->owner == entry->token ? item : fallback;
     }
     if (!whole && selected == BUSTER_CHECK_NONE && fallback != NULL)
@@ -1209,10 +1399,14 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
          body = parser->tree.parents[body])
     {
     }
-    // The body's own extent and its statements' end — the control after the last whose token is inside.
+    // The body's own extent and its statements' end — the control after the last whose token is inside. The walk up
+    // can only miss the switch's head where the control's token isn't its `)`, a sentinel the extent can't answer.
     uint32_t low = 0;
     uint32_t high = 0;
-    check_target_feature_extent(program, body, &low, &high);
+    if (body < parser->tokens.count)
+    {
+        check_target_feature_extent(emission, program, body, &low, &high);
+    }
     uint32_t end = statements;
     for (uint32_t i = statements; i < walk->body->count; i += 1)
     {
@@ -1223,9 +1417,10 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
     {
         if (selected == BUSTER_CHECK_NONE)
         {
-            // No case the value takes, no default: clang emits nothing — unless a jump can enter the body, a label it
-            // holds, which emits the whole switch (its `!ContainsLabel(&S)`).
-            whole = check_target_feature_label_between(parser, low, high + 1);
+            // No case the value takes, no default: clang emits none of the body — unless a jump can enter it, a label
+            // it holds, which emits the whole switch (its `!ContainsLabel(&S)`). Either way the code after the switch
+            // goes on: the table's jump reaches it.
+            whole = check_target_feature_label_between(emission, parser, low, high + 1);
         }
         else
         {
@@ -1239,7 +1434,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
                 if (controls[i].kind == CHECK_CONTROL_JUMP && controls[i].target == end &&
                     parser->tokens.kinds[controls[i].token] == PARSE_KIND_BREAK)
                 {
-                    if (check_target_feature_top_level(parser, controls[i].token, body, true))
+                    if (check_target_feature_top_level(parser, controls[i].token, body, BUSTER_CHECK_TARGET_FEATURE_TOP_COMPOUND))
                     {
                         const uint32_t terminator = parser->tree.parents[controls[i].token];
                         kept_end = terminator < parser->tokens.count ? terminator + 1 : kept_end;
@@ -1252,21 +1447,24 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
                     break;
                 }
             }
-            // A declaration a skipped statement adds at the body's own scope (mightAddDeclToScope): clang's collection
-            // fails on it, whether it is a case's own statement or one before the first case.
+            // A declaration a skipped statement adds (mightAddDeclToScope): clang's collection recurses through
+            // nested compounds and fails on any it skips, whether it is a case's own statement or one before the
+            // first case — a declaration inside `if` or `for` is not the scan's.
             for (uint32_t token = low; !whole && token < selected_token && token <= high; token += 1)
             {
                 whole = program->input->declaration_kinds[token] != 0 &&
-                        check_target_feature_top_level(parser, token, body, false);
+                        check_target_feature_top_level(parser, token, body,
+                                                       BUSTER_CHECK_TARGET_FEATURE_TOP_LABEL | BUSTER_CHECK_TARGET_FEATURE_TOP_COMPOUND);
             }
-            whole = whole || check_target_feature_label_between(parser, low, selected_token) ||
-                    check_target_feature_label_between(parser, kept_end, high + 1);
+            whole = whole || check_target_feature_label_between(emission, parser, low, selected_token) ||
+                    check_target_feature_label_between(emission, parser, kept_end, high + 1);
         }
     }
     if (whole)
     {
         // The collection failed: the whole body emits — except the dead statements before its first case label, which
-        // only a label of their own makes reachable (a `goto`'s target, clang's unreachable-code elision).
+        // only a label of their own makes reachable (a `goto`'s target, clang's unreachable-code elision). A label
+        // there emits the statement that holds it from its start (ContainsLabel's whole statements), not the body's.
         uint32_t first_target = end;
         uint32_t first_case_token = high;
         for (uint32_t i = index + 1; i < next; i += 1)
@@ -1275,7 +1473,16 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
             first_target = item->target < first_target ? item->target : first_target;
             first_case_token = item->token < first_case_token ? item->token : first_case_token;
         }
-        const uint32_t from = check_target_feature_label_between(parser, low, first_case_token) ? statements : first_target;
+        uint32_t from = first_target;
+        for (uint32_t l = 0; l < walk->body->label_count; l += 1)
+        {
+            const uint32_t position = program->label_positions[walk->body->label_first + l];
+            if (position < walk->body->entry_count && controls[position].token < first_case_token)
+            {
+                const uint32_t root = check_target_feature_label_root(emission, program, walk->body, position);
+                from = root < from ? root : from;
+            }
+        }
         for (uint32_t i = from; i < end; i += 1)
         {
             check_x86_diagnostic_push(walk, i, true);
@@ -1285,12 +1492,21 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, uint32_t i
     else if (selected != BUSTER_CHECK_NONE)
     {
         // The kept statements — each emits where it is (clang emits every one of its CaseStmts, dead or not) — and the
-        // switch's merge, which a break's own jump already reaches.
+        // switch's merge where the last kept control falls into it; a break's own jump already reaches it, and a kept
+        // statement whose code ends dead (a call that doesn't return) leaves the merge's block nothing.
         for (uint32_t i = selected; i < kept_control_end; i += 1)
         {
             check_x86_diagnostic_push(walk, i, true);
         }
-        check_x86_diagnostic_push(walk, end, true);
+        if (check_target_feature_falls(walk, emission, kept_control_end - 1))
+        {
+            check_x86_diagnostic_push(walk, end, true);
+        }
+    }
+    else
+    {
+        // The value takes no case and the body has no default: nothing of it emits, but the code after the switch does.
+        check_x86_diagnostic_push(walk, controls[next].target, true);
     }
 }
 
@@ -1318,9 +1534,10 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
         // A do statement's condition, which its end follows whatever its value — clang's `br i1` reaches the exit even
         // under `while (1)`, whose block nothing else needs — or a while or for statement's, which its body follows
         // whatever its value; a constant one has no branch where it can't go: back from `do ... while (0)`, out of
-        // `while (1)`.
+        // `while (1)`. A label inside the condition keeps clang's ConstantFoldsToSimpleInteger from folding it.
         bool truth = false;
-        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth);
+        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth) &&
+                           !(entry->node < program->input->graph.count && emission->node_labeled[entry->node] != 0);
         const bool branch = entry->kind == CHECK_CONTROL_BRANCH_TRUE ? !known || truth : loop == 2 || !known || !truth;
         check_x86_diagnostic_push(walk, entry->node, false);
         if (branch)
@@ -1332,13 +1549,15 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
     else if (entry->kind == CHECK_CONTROL_BRANCH_FALSE)
     {
         // An if statement's condition: the arm a constant one leaves out still emits where a jump can enter it — it
-        // holds a label, or a case of a switch outside it (ConstantFoldsToSimpleInteger and ContainsLabel).
+        // holds a label, or a case of a switch outside it (ConstantFoldsToSimpleInteger and ContainsLabel, which also
+        // keeps the condition itself from folding where it holds a label).
         bool truth = false;
-        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth);
+        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth) &&
+                           !(entry->node < program->input->graph.count && emission->node_labeled[entry->node] != 0);
         check_x86_diagnostic_push(walk, entry->node, false);
         uint32_t body = BUSTER_CHECK_NONE;
         uint32_t alternate = BUSTER_CHECK_NONE;
-        check_target_feature_arms(program, entry->token, &body, &alternate);
+        check_target_feature_arms(emission, program, entry->token, &body, &alternate);
         if (!known)
         {
             check_x86_diagnostic_push(walk, entry->target, true);
@@ -1347,14 +1566,8 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
         else
         {
             const uint32_t skipped = truth ? alternate : body;
-            uint32_t low = 0;
-            uint32_t high = 0;
-            if (skipped != BUSTER_CHECK_NONE)
-            {
-                check_target_feature_extent(program, skipped, &low, &high);
-            }
             check_x86_diagnostic_push(walk, truth ? index + 1 : entry->target, true);
-            if (skipped != BUSTER_CHECK_NONE && check_target_feature_enterable(program, low, high))
+            if (skipped != BUSTER_CHECK_NONE && check_target_feature_enterable(emission, program, skipped))
             {
                 check_x86_diagnostic_push(walk, truth ? entry->target : index + 1, true);
             }
@@ -1363,7 +1576,7 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
     else if (entry->kind == CHECK_CONTROL_SWITCH)
     {
         check_x86_diagnostic_push(walk, entry->node, false);
-        check_target_feature_switch(walk, index);
+        check_target_feature_switch(walk, emission, index);
     }
     else
     {
@@ -1373,60 +1586,17 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
 
 // Whether `node`'s code holds a label — a statement expression's whose block does — which code generation emits even
 // in the operand a constant condition leaves out: clang's ContainsLabel is the whole subtree's, and a label is a
-// statement's, so an operand can hold one only through a statement expression.
-static bool check_target_feature_labeled(CheckProgram* program, CheckTargetFeatureEmission* emission, uint32_t node)
+// statement's, so an operand can hold one only through a statement expression. The answer is memoized per node
+// (check_target_feature_columns).
+static bool check_target_feature_labeled(CheckTargetFeatureEmission* emission, CheckProgram* program, uint32_t node)
 {
-    const CheckInput* input = program->input;
-    const CheckGraph* graph = &input->graph;
-    uint64_t depth = 0;
-    bool room = node < graph->count && emission->capacity != 0;
-    if (room)
-    {
-        emission->stack[depth++] = node;
-    }
-    bool labeled = false;
-    while (!labeled && room && depth != 0)
-    {
-        const uint32_t current = (uint32_t)emission->stack[--depth];
-        const CheckOp op = graph->ops[current];
-        if (op == CHECK_OP_STATEMENT_VALUE && graph->tokens[current] < input->token_count)
-        {
-            const uint32_t region = input->expression_regions[graph->tokens[current]];
-            if (region != 0 && region <= input->region_count)
-            {
-                const CheckInputRegion* item = input->regions + region - 1;
-                labeled = check_target_feature_enterable(program, item->opening, item->closing);
-            }
-        }
-        else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
-        {
-            const uint32_t operands[] = { graph->operand0[current], graph->operand1[current], graph->operand2[current] };
-            for (uint32_t i = 0; room && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
-            {
-                room = depth < emission->capacity;
-                if (room && operands[i] < graph->count)
-                {
-                    emission->stack[depth++] = operands[i];
-                }
-            }
-            if (check_graph_has_arguments(op))
-            {
-                for (uint32_t i = 0; room && i < graph->argument_counts[current]; i += 1)
-                {
-                    room = depth < emission->capacity;
-                    if (room)
-                    {
-                        emission->stack[depth++] = graph->argument_nodes[graph->argument_offsets[current] + i];
-                    }
-                }
-            }
-        }
-    }
-    return labeled;
+    return node < program->input->graph.count && emission->node_labeled[node] != 0;
 }
 
-// The check's walk's step at expression `node`: #487's walk's, and the operand a constant condition leaves out where
-// it holds a label, which code generation still emits (check_target_feature_labeled).
+// The check's walk's step at expression `node`: #487's walk's, the operand a constant condition leaves out where it
+// holds a label, which code generation still emits (check_target_feature_labeled), and a statement expression's final
+// statement, which clang emits wherever the expression's statement emits — EnsureInsertPoint makes its block even
+// where the block's own code stopped (EmitCompoundStmtWithoutScope's value).
 static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t node)
 {
     CheckProgram* program = walk->program;
@@ -1435,14 +1605,44 @@ static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckT
     if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
     {
         uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        // A label inside the condition keeps clang's ConstantFoldsToSimpleInteger from folding it: every operand's
+        // code emits, whichever the constant would have left out.
+        const bool labeled_condition = check_target_feature_labeled(emission, program, operands[0]);
+        if (labeled_condition)
+        {
+            for (uint32_t k = 1; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+            {
+                if (operands[k] < graph->count)
+                {
+                    check_x86_diagnostic_push(walk, operands[k], false);
+                }
+            }
+        }
         bool truth = false;
-        if (check_program_runtime_truth(program, node, operands[0], &truth))
+        if (!labeled_condition && check_program_runtime_truth(program, node, operands[0], &truth))
         {
             const uint32_t skipped = op == CHECK_OP_CONDITIONAL ? operands[truth ? 2 : 1] :
                                     truth == (op == CHECK_OP_LOGICAL_OR) ? operands[1] : BUSTER_CHECK_NONE;
-            if (skipped < graph->count && check_target_feature_labeled(program, emission, skipped))
+            if (skipped < graph->count && check_target_feature_labeled(emission, program, skipped))
             {
                 check_x86_diagnostic_push(walk, skipped, false);
+            }
+        }
+    }
+    else if (op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < program->input->token_count)
+    {
+        const uint32_t region = program->input->expression_regions[graph->tokens[node]];
+        if (region != 0 && region <= program->region_count && program->input->regions[region - 1].final_statement != BUSTER_CHECK_NONE)
+        {
+            const CheckProgramRegion* item = program->regions + region - 1;
+            const uint32_t last = item->first + item->count - item->cleanups;
+            for (uint32_t i = last; i > item->first && i - 1 < walk->body->count; i -= 1)
+            {
+                if (program->controls[walk->body->first + i - 1].kind == CHECK_CONTROL_EVALUATE)
+                {
+                    check_x86_diagnostic_push(walk, i - 1, true);
+                    break;
+                }
             }
         }
     }
@@ -1475,7 +1675,7 @@ static bool check_target_feature_cleanup_emitted(CheckX86DiagnosticWalk* walk, C
     const uint64_t first = (uint64_t)input->graph.count + body->first;
     uint32_t low = 0;
     uint32_t high = 0;
-    check_target_feature_extent(program, input->cleanups[record].declaration, &low, &high);
+    check_target_feature_extent(emission, program, input->cleanups[record].declaration, &low, &high);
     bool emitted = controls[0].token < input->token_count && low < controls[0].token && walk->seen[first] != 0;
     for (uint32_t i = 0; !emitted && i < body->count; i += 1)
     {
@@ -1695,7 +1895,11 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     if (valid)
                     {
                         memset(walk.seen, 0, items);
+                        memset(emission.bits, 0, input->graph.count);
                     }
+                    // The subtree and graph answers every body's walk shares, computed once: the per-body scratch the
+                    // calls' own mark resets at each body's end does not reach them.
+                    valid = valid && check_target_feature_columns(program, &emission, scratch);
                     if (valid && walk.cleanup_tags != 0)
                     {
                         memset(walk.cleanup_tags, 0, (uint64_t)input->cleanup_count * sizeof(uint32_t));

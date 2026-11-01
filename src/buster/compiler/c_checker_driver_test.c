@@ -4240,7 +4240,9 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static int b(int x) { return 0 && ({ lbl: h(x + 2); }); }\n"
           "static int c(int x) { return 1 || ({ lbl: h(x + 3); }); }\n"
           "static int d(int x) { return 1 ? x : ({ lbl: h(x + 4); }); }\n"
-          "int e(int x) { return a(x) + b(x) + c(x) + d(x); }\n" },
+          "static int g(int x) { if (0) { x = ({ lbl: h(x + 5); }); } return x; }\n"
+          "static int k(int x) { if (0) { goto out; } x = h(x + 6); out: return x; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + g(x) + k(x); }\n" },
         { "the C library's functions that don't return by their names, and a call through a pointer",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "void exit(int);\nvoid abort(void);\nvoid _Exit(int);\nvoid quick_exit(int);\n"
@@ -4263,7 +4265,8 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static int k(int x) { switch (0) { case 0: { if (x) break; } break; case 1: x = h(x); } return x; }\n"
           "static int m(int x) { switch (0) { case 1: int y = h(x + 8); x = y; case 0: x = h(x); break; } return x; }\n"
           "static int q(int x) { switch (0) { case 0: x = h(x); default: x = h(x + 1); } return x; }\n"
-          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + g(x) + k(x) + m(x) + q(x); }\n" },
+          "static int s(int x) { switch (0) { lbl: case 0: x = h(x); break; case 1: x = h(x + 1); break; } return x; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + g(x) + k(x) + m(x) + q(x) + s(x); }\n" },
         { "a cleanup attribute's call in a while (0) body the emission still makes",
           "static inline __attribute__((always_inline, target(\"avx2\"))) void hp(int *p) { *p = 1; }\n"
           "static int a(void) { while (0) { int y __attribute__((cleanup(hp))) = 0; (void)y; } return 0; }\n"

@@ -2240,6 +2240,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                                          uint32_t* seen, uint32_t* nodes, uint32_t* stack, uint64_t* references, uint8_t* needed)
 {
     const CheckGraph* graph = &program->input->graph;
+    const bool regions = program->input->region_count != 0;
     uint32_t depth = 0;
     uint32_t reference_count = 0;
     reference_count = check_program_reference_roots(program, controls, count, epoch, nodes, stack, &depth, seen, references, needed, reference_count);
@@ -2341,11 +2342,12 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             {
                 // The operand a constant condition leaves out still emits — and so refers — where it holds a label
                 // (check_program_labeled): a statement expression's block's, or a case of a switch outside it — which
-                // only a unit with a statement expression can have.
+                // only a unit with a statement expression can have. A label inside the condition itself keeps clang's
+                // ConstantFoldsToSimpleInteger from folding it, so then the operand emits whatever it holds.
                 const uint32_t dropped = op == CHECK_OP_CONDITIONAL ? (truth ? 2 : 1) : 1;
                 const bool leaves = op == CHECK_OP_CONDITIONAL || (op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth);
-                if (leaves && (program->input->region_count == 0 ||
-                               !check_program_labeled(program, operands[dropped], epoch | UINT32_C(0x40000000), nodes, stack, depth)))
+                if (leaves && (!regions || !(check_program_labeled(program, operands[0], epoch | UINT32_C(0x20000000), nodes, stack, depth) ||
+                                             check_program_labeled(program, operands[dropped], epoch | UINT32_C(0x40000000), nodes, stack, depth))))
                 {
                     operands[dropped] = BUSTER_CHECK_NONE;
                 }
