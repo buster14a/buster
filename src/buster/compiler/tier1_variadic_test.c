@@ -10,8 +10,8 @@
 // 3's first unnamed argument is its callee's address, and its values live across the call make its prologue push
 // callee-saved registers, which the overflow area's address must count past where the frame keeps no pointer. Every compile
 // must save the six argument registers and the eight vector ones in its prologue, those behind al's test, in the
-// frame's save area. tier1_select_test_variadic_oracle reads only the arguments; the code runs in a bounded child
-// (tier1_variadic_tests).
+// frame's save area, and take the overflow area's address in one lea past the frame its prologue's records build.
+// tier1_select_test_variadic_oracle reads only the arguments; the code runs in a bounded child (tier1_variadic_tests).
 
 #define BUSTER_TIER1_VARIADIC_SAMPLES 32u
 
@@ -53,6 +53,35 @@ static bool tier1_variadic_prologue(const Tier1EmitResult* emitted)
     return frame->variadic && general == (1u << BUSTER_ABI_INTEGER_ARGUMENTS) - 1 && vectors == (1u << BUSTER_ABI_VECTOR_ARGUMENTS) - 1;
 }
 
+// Whether the code takes the overflow area's address in one lea at the first stack argument, read off the prologue's
+// records rather than the frame's plan: rbp + 16 where the prologue sets rbp from rsp, and otherwise rsp + 8 per
+// register it pushes, plus its reservation, plus 8 for the return address; these shapes have no named stack arguments.
+static bool tier1_variadic_overflow(const Tier1EmitResult* emitted)
+{
+    const Tier1SelectCode* code = &emitted->code;
+    const uint32_t end = code->node_first != 0 ? code->node_first[0] : 0;
+    int64_t pushes = 0;
+    int64_t reservation = 0;
+    bool pointer = false;
+    for (uint32_t r = 0; r < end && r < code->count; r += 1)
+    {
+        const X86Instruction* record = &code->records[r];
+        const uint32_t form = record->form & BUSTER_X86_FORM_NUMBER;
+        pushes += form == X86_FORM_PUSH_R64;
+        pointer |= form == X86_FORM_MOV_RM64_R64 && (record->mode & BUSTER_X86_MODE_MEMORY) == 0 && record->rm == X86_REGISTER_RBP && record->reg == X86_REGISTER_RSP;
+        reservation += (form == X86_FORM_SUB_RM64_IMM8 || form == X86_FORM_SUB_RM64_IMM32) && (record->mode & BUSTER_X86_MODE_MEMORY) == 0 && record->rm == X86_REGISTER_RSP ? record->immediate : 0;
+    }
+    const int64_t displacement = pointer ? 16 : 8 * pushes + reservation + 8;
+    const uint8_t anchor = pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+    uint32_t found = 0;
+    for (uint32_t r = end; r < code->count; r += 1)
+    {
+        const X86Instruction* record = &code->records[r];
+        found += (record->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LEA_R64_M && record->mode == BUSTER_X86_MEMORY_BASE && record->rm == anchor && record->displacement == displacement;
+    }
+    return found == 1;
+}
+
 // One compile by one path and one set of options, its prologue checked and its code run on the samples.
 static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vector, bool rematerialize, uint32_t register_mask, bool keep_pointer)
 {
@@ -82,6 +111,7 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
         tier1_emit_test_expect(test, emitted.general && tier1_variadic_prologue(&emitted), "the prologue saves the argument registers, and the vector ones behind al's test, in the frame's save area");
         tier1_emit_test_expect(test, (shape == 2 || keep_pointer) == emitted.frame.frame_pointer, "a realigned frame or a kept frame pointer gives the overflow area's address its base");
         tier1_emit_test_expect(test, shape != 3 || emitted.frame.saved_registers != 0, "the values live across shape 3's call are in callee-saved registers, which its prologue pushes");
+        tier1_emit_test_expect(test, tier1_variadic_overflow(&emitted), "the overflow area's address is one lea at rbp + 16, or past rsp's pushes, its reservation and the return address");
         void* executable = MAP_FAILED;
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))

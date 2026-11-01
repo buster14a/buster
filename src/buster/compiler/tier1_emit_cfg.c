@@ -668,16 +668,18 @@ static bool tier1_emit_cfg_object(const IrFunction* function, const Tier1EmitRes
 
 // A variadic definition's overflow area's address (#789): its unnamed stack arguments start past its named ones
 // (IrFunction.incoming.stack_bytes) in the incoming argument area, 8 bytes past the return address's slot. That is 16
-// past rbp, where the prologue pushed it, in a frame with a frame pointer, a realigned one's among them; and otherwise
-// past rsp's reservation and the callee-saved registers the prologue pushed before it (#177's protocol), which nothing
-// moves until the epilogue (the red zone too is below the entry's rsp).
+// past rbp in a frame with a frame pointer, a realigned one's among them, as the prologue sets rbp right after pushing
+// it. In a frame without one (#177's protocol), the prologue moves rsp by its pushes of the callee-saved registers,
+// then by its reservation, and nothing moves it again until the epilogue: the area is past both and the return address
+// (the red zone too is below the entry's rsp). The protocol never realigns such a frame, which would leave rsp's
+// distance from the entry unknown: the guard refuses one rather than miscompile it.
 static bool tier1_emit_cfg_incoming(const IrFunction* function, const Tier1EmitResult* emitted, uint8_t* base, int32_t* offset)
 {
     const Tier1Frame* frame = &emitted->frame;
     const uint64_t pushed = 8 * (uint64_t)__builtin_popcount(frame->saved_registers);
     const uint64_t above = frame->frame_pointer ? 16 : (uint64_t)frame->stack_adjust_bytes + pushed + 8;
     const uint64_t total = above + function->incoming.stack_bytes;
-    const bool found = total <= INT32_MAX && (frame->frame_pointer || (frame->base_register == X86_REGISTER_RSP && !frame->realigned));
+    const bool found = total <= INT32_MAX && (frame->frame_pointer || !frame->realigned);
     *base = frame->frame_pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
     *offset = found ? (int32_t)total : 0;
     return found;
