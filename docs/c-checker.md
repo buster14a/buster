@@ -3547,8 +3547,14 @@ tokens it may act at, and tests there only what may make it act. On SQLite
 - **The expressions' walk** takes each token's classes from a pass before it
   (`check_input_expression_classes`): whether the walk acts at the token (it
   has children, its role or kind is one the walk's tests take, by the same
-  tables, or one of seven sparse columns has an entry for it, 16 tokens' at a
-  time), and whether a sparse column does. It skips the tokens it doesn't act
+  tables, or one of seven sparse columns has an entry for it), and whether a
+  sparse column does. The vector path reads that last from a bit a token,
+  64 tokens' in a word (`CheckInputReader.sparse_marks`, #628), which every
+  write of the seven columns keeps (`check_input_sparse_mark`), rather than
+  the columns themselves; so the walk reads four of them (the cached
+  constants, the `va_arg` calls, the designators and the variable arrays'
+  bounds) only where they have entries, and they live in the base pages of
+  the reader's arena of rare columns. It skips the tokens it doesn't act
   at, whose first values, `NONE`, the pass writes, and tests the sparse
   columns only of the tokens that have an entry.
 - **Deferred bodies** (#113) need no marks of their own: each starts at an
@@ -3557,7 +3563,8 @@ tokens it may act at, and tests there only what may make it act. On SQLite
 - **The twins.** The scalar path, `--scalar`, still visits every token and
   makes every test. At each token it also checks what the vector path would
   have done: each test that could act there, without the mark or the class
-  that would make the vector path make it, counts in `CheckInput.visit_misses`,
+  that would make the vector path make it, and each sparse mark that the
+  columns contradict, counts in `CheckInput.visit_misses`,
   which `test-checker`'s fixtures and `test-checker-corpus` require to be 0. A
   mutant without the activations' mark failed 3,243 of `test-checker`'s checks.
   `test-checker` also requires the vector path's walks to visit fewer tokens
