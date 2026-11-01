@@ -3462,9 +3462,9 @@ they do per token where little of it was per declaration or expression:
   write) run 158 of the 33,848 passes that main ran, and the 104 sorts of
   address candidates none of their 832. Callgrind on a baseline
   (`BUSTER_HOST_ARCH=x86-64`) build counts 39.7M fewer instructions of 5,964M
-  (−0.66%): the walk's 43.9M became 5.3M, the address sorts' 3.7M 2.4M, and the
-  appends' 4.01M 4.29M, a few more instructions per depth for no stack round
-  trip. On the 7940HS, `perf stat -r 5` of the native build before the address
+  (−0.66%): the walk's 43.9M became 5.3M, the address sorts' 3.7M became 2.4M,
+  and the appends' 4.01M became 4.29M, a few more instructions per depth for no
+  stack round trip. On the 7940HS, `perf stat -r 5` of the native build before the address
   sorts' change counted 2.25% fewer instructions and 9.62% fewer `stli_other`
   ([buster14a/buster#1037's review](https://github.com/buster14a/buster/pull/1037#pullrequestreview-5727977655)).
   Neither is the 9700X's: its A/B of `stli_other`, cycles and the checker
