@@ -392,9 +392,12 @@ struct CheckProgramLanes
     uint64_t merge_ns;
     // --tier1, and what became of the emissions' bodies, summed over them; with --tier1-refusals, the stream that each
     // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal). With
-    // --tier1-no-rematerialize, Tier 1's allocation spills what it would recompute (#178's comparison).
+    // --tier1-no-rematerialize, Tier 1's allocation spills what it would recompute (#178's comparison). With
+    // --tier1-no-lifetimes, the checked program gives its objects no lifetimes, and Tier 1's frame shares no object's slot
+    // (#177's comparison, c_check_program_lifetime.c).
     bool tier1;
     bool tier1_no_rematerialize;
+    bool tier1_no_lifetimes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];

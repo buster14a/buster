@@ -1199,3 +1199,273 @@ static void check_test_driver_tier1_narrow(CheckTest* test, const char* clang, c
     unlink(callee_object);
     unlink(reference);
 }
+
+// Slot sharing between frame objects (#177, c_check_program_lifetime.c and tier1_emit_cfg_lifetimes): each function's
+// objects in blocks of their own, which --tier1 gives lifetimes and Tier 1's frame lets share slots, and the blocks that
+// keep theirs: one a goto enters past its opening, a switch's own block, those around labels whose addresses are taken.
+// Arrays in sibling blocks, in a loop's body left by break and continue, after it, beside the switch's cases, compound
+// literals and an if's two arms; and a pointer to an array kept across a goto back inside its block, which C lets the
+// next round read. Clang's build is the oracle of each build, with lifetimes and without (--tier1-no-lifetimes).
+static const char check_test_tier1_lifetimes_source[] =
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "\n"
+    "static void fill(int* p, int n, int seed) { for (int i = 0; i < n; i += 1) { p[i] = seed + i; } }\n"
+    "static int sum(const int* p, int n) { int s = 0; for (int i = 0; i < n; i += 1) { s += p[i]; } return s; }\n"
+    "\n"
+    "// Two sibling blocks: their arrays can share one slot.\n"
+    "int siblings(int x)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    {\n"
+    "        int a[64];\n"
+    "        fill(a, 64, x);\n"
+    "        total += sum(a, 64);\n"
+    "    }\n"
+    "    {\n"
+    "        int b[64];\n"
+    "        fill(b, 64, x * 2);\n"
+    "        total += sum(b, 64);\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "// A loop body's array, live across the call, and a break and a continue that leave its block.\n"
+    "int loop(int n)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        int a[32];\n"
+    "        fill(a, 32, i);\n"
+    "        if (i == 3) { continue; }\n"
+    "        if (i == 7) { break; }\n"
+    "        {\n"
+    "            int b[32];\n"
+    "            fill(b, 32, sum(a, 32));\n"
+    "            total += sum(b, 32);\n"
+    "        }\n"
+    "    }\n"
+    "    {\n"
+    "        int c[32];\n"
+    "        fill(c, 32, total);\n"
+    "        total = sum(c, 32);\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "// A goto that leaves a block, and one that enters another past its declaration (no lifetimes there).\n"
+    "int jumps(int x)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    {\n"
+    "        int a[16];\n"
+    "        fill(a, 16, x);\n"
+    "        if (x > 2) { goto out; }\n"
+    "        total += sum(a, 16);\n"
+    "    }\n"
+    "    {\n"
+    "        int b[16];\n"
+    "        fill(b, 16, x + 1);\n"
+    "        total += sum(b, 16);\n"
+    "    }\n"
+    "out:\n"
+    "    if (x > 5) { goto inside; }\n"
+    "    {\n"
+    "        int c[16];\n"
+    "        fill(c, 16, x + 2);\n"
+    "inside:\n"
+    "        c[0] = x;\n"
+    "        total += c[0];\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "// A switch's own block's array, and a case's block.\n"
+    "int choose(int x)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    switch (x)\n"
+    "    {\n"
+    "        int shared[8];\n"
+    "    case 0:\n"
+    "        fill(shared, 8, 1);\n"
+    "        total = sum(shared, 8);\n"
+    "        break;\n"
+    "    case 1:\n"
+    "    {\n"
+    "        int mine[8];\n"
+    "        fill(mine, 8, 2);\n"
+    "        total = sum(mine, 8);\n"
+    "        break;\n"
+    "    }\n"
+    "    default:\n"
+    "    {\n"
+    "        int other[8];\n"
+    "        fill(other, 8, 3);\n"
+    "        total = sum(other, 8);\n"
+    "    }\n"
+    "    }\n"
+    "    {\n"
+    "        int after[8];\n"
+    "        fill(after, 8, total);\n"
+    "        total += sum(after, 8);\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "// A label whose address is taken: its blocks have no lifetimes.\n"
+    "int computed(int x)\n"
+    "{\n"
+    "    static void* targets[] = { &&first, &&second };\n"
+    "    int total = 0;\n"
+    "    {\n"
+    "        int a[8];\n"
+    "        fill(a, 8, x);\n"
+    "        total += sum(a, 8);\n"
+    "        goto *targets[x & 1];\n"
+    "    }\n"
+    "    {\n"
+    "first:;\n"
+    "        int b[8];\n"
+    "        fill(b, 8, 5);\n"
+    "        total += sum(b, 8);\n"
+    "    }\n"
+    "second:\n"
+    "    {\n"
+    "        int c[8];\n"
+    "        fill(c, 8, 7);\n"
+    "        total += sum(c, 8);\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "// Compound literals and structs in sibling blocks.\n"
+    "struct point { int x, y, z, w; };\n"
+    "static int norm(const struct point* p) { return p->x + p->y + p->z + p->w; }\n"
+    "int literals(int x)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    {\n"
+    "        total += norm(&(struct point){ x, x + 1, x + 2, x + 3 });\n"
+    "    }\n"
+    "    {\n"
+    "        struct point q = { x * 2, 1, 2, 3 };\n"
+    "        total += norm(&q);\n"
+    "    }\n"
+    "    if (x) {\n"
+    "        char text[40];\n"
+    "        snprintf(text, sizeof(text), \"%d\", x);\n"
+    "        total += (int)strlen(text);\n"
+    "    } else {\n"
+    "        char other[40];\n"
+    "        memset(other, 'a', 39);\n"
+    "        other[39] = 0;\n"
+    "        total += (int)strlen(other);\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "// A pointer saved in one iteration and read after a backward goto within the same block: valid C.\n"
+    "int backward(int n)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    {\n"
+    "        int* saved = 0;\n"
+    "        int rounds = 0;\n"
+    "again:\n"
+    "        if (saved != 0) { total += *saved; }\n"
+    "        int value[2] = { rounds * 3, 1 };\n"
+    "        saved = value;\n"
+    "        rounds += 1;\n"
+    "        if (rounds < n) { goto again; }\n"
+    "    }\n"
+    "    {\n"
+    "        int spill[2] = { 100, 200 };\n"
+    "        total += spill[0] + spill[1];\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < 9; i += 1)\n"
+    "    {\n"
+    "        total += siblings(i) + loop(i) + jumps(i) + choose(i % 3) + computed(i) + literals(i) + backward(i);\n"
+    "        printf(\"%d %d %d %d %d %d %d\\n\", siblings(i), loop(i), jumps(i), choose(i % 3), computed(i), literals(i), backward(i));\n"
+    "    }\n"
+    "    printf(\"%d\\n\", total);\n"
+    "    return 0;\n"
+    "}\n";
+
+// The lifetime fixture compiled by --tier1 (`lifetimes` or not, by each path) into `output`, whose report's frame bytes
+// go into *frame: whether it compiled with siblings, loop and literals Tier 1's.
+static bool check_test_tier1_lifetime_build(const char* executable, const char* source, const char* output, bool lifetimes, bool scalar, uint64_t* frame)
+{
+    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
+    uint32_t count = 5;
+    if (!lifetimes)
+    {
+        arguments[count++] = "--tier1-no-lifetimes";
+    }
+    if (scalar)
+    {
+        arguments[count++] = "--scalar";
+    }
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)output;
+    arguments[count++] = (char*)source;
+    arguments[count] = NULL;
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    *frame = 0;
+    const bool reported = check_test_tier1_field(text, "frame_bytes", frame);
+    const bool taken = text != NULL && strstr(text, "tier1-refused\tsiblings\t") == NULL && strstr(text, "tier1-refused\tloop\t") == NULL &&
+                       strstr(text, "tier1-refused\tliterals\t") == NULL;
+    if (status != 0 && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    return status == 0 && reported && taken;
+}
+
+static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-lifetimes.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-lifetimes-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_lifetimes_source, sizeof(check_test_tier1_lifetimes_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the lifetime fixture runs");
+    uint64_t frames[2][2] = { { 0 } };
+    for (uint32_t lifetimes = 0; ran && lifetimes < 2; lifetimes += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            snprintf(output, sizeof(output), "%s/tier1-lifetimes-%u-%u", directory, lifetimes, path);
+            const bool built = check_test_tier1_lifetime_build(executable, source, output, lifetimes != 0, path != 0, &frames[lifetimes][path]);
+            check_test_expect(test, built, "the lifetime fixture compiles by --tier1, its sharing functions Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "the lifetime fixture prints clang's build's output");
+            unlink(output);
+        }
+    }
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        check_test_expect(test, frames[1][path] != 0 && frames[1][path] < frames[0][path], "objects' lifetimes shrink Tier 1's frames");
+        printf("  Tier 1's frames, %s path: %" PRIu64 " bytes with lifetimes, %" PRIu64 " without\n", path == 0 ? "vector" : "scalar", frames[1][path], frames[0][path]);
+    }
+    check_test_expect(test, !ran || (frames[1][0] == frames[1][1] && frames[0][0] == frames[0][1]), "both paths' frames take the same bytes");
+    unlink(source);
+    unlink(reference);
+}

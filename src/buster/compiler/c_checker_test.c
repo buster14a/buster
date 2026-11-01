@@ -5649,6 +5649,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
 #include "c_check_program_bits_test.c"
+#include "c_check_program_generic_builtins_test.c"
 #include "c_check_program_align_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"

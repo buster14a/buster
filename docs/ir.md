@@ -403,6 +403,22 @@ inline so count mode can erase column writes and fill mode can erase null checks
 before general inlining decisions. Both scalar/vector paths use the same two
 instantiations, and all existing allocation, validation and rollback gates remain.
 
+### Slot lifetimes (#177)
+
+`lifetime` (void, `a` a slot, `b` 0 for `start` and 1 for `end`; printed
+`lifetime.void $N start` or `end`) marks where a frame slot's object's lifetime
+starts and ends. It reads and writes nothing: after a start the slot's bytes
+are indeterminate, and after an end nothing may access the slot until the next
+start. A slot without markers lives throughout its function. The lowering puts
+markers before the typed entries that `Tier0Function.lifetime_entries` names
+(the C driver's `--tier1` gives a block's objects its lifetime:
+[the frame guide](tier1-frame.md)'s "Slot sharing between objects"), and both
+verifiers check the slot and the edge by the slot rule. The optimizer keeps
+markers as roots and moves no load or store past them; SSA promotion drops a
+promoted slot's markers with its address and renumbers the others' slots. Tier
+1's selection gives them a rule with no records, and the CFG consumer colors
+the frame's objects by them (`tier1_emit_cfg_lifetimes`).
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |
