@@ -6712,17 +6712,17 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 };
                 if (constant != 0)
                 {
-                    *check_graph_leaf_of(graph, node) = (CheckValue)
+                    CheckValue value =
                     {
                         .type = type,
                         .category = CHECK_LVALUE,
                         .flags = constant->value.flags | BUSTER_CHECK_ICE,
                         .constant_kind = constant->value.constant_kind,
                         .integer = constant->value.integer,
-                        .floating = constant->value.floating,
-                        .imaginary = constant->value.imaginary,
                         .object = reader->objects[declaration],
                     };
+                    check_value_copy_floating(&value, &constant->value);
+                    *check_graph_leaf_of(graph, node) = value;
                 }
             }
         }

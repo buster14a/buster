@@ -94,4 +94,25 @@ static void check_test_value_storage(CheckTest* test)
         check_test_expect(test, fetestexcept(FE_ALL_EXCEPT) == 0, "literal handoff does not evaluate signaling NaNs or raise floating exceptions");
         check_test_expect(test, fesetenv(&saved) == 0, "restore floating environment after representation fixtures");
     }
+
+    // A constexpr identifier's copy (#879) takes the same ten meaningful bytes as the literal handoff, never an x87
+    // load and store, and leaves the destination's padding zero although the source's is poison.
+    CheckValue source = { 0 };
+    source.floating_storage[0] = UINT64_C(0x8000000000000123);
+    source.floating_storage[1] = UINT64_C(0xa5a5a5a5a5a57fff);
+    source.imaginary_storage[0] = UINT64_C(0xc000000000000456);
+    source.imaginary_storage[1] = UINT64_C(0x5a5a5a5a5a5affff);
+    CheckValue destination = { 0 };
+    if (saved_environment)
+    {
+        check_test_expect(test, feclearexcept(FE_ALL_EXCEPT) == 0, "clear exceptions before the constexpr payload copy");
+        check_value_copy_floating(&destination, &source);
+        check_test_expect(test, destination.floating_storage[0] == source.floating_storage[0] &&
+            destination.floating_storage[1] == (source.floating_storage[1] & UINT64_C(0xffff)) &&
+            destination.imaginary_storage[0] == source.imaginary_storage[0] &&
+            destination.imaginary_storage[1] == (source.imaginary_storage[1] & UINT64_C(0xffff)),
+            "constexpr payload copy preserves the ten meaningful bytes and zeroes the poison padding");
+        check_test_expect(test, fetestexcept(FE_ALL_EXCEPT) == 0, "constexpr payload copy raises no floating exception");
+        check_test_expect(test, fesetenv(&saved) == 0, "restore the floating environment after the constexpr payload copy");
+    }
 }
