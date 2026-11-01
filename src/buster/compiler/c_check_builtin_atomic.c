@@ -58,7 +58,10 @@ struct CheckBuiltinAtomicAction
     bool alignment_known;
     // A C11 operation on an object that isn't _Atomic: clang's __hip_atomic_* (check_builtin_atomic_family).
     bool plain_object;
-    // The call is in a constant context (CheckStream.constant_evaluated), which clang's Sema evaluates where it reads it.
+    // The unit's constant objects' receipts and whether the call is in a constant context
+    // (CheckStream.constant_evaluated), which clang's Sema evaluates where it reads it: only then does an operand
+    // conversion's lvalue read load a const object's constant initializer (#990).
+    const CheckConstValues* const_values;
     bool constant_evaluated;
 };
 
@@ -147,6 +150,8 @@ static CheckValue check_builtin_atomic_argument(TypeTable* table, const CheckBui
                 .tag_completion_count = input->tag_completion_count,
                 .source_position = input->source_position,
                 .extensions = input->extensions,
+                .const_values = input->const_values,
+                .constant_evaluated = input->constant_evaluated,
             };
             value = check_action_operand(table, &action, &converted, 0);
             if (converted.diagnostic != CHECK_DIAG_NONE)
