@@ -1299,7 +1299,7 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
     const uint64_t mark = output->length;
     CheckTargetFeatureError* errors = NULL;
     uint32_t count = 0;
-    const bool valid = check_program_target_features(program, predefines, scalar, output, scratch, &errors, &count);
+    const bool valid = check_program_target_features(program, &pp->options, predefines, scalar, output, scratch, &errors, &count);
     if (!valid)
     {
         check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");

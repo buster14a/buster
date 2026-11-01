@@ -401,14 +401,43 @@ including `[[gnu::noreturn]]`, changes the function type instead, and the C
 their effect. A shared specifier list is copied per declarator before any
 record is marked ignored.
 
-It still differs where clang emits a statement that holds a label from its
-start: an `if`, loop or `switch` statement after a point where emission stops,
-and an `if`'s or a `switch`'s arm that a constant condition would leave out,
-which the walk takes from the label on; and a statement expression holding a
-label in an operand a constant condition leaves out. A call through a pointer
-to a function that doesn't return, and a call of a C library function that
-clang knows doesn't return (`exit`, `abort`) where its declaration lacks the
-attribute (glibc's headers have it), go on (#891 has the rest).
+And it emits a statement that holds a label from its start: an `if`, loop or
+`switch` statement after a point where emission stops, an `if`'s or a
+`switch`'s arm that a constant condition would leave out — the check walks the
+whole statement or arm then, as a source label makes it, `ContainsLabel`'s
+rule — and an operand a constant condition leaves out where a statement
+expression in it holds a label, which its references keep (`0 && ({ l: h(x); })`
+emits). `ContainsLabel` is syntactic, so a label inside a `sizeof` or
+`__alignof__` operand counts too, though that operand's code doesn't emit. A
+valued statement expression's last expression is emitted even where its earlier
+statements' code stopped: `EmitCompoundStmtWithoutScope` calls
+`EnsureInsertPoint()` before the value, so `({ stop(); h(x); })` checks `h`
+wherever the statement expression itself is emitted, and the orphan block ends
+the enclosing expression statement, so code after it may not emit; a void
+statement expression has no value, so its last statement is an ordinary one
+and a dead statement before it skips it. A call
+through `*` or `&` to a function that doesn't return, and a call of a C library
+function that clang knows doesn't return (`exit`, `abort`, `_Exit`, `_exit`,
+`longjmp` and kin, by the builtins' attributes, which `-ffreestanding`,
+`-fno-builtin` and `-fno-builtin-NAME` lift), end what follows them too. The
+builtin declaration's noreturn merges into the user's declaration whatever its
+result type (`int exit(int)` doesn't return), but `longjmp`'s needs `jmp_buf`,
+and `siglongjmp`'s `sigjmp_buf`, as a file-scope typedef before the
+declaration in effect at the call; `void longjmp(void *, int)` without one
+returns, and so does an earlier call that a later `jmp_buf` typedef's
+redeclaration doesn't reach. A call through a function pointer variable
+doesn't end anything. A `switch` on a constant emits just the
+case the value takes — its statements until the body's first break — where the
+scan that finds it can skip the rest, which a label a skipped statement holds,
+a declaration at the body's own scope the kept statements may use, a case
+range the list's order puts first, or a kept statement's own break means it
+can't; then the whole body's code goes, as a switch without a constant's. In
+either, an unlabeled statement after one whose code stopped is skipped, as
+`EmitStmt`'s insertion point skips it, while a case label or a value block
+still emits. It still differs for a `case` inside a nested `if`: clang's scan
+doesn't reach the case, so clang emits the whole body, the enclosing `if`'s
+condition included, where the check starts at the case and misses that
+enclosing code; and for `goto` into a label inside one.
 
 Clang's errors are unrecoverable. It emits the functions it must emit where the
 unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by

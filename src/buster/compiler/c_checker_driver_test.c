@@ -4329,6 +4329,88 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "void returning(void) {}\n[[noreturn]] void returning(void), stop(void);\n"
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
           "int a(void) { stop(); return h(1); }\nint b(void) { returning(); return h(2) + h(3); }\n", "-std=c23" },
+        // #891's code-generation emission: the code a label can enter goes with it, from the statement's or operand's
+        // start — an if, loop or switch a jump can enter, or the operand a constant condition leaves out when a
+        // statement expression in it holds a label.
+        { "a label the constant condition's left-out code can enter",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static int a(int x) { if (0) { x = h(x); lbl: x = h(x + 1); } return x; }\n"
+          "static int b(int x) { return 0 && ({ lbl: h(x + 2); }); }\n"
+          "static int c(int x) { return 1 || ({ lbl: h(x + 3); }); }\n"
+          "static int d(int x) { return 1 ? x : ({ lbl: h(x + 4); }); }\n"
+          "static int g(int x) { if (0) { x = ({ lbl: h(x + 5); }); } return x; }\n"
+          "static int k(int x) { if (0) { goto out; } x = h(x + 6); out: return x; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + g(x) + k(x); }\n" },
+        { "the C library's functions that don't return by their names, and a call through a pointer",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "void exit(int);\nvoid abort(void);\nvoid _Exit(int);\nvoid quick_exit(int);\n"
+          "__attribute__((noreturn)) void stop(void);\n"
+          "static int a(int x) { exit(0); return h(x); }\n"
+          "static int b(int x) { abort(); return h(x + 1); }\n"
+          "static int c(int x) { _Exit(0); return h(x + 2); }\n"
+          "static int d(int x) { quick_exit(0); return h(x + 3); }\n"
+          "static int g(int x) { (*stop)(); return h(x + 4); }\n"
+          "static int k(int x) { (&exit)(0); return h(x + 5); }\n"
+          "static int m(int x) { void (*p)(int) = exit; p(0); return h(x + 6); }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + g(x) + k(x) + m(x); }\n" },
+        { "a switch on a constant emits the case it selects alone where its scan can skip the rest",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static int a(int x) { switch (0) { case 0: x = h(x); break; case 1: x = h(x + 1); break; } return x; }\n"
+          "static int b(int x) { switch (0) { case 1: x = h(x); default: x = h(x + 1); } return x; }\n"
+          "static int c(int x) { switch (0) { case 1: x = h(x); } return x; }\n"
+          "static int d(int x) { switch (0) { case 0: x = h(x); break; case 1: x = h(x + 1); lbl: x = h(x + 2); } return x; }\n"
+          "static int g(int x) { switch (0) { case 0: x = h(x); break; case 1: x = h(x + 1); case 2 ... 4: x = h(x + 2); } return x; }\n"
+          "static int k(int x) { switch (0) { case 0: { if (x) break; } break; case 1: x = h(x); } return x; }\n"
+          "static int m(int x) { switch (0) { case 1: int y = h(x + 8); x = y; case 0: x = h(x); break; } return x; }\n"
+          "static int q(int x) { switch (0) { case 0: x = h(x); default: x = h(x + 1); } return x; }\n"
+          "static int s(int x) { switch (0) { lbl: case 0: x = h(x); break; case 1: x = h(x + 1); break; } return x; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + g(x) + k(x) + m(x) + q(x) + s(x); }\n" },
+        { "a cleanup attribute's call in a while (0) body the emission still makes",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void hp(int *p) { *p = 1; }\n"
+          "static int a(void) { while (0) { int y __attribute__((cleanup(hp))) = 0; (void)y; } return 0; }\n"
+          "static int b(void) { if (0) { int y __attribute__((cleanup(hp))) = 0; (void)y; } return 0; }\n"
+          "static int c(void) { if (0) { lbl: int y __attribute__((cleanup(hp))) = 0; (void)y; } return 0; }\n"
+          "int e(void) { return a() + b() + c(); }\n" },
+        // #891's re-review findings: the library builtins' noreturn merge takes the declaration's type as clang's does,
+        // a `jmp_buf` typedef counts only at file scope before the declaration in effect at the call, a statement
+        // expression's value and labels emit after a dead statement, an unlabeled statement after a dead one doesn't
+        // in a constant switch's kept statements, and ContainsLabel sees labels inside sizeof and __alignof__.
+        { "the C library's noreturn declarations inherit it whatever their result type",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int exit(int);\nint abort(void);\nint _Exit(int);\ntypedef int jmp_buf;\nint longjmp(jmp_buf, int);\n"
+          "int x1(int x) { exit(0); return h(x); }\nint x2(int x) { abort(); return h(x + 1); }\n"
+          "int x3(int x) { _Exit(0); return h(x + 2); }\nint x4(int x) { longjmp(0, 1); return h(x + 3); }\n"
+          "int e(int x) { return x1(x) + x2(x) + x3(x) + x4(x) + h(x + 4); }\n" },
+        { "a jmp_buf typedef at file scope before the declaration in effect at the call, not a block-scope one",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "void g(void) { typedef int jmp_buf; (void)sizeof(jmp_buf); }\nvoid longjmp(void *, int);\n"
+          "int x1(int x) { longjmp(0, 1); return h(x); }\ntypedef int jmp_buf;\nvoid longjmp(void *, int);\n"
+          "int x2(int x) { longjmp(0, 1); return h(x + 1); }\nint e(int x) { return x1(x) + x2(x); }\n" },
+        { "a statement expression's value and labels after a dead statement",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void hp(int *p) { *p = 1; }\n"
+          "__attribute__((noreturn)) void stop(void);\n"
+          "static int a(int x) { int y = ({ stop(); h(x); }); return y; }\n"
+          "static int b(int x) { return ({ stop(); h(x + 1); }); }\n"
+          "static int c(int x) { ({ stop(); h(x + 2); }); return h(x + 3); }\n"
+          "static int d(int x) { int y = ({ stop(); lbl: h(x + 4); }); return y; }\n"
+          "static int v(int x) { ({ stop(); hp(&x); }); return h(x + 5); }\n"
+          "static int w(int x) { ({ hp(&x); }); return h(x + 6); }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x) + v(x) + w(x); }\n" },
+        { "a constant switch's kept statements after a dead statement",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((noreturn)) void stop(void);\n"
+          "int a(int x) { switch (0) { case 0: stop(); x = h(x); break; } return x; }\n"
+          "int b(int x) { switch (0) { case 0: stop(); x = h(x + 1); break; } return h(x + 2); }\n"
+          "int c(int x) { switch (0) { case 0: stop(); break; } return h(x + 3); }\n"
+          "int g(int x) { return h(x + 4); }\nint e(int x) { return a(x) + b(x) + c(x) + g(x); }\n" },
+        { "labels inside sizeof and __alignof__ operands",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static int a(int x) { return 0 && (h(x), sizeof(({ lbl: 1; }))); }\n"
+          "static int b(int x) { switch (sizeof(({ lbl2: 1; }))) { case 0: x = 1; break; case 4: x = h(x + 1); break; } return x; }\n"
+          "static int c(int x) { if (sizeof(({ lbl3: 1; }))) { x = 1; } else { x = h(x + 2); } return x; }\n"
+          "static int d(int x) { if (__alignof__(({ lbl4: 1; })) == 4) { x = 1; } else { x = h(x + 3); } return x; }\n"
+          "int e(int x) { return a(x) + b(x) + c(x) + d(x); }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
