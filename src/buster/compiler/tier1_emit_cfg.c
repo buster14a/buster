@@ -1033,6 +1033,19 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     selected_records.records[0].rm = (uint8_t)emitted->frame.base_register;
                     selected_records.records[0].displacement = object_offset;
                 }
+                // A load, a store or an address through a frame object: the frame's base register at the object's
+                // offset plus the walked displacement, as the object's lea's. The memory record is the last one.
+                if (plan->patterns[node].stack_object != BUSTER_IR_NONE && error == TIER1_EMIT_OK)
+                {
+                    int32_t total = 0;
+                    error = selected_records.count != 0 && tier1_emit_cfg_object(emitted, plan->patterns[node].stack_object, &object_offset) &&
+                                    !__builtin_add_overflow(object_offset, plan->patterns[node].displacement, &total) ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
+                    if (error == TIER1_EMIT_OK)
+                    {
+                        selected_records.records[selected_records.count - 1].rm = (uint8_t)emitted->frame.base_register;
+                        selected_records.records[selected_records.count - 1].displacement = total;
+                    }
+                }
                 // A symbol's address, its reference the record's: a lea of it, or a load of its GOT slot; a thread-local's
                 // is the driver's Tier 0's.
                 if (plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS && error == TIER1_EMIT_OK)

@@ -128,6 +128,8 @@ static X86Instruction check_vector_lower_record(uint32_t form, uint8_t reg, uint
     return (X86Instruction){ .form = (uint16_t)form, .reg = reg, .vvvv = vvvv, .rm = rm, .mode = BUSTER_X86_REGISTER_DIRECT };
 }
 
+#include "c_check_program_vector_forms.c"
+
 // The row of an operator (check_vector_lower_*'s ops, or BUSTER_CHECK_VECTOR_SPLAT) at a vector type, on a target: its
 // records, operands and result, or the reason it has none. A binary operator takes its operands as VECTOR(0) and
 // VECTOR(1) and leaves its result in VECTOR(0); a compare, its -1 or 0 elements of the operands' sizes; a unary one, its
@@ -139,7 +141,7 @@ static X86Instruction check_vector_lower_record(uint32_t form, uint8_t reg, uint
 // target hasn't AVX512-FP16: check_lower_vector_half_chain), a negation of them is clang's in float, which quiets their
 // signaling NaNs: the sign bits flipped, then each half converted to a float and back (VCVTPH2PS and VCVTPS2PH, exact
 // but for those NaNs), the 64-byte vector's in two halves of 32 bytes.
-static const char* check_vector_lower_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
+static const char* check_vector_lower_evex_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
                                           Tier0Operation* row)
 {
     const CheckVectorElement element = check_vector_lower_element(types, vector);
@@ -317,6 +319,16 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
         reason = "vector operations on half-precision elements without AVX512-FP16";
     }
     return reason;
+}
+
+#include "c_check_program_vectors_baseline.c"
+
+static const char* check_vector_lower_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
+                                         Tier0Operation* row)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    return (target->features & evex) == evex ? check_vector_lower_evex_row(types, target, excess, op, vector, scalar_class, row) :
+                                             check_vector_lower_baseline_row(types, target, op, vector, scalar_class, row);
 }
 
 // Whether a vector type's elements are __bf16's (bfloat16), whose operators are check_vector_lower_brain_rows'.
