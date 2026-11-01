@@ -1096,12 +1096,13 @@ static void tier1_call_failures(Tier1EmitTest* test)
     }
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->input, 0);
-    // Past six arguments, and I128 and F64 results; variadic calls, calls through a pointer and narrow results are taken.
+    // Past the most arguments a call passes, and I128 and F64 results; variadic calls, calls through a pointer, narrow
+    // results and arguments past the registers (#141) are taken.
     static const uint32_t failures[] = { 0, 4, 5 };
     for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
         const uint32_t failure = failures[index];
-        const uint32_t arguments = failure == 0 ? 7 : failure < 3 ? 1 : 0;
+        const uint32_t arguments = failure == 0 ? BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1 : failure < 3 ? 1 : 0;
         const IrType parameter = failure == 2 ? IR_PTR : IR_I64;
         const IrType result = failure == 3 ? IR_I8 : failure == 4 ? IR_I128 : failure == 5 ? IR_F64 : IR_I64;
         const IrSizes sizes = {
@@ -1140,7 +1141,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             const uint64_t mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
             const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &rejected, &node);
-            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "stack arguments and wide or floating results explicitly refuse");
+            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "too many arguments and wide or floating results explicitly refuse");
             tier1_emit_test_expect(test, test->output.length == mark && test->scratch.length == scratch_mark && memcmp(&before, &rejected, sizeof(rejected)) == 0, "unsupported-call selection is transactional");
         }
         arena_pop_to(&test->input, 0);

@@ -87,8 +87,11 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : plan->patterns[node].rule;
         // A mask, and a mask's store, need the opmask class's allocation (#179).
         const bool mask = tier1_select_mask_width(type) != 0 || tier1_select_mask_rule(rule);
+        // Arguments past the registers, and parameters past them, which the CFG consumer's entry loads, are its own (#141).
+        const bool stacked = (op == IR_CALL && function->calls[function->b[node]].argument_count > BUSTER_TIER1_SELECT_CALL_ARGUMENTS) ||
+                             (op == IR_PARAM && function->a[node] >= BUSTER_TIER1_SELECT_CALL_ARGUMENTS);
         chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_LIFETIME && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow)) && rule != TIER1_RULE_DIVIDE &&
-                rule != TIER1_RULE_SHIFT && !mask;
+                rule != TIER1_RULE_SHIFT && !mask && !stacked;
         prefix &= op == IR_PARAM;
     }
     return chain;
@@ -298,6 +301,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             prepared->call_count += 1;
             const uint32_t arguments = function->calls[function->b[node]].argument_count;
             prepared->call_abi.integer_registers = prepared->call_abi.integer_registers > arguments ? prepared->call_abi.integer_registers : arguments;
+            // The outgoing area: the most stack slots a call's arguments past the registers take (#141).
+            const uint32_t stacked = arguments > BUSTER_TIER1_SELECT_CALL_ARGUMENTS ? BUSTER_ABI_SLOT_BYTES * (arguments - BUSTER_TIER1_SELECT_CALL_ARGUMENTS) : 0;
+            prepared->call_abi.stack_bytes = prepared->call_abi.stack_bytes > stacked ? prepared->call_abi.stack_bytes : stacked;
         }
     }
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
@@ -306,6 +312,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     emitted->symbol_access = options->symbol_access;
     emitted->symbol_access_count = options->symbol_access != 0 ? options->symbol_count : 0;
     prepared->call_abi.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    prepared->call_abi.integer_registers = prepared->call_abi.integer_registers < BUSTER_ABI_INTEGER_ARGUMENTS ? prepared->call_abi.integer_registers : BUSTER_ABI_INTEGER_ARGUMENTS;
     prepared->call_save_mask = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
     // The slots' columns: a value's at its node, the general registers' caller-save rows', the opmask registers' (one
@@ -506,18 +513,24 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
+            // A parameter past the registers, and a call's argument past them (#141), may be in a slot there: the entry
+            // loads the one from its incoming slot wherever its first fragment is (tier1_emit_cfg_entry), and the call
+            // stores the other into the outgoing area from wherever it is (tier1_emit_cfg_stack_argument).
             const uint32_t defined = node_values[node];
+            const bool call = function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT;
+            const uint32_t arguments = call ? function->calls[function->b[node]].argument_count : 0;
             if (defined != BUSTER_TIER1_CFG_NONE && function->op[node] == IR_PARAM)
             {
                 use_positions[use_cursors[defined]] = 0;
-                use_required[use_cursors[defined]] = 1;
+                use_required[use_cursors[defined]] = function->a[node] < BUSTER_TIER1_SELECT_CALL_ARGUMENTS;
                 use_cursors[defined] += 1;
             }
             for (uint32_t use = plan->effective_use_offsets[node]; use < plan->effective_use_offsets[node + 1]; use += 1)
             {
                 const uint32_t v = node_values[plan->effective_use_values[use]];
+                const uint32_t argument = use - plan->effective_use_offsets[node];
                 use_positions[use_cursors[v]] = base + 2 * node;
-                use_required[use_cursors[v]] = 1;
+                use_required[use_cursors[v]] = !call || argument < BUSTER_TIER1_SELECT_CALL_ARGUMENTS || argument >= arguments;
                 use_cursors[v] += 1;
             }
             if (defined != BUSTER_TIER1_CFG_NONE && function->op[node] != IR_PARAM && function->op[node] != IR_PHI)
@@ -666,19 +679,20 @@ static bool tier1_emit_cfg_object(const IrFunction* function, const Tier1EmitRes
     return found;
 }
 
-// A variadic definition's overflow area's address (#789): its unnamed stack arguments start past its named ones
-// (IrFunction.incoming.stack_bytes) in the incoming argument area, 8 bytes past the return address's slot. That is 16
-// past rbp in a frame with a frame pointer, a realigned one's among them, as the prologue sets rbp right after pushing
-// it. In a frame without one (#177's protocol), the prologue moves rsp by its pushes of the callee-saved registers,
-// then by its reservation, and nothing moves it again until the epilogue: the area is past both and the return address
-// (the red zone too is below the entry's rsp). The protocol never realigns such a frame, which would leave rsp's
-// distance from the entry unknown: the guard refuses one rather than miscompile it.
-static bool tier1_emit_cfg_incoming(const IrFunction* function, const Tier1EmitResult* emitted, uint8_t* base, int32_t* offset)
+// An address `past` bytes into the incoming argument area, 8 bytes past the return address's slot: a stack parameter's
+// (#141), or a variadic definition's overflow area, whose unnamed stack arguments start past its named ones
+// (IrFunction.incoming.stack_bytes, #789). That is 16 past rbp in a frame with a frame pointer, a realigned one's among
+// them, as the prologue sets rbp right after pushing it. In a frame without one (#177's protocol), the prologue moves
+// rsp by its pushes of the callee-saved registers, then by its reservation, and nothing moves it again until the
+// epilogue: the area is past both and the return address (the red zone too is below the entry's rsp). The protocol
+// never realigns such a frame, which would leave rsp's distance from the entry unknown: the guard refuses one rather
+// than miscompile it.
+static bool tier1_emit_cfg_incoming(const Tier1EmitResult* emitted, uint64_t past, uint8_t* base, int32_t* offset)
 {
     const Tier1Frame* frame = &emitted->frame;
     const uint64_t pushed = 8 * (uint64_t)__builtin_popcount(frame->saved_registers);
     const uint64_t above = frame->frame_pointer ? 16 : (uint64_t)frame->stack_adjust_bytes + pushed + 8;
-    const uint64_t total = above + function->incoming.stack_bytes;
+    const uint64_t total = above + past;
     const bool found = total <= INT32_MAX && (frame->frame_pointer || !frame->realigned);
     *base = frame->frame_pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
     *offset = found ? (int32_t)total : 0;
@@ -940,6 +954,44 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
     return found;
 }
 
+// A call's argument past the registers (#141), node `value`'s, into its 8-byte slot `slot` bytes into the outgoing area
+// from rsp: from where the allocation has it at the call's use phase `position`, which needn't be a register (its use
+// isn't required): from its register, from its slot through the scratch register, or recomputed into the scratch
+// register. The slot's 8 bytes are stored whole: an I32's bits past its 32 are the callee's to ignore, as the ABI says.
+static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint32_t slot, Tier1EmitBuffer* buffer)
+{
+    const uint8_t base = (uint8_t)emitted->frame.base_register;
+    const uint32_t v = emitted->node_values[value];
+    uint32_t location = BUSTER_TIER1_CFG_NONE;
+    uint8_t kind = 0;
+    int32_t offset = 0;
+    const bool found = v != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, v, position, &location, &kind);
+    Tier1EmitError error = found ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    uint8_t source = BUSTER_TIER1_SELECT_SCRATCH;
+    if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
+    {
+        source = (uint8_t)location;
+        error = location < 16 ? error : TIER1_EMIT_ALLOCATION;
+    }
+    else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_SPILL && tier1_emit_cfg_slot(emitted, location, &offset))
+    {
+        const uint32_t width = emitted->prepared.sizes[value];
+        const X86Instruction load = { .displacement = offset, .reg = source, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32 };
+        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+        emitted->spill_loads += 1;
+    }
+    else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
+    {
+        error = tier1_emit_copy(emitted, &emitted->prepared.recipes, value, source, base, buffer);
+    }
+    else
+    {
+        error = TIER1_EMIT_ALLOCATION;
+    }
+    const X86Instruction store = { .displacement = (int32_t)slot, .reg = source, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_RM64_R64 };
+    return error == TIER1_EMIT_OK ? (tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY) : error;
+}
+
 // A node whose rule takes x86's fixed registers (tier1_select_fixed: a division or a shift by a register, a division by a
 // constant's reciprocal), with any other value live past it in those registers, by its interval at the node's definition
 // phase, saved around it in its call-save row (tier1_emit_cfg_problem gives it one; tier1_emit_fixed).
@@ -960,7 +1012,8 @@ static Tier1EmitError tier1_emit_cfg_fixed(Tier1EmitResult* emitted, const Tier1
 // The entry's moves: each parameter free at its definition (Tier1CfgInput.definition_registers 0 for it, every
 // parameter where the allocation needed them all free) from its incoming register into the register its allocation has
 // it in at the entry, its definition's, as one parallel move through the scratch register. A parameter bound to its
-// incoming register is there already.
+// incoming register is there already. Then each parameter past the registers, always free, is loaded from its incoming
+// stack slot into its register (#141): after the moves, which read the registers the loads may write.
 static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, Arena* scratch, Tier1EmitBuffer* buffer)
 {
     const IrFunction* function = plan->function;
@@ -974,10 +1027,11 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
     {
         const uint32_t v = emitted->node_values[node];
         const bool free = function->op[node] == IR_PARAM && v != BUSTER_TIER1_CFG_NONE && (input->definition_registers == 0 || input->definition_registers[v] == 0);
+        const bool stacked = function->a[node] >= BUSTER_TIER1_SELECT_CALL_ARGUMENTS;
         const uint32_t interval = free ? tier1_cfg_interval_at(&emitted->cfg, v, 0) : BUSTER_TIER1_CFG_NONE;
         const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? allocation->fragment_offsets[interval] : 0;
-        error = !free || (interval != BUSTER_TIER1_CFG_NONE && allocation->kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER && count < BUSTER_ABI_INTEGER_ARGUMENTS) ? error : TIER1_EMIT_ALLOCATION;
-        if (free && error == TIER1_EMIT_OK && allocation->registers[fragment] != tier1_select_parameter_registers[function->a[node]])
+        error = !free || stacked || (interval != BUSTER_TIER1_CFG_NONE && allocation->kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER && count < BUSTER_ABI_INTEGER_ARGUMENTS) ? error : TIER1_EMIT_ALLOCATION;
+        if (free && !stacked && error == TIER1_EMIT_OK && allocation->registers[fragment] != tier1_select_parameter_registers[function->a[node]])
         {
             sources[count] = tier1_select_parameter_registers[function->a[node]];
             destinations[count] = allocation->registers[fragment];
@@ -1002,6 +1056,34 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
         error = tier1_emit_append(buffer, tier1_emit_move(resolved.sources[move], resolved.destinations[move], 8)) ? error : TIER1_EMIT_MEMORY;
     }
     arena_pop_to(scratch, scratch_mark);
+    // Each parameter past the registers from its incoming slot, 8 bytes each, into where its first fragment is: its
+    // register, or its slot through the scratch register (its definition isn't required to be in a register). A narrow
+    // one is zero-extended into its canonical 32-bit storage and an I32 zeroed past its 32 bits, as every other's is.
+    for (uint32_t node = 0; error == TIER1_EMIT_OK && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
+    {
+        const uint32_t v = emitted->node_values[node];
+        if (function->op[node] == IR_PARAM && function->a[node] >= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && v != BUSTER_TIER1_CFG_NONE)
+        {
+            uint32_t location = BUSTER_TIER1_CFG_NONE;
+            uint8_t kind = 0;
+            uint8_t base = X86_REGISTER_RSP;
+            int32_t offset = 0;
+            int32_t slot = 0;
+            const bool found = tier1_cfg_location(&emitted->cfg, v, 0, &location, &kind) &&
+                               tier1_emit_cfg_incoming(emitted, (uint64_t)BUSTER_ABI_SLOT_BYTES * (function->a[node] - BUSTER_TIER1_SELECT_CALL_ARGUMENTS), &base, &offset);
+            const bool in_register = found && kind == BUSTER_TIER1_ALLOCATE_REGISTER && location < 16;
+            const bool in_slot = found && kind == BUSTER_TIER1_ALLOCATE_SPILL && tier1_emit_cfg_slot(emitted, location, &slot);
+            const uint32_t type = function->type[node];
+            const uint16_t form = type == IR_I64 || type == IR_PTR ? X86_FORM_MOV_R64_RM64 : type == IR_I32 ? X86_FORM_MOV_R32_RM32 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+            const uint8_t target = in_register ? (uint8_t)location : (uint8_t)BUSTER_TIER1_SELECT_SCRATCH;
+            const X86Instruction load = { .form = form, .reg = target, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = offset };
+            const uint32_t width = emitted->prepared.sizes[node];
+            const X86Instruction store = { .displacement = slot, .reg = target, .rm = (uint8_t)emitted->frame.base_register, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
+            error = !in_register && !in_slot ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+            error = error == TIER1_EMIT_OK && in_slot ? (tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY) : error;
+            emitted->spill_stores += error == TIER1_EMIT_OK && in_slot;
+        }
+    }
     return error;
 }
 
@@ -1293,7 +1375,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count +
-                              (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS;
+                              (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -1319,6 +1401,13 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     for (uint32_t m = 0; error == TIER1_EMIT_OK && m < cfg->move_count; m += 1)
     {
         emitted->reference_capacity += cfg->move_sources[m] == BUSTER_TIER1_CFG_REMATERIALIZE && recipes[emitted->value_nodes[cfg->move_values[m]]] == BUSTER_TIER1_REMAT_SYMBOL;
+    }
+    // A call's argument past the registers that the call recomputes, a symbol's address with a reference (#141).
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        const bool call = !plan->covered[node] && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT);
+        const uint32_t arguments = call ? function->calls[function->b[node]].argument_count : 0;
+        emitted->reference_capacity += arguments > BUSTER_TIER1_SELECT_CALL_ARGUMENTS ? arguments - BUSTER_TIER1_SELECT_CALL_ARGUMENTS : 0;
     }
     bool ok = error == TIER1_EMIT_OK;
     code->records = ok ? ir_allocate(output, capacity, sizeof(X86Instruction), &ok) : 0;
@@ -1385,7 +1474,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             const uint32_t node = emitted->value_nodes[v];
             const uint32_t first = allocation->fragment_offsets[i];
             const uint32_t start = cfg->intervals.starts[i];
-            const bool defines = start == input->definitions[v] && function->op[node] != IR_PHI;
+            // A definition writes a register, but a parameter past the registers', which the entry loads from its incoming
+            // slot into its first fragment's place, a register or its own slot (tier1_emit_cfg_entry, #141).
+            const bool stacked = function->op[node] == IR_PARAM && function->a[node] >= BUSTER_TIER1_SELECT_CALL_ARGUMENTS;
+            const bool defines = start == input->definitions[v] && function->op[node] != IR_PHI && !stacked;
             error = !defines || allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER ? error : TIER1_EMIT_ALLOCATION;
             for (uint32_t f = first + 1; error == TIER1_EMIT_OK && f < allocation->fragment_offsets[i + 1]; f += 1)
             {
@@ -1441,7 +1533,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         const uint32_t type = function->type[node];
         const uint32_t narrow = type == IR_I1 || type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
-        if (function->op[node] == IR_PARAM && narrow != 0 && emitted->node_values[node] != BUSTER_TIER1_CFG_NONE)
+        if (function->op[node] == IR_PARAM && narrow != 0 && function->a[node] < BUSTER_TIER1_SELECT_CALL_ARGUMENTS && emitted->node_values[node] != BUSTER_TIER1_CFG_NONE)
         {
             const uint8_t reg = (uint8_t)tier1_select_parameter_registers[function->a[node]];
             const X86Instruction extend = { .form = narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
@@ -1512,7 +1604,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
             Tier1SelectHoles holes = { 0 };
             // The arguments' registers, and an indirect call's callee's after them.
-            uint32_t argument_registers[BUSTER_ABI_INTEGER_ARGUMENTS + 1] = { 0 };
+            uint32_t argument_registers[BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1] = { 0 };
             if (error == TIER1_EMIT_OK && selected)
             {
                 const Tier1SelectPattern* pattern = &plan->patterns[node];
@@ -1522,11 +1614,20 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     const uint32_t value = pattern->values[p];
                     registered &= value == BUSTER_IR_NONE || tier1_emit_cfg_holds(emitted, value, transitions.registers[value]);
                 }
+                // A call's arguments past the registers go to the outgoing area now, from where they are at its use phase,
+                // before its definition phase's transitions may take their registers (#141); the others are in registers.
+                const uint32_t arguments = calls ? function->calls[function->b[node]].argument_count : 0;
                 for (uint32_t u = plan->effective_use_offsets[node]; calls && u < plan->effective_use_offsets[node + 1]; u += 1)
                 {
                     const uint32_t value = plan->effective_use_values[u];
-                    argument_registers[u - plan->effective_use_offsets[node]] = transitions.registers[value];
-                    registered &= tier1_emit_cfg_register(transitions.registers[value]);
+                    const uint32_t argument = u - plan->effective_use_offsets[node];
+                    const bool stacked = argument >= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && argument < arguments;
+                    argument_registers[argument] = transitions.registers[value];
+                    registered &= stacked || tier1_emit_cfg_register(transitions.registers[value]);
+                    if (stacked && registered && error == TIER1_EMIT_OK)
+                    {
+                        error = tier1_emit_cfg_stack_argument(emitted, value, use, BUSTER_ABI_SLOT_BYTES * (argument - BUSTER_TIER1_SELECT_CALL_ARGUMENTS), &buffer);
+                    }
                 }
                 error = registered ? error : TIER1_EMIT_ALLOCATION;
                 if (error == TIER1_EMIT_OK && !calls)
@@ -1645,7 +1746,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 {
                     const uint32_t object = (uint32_t)plan->patterns[node].immediate;
                     uint8_t base = (uint8_t)emitted->frame.base_register;
-                    const bool found = tier1_emit_cfg_overflow_area(function, object) ? tier1_emit_cfg_incoming(function, emitted, &base, &object_offset)
+                    const bool found = tier1_emit_cfg_overflow_area(function, object) ? tier1_emit_cfg_incoming(emitted, function->incoming.stack_bytes, &base, &object_offset)
                                                                                      : tier1_emit_cfg_object(function, emitted, object, &object_offset);
                     error = selected_records.count == 1 && found ? error : TIER1_EMIT_FRAME;
                     selected_records.records[0].rm = base;

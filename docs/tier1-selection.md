@@ -144,6 +144,24 @@ patterns are:
   (`tier1_emit_cfg_incoming`). Every variadic definition that selection
   accepts goes to the CFG consumer. A function with its own ABI records is
   still refused whole.
+- Arguments and parameters past the registers (#141): a call takes up to
+  sixteen `I32`, `I64` or pointer arguments, and a function up to sixteen such
+  parameters (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`); those past the sixth are in
+  the stack's 8-byte slots. A variadic call's unnamed argument has its value's
+  type (`tier1_select_argument_type`), since `call_types` holds only the fixed
+  parameters' types. The CFG consumer takes every function with one, as follows.
+  - A call's argument past the registers needn't be in a register at the call.
+    The call stores it into its slot of the outgoing area, before its own moves:
+    from its register, from its spill slot through R11, or recomputed into R11
+    (`tier1_emit_cfg_stack_argument`). The frame planner reserves the area for
+    the calls' most stack bytes.
+  - A parameter past the registers is defined at the entry without a register.
+    After the register parameters' moves, the entry loads it from its incoming
+    slot into its first fragment's register, or through R11 into its own slot
+    (`tier1_emit_cfg_entry`). A narrow one is zero-extended as it loads. The
+    incoming slots are 16 bytes past RBP where the frame has a frame pointer, a
+    realigned frame's among them, and otherwise past RSP's reservation and the
+    return address (`tier1_emit_cfg_incoming`).
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and
 four-byte spill slots. Their logical memory widths remain one/two bytes.
@@ -370,6 +388,7 @@ A division and a shift by a register keep their functions on the CFG consumer, a
 before the helper (`tier1_emit_cfg_chain`).
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
+(sixteen through the CFG consumer, those past the sixth on the stack: #141)
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
 ID in `immediate`; its three ordinary value holes are empty. Its complete
 ordered argument list is the effective-use CSR slice, including duplicates.
@@ -401,10 +420,12 @@ and encoding, publish them through `link_add_code_fixups` with the encoder's
 instruction ends. The references retain instruction indices, not guessed byte
 offsets. The older frameless `tier1_select_emit` API still rejects call plans.
 
-Indirect and variadic calls, stack arguments, and floating-point and aggregate
-arguments/results are outside this bounded path. Calls in general CFGs, loops
-among them, go through the CFG consumer, which saves the registers of values
-live past each call. Neither establishes acceptance of source functions.
+Indirect and variadic calls, arguments and parameters past the registers, and
+floating-point and aggregate arguments/results are outside this bounded path.
+Calls in general CFGs, loops among them, and functions with arguments or
+parameters past the registers go through the CFG consumer, which saves the
+registers of values live past each call. Neither establishes acceptance of
+source functions.
 Unsupported calls and allocation/target/capacity errors publish no partial
 result. Correct execution of these component fixtures does not establish
 atomic-builtin, full-source ABI or corpus acceptance.

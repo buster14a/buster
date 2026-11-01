@@ -25,6 +25,11 @@
 // dividend is in rax or rdx has 13.
 #define BUSTER_TIER1_SELECT_FIXED_RECORDS 13
 #define BUSTER_TIER1_SELECT_CALL_ARGUMENTS 6
+// The most integer or pointer arguments a call passes, and parameters a function takes (#141): those past the registers
+// in the stack's 8-byte slots, the outgoing area's at a call and the incoming area's at the entry. Their values needn't
+// be in registers there: the CFG consumer stores each argument from wherever it is and loads each parameter into its
+// first fragment's place (tier1_emit_cfg.c).
+#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 16
 
 typedef enum Tier1SelectError
 {
@@ -1271,6 +1276,13 @@ static void tier1_select_canonical(const IrFunction* function, const uint32_t* b
     }
 }
 
+// A call's argument's type: a fixed parameter's, or an unnamed one's (a variadic call's past its parameters) its value's,
+// since call_types holds the fixed parameters' alone.
+static uint32_t tier1_select_argument_type(const IrFunction* function, const IrCall* call, uint32_t argument)
+{
+    return argument < call->parameter_count ? function->call_types[call->type_first + argument] : function->type[function->extra[call->argument_first + argument]];
+}
+
 // This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers, floating-point
 // and aggregates. The shared verifier checks descriptor bounds and actual argument types before this helper runs.
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
@@ -1284,11 +1296,11 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // A variadic call's unnamed arguments are promoted ones: its al says no vector register holds one (tier1_emit_call).
         // A narrow result is zero-extended after the call.
         const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
-        supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS &&
+        supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS &&
                     (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
-            const uint32_t argument_type = function->call_types[call.type_first + argument];
+            const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
             supported = argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR;
         }
     }
@@ -1714,7 +1726,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_PARAM && (integer || type == IR_PTR || type == IR_I1 || type == IR_I8 || type == IR_I16) && a < 6)
+    else if (op == IR_PARAM && (integer || type == IR_PTR || type == IR_I1 || type == IR_I8 || type == IR_I16) && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
     {
         base.rule = TIER1_RULE_LEAF;
         tier1_select_add_candidate(forest, node, &candidates, base);

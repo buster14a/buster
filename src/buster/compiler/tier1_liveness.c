@@ -69,7 +69,8 @@ static uint32_t tier1_liveness_parameter_mask(uint32_t parameter)
 }
 
 // With `phis`, for the CFG consumer (tier1_emit_cfg.c), a selected phi is valid too, and so are a parameter after other
-// instructions and a narrow one (which it zero-extends at the entry); this file's intervals still refuse them.
+// instructions, a narrow one (which it zero-extends at the entry) and one past the registers (which it loads there from
+// its incoming stack slot, #141); this file's intervals still refuse them.
 static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* plan, Arena* scratch, bool vector, bool phis)
 {
     (void)vector;
@@ -177,7 +178,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             // reciprocal takes its fixed registers in either consumer.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
-        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0 ||
+        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || (tier1_liveness_parameter_mask(function->a[node]) == 0 && !phis) ||
                                     (type != IR_I32 && type != IR_I64 && type != IR_PTR && !(phis && (type == IR_I1 || type == IR_I8 || type == IR_I16)))))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;

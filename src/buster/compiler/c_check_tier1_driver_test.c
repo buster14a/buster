@@ -432,6 +432,63 @@ static const char check_test_tier1_narrow_callee_source[] =
     "int tier1_narrow_entry(int a, int b, int c);\n"
     "int clang_calls_narrow(int x) { return tier1_narrow_entry(0x123456f0 + x, 0x7fff0000 | (x & 0xffff), 0x5a5a0000 | (x & 1)); }\n";
 
+// The stack arguments' fixture (#141): a unit by --tier1 whose functions pass 7 to 16 arguments of mixed types (longs,
+// ints, pointers, chars and shorts, extended by their types) to functions clang -O2 compiles in the other unit, which
+// read the ones past the registers from the stack, and take 7 to 12 parameters from callers clang -O2 compiles there,
+// some through function pointers. Each of the other unit's functions folds its arguments into one value.
+static const char check_test_tier1_stack_caller_source[] =
+    "#include <stdio.h>\n"
+    "long tier1_other7(long a, int b, long c, char* d, short e, long f, long g);\n"
+    "long tier1_other8(int a, long b, long c, long d, long e, unsigned char f, long g, int h);\n"
+    "long tier1_other12(long a, long b, int c, long d, long e, long f, signed char g, long h, long* i, int j, long k, unsigned short l);\n"
+    "long tier1_other16(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, long k, long l, long m, long n, long o, long p);\n"
+    "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x);\n"
+    "static long tier1_pass(long x, long y)\n"
+    "{\n"
+    "    char text[4] = { 'a', 'b', 'c', 0 };\n"
+    "    long cell = x ^ 77;\n"
+    "    long r = tier1_other7(x, (int)y, x + y, text, (short)(x * 3), x - y, y * 5);\n"
+    "    r = r * 31 + tier1_other8((int)(x + 1), y, x * y, x ^ y, ~x, (unsigned char)(y + 200), x + 7, (int)-y);\n"
+    "    r = r * 31 + tier1_other12(x, y, (int)(x - 9), y + 1, x + 2, y + 3, (signed char)(x * 11), y - 4, &cell, (int)(y * 13), x * 9, (unsigned short)(y * 4099));\n"
+    "    r = r * 31 + tier1_other16(x, y, x + 1, y + 1, x + 2, y + 2, x + 3, y + 3, x + 4, y + 4, x + 5, y + 5, x + 6, y + 6, x + 7, y + 7);\n"
+    "    return r;\n"
+    "}\n"
+    "long tier1_take7(long a, long b, long c, long d, long e, long f, long g)\n"
+    "{\n"
+    "    return ((((((a * 3 + b) * 3 + c) * 3 + d) * 3 + e) * 3 + f) * 3 + g);\n"
+    "}\n"
+    "long tier1_take12(long a, long b, long c, long d, long e, long f, int g, long h, long i, long j, short k, long l)\n"
+    "{\n"
+    "    long r = a ^ (b * 2) ^ (c * 4) ^ (d * 8) ^ (e * 16) ^ (f * 32);\n"
+    "    return r * 1000003 + g * 7 + h * 11 + (i ^ j) * 13 + k * 17 + l;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long total = 0;\n"
+    "    for (long x = -40; x < 40; x += 3)\n"
+    "    {\n"
+    "        total = total * 31 + (unsigned long)tier1_pass(x, x * 7 - 5) + (unsigned long)tier1_drive(tier1_take7, tier1_take12, x);\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", total);\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_stack_callee_source[] =
+    "long tier1_other7(long a, int b, long c, char* d, short e, long f, long g) { return a * 3 + b * 5 + c * 7 + d[1] * 11 + e * 13 + f * 17 + g * 19; }\n"
+    "long tier1_other8(int a, long b, long c, long d, long e, unsigned char f, long g, int h) { return (a ^ b) + c * 3 - d + (e ^ 99) + f * 7 + g * 11 + h * 13; }\n"
+    "long tier1_other12(long a, long b, int c, long d, long e, long f, signed char g, long h, long* i, int j, long k, unsigned short l)\n"
+    "{\n"
+    "    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + *i * 9 + j * 10 + k * 11 + l * 12;\n"
+    "}\n"
+    "long tier1_other16(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, long k, long l, long m, long n, long o, long p)\n"
+    "{\n"
+    "    return ((((a * 31 + b) * 31 + c - d) * 31 + e * f - g) * 31 + h ^ i) + j * 3 + k * 5 + l * 7 + m * 11 + n * 13 + o * 17 + p * 19;\n"
+    "}\n"
+    "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x)\n"
+    "{\n"
+    "    return seven(x, x + 1, x - 2, x * 3, x ^ 4, ~x, x * x) + twelve(x, 2, 3, x, 5, 6, (int)(x * 7), 8, x - 9, 10, (short)(x * 11), x + 12);\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -1629,5 +1686,61 @@ static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang
     }
     check_test_expect(test, !ran || (frames[1][0] == frames[1][1] && frames[0][0] == frames[0][1]), "both paths' frames take the same bytes");
     unlink(source);
+    unlink(reference);
+}
+
+// The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
+// function but main Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both
+// prints: the arguments past the registers reach clang's callees in their stack slots, and the parameters past them
+// arrive from clang's callers.
+static void check_test_driver_tier1_stack(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char caller[512];
+    char callee[512];
+    char callee_object[512];
+    char reference[512];
+    snprintf(caller, sizeof(caller), "%s/tier1-stack.c", directory);
+    snprintf(callee, sizeof(callee), "%s/tier1-stack-other.c", directory);
+    snprintf(callee_object, sizeof(callee_object), "%s/tier1-stack-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-stack-clang", directory);
+    const bool written = parse_test_write(caller, check_test_tier1_stack_caller_source, sizeof(check_test_tier1_stack_caller_source) - 1) &&
+                         parse_test_write(callee, check_test_tier1_stack_callee_source, sizeof(check_test_tier1_stack_callee_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, caller, callee, NULL };
+    char* callee_arguments[] = { (char*)clang, "-O2", "-c", "-o", callee_object, callee, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool callee_built = written && check_test_driver_spawn(callee_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && callee_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the stack arguments' fixture run");
+    static const char* const names[3] = { "tier1_pass", "tier1_take7", "tier1_take12" };
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-stack-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-stack-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build_names(executable, caller, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the stack arguments' unit compiles by --tier1, every function but main Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, callee_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[256] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's stack arguments and parameters meet clang -O2's code");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(caller);
+    unlink(callee);
+    unlink(callee_object);
     unlink(reference);
 }

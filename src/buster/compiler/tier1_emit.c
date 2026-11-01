@@ -39,7 +39,7 @@
 #define BUSTER_TIER1_EMIT_MASK_REGISTERS 0xfeu
 // A call's records past its node's share, a kmov store and load of each of k1 to k7 that a mask holds across it among
 // them (#179).
-#define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6 + 2 * 7)
+#define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6 + 2 * 7 + 2 * (BUSTER_TIER1_SELECT_MAX_ARGUMENTS - BUSTER_TIER1_SELECT_CALL_ARGUMENTS))
 // The records a node of a fixed-register rule writes past its share, BUSTER_TIER1_SELECT_RECORDS_PER_NODE: its sequence's,
 // and the saves and restores of the two fixed registers a division takes (tier1_emit_fixed).
 #define BUSTER_TIER1_EMIT_FIXED_RECORDS (BUSTER_TIER1_SELECT_FIXED_RECORDS + 4 - BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
@@ -634,25 +634,28 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     {
         error = TIER1_EMIT_ALLOCATION;
     }
-    // The arguments into their registers, and an indirect call's callee, its effective use after them, into R10, which no
-    // argument takes: one parallel move, so that no source is overwritten before it is read.
+    // The register arguments into their registers, and an indirect call's callee, its effective use after the arguments,
+    // into R10, which no argument takes: one parallel move, so that no source is overwritten before it is read. The
+    // arguments past the registers are the CFG consumer's, which stores them first (tier1_emit_cfg_stack_argument, #141):
+    // `argument_registers` holds a register for the others alone, and for the callee at the arguments' count.
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
+    const uint32_t registered = call->argument_count < BUSTER_TIER1_SELECT_CALL_ARGUMENTS ? call->argument_count : BUSTER_TIER1_SELECT_CALL_ARGUMENTS;
     uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 1];
     uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 1];
-    for (uint32_t argument = 0; argument < call->argument_count; argument += 1)
+    for (uint32_t argument = 0; argument < registered; argument += 1)
     {
         sources[argument] = argument_registers[argument];
         destinations[argument] = tier1_select_parameter_registers[argument];
     }
     if (indirect)
     {
-        sources[call->argument_count] = argument_registers[call->argument_count];
-        destinations[call->argument_count] = X86_REGISTER_R10;
+        sources[registered] = argument_registers[call->argument_count];
+        destinations[registered] = X86_REGISTER_R10;
     }
     const Tier1ParallelMoves moves = {
         .sources = sources,
         .destinations = destinations,
-        .count = call->argument_count + indirect,
+        .count = registered + indirect,
         .scratch = BUSTER_TIER1_SELECT_SCRATCH,
     };
     Tier1ResolvedMoves resolved = {0};
@@ -681,9 +684,9 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     // Resolve mixed-width cycles using full registers first. Narrowing a source early could corrupt a distinct
     // 64-bit argument that shares it; only the completed 32-bit destinations are then zero-extended.
-    for (uint32_t argument = 0; error == TIER1_EMIT_OK && argument < call->argument_count; argument += 1)
+    for (uint32_t argument = 0; error == TIER1_EMIT_OK && argument < registered; argument += 1)
     {
-        if (function->call_types[call->type_first + argument] == IR_I32 && !tier1_emit_append(buffer, tier1_emit_move(destinations[argument], destinations[argument], 4)))
+        if (tier1_select_argument_type(function, call, argument) == IR_I32 && !tier1_emit_append(buffer, tier1_emit_move(destinations[argument], destinations[argument], 4)))
         {
             error = TIER1_EMIT_MEMORY;
         }

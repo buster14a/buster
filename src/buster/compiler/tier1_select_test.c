@@ -1292,9 +1292,9 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                 {
                     .instruction_count = count,
                     .block_count = 1,
-                    .extra_count = 7,
+                    .extra_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1,
                     .call_count = 1,
-                    .call_type_count = 7,
+                    .call_type_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1,
                     .parameter_count = 6,
                 };
                 IrFunction function;
@@ -1310,10 +1310,11 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                     {
                         tier1_select_test_node(&function, p, IR_PARAM, parameter_types[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
                     }
-                    for (uint32_t p = 0; p < 7; p += 1)
+                    // Room for one argument more than a call passes, the arguments past the seventh repeating them.
+                    for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1; p += 1)
                     {
-                        function.extra[p] = ordered[p];
-                        function.call_types[p] = parameter_types[ordered[p]];
+                        function.extra[p] = ordered[p % 7];
+                        function.call_types[p] = parameter_types[ordered[p % 7]];
                     }
                     function.calls[0] = (IrCall)
                     {
@@ -1372,7 +1373,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                     }
                     if (calls == 1 && arguments == 6 && result_types[type] == IR_I64)
                     {
-                        for (uint32_t refusal = 0; refusal < 7; refusal += 1)
+                        for (uint32_t refusal = 0; refusal < 8; refusal += 1)
                         {
                             const IrCall saved = function.calls[0];
                             if (refusal == 0)
@@ -1380,6 +1381,11 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 function.calls[0].variadic = true;
                             }
                             else if (refusal == 1)
+                            {
+                                function.calls[0].argument_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
+                                function.calls[0].parameter_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
+                            }
+                            else if (refusal == 7)
                             {
                                 function.calls[0].argument_count = 7;
                                 function.calls[0].parameter_count = 7;
@@ -1417,9 +1423,10 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 const uint64_t mark = output.length;
                                 uint32_t failed = 0;
                                 const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &rejected, &failed);
-                                // A variadic call of integer arguments (its AL zero) and a call through a pointer are taken
-                                // (tier1_call_test.c runs both).
-                                const bool taken = refusal == 0 || refusal == 2;
+                                // A variadic call of integer arguments (its AL zero), a call through a pointer
+                                // (tier1_call_test.c runs both) and a call of seven, its last on the stack (#141,
+                                // tier1_stack_test.c), are taken.
+                                const bool taken = refusal == 0 || refusal == 2 || refusal == 7;
                                 const Tier1SelectError expected = taken ? TIER1_SELECT_OK : refusal < 5 ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
                                 tier1_select_test_expect(test, error == expected && (taken || refusal >= 5 || failed == 6), "unsupported call ABI and invalid IR remain distinct");
                                 tier1_select_test_expect(test, error == TIER1_SELECT_OK || (output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0), "call refusal preserves result and arena lengths");

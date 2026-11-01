@@ -212,8 +212,11 @@ definitions (#789): the frame's register save area, which the prologue fills
 from the argument registers, and the overflow area past the incoming stack
 arguments. A narrow call argument reaches Tier 1 as the `i32` the lowering
 extends it to by its class, and a narrow parameter as an `i32` it truncates (#141,
-the [IR guide](ir.md)'s "Typed-stream lowering"). Still refused: floating point,
-stack arguments, switches and aggregates by value.
+the [IR guide](ir.md)'s "Typed-stream lowering"). Arguments and parameters past
+the six registers (#141) go through the CFG consumer too: a call stores each
+argument in its slot of the outgoing area, from wherever its value is, and the
+entry loads each parameter from its incoming slot. Still refused: floating
+point, switches and aggregates by value.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
@@ -267,7 +270,8 @@ its own broader branch subset and explicitly refuses unsupported allocations
 and phis.
 
 Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
-arguments and a void or matching scalar result. The native consumer preserves
+arguments (sixteen through the CFG consumer, those past the sixth on the stack:
+#141) and a void or matching scalar result. The native consumer preserves
 live caller registers, resolves argument cycles, aligns the stack and publishes
 ordinary symbolic CALL references. Independent hostile helpers test clobbers,
 return widths, memory effects and frame safety. Full builtin/source acceptance
