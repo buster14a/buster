@@ -227,12 +227,13 @@ designs and the compilers already built this way.
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
-  stores and constants of every width) and allocated in the opmask class by the
-  CFG consumer, which moves and spills them at their widths and saves them around
-  calls; vectors are refused (#141). Run
+  stores, constants and bitcasts to and from integers of every width) and
+  allocated in the opmask class by the CFG consumer, which moves and spills them
+  at their widths and saves them around calls; vectors are refused (#141). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
-  natively against the IR's interpreter) for bounded typed-stream/native
+  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
+  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -1307,7 +1308,10 @@ designs and the compilers already built this way.
   number; rows take them by role (`MASK(j)`, `MASK_RESULT`, `MASK_SCRATCH(k)`,
   borrowing k1 on past k7), and the stack's depths are a column of their own
   in a function with masks (`Tier0Function.masks`, `tier0_vector_mask_depths`
-  and its twin). `interpreter.c` runs them; `ir_lower.c` refuses them; the
+  and its twin). `interpreter.c` runs them; `ir_lower.c` lowers them to the
+  IR's `m8` to `m64`, its rows of the front end's `_k*` builtins through
+  `ir_simd_typed.c`'s decoder, so `--tier1` compiles them by Tier 1
+  (docs/ir-simd.md's "Masks from the typed stream"); the
   front end's AVX-512 builtins are their first user (`check_x86_lower_masks`);
   `test-tier0`'s masks check (`tier0_mask_test.c`) runs random programs over
   them natively against the interpreter and a model of its own. The
@@ -5556,8 +5560,12 @@ lazy session.
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
-every run one lane's code. Run it under the 9700X's lock without `taskset`,
-with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
+every run one lane's code, for the target its options give (#1045:
+`test-checker` measures a unit of 512-bit vectors with `-march=znver5` and
+refuses the same unit for the baseline profile, and measures a baseline
+unit's function whose target attribute takes AVX2's vectors,
+`c_check_lanes_benchmark_test.c`). Run it under the 9700X's lock without
+`taskset`, with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
 and the benchmark on the frozen SQLite source where the emission changes.
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
 measurements.

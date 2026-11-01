@@ -77,6 +77,9 @@
 #include <string.h>
 #include "host_isa.h"
 
+// OS-dependent includes
+#include <sys/mman.h>
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The typed stream
 
@@ -3051,11 +3054,41 @@ static bool tier0_inc_dec_costs_no_more(void)
     return cheaper;
 }
 
+// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name.
+#define BUSTER_TIER0_MADV_POPULATE_WRITE 23
+
+// Before tier0_initialize writes its tables (about 1 MB), their pages, both ends rounded out, committed in one call each
+// (MADV_POPULATE_WRITE) rather than a fault each (#590): a kernel whose transparent huge pages are only `madvise`d gave them 257 base pages'
+// faults in every compile. Each stays a separate array, which the passes' code needs: one structure of them, in a huge
+// page of its own, took tier0_initialize from 82 to 184 million instructions in 60 builds, as LLVM can't tell that its
+// members don't overlap. A call failing (an older kernel) leaves the pages to their faults.
+static void tier0_commit(const void* table, uintptr_t bytes)
+{
+    const uintptr_t page = 4096;
+    const uintptr_t first = (uintptr_t)table & ~(page - 1);
+    const uintptr_t last = ((uintptr_t)table + bytes + page - 1) & ~(page - 1);
+    madvise((void*)first, last - first, BUSTER_TIER0_MADV_POPULATE_WRITE);
+}
+
+static void tier0_prepare_tables(void)
+{
+    tier0_commit(tier0_templates, sizeof(tier0_templates));
+    tier0_commit(tier0_template_infos, sizeof(tier0_template_infos));
+    tier0_commit(tier0_compiled, sizeof(tier0_compiled));
+    tier0_commit(tier0_slot_words, sizeof(tier0_slot_words));
+    tier0_commit(tier0_template_words, sizeof(tier0_template_words));
+    tier0_commit(tier0_masks, sizeof(tier0_masks));
+    tier0_commit(tier0_slots, sizeof(tier0_slots));
+    tier0_commit(tier0_slot_bases, sizeof(tier0_slot_bases));
+    tier0_commit(tier0_choice_shapes, sizeof(tier0_choice_shapes));
+}
+
 static bool tier0_initialize(void)
 {
     // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
     if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
     {
+        tier0_prepare_tables();
         tier0_inc_dec = tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0;
         memset(tier0_slot_bases, 0, sizeof(tier0_slot_bases));
         tier0_template_count = 0;
