@@ -338,6 +338,9 @@ struct PPOptions
     // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
     // ordinary errors, followed by Clang's twentieth, fatal cutoff. Suppressed warnings are not counted.
     uint32_t error_limit;
+    // -Wfatal-errors: the first command-line or default error, including a warning mapped to one, is published as a
+    // fatal error and stops publication; -Wno-fatal-errors restores the ordinary error budget.
+    bool fatal_errors;
     bool suppress_warnings;
     bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
@@ -1638,8 +1641,13 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Pre
 // The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
 static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
 {
-    *severity = (*severity == PP_SEVERITY_MAPPED_ERROR || *severity == PP_SEVERITY_DEFERRED_ERROR) ? PP_SEVERITY_ERROR :
+    // A source pragma's error is MAPPED_ERROR and keeps clang's ordinary error severity under -Wfatal-errors; every
+    // other error becomes fatal below. It has no effect on warnings, and the error budget can't cut in first: the
+    // diagnostic is already fatal.
+    const bool source_error = *severity == PP_SEVERITY_MAPPED_ERROR;
+    *severity = (source_error || *severity == PP_SEVERITY_DEFERRED_ERROR) ? PP_SEVERITY_ERROR :
                 *severity == PP_SEVERITY_MAPPED_FATAL ? PP_SEVERITY_FATAL : *severity;
+    *severity = pp->options.fatal_errors && *severity == PP_SEVERITY_ERROR && !source_error ? PP_SEVERITY_FATAL : *severity;
     const bool accepted = !pp->fatal && !(*severity == PP_SEVERITY_WARNING && pp->options.suppress_warnings);
     *limited = accepted && !pp->options.collect_diagnostics && *severity == PP_SEVERITY_ERROR && pp->options.error_limit != 0 && pp->errors >= pp->options.error_limit;
     if (accepted)
@@ -20544,6 +20552,10 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             options->system_header_warnings = strcmp(argument, "-Wsystem-headers") == 0;
             options->implicit_function_system = options->system_header_warnings;
+        }
+        else if (strcmp(argument, "-Wfatal-errors") == 0 || strcmp(argument, "-Wno-fatal-errors") == 0)
+        {
+            options->fatal_errors = strcmp(argument, "-Wfatal-errors") == 0;
         }
         else if (strcmp(argument, "-dM") == 0)
         {
