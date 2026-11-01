@@ -40,7 +40,10 @@
 //
 // The frame's rows, in order: the spilled values' slots, the general registers' call-save rows (the fixed registers'
 // among them), the opmask registers' (one per register a mask holds across a call), the general class's temporary slot
-// and the opmask class's where moves use them, then the frame objects.
+// and the opmask class's where moves use them, then the frame objects. A variadic definition's register save area
+// (#789) is the frame's own past the rows (BUSTER_TIER1_FRAME_VARIADIC), which the prologue fills from the argument
+// registers, and the vector ones where al isn't zero, before anything else writes them; its overflow area is in the
+// caller's frame, past the incoming stack arguments (tier1_emit_cfg_incoming).
 //
 // Borrowed inputs are immutable; the arenas are disjoint. tier1_emit_function restores both arenas' lengths on failure
 // and leaves the result unchanged.
@@ -72,8 +75,9 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     // parameter or one after other instructions the entry's definitions: the CFG consumer's. A division and a shift by a
     // register stay the CFG consumer's too, which keeps their functions' code as it was before both consumers saved
     // fixed registers (tier1_emit_fixed); a division by a constant's reciprocal takes them in either consumer.
-    // Labels' symbols, which the CFG consumer defines at their blocks (tier1_emit_cfg_labels), make a function its own too.
-    chain &= function->label_count == 0;
+    // Labels' symbols, which the CFG consumer defines at their blocks (tier1_emit_cfg_labels), make a function its own too,
+    // and so does a variadic definition, whose prologue fills its register save area (tier1_emit_cfg_frame_flags).
+    chain &= function->label_count == 0 && !function->variadic;
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -132,6 +136,27 @@ static uint32_t tier1_emit_cfg_object_row(const Tier1EmitResult* emitted, uint32
 {
     const uint32_t temporaries = (emitted->cfg.temp_slots & 1u) + ((emitted->cfg.temp_slots >> BUSTER_TIER1_ALLOCATE_MASK) & 1u);
     return tier1_emit_cfg_temporary_row(emitted, BUSTER_TIER1_ALLOCATE_GPR) + temporaries + object;
+}
+
+// Whether frame object `slot` is a variadic definition's overflow area (#789), whose address is in the caller's frame,
+// past the incoming stack arguments (tier1_emit_cfg_incoming): the frame's base doesn't reach it, so its address has
+// no frame row and no recipe.
+static bool tier1_emit_cfg_overflow_area(const IrFunction* function, uint32_t slot)
+{
+    return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
+}
+
+// The frame's flags: the options', and BUSTER_TIER1_FRAME_VARIADIC for a variadic definition with a register save area
+// (#789), which the frame reserves and its prologue fills from the argument registers (tier1_frame.c): the IR's save
+// area is that one (tier1_emit_cfg_object).
+static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tier1EmitOptions* options)
+{
+    bool save_area = false;
+    for (uint32_t s = 0; s < function->slot_count; s += 1)
+    {
+        save_area |= (function->slots[s].flags & BUSTER_IR_SLOT_REGISTER_SAVE_AREA) != 0;
+    }
+    return options->frame_flags | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0);
 }
 
 // The inverse of a conditional jump's form, or X86_FORM_NONE for a form the selector doesn't choose.
@@ -204,7 +229,7 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
             addends[node] = displacement;
             flags[node] = BUSTER_TIER1_REMAT_STABLE | (access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_TIER1_REMAT_GOT : 0);
         }
-        else if (rule == TIER1_RULE_STACK_ADDRESS && fits)
+        else if (rule == TIER1_RULE_STACK_ADDRESS && fits && !tier1_emit_cfg_overflow_area(plan->function, (uint32_t)pattern->immediate))
         {
             operations[node] = BUSTER_TIER1_REMAT_STACK;
             values[node] = pattern->immediate;
@@ -318,9 +343,12 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         }
         for (uint32_t o = 0; o < objects; o += 1)
         {
+            // A variadic definition's anchors (#789) take a row of one byte, which nothing reads: the register save area is
+            // the frame's own, and the overflow area is in the caller's frame.
             const IrSlot* slot = &function->slots[o];
-            prepared->sizes[count + fixed_columns + o] = slot->size != 0 ? (uint32_t)slot->size : 1;
-            prepared->alignments[count + fixed_columns + o] = slot->alignment != 0 ? slot->alignment : 1;
+            const bool anchor = (slot->flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) != 0;
+            prepared->sizes[count + fixed_columns + o] = !anchor && slot->size != 0 ? (uint32_t)slot->size : 1;
+            prepared->alignments[count + fixed_columns + o] = !anchor && slot->alignment != 0 ? slot->alignment : 1;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -374,7 +402,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             },
             .calls = &prepared->call_abi,
             .call_count = prepared->call_count != 0,
-            .flags = options->frame_flags,
+            .flags = tier1_emit_cfg_frame_flags(plan->function, options),
         };
         Tier1FrameRequirements requirements = { 0 };
         error = tier1_frame_requirements(&request, &requirements) == TIER1_FRAME_OK ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
@@ -625,12 +653,35 @@ static Tier1EmitError tier1_emit_cfg_mask_saves(const Tier1SelectPlan* plan, Are
     return ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
 
-// The frame offset of frame object `object`: its row, the last ones (tier1_emit_cfg_frame).
-static bool tier1_emit_cfg_object(const Tier1EmitResult* emitted, uint32_t object, int32_t* offset)
+// The frame offset of frame object `object`: its row, the last ones (tier1_emit_cfg_frame), or for a variadic
+// definition's register save area the frame's own (Tier1Frame.variadic_offset, which the prologue fills, #789). An
+// overflow area has none (tier1_emit_cfg_incoming).
+static bool tier1_emit_cfg_object(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t object, int32_t* offset)
 {
+    const uint32_t flags = object < function->slot_count ? function->slots[object].flags : 0;
+    const bool save_area = (flags & BUSTER_IR_SLOT_REGISTER_SAVE_AREA) != 0;
     const uint32_t row = tier1_emit_cfg_object_row(emitted, object);
-    const bool found = row < emitted->frame.count;
-    *offset = found ? emitted->frame.offset[row] : 0;
+    const bool found = object < function->slot_count && (flags & BUSTER_IR_SLOT_OVERFLOW_AREA) == 0 && (save_area ? emitted->frame.variadic : row < emitted->frame.count);
+    *offset = !found ? 0 : save_area ? emitted->frame.variadic_offset : emitted->frame.offset[row];
+    return found;
+}
+
+// A variadic definition's overflow area's address (#789): its unnamed stack arguments start past its named ones
+// (IrFunction.incoming.stack_bytes) in the incoming argument area, 8 bytes past the return address's slot. That is 16
+// past rbp in a frame with a frame pointer, a realigned one's among them, as the prologue sets rbp right after pushing
+// it. In a frame without one (#177's protocol), the prologue moves rsp by its pushes of the callee-saved registers,
+// then by its reservation, and nothing moves it again until the epilogue: the area is past both and the return address
+// (the red zone too is below the entry's rsp). The protocol never realigns such a frame, which would leave rsp's
+// distance from the entry unknown: the guard refuses one rather than miscompile it.
+static bool tier1_emit_cfg_incoming(const IrFunction* function, const Tier1EmitResult* emitted, uint8_t* base, int32_t* offset)
+{
+    const Tier1Frame* frame = &emitted->frame;
+    const uint64_t pushed = 8 * (uint64_t)__builtin_popcount(frame->saved_registers);
+    const uint64_t above = frame->frame_pointer ? 16 : (uint64_t)frame->stack_adjust_bytes + pushed + 8;
+    const uint64_t total = above + function->incoming.stack_bytes;
+    const bool found = total <= INT32_MAX && (frame->frame_pointer || !frame->realigned);
+    *base = frame->frame_pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+    *offset = found ? (int32_t)total : 0;
     return found;
 }
 
@@ -727,7 +778,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
             .calls = &prepared->call_abi,
             .call_count = prepared->call_count != 0,
             .used_callee_saved = emitted->callee_used,
-            .flags = options->frame_flags,
+            .flags = tier1_emit_cfg_frame_flags(plan->function, options),
         };
         const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
         error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_FRAME;
@@ -739,7 +790,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
         int32_t offset = 0;
         if (prepared->recipes.operations[node] == BUSTER_TIER1_REMAT_STACK)
         {
-            error = tier1_emit_cfg_object(emitted, (uint32_t)prepared->recipe_values[node], &offset) ? error : TIER1_EMIT_FRAME;
+            error = tier1_emit_cfg_object(plan->function, emitted, (uint32_t)prepared->recipe_values[node], &offset) ? error : TIER1_EMIT_FRAME;
             prepared->recipe_values[node] = (uint64_t)((int64_t)offset + prepared->recipes.addends[node]);
         }
     }
@@ -907,10 +958,13 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
 // Whether value v's definition at `definition` writes a register nothing reads: v is recomputed (#178), and the first
 // fragment of the interval its definition starts serves no use of v but those of definitions left out (`dropped`, by
 // node, decided for every later node first), and ends where a recomputation takes over (the next fragment's) or, as the
-// interval's last, before its block's end, where an edge would read it. Its records can then be left out, the value
-// recomputed where it is used (an edge's move or a fragment's transition takes the recipe rather than the register), as
-// the definition's records only compute a value: a constant, an address or a copy of one. A use at position p > the
-// definition is node (p - base) / 2's.
+// interval's last, before its block's end, where an edge would read it; either way before the last position of the
+// block the definition is in. An edge leaving a block whose end the fragment covers reads its register: for a phi's
+// operand on the edge, or for v live into the successor, moved from the register or found there where the successor
+// keeps v (or the phi) in the same one, with no move at all (#141: sqlite3VdbeExec's join of an error code). Its
+// records can then be left out, the value recomputed where it is used (an edge's move or a fragment's transition takes
+// the recipe rather than the register), as the definition's records only compute a value: a constant, an address or a
+// copy of one. A use at position p > the definition is node (p - base) / 2's.
 static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint32_t v, uint32_t definition, const uint8_t* dropped, uint32_t base)
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
@@ -921,8 +975,9 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
     const bool last = interval != BUSTER_TIER1_CFG_NONE && first + 1 == allocation->fragment_offsets[interval + 1];
     const uint32_t end = interval != BUSTER_TIER1_CFG_NONE ? cfg->intervals.ends[interval] : 0;
     const bool inside = last && end != input->block_starts[tier1_cfg_block_of(input, end - 1) + 1];
+    const uint32_t block = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_block_of(input, definition) : 0;
     bool dead = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
-                (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
+                allocation->ends[first] < input->block_starts[block + 1] && (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
     // Uses are sorted: the definition's own (at its position), then those the first fragment serves, before its end.
     for (uint32_t u = dead ? input->use_offsets[v] : 0; dead && u < input->use_offsets[v + 1]; u += 1)
     {
@@ -1453,12 +1508,17 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 Tier1SelectRecords selected_records = tier1_select_expand(&holes);
                 error = selected_records.overflowed ? TIER1_EMIT_INVALID : error;
-                // A frame object's address, from the frame's base at the object's offset.
+                // A frame object's address, from the frame's base at the object's offset; an overflow area's from the
+                // incoming frame (#789).
                 int32_t object_offset = 0;
                 if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
                 {
-                    error = selected_records.count == 1 && tier1_emit_cfg_object(emitted, (uint32_t)plan->patterns[node].immediate, &object_offset) ? error : TIER1_EMIT_FRAME;
-                    selected_records.records[0].rm = (uint8_t)emitted->frame.base_register;
+                    const uint32_t object = (uint32_t)plan->patterns[node].immediate;
+                    uint8_t base = (uint8_t)emitted->frame.base_register;
+                    const bool found = tier1_emit_cfg_overflow_area(function, object) ? tier1_emit_cfg_incoming(function, emitted, &base, &object_offset)
+                                                                                     : tier1_emit_cfg_object(function, emitted, object, &object_offset);
+                    error = selected_records.count == 1 && found ? error : TIER1_EMIT_FRAME;
+                    selected_records.records[0].rm = base;
                     selected_records.records[0].displacement = object_offset;
                 }
                 // A load, a store or an address through a frame object: the frame's base register at the object's
@@ -1466,7 +1526,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 if (plan->patterns[node].stack_object != BUSTER_IR_NONE && error == TIER1_EMIT_OK)
                 {
                     int32_t total = 0;
-                    error = selected_records.count != 0 && tier1_emit_cfg_object(emitted, plan->patterns[node].stack_object, &object_offset) &&
+                    error = selected_records.count != 0 && tier1_emit_cfg_object(function, emitted, plan->patterns[node].stack_object, &object_offset) &&
                                     !__builtin_add_overflow(object_offset, plan->patterns[node].displacement, &total) ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
                     if (error == TIER1_EMIT_OK)
                     {
