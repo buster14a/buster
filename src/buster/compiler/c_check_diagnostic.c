@@ -55,6 +55,17 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wreturn-type", NULL, "non-void function does not return a value" },
     { "-Wimplicit-function-declaration", "-Wimplicit", "call to undeclared function" },
     { "-Wignored-pragmas", "-Wpragmas", "ignored pragma visibility directive" },
+    { "-Wnon-literal-null-conversion", NULL, "expression which evaluates to zero treated as a null pointer constant" },
+    { "-Wliteral-range", NULL, "floating literal is outside the range of its type" },
+    { NULL, NULL, "ordered comparison between pointer and integer" },
+    { "-Wmissing-declarations", NULL, "declaration does not declare anything" },
+    { NULL, NULL, "plain '_Complex' requires a type specifier; assuming '_Complex double'" },
+    { "-Wgnu-variable-sized-type-not-at-end", "-Wgnu", "field with variable sized type is not at the end of a struct or class" },
+    { "-Wstatic-local-in-inline", NULL, "non-constant static local variable in inline function may be different in different files" },
+    { "-Wmany-braces-around-scalar-init", NULL, "too many braces around scalar initializer" },
+    { "-Winitializer-overrides", NULL, "initializer overrides prior initialization of this subobject" },
+    { "-Wundefined-internal", NULL, "function has internal linkage but is not defined" },
+    { "-Wc23-extensions", "-Wc2x-extensions", "omitting the parameter name in a function definition is a C23 extension" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -122,6 +133,13 @@ static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input
 {
     const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
                                           warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    const uint32_t index = check_diagnostic_warning_index(warning);
+    return check_diagnostic_severity_id_from(input, token, source, index, severity);
+}
+
+static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning,
+                                                            CheckWarningSeverity severity)
+{
     const uint32_t index = check_diagnostic_warning_index(warning);
     return check_diagnostic_severity_id_from(input, token, source, index, severity);
 }
