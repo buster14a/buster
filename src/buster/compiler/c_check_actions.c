@@ -65,7 +65,8 @@ typedef enum CheckFault
 #define BUSTER_CHECK_GNU_OBJECT_READ 0x10000u
 // A value an assignment, a compound assignment or an increment gives, or one computed from such a value: clang's evaluator
 // fails on it, as it may modify no object whose lifetime began before the evaluation, even past side effects (an
-// alignment builtin's `(s = 3)` is no constant to it). A comma's left operand, whose value is discarded, doesn't pass it on.
+// alignment builtin's `(s = 3)` is no constant to it). In a constant evaluation, a comma's left operand, whose value is
+// discarded, doesn't pass it on; a runtime view's comma, which nothing reads it from, keeps it.
 #define BUSTER_CHECK_MODIFICATION 0x20000u
 // The designator names an inactive member of a known const union. Its address remains valid; value conversion
 // cannot use the initializer receipt. Runtime union access keeps its ordinary semantics.
@@ -2238,7 +2239,8 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
         const bool gnu_ice = check_action_is_integer(table, target) && (source.flags & BUSTER_CHECK_GNU_ICE_FORM) != 0;
         const bool null = target_pointer && check_action_kind(table, type_element(table, target)) == BUSTER_TYPE_KIND_VOID && check_action_null(table, &source, action->extensions);
         // A cast to void discards its operand: whether clang's evaluator evaluates it, before the conversion makes it void.
-        const bool discarded = target_kind != BUSTER_TYPE_KIND_VOID || check_action_discard_evaluable(table, &source);
+        // A constant evaluation's alone (BUSTER_CHECK_DISCARDED_UNEVALUABLE).
+        const bool discarded = target_kind != BUSTER_TYPE_KIND_VOID || !action->constant_evaluated || check_action_discard_evaluable(table, &source);
         check_action_conversion(table, &source, target, BUSTER_CHECK_CONVERT_CAST, &result->conversions[0], action->node);
         result->value = source;
         result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
@@ -2731,9 +2733,14 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                 }
                 check_action_inherit(&result->value, &left);
                 // The left operand's value is discarded: its modification makes no value of the comma's one, but what
-                // clang's evaluator can't evaluate there fails a constant expression.
-                result->value.flags = (result->value.flags & ~BUSTER_CHECK_MODIFICATION) | (right.flags & BUSTER_CHECK_MODIFICATION) |
-                                      (check_action_discard_evaluable(table, &left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE);
+                // clang's evaluator can't evaluate there fails a constant expression. Only a constant evaluation (the
+                // source adapter's evidence, a constant context) reads either, so a runtime view keeps the left's
+                // modification and pays for neither.
+                if (action->constant_evaluated)
+                {
+                    result->value.flags = (result->value.flags & ~BUSTER_CHECK_MODIFICATION) | (right.flags & BUSTER_CHECK_MODIFICATION) |
+                                          (check_action_discard_evaluable(table, &left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE);
+                }
             } break;
             case CHECK_OP_ADDRESS:
             {
