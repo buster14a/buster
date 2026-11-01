@@ -126,6 +126,27 @@ static void check_test_warning_render(CheckTest* test)
                 check_test_expect(test, !check_driver_warning_events(&parser, &pp, &input, &types.table, &one, NULL, &limited) &&
                                        limited.length == scratch.length && pp.errors == errors,
                                   "renderer allocation failure publishes no partial primary and releases all temporary text");
+                // #992: the pass's spelling columns and tag rows exist only for a rendered type. An empty view and
+                // a typeless message therefore succeed with no scratch left, where a visible type still fails
+                // above; a clean unit with an anonymous tag pays no scan for its warnings.
+                const CheckWarningEvents none = { 0 };
+                check_test_expect(test, check_driver_warning_events(&parser, &pp, &input, &types.table, &none, NULL, &limited) &&
+                                       limited.length == scratch.length && pp.errors == errors,
+                                  "an empty sparse view returns before building a pass's spelling columns");
+                const CheckWarningEvent message = {
+                    .id = CHECK_WARNING_ID_KR_TOO_FEW,
+                    .kind = CHECK_WARNING_EVENT_MESSAGE,
+                    .token = 1,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .flags = BUSTER_CHECK_WARNING_SUPPRESSED,
+                    .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
+                    .completion = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                const CheckWarningEvents messages = { .events = &message, .count = 1 };
+                check_test_expect(test, check_driver_warning_events(&parser, &pp, &input, &types.table, &messages, NULL, &limited) &&
+                                       limited.length == scratch.length && pp.errors == errors,
+                                  "a pass of typeless messages builds no spelling columns and allocates no scratch");
             }
         }
         if (output != NULL)
@@ -193,6 +214,160 @@ static void check_test_warning_render(CheckTest* test)
         const char* later = text != NULL ? strstr(text, "later_prefix_control") : NULL;
         check_test_expect(test, ready && semantic != NULL && later != NULL && semantic < later && pp.warnings == 2 && pp.errors == 0,
                           "a sparse fact at a retained prefix end uses original lookahead before later preprocessing groups");
+        free(text);
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&retained);
+    }
+    // #992's rendered spellings against clang's exact text: a kept qualifier, typedef sugar and its
+    // `(aka '...')`, an unnamed tag's declaration place — its expansion's for a macro body's tag — and the
+    // `__size_t` sentinel for a sizeof/alignof operand's own type.
+    static const char spelling_source[] =
+        "typedef struct { int x; } T;\n"
+        "typedef struct S { int x; } S;\n"
+        "typedef unsigned long size_t;\n"
+        "T *tp;\n"
+        "struct { int y; } *up;\n"
+        "S *sp;\n"
+        "S sv;\n"
+        "size_t *zp;\n"
+        "int *const cp;\n"
+        "#define D struct { int y; }\n"
+        "D *mp;\n";
+    {
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        CheckTestTypes types = { 0 };
+        Arena retained = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        char* text = NULL;
+        size_t size = 0;
+        FILE* output = open_memstream(&text, &size);
+        const PPOptions preprocessing = {
+            .language = { .standard = 2017, .gnu = true },
+            .semantic_pragmas = true,
+            .no_standard_includes = true,
+            .collect_diagnostics = true,
+            .diagnostics = output,
+        };
+        const ParseOptions parsing = { .extension_metadata = true };
+        CheckInput input = { 0 };
+        bool ready = output != NULL && retained.base != NULL && scratch.base != NULL && check_test_types_open(&types) && intern_initialize(&identifiers) &&
+                     pp_initialize(&pp, &preprocessing, &identifiers) && parse_initialize(&parser, &parsing, preprocessing.language) &&
+                     pp_run_source(&pp, "spellings.c", (const uint8_t*)spelling_source, sizeof(spelling_source) - 1) &&
+                     parse_translation_unit(&parser, &pp) && check_input(&input, &parser, &pp, &types.table, &retained, &scratch);
+        // Each declarator's name token, for its declared type and its typedef-specifier spelling's scan.
+        static const char* const names[] = { "tp", "up", "sp", "sv", "zp", "cp", "mp", "size_t" };
+        uint32_t declaration[BUSTER_ARRAY_LENGTH(names)] = { 0 };
+        for (uint32_t n = 0; ready && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+        {
+            const uint32_t identifier = intern_find(&identifiers, (const uint8_t*)names[n], (uint32_t)strlen(names[n]));
+            for (uint32_t i = 0; declaration[n] == 0 && i < parser.tokens.count; i += 1)
+            {
+                declaration[n] = parser.tokens.names[i] == identifier && input.declarations != 0 && input.declarations[i] == i ? i + 1 : 0;
+            }
+            ready &= declaration[n] != 0;
+            declaration[n] -= 1;
+        }
+        check_test_expect(test, ready, "spelling fixture's declarations and typedefs resolve their own tokens");
+        if (ready)
+        {
+            CheckWarningBuffer facts = { .arena = &retained };
+            CheckWarningEvent event = {
+                .id = CHECK_WARNING_ID_NON_LITERAL_NULL,
+                .kind = CHECK_WARNING_EVENT_NON_LITERAL_NULL,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
+                .completion = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            // `int *const cp`: the declared type's qualifier stays, no sugar.
+            event.token = declaration[5];
+            event.payload.first_type = input.declared_types[declaration[5]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[5]);
+            ready = check_warning_append(&facts, &event, NULL, 0);
+            // `T *tp`: the typedef is the anonymous record's own name, so clang prints no aka for it.
+            event.token = declaration[0];
+            event.payload.first_type = input.declared_types[declaration[0]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[0]);
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            // `struct { int y; } *up`: no typedef names the tag; its own declaration's place does.
+            event.token = declaration[1];
+            event.payload.first_type = input.declared_types[declaration[1]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[1]);
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            // `S *sp` and `S sv`: the typedef's sugar covers `struct S` wherever it appears in the type.
+            event.token = declaration[2];
+            event.payload.first_type = input.declared_types[declaration[2]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[2]);
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            event.token = declaration[3];
+            event.payload.first_type = input.declared_types[declaration[3]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[3]);
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            // `size_t *zp`: an ordinary typedef's sugar, expanded in the aka.
+            event.token = declaration[4];
+            event.payload.first_type = input.declared_types[declaration[4]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[4]);
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            // `D *mp`: the tag's declaration was written inside `D`'s body; clang's place is the expansion's.
+            event.token = declaration[6];
+            event.payload.first_type = input.declared_types[declaration[6]];
+            event.payload.data = check_input_typedef_spelling(&input, &parser, declaration[6]);
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            // A sizeof/alignof operand's own type is `__size_t`; `size_t`'s typedef gives the canonical aka.
+            event.token = declaration[7];
+            event.payload.first_type = input.declared_types[declaration[7]];
+            event.payload.data = BUSTER_CHECK_NONE;
+            ready = ready && check_warning_append(&facts, &event, NULL, 0);
+            // The ordered warning spells both operands; the sentinel covers the second here too.
+            const CheckWarningEvent ordered = {
+                .id = CHECK_WARNING_ID_ORDERED_POINTER_INTEGER,
+                .kind = CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER,
+                .token = declaration[1],
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
+                .completion = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .first_type = input.declared_types[declaration[1]], .second_type = input.declared_types[declaration[7]],
+                             .name = 0, .data = BUSTER_CHECK_NONE, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            ready = ready && check_warning_append(&facts, &ordered, NULL, 0);
+            const CheckWarningEvents view = check_warning_view(&facts);
+            const uint64_t mark = scratch.length;
+            ready = ready && check_driver_warning_events(&parser, &pp, &input, &types.table, &view, NULL, &scratch) && scratch.length == mark;
+            pp_diagnostic_publish(&pp);
+            if (output != NULL)
+            {
+                fflush(output);
+            }
+            check_test_expect(test, ready && pp.warnings == 9 && pp.errors == 0,
+                              "every fabricated spelling fact publishes its own warning group");
+            const char* expected[] = {
+                "of type 'int *const' [-Wnon-literal-null-conversion]",
+                "of type 'T *' [-Wnon-literal-null-conversion]",
+                "of type 'struct (unnamed at spellings.c:5:1) *' [-Wnon-literal-null-conversion]",
+                "of type 'S *' (aka 'struct S *') [-Wnon-literal-null-conversion]",
+                "of type 'S' (aka 'struct S') [-Wnon-literal-null-conversion]",
+                "of type 'size_t *' (aka 'unsigned long *') [-Wnon-literal-null-conversion]",
+                "of type 'struct (unnamed at spellings.c:11:1) *' [-Wnon-literal-null-conversion]",
+                "of type '__size_t' (aka 'unsigned long') [-Wnon-literal-null-conversion]",
+                "ordered comparison between pointer and integer ('struct (unnamed at spellings.c:5:1) *' and '__size_t' (aka 'unsigned long'))",
+            };
+            bool found = true;
+            for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(expected); e += 1)
+            {
+                found &= text != NULL && strstr(text, expected[e]) != NULL;
+            }
+            check_test_expect(test, found, "qualifiers, typedef sugar and (aka '...'), unnamed-tag places and __size_t match clang's text");
+        }
+        if (output != NULL)
+        {
+            fclose(output);
+        }
         free(text);
         parse_release(&parser);
         pp_release(&pp);

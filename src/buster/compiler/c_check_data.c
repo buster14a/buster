@@ -1164,7 +1164,14 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
                 const bool defined_here = (definitions[target / 64] & (UINT64_C(1) << (target % 64))) != 0;
                 const bool same_unit = atom != 0 && atom < link->atoms.count && link->atoms.unit[atom] == unit;
                 const bool later = atom == 0 && link->symbols.source[target] == BUSTER_LINK_SOURCE_PROGRAM;
-                if (!defined_here && !same_unit && !later)
+                // A static-data reference to an internal-linkage declaration the unit never defines, like a
+                // `static void missing(void);` only declared, is still an undefined reference: clang writes it
+                // as an undefined *global* symbol, since an undefined local is one ELF can't hold. The program
+                // symbols' own pass rewrites those after publishing (check_program_sections); a fixup target
+                // that is still a source-less local here is the same, promoted at publish below once every
+                // condition has passed (#992).
+                const bool undefined = link->symbols.source[target] == BUSTER_LINK_SOURCE_NONE && atom == 0;
+                if (!defined_here && !same_unit && !later && !undefined)
                 {
                     result->status = CHECK_DATA_SYMBOL;
                     result->failed_record = i;
@@ -1191,6 +1198,19 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
     {
         assert(bytes->length - byte_start == byte_count);
         result->atom_begin = link->atoms.count;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            for (uint32_t fixup = 0; fixup < plans[i].fixup_count; fixup += 1)
+            {
+                const SymbolId target = plans[i].fixups[fixup].target;
+                if ((link->symbols.flags[target] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL &&
+                    link->symbols.source[target] == BUSTER_LINK_SOURCE_NONE && link->symbols.atom[target] == 0 &&
+                    (definitions[target / 64] & (UINT64_C(1) << (target % 64))) == 0)
+                {
+                    link->symbols.flags[target] = (uint8_t)((link->symbols.flags[target] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
+                }
+            }
+        }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckDataPlan* plan = &plans[i];
