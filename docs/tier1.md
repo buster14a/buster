@@ -136,7 +136,10 @@ arguments), narrow call results and returns, and division, remainder and shifts
 by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
 the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
 read, and any other value live past the node there saved around it in a
-call-save row). A parameter's register binds its definition's interval alone
+call-save row). A division or remainder by a constant that isn't a power of two
+is a multiplication by its reciprocal and shifts (#141, Granlund and Montgomery's:
+the [selection guide](tier1-selection.md)), whose `mul` or `imul` takes `rax` and
+`rdx` the same way, in either consumer. A parameter's register binds its definition's interval alone
 (`Tier1CfgInput.definition_registers`); where that leaves a use in the interval
 no register, the allocation runs again with every parameter free, and the entry's
 moves bring each from its incoming register (`tier1_emit_cfg_entry`). Freeing a

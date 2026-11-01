@@ -191,10 +191,16 @@ designs and the compilers already built this way.
   natively against the IR's interpreter) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
-  not programs; under the 9700X's lock, CPU 2). `measure-mask-spills` times a mask's
-  spill and reload, to memory against to a general register (`mask_spill_measure.c`,
-  #179's measured choice; the 9700X job runs it, `test-mask-spills` checks its
-  programs). `test-tier1-model` checks the emitted-case measurement reader;
+  not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
+  [--only select|select-scalar] [-E's options] file...` selection's core cycles
+  per IR instruction on real C's functions, as `--tier1` prepares them, by both
+  paths (#141). A division by a constant that isn't a power of two is a
+  multiplication by its reciprocal (Granlund and Montgomery), in either consumer,
+  which saves the values `mul`'s `rax` and `rdx` would clobber (the [selection
+  guide](docs/tier1-selection.md)). `measure-mask-spills` times a mask's spill and
+  reload, to memory against to a general register (`mask_spill_measure.c`, #179's
+  measured choice; the 9700X job runs it, `test-mask-spills` checks its programs).
+  `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.

@@ -373,6 +373,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 #include "tier1_call_test.c"
 #include "tier1_narrow_test.c"
 #include "tier1_terminal_test.c"
+#include "tier1_divide_test.c"
 
 // Frame objects' addresses in their users' memory operands (#982): the selected plan's folded loads, stores and
 // addresses take the frame's base register at the object's offset plus the walked displacement, filled at emission as
@@ -833,7 +834,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
             {
                 const uint32_t op = function.op[n];
                 const uint32_t rule = plan.patterns[n].rule;
-                if (!plan.covered[n] && op != IR_PARAM && op != IR_PHI && op != IR_BR && op != IR_CALL && op != IR_CALL_INDIRECT && rule != TIER1_RULE_DIVIDE && rule != TIER1_RULE_SHIFT)
+                if (!plan.covered[n] && op != IR_PARAM && op != IR_PHI && op != IR_BR && op != IR_CALL && op != IR_CALL_INDIRECT && tier1_select_fixed_registers(rule) == 0)
                 {
                     const uint32_t fitted = tier1_emit_test_overlong_node(test, &plan, &function, &options, n, base.code.count, branching != 0);
                     tier1_emit_test_expect(test, op != IR_CBR || (plan.patterns[n].rule == TIER1_RULE_BRANCH_COMPARE && fitted == BUSTER_TIER1_SELECT_RECORDS_PER_NODE - 2),
@@ -885,6 +886,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_call_tests(&test);
             tier1_narrow_tests(&test);
             tier1_terminal_tests(&test);
+            tier1_divide_tests(&test);
             tier1_emit_test_overlong(&test);
             printf("tier1 fragment emission: %" PRIu64 " checks, %" PRIu64 " failures; stores=%" PRIu64 " reloads=%" PRIu64 " rematerializations=%" PRIu64 "\n", test.checks, test.failures, test.stores, test.loads, test.copies);
             arena_release(&test.input);

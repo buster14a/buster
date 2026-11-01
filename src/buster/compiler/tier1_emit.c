@@ -10,8 +10,9 @@
 // the instruction writes its destination; source registers were captured at the preceding input phase, so the
 // selector's destructive-operand repairs still apply. Integer constants may be recomputed after eviction, a zero by a
 // zeroing xor: no flag is live between two nodes' records (BUSTER_TIER1_EMIT_BOUNDARY_FLAGS). Initial definitions are
-// still emitted. Direct scalar calls publish symbolic CALL
-// references, save live caller registers in fixed frame rows and resolve argument moves with reserved R11.
+// still emitted. Direct scalar calls publish symbolic CALL references, save live caller registers in fixed frame rows and
+// resolve argument moves with reserved R11. A division by a constant's reciprocal takes rax and rdx, whose other values
+// that live past it are saved around it in such rows too, as the CFG consumer saves them (tier1_emit_fixed).
 //
 // This consumer accepts a straight-line chain ending in RET, UNREACHABLE or an empty self-loop sink; every earlier
 // block must branch to the immediately following block. The sink has no values to reconcile and retains its branch.
@@ -35,7 +36,12 @@
 #define BUSTER_TIER1_EMIT_MASK_LOCATION (32u * BUSTER_TIER1_ALLOCATE_MASK)
 // The opmask registers the CFG consumer's masks take, k1 to k7, k0 its scratch: and every one a call clobbers.
 #define BUSTER_TIER1_EMIT_MASK_REGISTERS 0xfeu
+// A call's records past its node's share, a kmov store and load of each of k1 to k7 that a mask holds across it among
+// them (#179).
 #define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6 + 2 * 7)
+// The records a node of a fixed-register rule writes past its share, BUSTER_TIER1_SELECT_RECORDS_PER_NODE: its sequence's,
+// and the saves and restores of the two fixed registers a division takes (tier1_emit_fixed).
+#define BUSTER_TIER1_EMIT_FIXED_RECORDS (BUSTER_TIER1_SELECT_FIXED_RECORDS + 4 - BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
 
 typedef enum Tier1EmitError
 {
@@ -83,6 +89,9 @@ struct Tier1EmitPrepared
     uint32_t* alignments;
     uint32_t reserved_registers;
     uint32_t call_count;
+    // The straight-line consumer's nodes of fixed-register rules (tier1_select_fixed_registers), whose records take more
+    // than a node's share.
+    uint32_t fixed_count;
     uint32_t call_save_mask;
     // The CFG consumer's: each node's class (null for the straight-line consumer, whose values are all general), the
     // opmask registers whose masks a call saves in rows of their own after the general registers' (#179), and the
@@ -109,9 +118,9 @@ struct Tier1EmitResult
     LinkReference* references;
     uint32_t reference_count;
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
-    // symbols' access (Tier1EmitOptions.symbol_access); and its divisions' and shifts' by a register, whose sequences
-    // take records past a node's share.
+    // symbols' access (Tier1EmitOptions.symbol_access).
     uint32_t reference_capacity;
+    // The nodes of fixed-register rules (tier1_select_fixed_registers), whose sequences take records past a node's share.
     uint32_t fixed_count;
     // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,
     // which the frame saves; and how many values live across a call it gave them.
@@ -158,6 +167,9 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     const uint64_t uses = (uint64_t)source->use_count + source->count;
     Tier1EmitError error = uses <= BUSTER_TIER1_ALLOCATE_MAX_USES ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
     Tier1EmitPrepared prepared = { .allocation = *source };
+    // A fixed-register sequence's registers (a division by a constant's reciprocal's rax and rdx) need call-save rows for
+    // the values that live past it in them, as calls' registers do.
+    uint32_t fixed_saves = 0;
     for (uint32_t node = 0; node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL)
@@ -166,9 +178,12 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             const uint32_t arguments = plan->function->calls[plan->function->b[node]].argument_count;
             prepared.call_abi.integer_registers = prepared.call_abi.integer_registers > arguments ? prepared.call_abi.integer_registers : arguments;
         }
+        const uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule);
+        fixed_saves |= fixed;
+        prepared.fixed_count += fixed != 0;
     }
     prepared.call_abi.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
-    prepared.call_save_mask = prepared.call_count != 0 ? options->register_mask : 0;
+    prepared.call_save_mask = (prepared.call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
     prepared.slot_columns = count + (uint32_t)__builtin_popcount(prepared.call_save_mask);
     uint32_t* allowed = 0;
     uint32_t* offsets = 0;
@@ -552,6 +567,34 @@ static X86Instruction tier1_emit_move(uint32_t source, uint32_t destination, uin
     return record;
 }
 
+// A node whose rule takes x86's fixed registers (tier1_select_fixed: a division or a shift by a register, a division by a
+// constant's reciprocal): the `saved` registers, which hold other values that live past it, stored in their call-save rows
+// before its records and loaded after them. Both consumers give those registers rows (tier1_emit_prepare, and
+// tier1_emit_cfg_problem) and say which values live past the node, each by its own liveness. Out of line: the consumers'
+// loops over every node take it for a few of a function's, and the long sequences beneath it stay out of those loops.
+static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult* emitted, uint32_t saved, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+{
+    X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS];
+    const uint32_t count = tier1_select_fixed(holes, records);
+    const bool rows = (saved & ~emitted->prepared.call_save_mask) == 0;
+    bool appended = rows && count != 0;
+    for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    {
+        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, false));
+        emitted->call_stores += (saved >> reg) & 1;
+    }
+    for (uint32_t r = 0; appended && r < count; r += 1)
+    {
+        appended = tier1_emit_append(buffer, records[r]);
+    }
+    for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    {
+        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, true));
+        emitted->call_loads += (saved >> reg) & 1;
+    }
+    return appended ? TIER1_EMIT_OK : !rows ? TIER1_EMIT_ALLOCATION : count == 0 ? TIER1_EMIT_INVALID : TIER1_EMIT_MEMORY;
+}
+
 // The allocator has already split ordinary spills. Call preservation is local to a bounded machine-register set:
 // a surviving register is saved before argument shuffles and restored after capturing the return value. Keeping
 // this separate from fixed interval constraints avoids banning caller registers over an entire live interval.
@@ -698,7 +741,10 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
 static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint32_t count = plan->function->instruction_count;
-    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)result->allocation.fragment_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * 2 + (uint64_t)result->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS;
+    // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
+    result->fixed_count = result->prepared.fixed_count;
+    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)result->allocation.fragment_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * 2 + (uint64_t)result->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS +
+                              (uint64_t)result->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS;
     const bool terminal_sink = count != 0 && plan->function->op[count - 1] == IR_BR;
     const uint32_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * 2 + terminal_sink;
     const uint64_t output_mark = output->length;
@@ -799,6 +845,13 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
                 buffer.targets[buffer.branch_count] = code->node_first[node];
                 buffer.branch_count += 1;
             }
+        }
+        else if (error == TIER1_EMIT_OK && !plan->covered[node] && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
+        {
+            // Its fixed registers' other values that live past it, as a call's (but the destination's, which no other
+            // value holds at the node's definition).
+            const uint32_t saved = tier1_emit_call_saved(result, &transitions, node) & tier1_select_fixed_registers(plan->patterns[node].rule) & ~(1u << holes.destination);
+            error = tier1_emit_fixed(result, saved, &holes, &buffer);
         }
         else if (error == TIER1_EMIT_OK && !plan->covered[node] && plan->function->op[node] != IR_BR)
         {
