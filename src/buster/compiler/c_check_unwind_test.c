@@ -45,7 +45,7 @@
 //   red zone below an unmoved rsp (`red_leaf`: gdb's `break *leaf` finds a library's `leaf` once the program runs).
 //   --tier1-report's counts must show those shapes: two open frames at least, four returns published as tails (early's
 //   and aligned_early's first, spin's and aligned_spin's) and a red zone; and readelf -wF's table of each function's
-//   FDE, from its entry's row, its own: as many rows after the entry's with the CFA rsp+8 (each after a return's ret)
+//   FDE, from its entry's row, its own: as many rows after the entry's with the CFA rsp+8 (each at a return's ret)
 //   as its returns, a last row with another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in some
 //   row exactly for the frame pointers, and red_leaf's one row, its whole description. By each path (whose frames'
 //   slots may be colored apart, so not the same bytes), by --lanes 1 and 8 into the vector path's bytes, and its object
@@ -608,7 +608,7 @@ static uint64_t check_unwind_test_symbol(String8 file, const char* name, uint64_
 }
 
 // What readelf -wF's table of a function's FDE says (#177), the FDE from `address` to `address + size` in `text`: its
-// rows; those after its first whose CFA is rsp+8, each a return's, after its ret; whether its last row's CFA is
+// rows; those after its first whose CFA is rsp+8, each a return's, at its ret; whether its last row's CFA is
 // another, an open frame's (its code doesn't end in its last epilogue, and the FDE has no epilogue's rows); and whether
 // a row's CFA is rbp's, a frame pointer's.
 typedef struct CheckUnwindTestRows CheckUnwindTestRows;

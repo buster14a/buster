@@ -274,7 +274,7 @@ epilogue, an open frame whose loop's latch comes last, a realigned frame (with
 its frame pointer), the same open and with two returns, and a leaf whose spills
 are in the red zone, whose shapes `--tier1-report`'s counts must show. Each
 function's FDE, as `readelf -wF` interprets it, must have its shape: from the
-entry's row, a row with the CFA rsp+8 after each return's `ret`, a last row with
+entry's row, a row with the CFA rsp+8 at each return's `ret`, a last row with
 another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in
 some row exactly for the frame pointers, and the leaf's one row.
 By each path and through GNU ld and lld, `backtrace()` walks through every frame
