@@ -2799,7 +2799,11 @@ warning and error totals with Clang's singular/plural spelling; clean units prin
 no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
 does in Clang. Both output paths share the publication gate, including deferred
 preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
-graph's construction.
+graph's construction. `-Wfatal-errors` publishes the first command-line or default error, including a warning promoted
+to one by `-Werror`, as Clang's fatal error and stops publication there; warnings that remain warnings are unaffected.
+A source pragma's `error` mapping stays an ordinary error, while its `fatal` mapping is fatal, as in Clang.
+`-Wno-fatal-errors` restores the ordinary budget, and the last of the two options on the command line decides. The
+standalone `-E` command and the source driver's preprocessing, parsing and semantic groups all read the option.
 
 The source driver collects preprocessing, parser and checker groups before
 publication (#698). Their order follows expansion-output boundaries and proven

@@ -356,8 +356,9 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 const CheckWarningSeverity severity = check_diagnostic_severity(input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
+                    const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                                   severity >= CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                                                   severity >= CHECK_WARNING_ERROR ? (source_error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
                     pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s", check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS));
                     valid = !pp->diagnostic_collection_failed;
@@ -422,16 +423,18 @@ static void check_driver_visibility_report(const Parser* parser, Preprocessor* p
         if (record->warning == 2)
         {
             pp_diagnose_output_phase(pp, pp_severity, record->diagnostic_source, publication, phase, "unknown visibility '%.*s' [%s-Wignored-attributes]",
-                               (int)record->name.length, record->name.pointer, severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
+                               (int)record->name.length, record->name.pointer,
+                               check_driver_warning_error_prefix(!record->error && severity == CHECK_WARNING_ERROR));
         }
         else
         {
             char promoted[256];
             const char* message = record->message;
-            const char* option = !record->error && severity >= CHECK_WARNING_ERROR ? strstr(message, "[-W") : NULL;
+            const char* prefix = check_driver_warning_error_prefix(!record->error && severity == CHECK_WARNING_ERROR);
+            const char* option = prefix[0] != 0 ? strstr(message, "[-W") : NULL;
             if (option != NULL)
             {
-                snprintf(promoted, sizeof(promoted), "%.*s[-Werror,%s", (int)(option - message), message, option + 1);
+                snprintf(promoted, sizeof(promoted), "%.*s[%s%s", (int)(option - message), message, prefix, option + 1);
                 message = promoted;
             }
             if (record->diagnostic_location != 0)
@@ -485,7 +488,8 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                 pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN, "non-void function does not return a value%s [%s-Wreturn-type]",
-                                   body->return_warning == 2 ? " in all control paths" : "", severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
+                                   body->return_warning == 2 ? " in all control paths" : "",
+                                   check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
             }
         }
     }
@@ -557,8 +561,11 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                 {
                     *--text = '-';
                 }
+                // A source pragma's error is an ordinary error under -Wfatal-errors; a command-line or default error
+                // arrives already fatal from check_diagnostic_severity.
+                const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (event->default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
-                    severity == CHECK_WARNING_ERROR ? (event->default_error ?
+                    severity == CHECK_WARNING_ERROR ? (event->default_error && !source_error ?
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                 // Clang's warn_argument_invalid_range is an error by default, so its printer never adds `-Werror,`: the
                 // option alone, whether it is a warning, an error or a fatal error (#1079).
@@ -584,7 +591,8 @@ static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const
         }
         else
         {
-            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(warning));
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(warning),
+                               check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
 }
@@ -924,8 +932,9 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 else if (sequence >= offset)
                 {
                     const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
+                    const bool source_error = input->fatal_errors && severity == CHECK_WARNING_ERROR;
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (input->implicit_function_c99 ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
-                                                   severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
+                                                   severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;

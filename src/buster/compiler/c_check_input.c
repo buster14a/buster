@@ -371,6 +371,9 @@ struct CheckInput
     bool kr_warning_quiet;
     bool kr_warning_system;
     bool kr_warning_errors;
+    // -Wfatal-errors: a command-line or default error is fatal before a source pragma can map it, while a source
+    // pragma's own error stays an error, as clang's does.
+    bool fatal_errors;
     uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
@@ -7829,7 +7832,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
-                         .implicit_function_system = pp->options.implicit_function_system };
+                         .implicit_function_system = pp->options.implicit_function_system,
+                         .fatal_errors = pp->options.fatal_errors };
     check_input_kr_warning_policy(input, &pp->options);
     // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
     // inlines 16-byte atomics (cx16), which the lock-free queries read.
