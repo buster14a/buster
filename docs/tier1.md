@@ -119,6 +119,24 @@ guide](tier1-allocation.md)'s "Rematerialization"):
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
 ```
 
+`--tier1-gvn` runs #866's congruence solver on the lowered IR, before
+promotion, so that promotion's phi placement decides what its merged values
+need. It is a measurement option, off by default, and the measurement says to
+keep it off: its class representatives lengthen live ranges that Tier 1's
+allocation pays for in moves and spills. On the frozen `sqlite3.c` (2,604
+functions, 2,155 of them Tier 1's), the object's text grows from 1,283,627 to
+1,439,515 bytes (+12.1%) and five compiles' median wall time from 525 to 698 ms
+(+33.0%). On c-testsuite's 430 functions Tier 1 still compiles the same 350,
+with the objects 1.2% smaller (347,912 to 343,624 bytes) but 13.9% more
+instructions (9,136 to 10,402), 25 spill stores and reloads where it had none,
+and 146 edge moves where it had 113; no program fails to compile either way.
+Running it after `ir_optimize` instead is worse still (text +15.8%, instructions
++40%, 2.5 times the spill traffic), and the pipeline's cleanup after it changes
+nothing (205,229 against 205,269 instructions), so the cost is the merge rather
+than dead values. Tier 1 therefore doesn't route C source through GVN until a
+variant accounts for allocation cost; [the value-numbering
+guide](ir-value-numbering.md) has the figures.
+
 The driver refuses what Tier 1's code can't carry yet: unwind tables (Tier 1's
 frames save registers with stores, which the push-based unwind descriptor doesn't
 describe), hence the required `-fno-asynchronous-unwind-tables`, and `-g`'s

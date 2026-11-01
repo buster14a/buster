@@ -171,3 +171,19 @@ compile-time, emitted-code or default C-driver effect is claimed here. Those
 remain #139's integration work. The source-derived rows qualify the pass on
 real IR; the synthetic rows measure the whole public stage.
 
+## Tier 1's measurement (#866's last question)
+
+`--tier1-gvn` (docs/tier1.md, "The C driver's `--tier1`") runs this pass on the
+lowered IR before promotion, which is where Tier 1 can exercise it. Measured on
+the frozen `sqlite3.c` and on c-testsuite's 430 functions, it should stay off:
+the congruence classes it merges lengthen live ranges across blocks, and Tier
+1's allocation pays for that in moves and spills. The object's text grows 12.1%
+on `sqlite3.c` and its compile 33.0% (525 to 698 ms, five runs each); on
+c-testsuite the objects are 1.2% smaller but carry 13.9% more instructions and
+25 spill stores and reloads where there were none, with Tier 1's coverage
+unchanged (350 functions either way). After `ir_optimize` the same pass is worse
+(text +15.8%, instructions +40%, 2.5 times the spill traffic), and a cleanup
+pass after it changes nothing, so it is the merge, not dead values, that costs.
+Routing C source through GVN by default therefore waits for a variant that
+accounts for allocation cost; the option stays as the reproducible measurement.
+

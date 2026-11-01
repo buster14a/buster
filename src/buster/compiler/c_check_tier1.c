@@ -56,7 +56,7 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
+                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
 {
     *operation = 0;
     *counts = (CheckTier1Counts){ 0 };
@@ -71,9 +71,23 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         stage = check.error == IR_OK ? stage : CHECK_TIER1_LOWERING;
     }
     IrFunction promoted = { 0 };
+    // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
+    // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
+    // pays for in moves and spills. Its rewritten function is verified; a body it refuses is Tier 0's, as one
+    // ir_optimize refuses is, so no second, quieter path decides what Tier 1 compiles.
+    IrGvnResult gvn_result = { 0 };
+    bool gvn_applied = false;
+    if (stage == CHECK_TIER1_COMPILED && gvn)
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.scalar = scalar;
+        gvn_applied = ir_optimize_gvn(&lowered, &lane->steps[6], scratch, options, &gvn_result).error == IR_OK;
+        stage = gvn_applied ? stage : CHECK_TIER1_OPTIMIZATION;
+    }
+    const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ssa_ir_promote_scalar(&lowered, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(&lowered, &lane->steps[1], scratch, &promoted);
+        const IrCheck check = scalar ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
         stage = check.error == IR_OK ? stage : CHECK_TIER1_PROMOTION;
     }
     IrOptimizeResult optimized = { 0 };
@@ -83,6 +97,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         options.scalar = scalar;
         stage = ir_optimize(&promoted, &lane->steps[2], scratch, options, &optimized).error == IR_OK ? stage : CHECK_TIER1_OPTIMIZATION;
     }
+    // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
     const IrFunction* ir = &optimized.function;
     IrCfg cfg = { 0 };
     Dominators dominators = { 0 };

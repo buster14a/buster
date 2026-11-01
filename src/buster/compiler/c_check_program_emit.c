@@ -248,7 +248,7 @@ struct CheckEmitBoard
 // The C driver's --tier1 (c_check_tier1.c, #138's piece for #140): each body Tier 1's pipeline takes compiled by it,
 // every other by Tier 0. A lane's arenas for the pipeline: each step's output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
-#define BUSTER_CHECK_TIER1_STEPS 6
+#define BUSTER_CHECK_TIER1_STEPS 7
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
 {
@@ -385,6 +385,9 @@ struct CheckProgramLanes
     // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal). With
     // --tier1-no-rematerialize, Tier 1's allocation spills what it would recompute (#178's comparison).
     bool tier1;
+    // --tier1-gvn runs #866's congruence solver on the lowered IR, before promotion: a measurement option, off by
+    // default, because the class representatives it merges lengthen live ranges that Tier 1's allocation pays for.
+    bool tier1_gvn;
     bool tier1_no_rematerialize;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
@@ -400,7 +403,7 @@ static bool check_tier1_ready = false;
 // CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
 // `output` as it was.
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
+                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
@@ -683,7 +686,7 @@ static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run
     uint32_t operation = 0;
     const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
                                           check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                              !run->lanes->tier1_no_rematerialize, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
+                                                              !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
     run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
     return stage == CHECK_TIER1_COMPILED;
 }

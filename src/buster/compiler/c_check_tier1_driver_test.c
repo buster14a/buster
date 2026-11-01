@@ -248,13 +248,17 @@ struct CheckTestTier1Build
 // A fixture compiled by --tier1 with and without rematerialization (`rematerialize`) by each path, into an executable
 // (`-o output`) or with `object` an object (-c), whose report goes into *build: whether it compiled with its function
 // `name` by Tier 1 (no refusal line names it).
-static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, CheckTestTier1Build* build)
+static bool check_test_tier1_build(const char* executable, const char* source, const char* name, const char* output, bool rematerialize, bool scalar, bool object, bool gvn, CheckTestTier1Build* build)
 {
     char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "-fno-asynchronous-unwind-tables", "--verify" };
     uint32_t count = 6;
     if (!rematerialize)
     {
         arguments[count++] = "--tier1-no-rematerialize";
+    }
+    if (gvn)
+    {
+        arguments[count++] = "--tier1-gvn";
     }
     if (scalar)
     {
@@ -398,8 +402,8 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
             snprintf(linked, sizeof(linked), "%s/tier1-remat-%u-%u-cc", directory, rematerialize, path);
             // The executable by the direct path, and the object, which cc links.
             CheckTestTier1Build object_build;
-            const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
-            const bool compiled = check_test_tier1_build(executable, source, "tier1_remat", object, rematerialize != 0, path != 0, true, &object_build);
+            const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, rematerialize != 0, path != 0, false, false, &builds[rematerialize][path]);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_remat", object, rematerialize != 0, path != 0, true, false, &object_build);
             check_test_expect(test, built && compiled, "the fixture compiles by --tier1, its function Tier 1's");
             char* cc_arguments[] = { "cc", "-o", linked, object, NULL };
             char* cc_text = NULL;
@@ -430,6 +434,40 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
                " (%" PRIu64 "); %" PRIu64 " recomputed, %" PRIu64 " definitions left out, %u addresses recomputed in the loop, %u zeroing xors\n",
                path == 0 ? "vector" : "scalar", with->stores, without->stores, with->loads, without->loads, with->slots, without->slots, with->frame, without->frame,
                with->rematerializations, with->dropped, addresses[1][path], zeroing[1][path]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
+// --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
+// path. Its function is still Tier 1's and its executable still prints clang's build's output, so the solver's merged
+// values reach Tier 1's code without changing what the program does. The option is a measurement one (docs/tier1.md's
+// "The C driver's --tier1" has what it costs), so no code-size claim is made here.
+static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-gvn.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-gvn-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_remat_source, sizeof(check_test_tier1_remat_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the gvn fixture runs");
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        char output[512];
+        snprintf(output, sizeof(output), "%s/tier1-gvn-%u", directory, path);
+        CheckTestTier1Build build;
+        const bool built = check_test_tier1_build(executable, source, "tier1_remat", output, true, path != 0, false, true, &build);
+        check_test_expect(test, built, "--tier1-gvn compiles the fixture, its function Tier 1's");
+        char actual[256] = { 0 };
+        check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                          "--tier1-gvn's executable prints clang's build's output");
+        unlink(output);
     }
     unlink(source);
     unlink(reference);
@@ -477,9 +515,9 @@ static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, c
             snprintf(main_object, sizeof(main_object), "%s/tier1-divide-main-%u-%u.o", directory, rematerialize, path);
             CheckTestTier1Build object_build;
             CheckTestTier1Build main_build;
-            const bool built = check_test_tier1_build(executable, source, "tier1_divide", output, rematerialize != 0, path != 0, false, &builds[rematerialize][path]);
-            const bool compiled = check_test_tier1_build(executable, source, "tier1_divide", object, rematerialize != 0, path != 0, true, &object_build);
-            const bool main_compiled = check_test_tier1_build(executable, main_source, "main", main_object, rematerialize != 0, path != 0, true, &main_build);
+            const bool built = check_test_tier1_build(executable, source, "tier1_divide", output, rematerialize != 0, path != 0, false, false, &builds[rematerialize][path]);
+            const bool compiled = check_test_tier1_build(executable, source, "tier1_divide", object, rematerialize != 0, path != 0, true, false, &object_build);
+            const bool main_compiled = check_test_tier1_build(executable, main_source, "main", main_object, rematerialize != 0, path != 0, true, false, &main_build);
             check_test_expect(test, built && compiled && main_compiled, "the division fixture compiles by --tier1, its functions Tier 1's");
             check_test_expect(test, main_compiled && main_build.call_stores == 0, "the division fixture's main alone saves nothing around its calls");
             char actual[256] = { 0 };
