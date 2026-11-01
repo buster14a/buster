@@ -13,18 +13,36 @@ struct CheckPackedTestDiagnostic
 };
 
 // The driver on `source`, by `executable` or in a child as a command line runs it, with `-fsyntax-only` and `-std=gnu17`, by
-// the scalar path with `scalar`, and `option` (or none: null), its output and errors into `output` and `errors`. Returns
+// the scalar path with `scalar`, and `options` (or none: count 0), its output and errors into `output` and `errors`. Returns
 // its exit status.
-static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar, const char* option)
+static int check_test_packed_run_options(const char* executable, const char* source, const char* output, const char* errors, bool scalar, bool quiet,
+                                         const char* const* options, uint32_t option_count)
 {
     int result = -1;
-    char* const extra = (char*)(option != NULL ? option : "-fsyntax-only");
-    if (executable != NULL)
+    char* arguments[32];
+    uint32_t count = 0;
+    // The fixed arguments, the source and, for an external run, its NULL terminator.
+    const uint32_t fixed = executable != NULL ? 7u : 5u;
+    const bool fits = option_count <= BUSTER_ARRAY_LENGTH(arguments) - fixed;
+    if (fits && executable != NULL)
     {
-        char* arguments[] = { (char*)executable, scalar ? "--scalar" : "-fsyntax-only", extra, "-fsyntax-only", "-std=gnu17", (char*)source, NULL };
+        arguments[count++] = (char*)executable;
+    }
+    arguments[count++] = scalar ? "--scalar" : "-fsyntax-only";
+    arguments[count++] = quiet ? "-w" : "-fsyntax-only";
+    arguments[count++] = "-fsyntax-only";
+    arguments[count++] = "-std=gnu17";
+    for (uint32_t i = 0; fits && i < option_count; i += 1)
+    {
+        arguments[count++] = (char*)options[i];
+    }
+    arguments[count++] = (char*)source;
+    if (fits && executable != NULL)
+    {
+        arguments[count] = NULL;
         result = object_test_run(arguments, output, errors);
     }
-    else
+    else if (fits)
     {
         fflush(NULL);
         const pid_t child = fork();
@@ -38,8 +56,7 @@ static int check_test_packed_run(const char* executable, const char* source, con
             }
             close(out);
             close(err);
-            char* arguments[] = { scalar ? "--scalar" : "-fsyntax-only", extra, "-fsyntax-only", "-std=gnu17", (char*)source };
-            const int code = run_check_command(BUSTER_ARRAY_LENGTH(arguments), arguments, true);
+            const int code = run_check_command((int)count, arguments, true);
             fflush(NULL);
             _exit(code);
         }
@@ -56,6 +73,13 @@ static int check_test_packed_run(const char* executable, const char* source, con
         }
     }
     return result;
+}
+
+// One option's shorthand for the packed fixtures and #1085's range mappings; a null option adds none.
+static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar, const char* option)
+{
+    const char* options[1] = { option };
+    return check_test_packed_run_options(executable, source, output, errors, scalar, false, options, option != NULL ? 1u : 0u);
 }
 
 static uint32_t check_test_packed_diagnostics(const char* path, CheckPackedTestDiagnostic* diagnostics, uint32_t capacity)
