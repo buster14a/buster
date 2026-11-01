@@ -3,6 +3,12 @@
 Read [AGENTS.md](AGENTS.md) for issue ownership, build/test instructions and
 the shared benchmark host, and follow [the C style](docs/coding-style.md).
 
+Agent sessions posting GitHub issues, pull requests, comments, or reviews must
+include their private session permalink and exact model in each post, as
+[agent-authored GitHub attribution](AGENTS.md#attribution-for-agent-authored-github-activity)
+requires. These links remain access-controlled even though GitHub displays
+URLs publicly.
+
 Store raw performance measurements, logs, captures, receipts and their harnesses
 in [buster14a/buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements),
 under `docs/measurements/`. Keep design documentation and evidence links in this
