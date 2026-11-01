@@ -1188,11 +1188,11 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 build.sh has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
 and their marked copies, the x86 semantics' tables, and the checker unit's
-copies of Tier 0's tables, the Zen 5 costs they read and the unwind templates,
-with their initialized flags, all in a section of their own (`buster_baked`,
-`baked.h`), 5.1 MB of the file. A compile's process starts with them built, at
-their fixed addresses, and reads the pages it touches from the page cache,
-shared with every other process.
+copies of Tier 0's tables, the Zen 5 cost model's tables and the unwind
+templates, with their initialized flags, all in a section of their own
+(`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
+with them built, at their fixed addresses, and reads the pages it touches from
+the page cache, shared with every other process.
 
 - **Why baked, not a snapshot.** A snapshot in the cache directory, as the C
   runtime has, would need the executable's identity, staleness checks, a
@@ -1201,11 +1201,17 @@ shared with every other process.
   identity to check, nothing to go stale, and the first run has them.
 - **Checked.** The bake refuses, and fails the build, if the initializers wrote
   any byte of the image's writable memory outside the section (but the GOT,
-  which the loader fills as functions are first called). Its first run found
-  Tier 0's window and vector tables and the Zen 5 costs, which a list made by
-  hand had missed. `test-baked-tables` makes the same check in any executable,
-  a sanitizer build's PIE too, and in a baked one that a fresh build gives the
-  file's bytes.
+  which the loader fills as functions are first called), or if its writable
+  ranges or GOT sections outgrow the arrays it tracks them in. Its first run
+  found Tier 0's window and vector tables and the Zen 5 cost model's tables,
+  which a list made by hand had missed. `test-baked-tables` makes the same
+  check in any executable, a sanitizer build's PIE too, and in a baked one that
+  a fresh build gives the file's bytes and build ID; a missing section fails it
+  instead of skipping it.
+- **The build ID.** The linker's GNU build ID is over the pre-bake file, so
+  `bake-tables` recomputes it over the baked bytes, with the note's descriptor
+  zeroed. The ID stays stable for a given build and never names bytes other
+  than the file's.
 - **Where it isn't.** PIEs (the sanitizers' builds, whose tables would hold
   their load address if any had a pointer), executables linked without
   build.sh and builds with `BUSTER_BAKE=0` build the tables when they run, as

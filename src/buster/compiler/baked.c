@@ -3,17 +3,19 @@
 //
 // The backend's baked tables (#590, baked.h). `bake-tables OUTPUT` writes this executable with its buster_baked section
 // as the backend's initializers leave it, so that a compile starts with x86_encode's templates, the x86 semantics'
-// tables, Tier 0's (with the Zen 5 costs it reads) and the unwind templates built. build.sh runs it on each executable
-// it links. It runs in the checker's unit, whose Tier 0, unwind and Zen 5 copies the C driver uses (main.c): it zeroes
-// the section, runs the four initializers, checks that they wrote nothing in the image's writable memory outside the
+// tables, Tier 0's, the Zen 5 cost model's and the unwind templates built. build.sh runs it on each executable it links.
+// It runs in the checker's unit, whose Tier 0, unwind and Zen 5 copies the C driver uses (main.c): it zeroes the
+// section, runs the five initializers, checks that they wrote nothing in the image's writable memory outside the
 // section (but the GOT, which the loader may fill as functions are first called), and copies the section's bytes over
-// its place in /proc/self/exe's. A PIE, whose section would hold its load address's pointers if any table had one, and
+// its place in /proc/self/exe's. The file's GNU build ID is then recomputed over the baked bytes, since the linker's
+// note is over the pre-bake file. A PIE, whose section would hold its load address's pointers if any table had one, and
 // a link without the section exit with status 77, and build.sh keeps that executable as it is: its initializers build
 // the tables when it runs, as they did before.
 //
 // `test-baked-tables` makes the same build and checks in any executable, a PIE too (the sanitizers' builds, which
 // aren't baked): nothing written outside the section, a second build the same bytes as the first, and in a baked
-// executable the first the bytes it started with, which are the file's.
+// executable the first the bytes it started with, which are the file's, and its build ID. A link without the section
+// fails this test rather than skipping it.
 //
 // Entry points: run_bake_command and run_baked_tables_test.
 
@@ -139,7 +141,6 @@ static int bake_read_image(BakeImage* image)
     struct stat status;
     if (start == 0 || bake_section_size() == 0)
     {
-        fprintf(stderr, "bake-tables: this executable has no buster_baked section\n");
         result = BUSTER_BAKE_SKIPPED;
     }
     else if (file < 0 || fstat(file, &status) != 0 || status.st_size < (off_t)sizeof(Elf64_Ehdr))
@@ -198,32 +199,48 @@ static int bake_read_image(BakeImage* image)
         image->position_independent = header->e_type == ET_DYN;
         image->skipped[0] = (BakeRange){ start, start + bake_section_size() };
         image->skipped_count = 1;
-        for (uint32_t index = 0; index < header->e_shnum; index += 1)
+        for (uint32_t index = 0; index < header->e_shnum && result == 0; index += 1)
         {
             const Elf64_Shdr* names = &sections[header->e_shstrndx];
             const bool named = names->sh_offset <= image->length && sections[index].sh_name < image->length - names->sh_offset &&
                                memchr(image->bytes + names->sh_offset + sections[index].sh_name, 0, image->length - names->sh_offset - sections[index].sh_name);
             const char* name = named ? (const char*)image->bytes + names->sh_offset + sections[index].sh_name : "";
-            if (strncmp(name, ".got", 4) == 0 && sections[index].sh_addr != 0 && image->skipped_count < BUSTER_BAKE_RANGES)
+            if (strncmp(name, ".got", 4) == 0 && sections[index].sh_addr != 0)
             {
-                image->skipped[image->skipped_count] = (BakeRange){ bias + sections[index].sh_addr, bias + sections[index].sh_addr + sections[index].sh_size };
-                image->skipped_count += 1;
+                if (image->skipped_count == BUSTER_BAKE_RANGES)
+                {
+                    fprintf(stderr, "bake-tables: more than %u GOT sections\n", (unsigned)BUSTER_BAKE_RANGES - 1);
+                    result = 1;
+                }
+                else
+                {
+                    image->skipped[image->skipped_count] = (BakeRange){ bias + sections[index].sh_addr, bias + sections[index].sh_addr + sections[index].sh_size };
+                    image->skipped_count += 1;
+                }
             }
         }
         const Elf64_Phdr* segments = (const Elf64_Phdr*)(image->bytes + header->e_phoff);
-        for (uint32_t index = 0; index < header->e_phnum; index += 1)
+        for (uint32_t index = 0; index < header->e_phnum && result == 0; index += 1)
         {
-            if (segments[index].p_type == PT_LOAD && (segments[index].p_flags & PF_W) && image->writable_count < BUSTER_BAKE_RANGES)
+            if (segments[index].p_type == PT_LOAD && (segments[index].p_flags & PF_W))
             {
-                image->writable[image->writable_count] = (BakeRange){ bias + segments[index].p_vaddr, bias + segments[index].p_vaddr + segments[index].p_memsz };
-                image->writable_count += 1;
+                if (image->writable_count == BUSTER_BAKE_RANGES)
+                {
+                    fprintf(stderr, "bake-tables: more than %u writable segments\n", (unsigned)BUSTER_BAKE_RANGES);
+                    result = 1;
+                }
+                else
+                {
+                    image->writable[image->writable_count] = (BakeRange){ bias + segments[index].p_vaddr, bias + segments[index].p_vaddr + segments[index].p_memsz };
+                    image->writable_count += 1;
+                }
             }
         }
     }
     return result;
 }
 
-// Zeroes the section and runs the four initializers, which must succeed and write nothing in the image's writable
+// Zeroes the section and runs the five initializers, which must succeed and write nothing in the image's writable
 // memory outside it (but the GOT). Returns whether they did.
 static bool bake_build(const BakeImage* image)
 {
@@ -234,7 +251,7 @@ static bool bake_build(const BakeImage* image)
     {
         bake_hashes(image, before, NULL);
         memset(__start_buster_baked, 0, bake_section_size());
-        const bool built = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
+        const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize();
         const uint64_t changed = bake_hashes(image, NULL, before);
         valid = built && changed == 0;
         if (!valid)
@@ -260,6 +277,110 @@ static bool bake_write(const char* path, const uint8_t* bytes, uint64_t length, 
     return closed && done == length && chmod(path, mode) == 0;
 }
 
+typedef struct BakeBuildId BakeBuildId;
+struct BakeBuildId
+{
+    uint8_t* bytes;
+    uint64_t length;
+};
+
+// Finds the GNU build ID note's descriptor in the file image. Returns false for a malformed note, and true with no
+// bytes when the link has none.
+static bool bake_find_build_id(const BakeImage* image, BakeBuildId* build_id)
+{
+    *build_id = (BakeBuildId){ 0 };
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)image->bytes;
+    bool result = image->length >= sizeof(Elf64_Ehdr) && header->e_shoff <= image->length &&
+                  (uint64_t)header->e_shnum * sizeof(Elf64_Shdr) <= image->length - header->e_shoff && header->e_shstrndx < header->e_shnum;
+    const Elf64_Shdr* sections = result ? (const Elf64_Shdr*)(image->bytes + header->e_shoff) : NULL;
+    const Elf64_Shdr* names = result ? &sections[header->e_shstrndx] : NULL;
+    result = result && names->sh_offset <= image->length;
+    bool found = false;
+    for (uint32_t index = 0; result && !found && index < header->e_shnum; index += 1)
+    {
+        const Elf64_Shdr* section = &sections[index];
+        const bool named = section->sh_name < image->length - names->sh_offset &&
+                           memchr(image->bytes + names->sh_offset + section->sh_name, 0, image->length - names->sh_offset - section->sh_name);
+        if (!named || strcmp((const char*)image->bytes + names->sh_offset + section->sh_name, ".note.gnu.build-id") != 0)
+        {
+            continue;
+        }
+        found = true;
+        result = section->sh_offset <= image->length && section->sh_size <= image->length - section->sh_offset;
+        bool parsed = false;
+        uint64_t at = result ? section->sh_offset : 0;
+        const uint64_t end = result ? section->sh_offset + section->sh_size : 0;
+        while (result && !parsed && at + sizeof(Elf64_Nhdr) <= end)
+        {
+            const Elf64_Nhdr* note = (const Elf64_Nhdr*)(image->bytes + at);
+            const uint64_t name = at + sizeof(Elf64_Nhdr);
+            const uint64_t descriptor = (name + note->n_namesz + 3) & ~(uint64_t)3;
+            const uint64_t next = (descriptor + note->n_descsz + 3) & ~(uint64_t)3;
+            result = descriptor >= name && next <= end;
+            if (result && note->n_type == NT_GNU_BUILD_ID && note->n_namesz == 4 && memcmp(image->bytes + name, "GNU", 4) == 0)
+            {
+                build_id->bytes = image->bytes + descriptor;
+                build_id->length = note->n_descsz;
+                parsed = true;
+            }
+            at = next;
+        }
+        result = result && parsed;
+    }
+    return result;
+}
+
+static OracleKey bake_build_id_hash(const BakeImage* image)
+{
+    OracleHash hash;
+    oracle_sha256_begin(&hash);
+    oracle_hash_raw(&hash, image->bytes, (size_t)image->length);
+    return oracle_hash_end(&hash);
+}
+
+// Replaces the build ID with one derived from the baked file, with the note's descriptor zeroed for the hash. No link
+// with a build ID note leaves it as it is.
+static bool bake_build_id_write(BakeImage* image)
+{
+    BakeBuildId build_id;
+    bool result = bake_find_build_id(image, &build_id);
+    if (result && build_id.bytes != NULL && build_id.length != 0)
+    {
+        memset(build_id.bytes, 0, build_id.length);
+        const OracleKey key = bake_build_id_hash(image);
+        for (uint64_t i = 0; i < build_id.length; i += 1)
+        {
+            build_id.bytes[i] = key.bytes[i % sizeof(key.bytes)];
+        }
+    }
+    return result;
+}
+
+// Whether the file's build ID is the one bake_build_id_write gives it.
+static bool bake_build_id_current(const BakeImage* image)
+{
+    BakeBuildId build_id;
+    bool result = bake_find_build_id(image, &build_id);
+    if (result && build_id.bytes != NULL && build_id.length != 0)
+    {
+        uint8_t* saved = malloc(build_id.length);
+        result = saved != NULL;
+        if (result)
+        {
+            memcpy(saved, build_id.bytes, build_id.length);
+            memset(build_id.bytes, 0, build_id.length);
+            const OracleKey key = bake_build_id_hash(image);
+            for (uint64_t i = 0; i < build_id.length; i += 1)
+            {
+                result &= saved[i] == key.bytes[i % sizeof(key.bytes)];
+            }
+            memcpy(build_id.bytes, saved, build_id.length);
+            free(saved);
+        }
+    }
+    return result;
+}
+
 static int run_bake_command(int argc, char** argv)
 {
     BakeImage image;
@@ -268,6 +389,10 @@ static int run_bake_command(int argc, char** argv)
     if (argc != 2)
     {
         fprintf(stderr, "usage: compiler bake-tables OUTPUT\n");
+    }
+    else if (result == BUSTER_BAKE_SKIPPED)
+    {
+        fprintf(stderr, "bake-tables: this executable has no buster_baked section\n");
     }
     else if (result == 0 && image.position_independent)
     {
@@ -278,7 +403,12 @@ static int run_bake_command(int argc, char** argv)
     if (result == 0)
     {
         memcpy(image.bytes + image.section_offset, __start_buster_baked, bake_section_size());
-        if (!bake_write(argv[1], image.bytes, image.length, 0755))
+        if (!bake_build_id_write(&image))
+        {
+            fprintf(stderr, "bake-tables: can't update the build ID\n");
+            result = 1;
+        }
+        else if (!bake_write(argv[1], image.bytes, image.length, 0755))
         {
             fprintf(stderr, "bake-tables: can't write %s\n", argv[1]);
             result = 1;
@@ -294,8 +424,18 @@ static int run_baked_tables_test(int argc, char** argv)
     BakeImage image;
     memset(&image, 0, sizeof(image));
     int result = argc == 1 ? bake_read_image(&image) : 1;
-    // Whether this executable is baked: its tables built, as its file has them.
-    const bool baked = result == 0 && x86_encoder_initialized && tier0_initialized;
+    if (result == BUSTER_BAKE_SKIPPED)
+    {
+        fprintf(stderr, "test-baked-tables: this executable has no buster_baked section\n");
+        result = 1;
+    }
+    // Whether this executable started with any table built: then its file must be a fresh build's, and a complete bake
+    // has every initializer's state. A file that starts with none is the unbaked path (a PIE, BUSTER_BAKE=0, or a link
+    // without build.sh), which builds the tables when it runs.
+    const bool initialized = result == 0 && (x86_encoder_initialized || x86_semantics_initialized || x86_zen5_initialized || tier0_initialized ||
+                                             unwind_ready);
+    const bool complete = initialized && x86_encoder_initialized && x86_semantics_initialized && x86_zen5_initialized && tier0_initialized &&
+                          unwind_ready;
     uint8_t* first = result == 0 ? malloc(bake_section_size()) : NULL;
     if (argc != 1)
     {
@@ -312,11 +452,15 @@ static int run_baked_tables_test(int argc, char** argv)
         memcpy(first, __start_buster_baked, bake_section_size());
         const bool built_twice = built_once && bake_build(&image);
         const bool same = built_twice && memcmp(first, __start_buster_baked, bake_section_size()) == 0;
-        const bool current = !baked || memcmp(image.bytes + image.section_offset, first, bake_section_size()) == 0;
-        printf("baked tables: %llu bytes, %s; built twice, %s; nothing written outside them: %s\n", (unsigned long long)bake_section_size(),
-               baked ? (current ? "baked, the same as built" : "BAKED, BUT NOT AS BUILT") : "not baked (built when it runs)",
-               same ? "the same bytes" : "DIFFERENT BYTES", built_twice ? "yes" : "NO");
-        result = built_twice && same && current ? 0 : 1;
+        const bool current = !initialized || memcmp(image.bytes + image.section_offset, first, bake_section_size()) == 0;
+        const bool build_id = !initialized || bake_build_id_current(&image);
+        const char* state = complete ? (current ? "baked, the same as built" : "BAKED, BUT NOT AS BUILT")
+                                     : initialized ? (current ? "partially initialized, the same as built" : "PARTIALLY INITIALIZED, NOT AS BUILT")
+                                                   : "not baked (built when it runs)";
+        printf("baked tables: %llu bytes, %s; built twice, %s; nothing written outside them: %s; build ID: %s\n",
+               (unsigned long long)bake_section_size(), state, same ? "the same bytes" : "DIFFERENT BYTES", built_twice ? "yes" : "NO",
+               !initialized ? "not checked" : build_id ? "current" : "STALE");
+        result = built_twice && same && current && build_id ? 0 : 1;
     }
     free(first);
     free(image.bytes);

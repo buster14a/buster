@@ -304,18 +304,19 @@ cache, shared with every other process, rather than building 25,062 templates
 and their marked copies and clearing 3.2 MB of pages.
 - **What's baked.** The section holds everything the backend's initializers
   write: this table, the x86 semantics' tables, and the checker unit's copies
-  of Tier 0's, the Zen 5 costs' and the unwind templates (the C driver's:
+  of Tier 0's, the Zen 5 cost model's and the unwind templates (the C driver's:
   another unit's copies would only add their bytes to the file). It is writable
   data with file bytes, 5.1 MB, at the same fixed addresses, so the encoder's
   loop still reads `x86_templates` as a constant address.
-- **Checked.** The bake zeroes the section, runs the four initializers, and
+- **Checked.** The bake zeroes the section, runs the five initializers, and
   refuses (failing the build) if they wrote any byte of the image's writable
   memory outside the section, but the GOT, which the loader fills as functions
   are first called. Its first run found Tier 0's window and vector tables and
-  the Zen 5 costs that a list made by hand had missed. `test-baked-tables`
-  makes the same check in any executable, and in a baked one that a fresh
-  build gives the file's bytes; `test-x86-encoder` compares every entry of the
-  table it starts with against `build_mode_template`'s.
+  the Zen 5 cost model's tables that a list made by hand had missed.
+  `test-baked-tables` makes the same check in any executable, and in a baked
+  one that a fresh build gives the file's bytes and build ID; a missing section
+  fails it. `test-x86-encoder` compares every entry of the table it starts with
+  against `build_mode_template`'s.
 - **Where it isn't.** A PIE (the sanitizers' builds) isn't baked, since a
   table's pointer would hold its load address, and neither is an executable
   linked without build.sh, or with `BUSTER_BAKE=0`: their initializers build

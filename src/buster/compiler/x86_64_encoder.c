@@ -6111,7 +6111,10 @@ static bool build_mode_templates(X86EncoderMode encoder, X86TemplateEntry* templ
 // Builds x86_encode's table, unless it is built already (baked, or an earlier call's).
 static bool x86_encoder_initialize(void)
 {
-    x86_encoder_initialized = x86_encoder_initialized || build_mode_templates(X86_ENCODER_MODE_64, x86_templates);
+    if (!x86_encoder_initialized)
+    {
+        x86_encoder_initialized = build_mode_templates(X86_ENCODER_MODE_64, x86_templates);
+    }
     return x86_encoder_initialized;
 }
 

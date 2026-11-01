@@ -51,6 +51,8 @@
 //     x86_choice_instruction.
 //   - Initialization: x86_effects_slots, x86_effects_build, x86_choice_build and x86_semantics_initialize.
 
+#include "baked.h"
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Effects
 
