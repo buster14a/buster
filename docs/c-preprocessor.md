@@ -2261,11 +2261,16 @@ buffer, written with `fwrite` as it fills, in three steps:
    directory of 256-location pages gives the range of the first token not
    placed yet, and four compares of the chunk's 64 locations with that range's
    bounds place every token inside it. A chunk holds 1.5 (`sqlite3.c`) to 1.8
-   (`main.c`) ranges on average. Each spelling's address is its range's bytes
-   less its base plus its location, eight to a vector, and its length is its
-   value less its location. A chunk with a pragma line's identifiers (spelled
-   as written), a generated integer or an `#embed`, or a token outside every
-   range, goes through the general loop instead, token by token.
+   (`main.c`) ranges on average, and at most 7. Each spelling's address is its
+   range's bytes less its base plus its location, eight to a vector, and its
+   length is its value less its location. A chunk with a pragma line's
+   identifiers (spelled as written), a generated integer or an `#embed`, a
+   token outside every range, an empty spelling, or tokens in more than 8
+   ranges (`BUSTER_PP_PRINT_RANGES`) goes through the general loop instead,
+   token by token. Each range costs compares of all 64 locations: on the Xeon
+   below, a chunk in 8 ranges took 180 ns against 220–250 ns for the general
+   loop's lookups, one in 16 330–360 ns against 245–265, and one in 64
+   1,200–1,320 ns against 270–290.
 2. The spaces of all 64 tokens at once. A token at the start of a line gets
    none. Any other token gets one if whitespace was before it, or if its first
    character would lex together with the previous token's last. That is a

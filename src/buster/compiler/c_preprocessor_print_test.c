@@ -144,7 +144,7 @@ static uint64_t pp_print_test_random(uint64_t* state)
 // chunk's columns end at PROT_NONE pages too, for every count from 0 to 64, and the lanes past the count must keep
 // their canaries. Tokens are file runs of one range, mixed ranges in any order, identifiers among them, spellings past
 // 64 bytes and ending at their range's end; and failures, which must return false: a location in a gap or past every
-// range, an empty spelling, an identifier whose span is empty.
+// range, an empty spelling, an identifier whose span is empty. Then chunks whose tokens are in 1 to 64 ranges.
 static bool pp_test_print_spellings(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -324,12 +324,70 @@ static bool pp_test_print_spellings(void)
             refused += !expected;
         }
     }
+    // Then a preprocessor of 64 ranges, and chunks of 64 tokens whose other tokens are in 1 to 64 of them, each used,
+    // a third of the rest identifiers: taken with the reference's spellings up to BUSTER_PP_PRINT_RANGES ranges, and
+    // refused past them, for the general loop.
+    static PPRange many[64];
+    for (uint32_t r = 0; r < 64; r += 1)
+    {
+        many[r] = (PPRange){
+            .base = 0x10 + r * 200,
+            .length = 150,
+            .file = r,
+            .bytes = source + r * 150,
+        };
+    }
+    static Preprocessor wide;
+    wide.ranges = many;
+    wide.range_count = 64;
+    wide.location_top = 0x10 + 64 * 200 + 1;
+    const uint32_t* spread_directory = result ? pp_build_directory(&wide, &arena) : 0;
+    result = result && spread_directory != 0;
+    uint32_t spreads = 0;
+    for (uint32_t spread = 1; result && spread <= 64; spread += 1)
+    {
+        uint32_t* values = (uint32_t*)(columns + page) - 64;
+        uint32_t* locations = (uint32_t*)(columns + 3 * page) - 64;
+        const uint8_t* expected_spellings[64];
+        uint32_t expected_lengths[64];
+        uint64_t identifiers = 0;
+        for (uint32_t k = 0; k < 64; k += 1)
+        {
+            const uint64_t random = pp_print_test_random(&state);
+            const bool identifier = k >= spread && random % 3 == 0;
+            const uint32_t r = k < spread ? k : (uint32_t)((random >> 8) % spread);
+            const uint32_t start = (uint32_t)((random >> 16) % 140);
+            const uint32_t length = 1 + (uint32_t)((random >> 32) % 10);
+            identifiers |= (uint64_t)identifier << k;
+            values[k] = identifier ? 1 + (uint32_t)((random >> 40) % 63) : many[r].base + start + length;
+            locations[k] = many[r].base + start;
+            expected_spellings[k] = identifier ? records + spans[values[k]].offset : many[r].bytes + start;
+            expected_lengths[k] = identifier ? spans[values[k]].length : length;
+        }
+        const uint8_t* spellings[64];
+        uint32_t lengths[64];
+        uint8_t firsts[64];
+        uint8_t lasts[64];
+        const bool expected = spread <= BUSTER_PP_PRINT_RANGES;
+        const bool got = pp_print_spellings(&wide, spread_directory, values, locations, identifiers, ~0ull, records, spans, spellings, lengths, firsts, lasts);
+        result = got == expected;
+        for (uint32_t k = 0; result && expected && k < 64; k += 1)
+        {
+            result = spellings[k] == expected_spellings[k] && lengths[k] == expected_lengths[k] && firsts[k] == expected_spellings[k][0] &&
+                     lasts[k] == expected_spellings[k][expected_lengths[k] - 1];
+        }
+        if (!result)
+        {
+            printf("printer spellings: %u ranges: %s (expected %s)\n", spread, got ? "taken" : "refused", expected ? "taken" : "refused");
+        }
+        spreads += 1;
+    }
     arena_release(&arena);
     munmap(columns, 4 * page);
     munmap(source, (source_pages + 1) * page);
     munmap(records, (record_pages + 1) * page);
-    printf("printer spellings: %u chunks, %u refused, %s (guarded columns, bytes and records; runs, mixed ranges, gaps, empty spellings)\n", checked, refused,
-           result ? "pass" : "FAIL");
+    printf("printer spellings: %u chunks, %u refused, and chunks in 1 to %u of 64 ranges, %s (guarded columns, bytes and records; runs, mixed ranges, gaps, "
+           "empty spellings, the bound of %u ranges)\n", checked, refused, spreads, result ? "pass" : "FAIL", BUSTER_PP_PRINT_RANGES);
     return result;
 }
 

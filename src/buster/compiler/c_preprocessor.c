@@ -19498,6 +19498,11 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
     return ordinary ? total : 0;
 }
 
+// The most ranges pp_print_spellings places a chunk's tokens in. On an AVX-512 Xeon, chunks of 64 tokens in 8 ranges took
+// 180 ns (the general loop's lookups 220 to 250), in 16 ranges 330 to 360 ns (245 to 265), and in 64 1,200 to 1,320 ns
+// (270 to 290); no chunk of main.c's or sqlite3.c's has more than 7.
+#define BUSTER_PP_PRINT_RANGES 8
+
 // pp_print_vector's step 1 for a chunk of `valid` tokens (of the columns at `values` and `locations`, from the
 // chunk's first) of which none is a pragma line's identifier spelled as written, an integer, an #embed's data or
 // another internal kind, without a branch on each token's kind (#649): the identifiers' spellings from the intern
@@ -19505,8 +19510,11 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
 // splice or a trigraph is in it (pp_print_unspliced, or the batch's copies, check that), its length its value less its
 // location. Their ranges are found a range at a time: the printer's directory gives the range of the first token not
 // placed yet, and compares of the chunk's locations with that range's bounds place every token inside it; a chunk
-// holds 1.5 to 2 ranges on average (sqlite3.c, main.c). Then each token's first and last bytes. Returns false, for the
-// general loop to give the chunk's spellings, when a token's location is in no range or a spelling is empty.
+// holds 1.5 to 2 ranges on average (sqlite3.c, main.c), and at most 7 on those corpora. Each range costs compares of
+// all 64 locations, so a chunk past BUSTER_PP_PRINT_RANGES of them goes to the general loop, whose lookup per token
+// costs less from about 10 ranges up. Then each token's first and last bytes. Returns false, for the general loop to
+// give the chunk's spellings, when a token's location is in no range, the tokens are in more ranges than that or a
+// spelling is empty.
 static bool pp_print_spellings(const Preprocessor* pp, const uint32_t* directory, const uint32_t* values, const uint32_t* locations, uint64_t identifiers,
                                uint64_t valid, const uint8_t* records, const InternSpan* spans, const uint8_t** spellings, uint32_t* lengths, uint8_t* firsts,
                                uint8_t* lasts)
@@ -19520,9 +19528,11 @@ static bool pp_print_spellings(const Preprocessor* pp, const uint32_t* directory
     }
     uint64_t pending = others;
     bool result = true;
+    uint32_t looked = 0;
     while (result && pending != 0)
     {
-        const uint32_t range = pp_directory_range(pp, directory, locations[__builtin_ctzll(pending)]);
+        const uint32_t range = looked < BUSTER_PP_PRINT_RANGES ? pp_directory_range(pp, directory, locations[__builtin_ctzll(pending)]) : BUSTER_PP_NONE;
+        looked += 1;
         result = range != BUSTER_PP_NONE;
         if (result)
         {
