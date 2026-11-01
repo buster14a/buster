@@ -8,7 +8,32 @@ on:
 permissions:
   contents: read
 jobs:
+  apply:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.patch.outputs.sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: chatgpt/1054-tier1-outcomes
+      - id: patch
+        run: |
+          set -euo pipefail
+          if test -f .github/1054-fixture.patch; then
+              git apply --check .github/1054-fixture.patch
+              git apply .github/1054-fixture.patch
+              git rm .github/1054-fixture.patch
+              git diff --check
+              git add src/buster/compiler/c_check_tier1.c src/buster/compiler/c_check_tier1_outcome_test.c
+              git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'test: prepare symbol access before direct Tier 1 rollback checks'
+              git push origin HEAD:refs/heads/chatgpt/1054-tier1-outcomes
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   correctness:
+    needs: apply
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     strategy:
@@ -29,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          ref: ${{ needs.apply.outputs.sha }}
           persist-credentials: false
       - name: Install pinned Clang and test dependencies
         run: bash tools/ci/setup-hosted.sh
@@ -36,12 +62,15 @@ jobs:
         run: ./build.sh
       - name: Explicit outcomes, strict coverage and rollback
         run: ./build/compiler test-check-lanes --tier1-outcomes --keep
-      - name: Existing emitter regressions
+      - name: Existing emitter and pipeline regressions
         if: success() || failure()
-        run: test -x build/compiler && ./build/compiler test-tier1-emit
-      - name: Existing pipeline regressions
+        run: ./build/compiler test-tier1-emit && ./build/compiler test-tier1-pipeline
+      - name: Full lane regressions
         if: success() || failure()
-        run: test -x build/compiler && ./build/compiler test-tier1-pipeline
+        run: ./build/compiler test-check-lanes --keep
+      - name: Multi-unit driver regressions
+        if: success() || failure()
+        run: ./build/compiler test-check-units --keep
       - name: Preserve exact tested source and logs
         if: always()
         run: git archive --format=tar HEAD > "$RUNNER_TEMP/buster-1054-tested.tar"
@@ -52,4 +81,5 @@ jobs:
           path: |
             ${{ runner.temp }}/buster-1054-tested.tar
             /tmp/buster-check-lanes-*
+            /tmp/buster-check-units-*
           retention-days: 3
