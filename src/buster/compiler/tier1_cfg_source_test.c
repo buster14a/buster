@@ -14,10 +14,13 @@
 // checker's unit, its home, and this command runs in the backend's, whose copies a call here would split from them.
 // Include after ir_source_test.c and tier1_cfg_ir.c.
 //
-//   build/compiler test-tier1-cfg-source [--print NAME] [preprocessor options] file...
+//   build/compiler test-tier1-cfg-source [--simd] [--print NAME] [preprocessor options] file...
 //
-// --print NAME prints that function's allocation problem's sizes and each path's counts. This is a test outside the
-// compile path, with no vector path of its own.
+// --print NAME prints that function's allocation problem's sizes and each path's counts. --simd allocates a function
+// with vectors or masks, which the SSA promoter refuses (test-ir-source --simd checks that it does), in its lowered
+// form, which is SSA too (its locals in slots), so that #732's vector and mask values reach the vector and opmask
+// classes (#179): the report then counts its masks, which must be some. This is a test outside the compile path, with
+// no vector path of its own.
 
 #include <time.h>
 
@@ -40,6 +43,9 @@ struct Tier1CfgSourcePath
     uint64_t split_edges;
     uint64_t temp_slots;
     uint64_t nanoseconds;
+    // The opmask class's: masks given a slot, and moves of masks.
+    uint64_t mask_spilled;
+    uint64_t mask_moves;
 };
 
 typedef struct Tier1CfgSourceTotals Tier1CfgSourceTotals;
@@ -58,6 +64,9 @@ struct Tier1CfgSourceTotals
     uint64_t blocks;
     uint64_t edges;
     uint64_t phis;
+    // With --simd: the functions allocated in their lowered form, and their problems' mask values.
+    uint64_t simd;
+    uint64_t mask_values;
     // The promoted IR's loads and stores of its slots, beside each path's stores and reloads: the frame's traffic.
     uint64_t slot_accesses;
     Tier1CfgSourcePath paths[2];
@@ -122,10 +131,15 @@ static void tier1_cfg_source_count(Tier1CfgSourcePath* path, const Tier1CfgInput
         path->recomputed += from == BUSTER_TIER1_CFG_REMATERIALIZE;
         path->stores += from != BUSTER_TIER1_CFG_REMATERIALIZE && to >= BUSTER_TIER1_CFG_SPILL;
         path->reloads += from != BUSTER_TIER1_CFG_REMATERIALIZE && from >= BUSTER_TIER1_CFG_SPILL;
+        path->mask_moves += input->classes[result->move_values[m]] == BUSTER_TIER1_ALLOCATE_MASK;
+    }
+    for (uint32_t k = 0; k < allocation->spill_count; k += 1)
+    {
+        path->mask_spilled += input->classes[allocation->spill_values[k]] == BUSTER_TIER1_ALLOCATE_MASK;
     }
 }
 
-static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, Arena* lowered_output, Arena* promoted_output, Arena* problem_arena, Arena* output, Arena* scratch)
+static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, bool simd, Arena* lowered_output, Arena* promoted_output, Arena* problem_arena, Arena* output, Arena* scratch)
 {
     uint32_t failures = 0;
     for (uint32_t f = 0; f < file->count; f += 1)
@@ -137,9 +151,14 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
         IrFunction lowered = { 0 };
         IrFunction promoted = { 0 };
         const IrCheck lowering = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, lowered_output, scratch, &lowered);
-        const IrCheck promotion = lowering.error == IR_OK ? ssa_ir_promote(&lowered, promoted_output, scratch, &promoted) : lowering;
+        const IrCheck refused = lowering.error == IR_OK ? ssa_ir_promote(&lowered, promoted_output, scratch, &promoted) : lowering;
+        // With --simd, a function the promoter refuses for its vectors or masks is allocated as lowered.
+        const bool lowered_form = simd && lowering.error == IR_OK && refused.error == IR_ERROR_UNSUPPORTED && ir_function_has_simd(&lowered);
+        const IrCheck promotion = lowered_form ? lowering : refused;
+        const IrFunction* allocated = lowered_form ? &lowered : &promoted;
+        totals->simd += lowered_form;
         Tier1CfgIrProblem problem = { 0 };
-        const Tier1CfgIrStatus adapted = promotion.error == IR_OK ? tier1_cfg_from_ir(&promoted, problem_arena, scratch, &problem) : TIER1_CFG_IR_INVALID;
+        const Tier1CfgIrStatus adapted = promotion.error == IR_OK ? tier1_cfg_from_ir(allocated, problem_arena, scratch, &problem) : TIER1_CFG_IR_INVALID;
         totals->unpromoted += promotion.error != IR_OK;
         totals->unsupported += adapted == TIER1_CFG_IR_UNSUPPORTED;
         totals->malformed += promotion.error == IR_OK && adapted != TIER1_CFG_IR_OK && adapted != TIER1_CFG_IR_UNSUPPORTED;
@@ -147,7 +166,11 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
         if (adapted == TIER1_CFG_IR_OK)
         {
             const Tier1CfgInput* input = &problem.input;
-            totals->slot_accesses += tier1_cfg_source_slot_accesses(&promoted);
+            totals->slot_accesses += tier1_cfg_source_slot_accesses(allocated);
+            for (uint32_t v = 0; v < input->value_count; v += 1)
+            {
+                totals->mask_values += input->classes[v] == BUSTER_TIER1_ALLOCATE_MASK;
+            }
             totals->instructions += problem.instructions;
             totals->values += input->value_count;
             totals->blocks += input->block_count;
@@ -213,13 +236,14 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
 
 static void tier1_cfg_source_print_path(const char* label, const Tier1CfgSourcePath* path, uint64_t instructions)
 {
-    printf("tier1-cfg-source: path=%s allocated=%" PRIu64 " constraint_refusals=%" PRIu64 " failed=%" PRIu64 " rejected=%" PRIu64 " intervals=%" PRIu64 " scan_share=%.4f spilled_values=%" PRIu64 " stores=%" PRIu64 " reloads=%" PRIu64 " recomputed=%" PRIu64 " moves=%" PRIu64 " split_moves=%" PRIu64 " split_edges=%" PRIu64 " temp_slot_functions=%" PRIu64 " one_run_ns_per_instruction=%.2f\n",
-           label, path->allocated, path->constraints, path->failed, path->rejected, path->intervals, path->intervals != 0 ? (double)path->scalar_intervals / (double)path->intervals : 0.0, path->spilled, path->stores, path->reloads, path->recomputed, path->moves, path->split_moves, path->split_edges, path->temp_slots, instructions != 0 ? (double)path->nanoseconds / (double)instructions : 0.0);
+    printf("tier1-cfg-source: path=%s allocated=%" PRIu64 " constraint_refusals=%" PRIu64 " failed=%" PRIu64 " rejected=%" PRIu64 " intervals=%" PRIu64 " scan_share=%.4f spilled_values=%" PRIu64 " stores=%" PRIu64 " reloads=%" PRIu64 " recomputed=%" PRIu64 " moves=%" PRIu64 " split_moves=%" PRIu64 " split_edges=%" PRIu64 " temp_slot_functions=%" PRIu64 " spilled_masks=%" PRIu64 " mask_moves=%" PRIu64 " one_run_ns_per_instruction=%.2f\n",
+           label, path->allocated, path->constraints, path->failed, path->rejected, path->intervals, path->intervals != 0 ? (double)path->scalar_intervals / (double)path->intervals : 0.0, path->spilled, path->stores, path->reloads, path->recomputed, path->moves, path->split_moves, path->split_edges, path->temp_slots, path->mask_spilled, path->mask_moves, instructions != 0 ? (double)path->nanoseconds / (double)instructions : 0.0);
 }
 
 static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** arguments)
 {
     const char* print = 0;
+    bool simd = false;
     char** options = calloc((size_t)count + 1, sizeof(char*));
     char** files = calloc((size_t)count + 1, sizeof(char*));
     uint32_t option_count = 0;
@@ -232,6 +256,10 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
             valid = i + 1 < count;
             print = valid ? arguments[i + 1] : 0;
             i += 1;
+        }
+        else if (strcmp(arguments[i], "--simd") == 0)
+        {
+            simd = true;
         }
         else if (arguments[i][0] != '-')
         {
@@ -268,7 +296,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
         ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
-            tier1_cfg_source_check(&totals, &file, files[i], print, &lowered_output, &promoted_output, &problem_arena, &output, &scratch);
+            tier1_cfg_source_check(&totals, &file, files[i], print, simd, &lowered_output, &promoted_output, &problem_arena, &output, &scratch);
         }
         else
         {
@@ -283,8 +311,8 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     const uint64_t refused = totals.paths[0].failed + totals.paths[0].rejected + totals.paths[1].failed + totals.paths[1].rejected;
     if (valid)
     {
-        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 "\n",
-               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.malformed, totals.disagreed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis);
+        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_lowered=%" PRIu64 " masks=%" PRIu64 "\n",
+               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.malformed, totals.disagreed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis, totals.simd, totals.mask_values);
         tier1_cfg_source_print_path("vector", &totals.paths[0], totals.instructions);
         tier1_cfg_source_print_path("scalar", &totals.paths[1], totals.instructions);
         printf("tier1-cfg-source: frame traffic: slot_accesses=%" PRIu64 " vector=%" PRIu64 " scalar=%" PRIu64 "\n", totals.slot_accesses, totals.slot_accesses + totals.paths[0].stores + totals.paths[0].reloads,
@@ -292,7 +320,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-tier1-cfg-source [--print NAME] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler test-tier1-cfg-source [--simd] [--print NAME] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);
@@ -303,5 +331,5 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.disagreed == 0 && refused == 0 && totals.functions != 0 ? 0 : 1;
+    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.disagreed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
 }

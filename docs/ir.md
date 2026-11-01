@@ -43,9 +43,10 @@ transactional refusal by the still-scalar SSA promoter, not successful
 promotion; ordinary corpus mode continues to require promotion. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
-vector/mask calls remain unsupported. Native selection and opmask allocation
-are separate consumers: [#141](https://github.com/buster14a/buster/issues/141)
-and [#179](https://github.com/buster14a/buster/issues/179), respectively; see the
+vector/mask calls remain unsupported. Native selection of vectors is
+[#141](https://github.com/buster14a/buster/issues/141)'s; Tier 1 selects masks'
+operations and allocates them in the opmask class
+([#179](https://github.com/buster14a/buster/issues/179)); see the
 [backend handoff](tier1.md#vector-and-opmask-handoff).
 
 ## Lifetime and stage contract

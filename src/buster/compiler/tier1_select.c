@@ -91,8 +91,30 @@ typedef enum Tier1SelectRule
     // says which), `scale`'s bits as TIER1_RULE_DIVIDE's `immediate`'s: a multiplication by the divisor's reciprocal and
     // shifts (Tier1SelectReciprocal), mul's or imul's rdx:rax, which the consumers save around it as TIER1_RULE_DIVIDE's.
     TIER1_RULE_DIVIDE_RECIPROCAL,
+    // AVX-512's masks (#179), m8 to m64, in the opmask registers that the CFG consumer's allocation gives them (k1 to
+    // k7: a node's register is its tier1_cfg.c location, BUSTER_TIER1_CFG_SPILL's class 2, whose low three bits are
+    // the k register's number). `width` is the mask's bytes, 1 to 8: kmovb, kmovw, kmovd, kmovq and the opmask
+    // instructions of that width, which leave the bits past it zero, as the IR's masks have them. A constant (zero by
+    // kxor, every bit by kxnor, else its bits through the scratch register); a copy (kmov); and, or and xor of values[0]
+    // and values[1]; not of values[0]; a load and a store, as the integer ones, the store's mask in values[2], each one
+    // kmov, which must stay its node's last record: the CFG consumer writes a frame object's base and offset into that
+    // record (`stack_object`, tier1_emit_cfg_records). Only the CFG consumer takes them.
+    TIER1_RULE_MASK_CONSTANT,
+    TIER1_RULE_MASK_COPY,
+    TIER1_RULE_MASK_LOGIC,
+    TIER1_RULE_MASK_NOT,
+    TIER1_RULE_MASK_LOAD,
+    TIER1_RULE_MASK_LOAD_ADDRESS,
+    TIER1_RULE_MASK_STORE,
+    TIER1_RULE_MASK_STORE_ADDRESS,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
+
+// Whether a rule is a mask's (#179), which the uniform-register consumer and the straight-line one don't take.
+static bool tier1_select_mask_rule(uint32_t rule)
+{
+    return rule >= TIER1_RULE_MASK_CONSTANT && rule <= TIER1_RULE_MASK_STORE_ADDRESS;
+}
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
 // operand when allocation assigned it the destination; it cannot hold any IR value, including a dead definition.
@@ -477,6 +499,43 @@ static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHo
     }
 }
 
+// The opmask forms of a mask of each width (#179), by the width's log2, then a row of none for any other width: kmov
+// between opmask registers, from memory, to memory and from a general register (a 32-bit one, but kmovq's 64), and the
+// opmask instructions the selector takes.
+// kmovb, kandb and the other byte forms need AVX512DQ, the doubleword and quadword ones AVX512BW, the word ones AVX512F:
+// the target's allow-list decides, as for every record.
+typedef struct Tier1SelectMaskForms Tier1SelectMaskForms;
+struct Tier1SelectMaskForms
+{
+    uint16_t move;
+    uint16_t load;
+    uint16_t store;
+    uint16_t from_general;
+    uint16_t and_forms;
+    uint16_t or_forms;
+    uint16_t xor_forms;
+    uint16_t xnor_forms;
+    uint16_t not_forms;
+};
+
+static const Tier1SelectMaskForms tier1_select_mask_forms_table[5] =
+{
+    { X86_FORM_KMOVB_K_K, X86_FORM_KMOVB_K_M8, X86_FORM_KMOVB_M8_K, X86_FORM_KMOVB_K_R32, X86_FORM_KANDB_K_K_K, X86_FORM_KORB_K_K_K, X86_FORM_KXORB_K_K_K, X86_FORM_KXNORB_K_K_K, X86_FORM_KNOTB_K_K },
+    { X86_FORM_KMOVW_K_K, X86_FORM_KMOVW_K_M16, X86_FORM_KMOVW_M16_K, X86_FORM_KMOVW_K_R32, X86_FORM_KANDW_K_K_K, X86_FORM_KORW_K_K_K, X86_FORM_KXORW_K_K_K, X86_FORM_KXNORW_K_K_K, X86_FORM_KNOTW_K_K },
+    { X86_FORM_KMOVD_K_K, X86_FORM_KMOVD_K_M32, X86_FORM_KMOVD_M32_K, X86_FORM_KMOVD_K_R32, X86_FORM_KANDD_K_K_K, X86_FORM_KORD_K_K_K, X86_FORM_KXORD_K_K_K, X86_FORM_KXNORD_K_K_K, X86_FORM_KNOTD_K_K },
+    { X86_FORM_KMOVQ_K_K, X86_FORM_KMOVQ_K_M64, X86_FORM_KMOVQ_M64_K, X86_FORM_KMOVQ_K_R64, X86_FORM_KANDQ_K_K_K, X86_FORM_KORQ_K_K_K, X86_FORM_KXORQ_K_K_K, X86_FORM_KXNORQ_K_K_K, X86_FORM_KNOTQ_K_K },
+    { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+};
+
+// A mask width's forms: 1, 2, 4 or 8 bytes. Any other width, which no mask has, gets X86_FORM_NONE throughout rather than
+// another width's forms: no target's allow-list takes that form (x86_target_form_allowed), so the CFG consumer refuses a
+// record of it at emission (TIER1_EMIT_TARGET).
+static const Tier1SelectMaskForms* tier1_select_mask_forms(uint32_t width)
+{
+    const uint32_t index = width == 8 ? 3 : width == 4 ? 2 : width == 2 ? 1 : width == 1 ? 0 : 4;
+    return &tier1_select_mask_forms_table[index];
+}
+
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 {
     Tier1SelectRecords result = {0};
@@ -709,6 +768,59 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         break;
     }
+    // A mask's registers are opmask registers: a node's register is its location (class 2's), whose low three bits are
+    // the k register; a memory operand's base and index are general registers.
+    case TIER1_RULE_MASK_CONSTANT:
+    {
+        const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+        const uint8_t k = destination & 7;
+        const uint64_t every = width >= 8 ? UINT64_MAX : (UINT64_C(1) << (width * 8)) - 1;
+        if (holes->immediate == 0 || holes->immediate == every)
+        {
+            tier1_select_append(&result, (X86Instruction){ .form = holes->immediate == 0 ? forms->xor_forms : forms->xnor_forms, .reg = k, .vvvv = k, .rm = k });
+        }
+        else
+        {
+            tier1_select_request(&result, X86_OPERATION_MOV, width == 8 ? 8 : 4, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)holes->immediate, 0);
+            tier1_select_append(&result, (X86Instruction){ .form = forms->from_general, .reg = k, .rm = BUSTER_TIER1_SELECT_SCRATCH });
+        }
+        break;
+    }
+    case TIER1_RULE_MASK_COPY:
+        if ((destination & 7) != (holes->left & 7))
+        {
+            tier1_select_append(&result, (X86Instruction){ .form = tier1_select_mask_forms(width)->move, .reg = destination & 7, .rm = holes->left & 7 });
+        }
+        break;
+    case TIER1_RULE_MASK_LOGIC:
+    {
+        const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+        const uint16_t form = holes->operation == X86_OPERATION_AND ? forms->and_forms : holes->operation == X86_OPERATION_OR ? forms->or_forms : forms->xor_forms;
+        tier1_select_append(&result, (X86Instruction){ .form = form, .reg = destination & 7, .vvvv = holes->left & 7, .rm = holes->right & 7 });
+        break;
+    }
+    case TIER1_RULE_MASK_NOT:
+        tier1_select_append(&result, (X86Instruction){ .form = tier1_select_mask_forms(width)->not_forms, .reg = destination & 7, .rm = holes->left & 7 });
+        break;
+    // One kmov each, the node's last record, which the CFG consumer's frame-object patch rewrites (`stack_object`).
+    case TIER1_RULE_MASK_LOAD:
+    case TIER1_RULE_MASK_LOAD_ADDRESS:
+    {
+        X86Instruction record = holes->memory;
+        record.reg = destination & 7;
+        record.form = tier1_select_mask_forms(width)->load;
+        tier1_select_append(&result, record);
+        break;
+    }
+    case TIER1_RULE_MASK_STORE:
+    case TIER1_RULE_MASK_STORE_ADDRESS:
+    {
+        X86Instruction record = holes->memory;
+        record.reg = holes->right & 7;
+        record.form = tier1_select_mask_forms(width)->store;
+        tier1_select_append(&result, record);
+        break;
+    }
     default:
         tier1_select_append(&result, (X86Instruction){0});
         break;
@@ -887,8 +999,9 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
 // code leaves out follows from what the chosen patterns read (tier1_select_plan). For TIER1_RULE_ADDRESS,
-// TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE and TIER1_RULE_STORE_ADDRESS,
-// `stack_object` is BUSTER_IR_NONE, or the frame object the address walk reached, whose offset the consumer adds to the
+// TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE, TIER1_RULE_STORE_ADDRESS and a
+// mask's TIER1_RULE_MASK_LOAD_ADDRESS and TIER1_RULE_MASK_STORE_ADDRESS (#179), `stack_object` is BUSTER_IR_NONE, or the
+// frame object the address walk reached, whose offset the consumer adds to the
 // displacement at emission (tier1_emit_cfg.c): the base value is then BUSTER_IR_NONE, and no register is read for it.
 // The original function stays immutable.
 typedef struct Tier1SelectPattern Tier1SelectPattern;
@@ -1022,6 +1135,60 @@ static uint32_t tier1_select_width(uint32_t type)
 static uint32_t tier1_select_memory_width(uint32_t type)
 {
     return type == IR_I8 ? 1 : type == IR_I16 ? 2 : type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
+}
+
+// A mask's bytes (#179): m8 to m64's 1 to 8, the width of the opmask instructions that take it; 0 for any other type.
+static uint32_t tier1_select_mask_width(uint32_t type)
+{
+    return type == IR_M8 ? 1 : type == IR_M16 ? 2 : type == IR_M32 ? 4 : type == IR_M64 ? 8 : 0;
+}
+
+// Whether a function has vectors, which the selector doesn't take (#141): a vector type anywhere, its constants or its
+// operations, in its instructions, its parameters, calls and slots. Masks (#179) it takes, as ir_function_has_simd
+// doesn't. The instructions 64 at a time on the vector path, one at a time on its scalar twin.
+static bool tier1_select_has_vectors(const IrFunction* function, bool vector)
+{
+    (void)vector;
+
+    bool found = function->vector_constant_count != 0 || ir_vector_type(function->result_type);
+    if (BUSTER_VECTOR_PATH(vector))
+    {
+        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
+        {
+            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+            const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
+            const __mmask64 vectors = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) & ~_mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V16I32 + 1));
+            const __mmask64 operations = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) |
+                                         _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
+            found = (vectors | operations) != 0;
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
+        {
+            found = ir_vector_type(function->type[i]) || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
+        }
+    }
+    for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
+    {
+        found = ir_vector_type(function->parameter_types[i]);
+    }
+    for (uint32_t i = 0; !found && i < function->call_type_count; i += 1)
+    {
+        found = ir_vector_type(function->call_types[i]);
+    }
+    for (uint32_t i = 0; !found && i < function->call_count; i += 1)
+    {
+        found = ir_vector_type(function->calls[i].result_type);
+    }
+    for (uint32_t i = 0; !found && i < function->slot_count; i += 1)
+    {
+        found = ir_vector_type(function->slots[i].type);
+    }
+    return found;
 }
 
 // The width a narrow source's copy reads: I1's canonical storage is its 32 bits, I8 one byte and I16 two. Zero says the
@@ -1452,7 +1619,72 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         .width = (uint8_t)width,
     };
     const bool integer = type == IR_I32 || type == IR_I64;
-    if (op == IR_CONST && width != 0)
+    // A mask's operations (#179): the stored mask's width for a store, the result's for the others.
+    const uint32_t mask_width = tier1_select_mask_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type);
+    if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
+    {
+        // An undefined mask is any mask: zero, kxor's.
+        base.rule = TIER1_RULE_MASK_CONSTANT;
+        base.width = (uint8_t)mask_width;
+        base.immediate = op == IR_CONST ? function->constants[a].low & (mask_width < 8 ? (UINT64_C(1) << (mask_width * 8)) - 1 : UINT64_MAX) : 0;
+        const uint64_t every = mask_width < 8 ? (UINT64_C(1) << (mask_width * 8)) - 1 : UINT64_MAX;
+        base.intrinsic_cost = base.immediate == 0 || base.immediate == every ? 1 : 2;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (mask_width != 0 && op == IR_COPY)
+    {
+        base.rule = TIER1_RULE_MASK_COPY;
+        base.width = (uint8_t)mask_width;
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (mask_width != 0 && (op == IR_AND || op == IR_OR || op == IR_XOR))
+    {
+        base.rule = TIER1_RULE_MASK_LOGIC;
+        base.width = (uint8_t)mask_width;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (mask_width != 0 && op == IR_NOT)
+    {
+        base.rule = TIER1_RULE_MASK_NOT;
+        base.width = (uint8_t)mask_width;
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (mask_width != 0 && (op == IR_LOAD || op == IR_STORE))
+    {
+        // kmov of the mask's width, from or to the address, folded into its memory operand as an integer's is.
+        const bool store = op == IR_STORE;
+        base.rule = store ? TIER1_RULE_MASK_STORE : TIER1_RULE_MASK_LOAD;
+        base.width = (uint8_t)mask_width;
+        base.values[0] = a;
+        base.values[2] = store ? b : BUSTER_IR_NONE;
+        base.intrinsic_cost = 1;
+        Tier1SelectPattern folded = base;
+        const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
+        // Through a frame object the folded address stands alone, as an integer's does.
+        if (!walked || folded.stack_object == BUSTER_IR_NONE)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        if (walked)
+        {
+            folded.rule = store ? TIER1_RULE_MASK_STORE_ADDRESS : TIER1_RULE_MASK_LOAD_ADDRESS;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+    }
+    else if (mask_width != 0 && op == IR_PHI)
+    {
+        base.rule = TIER1_RULE_PHI;
+        base.width = (uint8_t)mask_width;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_CONST && width != 0)
     {
         base.rule = TIER1_RULE_CONSTANT;
         const uint32_t bits = ir_type_bits[type];
@@ -1918,6 +2150,8 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
         case TIER1_RULE_BRANCH_COMPARE:
         case TIER1_RULE_LOAD_ADDRESS:
         case TIER1_RULE_STORE_ADDRESS:
+        case TIER1_RULE_MASK_LOAD_ADDRESS:
+        case TIER1_RULE_MASK_STORE_ADDRESS:
             rank = 8;
             break;
         case TIER1_RULE_LOAD_OPERAND:
@@ -1976,7 +2210,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
             failed_node = check.instruction;
         }
-        else if (ir_function_has_simd(function))
+        else if (tier1_select_has_vectors(function, vector))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -2317,8 +2551,12 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_LOAD_ADDRESS:
     case TIER1_RULE_STORE:
     case TIER1_RULE_STORE_ADDRESS:
+    case TIER1_RULE_MASK_LOAD:
+    case TIER1_RULE_MASK_LOAD_ADDRESS:
+    case TIER1_RULE_MASK_STORE:
+    case TIER1_RULE_MASK_STORE_ADDRESS:
         holes.memory = tier1_select_memory_holes(pattern, registers, 0);
-        if (pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS)
+        if (pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS || pattern->rule == TIER1_RULE_MASK_STORE || pattern->rule == TIER1_RULE_MASK_STORE_ADDRESS)
         {
             holes.right = holes.third;
         }
@@ -2367,7 +2605,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
-            plan->patterns[node].stack_object != BUSTER_IR_NONE)
+            tier1_select_mask_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

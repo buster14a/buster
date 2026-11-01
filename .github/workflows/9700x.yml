@@ -627,6 +627,15 @@ jobs:
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-zen5,')
         run: taskset -c 2 ./build/compiler benchmark-x86-zen5
 
+      - name: Measure mask spills to memory and to general registers
+        # #179: kmov of each width to a stack slot and back, against to a general register and back, in chains of one
+        # mask (a round trip's latency) and of seven (throughput), with and without vector work beside them.
+        # Informational; counter and protocol failures fail the step.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',mask-spills,')
+        run: |
+          sha256sum build/compiler src/buster/compiler/mask_spill_measure.c
+          taskset -c 2 ./build/compiler measure-mask-spills --passes 21 --iterations 20000
+
       - name: Benchmark Zen 5 cost lookup in isolation and after scalar work
         # Where `changes` doesn't rule it out (the module's sources): with the plain run above, three processes of each
         # mode.

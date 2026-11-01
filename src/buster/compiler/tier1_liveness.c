@@ -111,8 +111,9 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             error = TIER1_LIVENESS_INVALID;
         }
         else if ((op == IR_PHI && !phis) || (op == IR_CALL_INDIRECT && !phis) || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)) ||
-                 (type != IR_VOID && tier1_select_width(type) == 0))
+                 (type != IR_VOID && tier1_select_width(type) == 0 && !(phis && tier1_select_mask_width(type) != 0)))
         {
+            // A mask (#179) is the CFG consumer's alone, whose allocation has the opmask class.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
         else if (op == IR_PHI && (plan->covered[node] || plan->patterns[node].rule != TIER1_RULE_PHI || first != end))
