@@ -632,8 +632,9 @@ static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, c
 }
 
 // The labels fixture's function `name` in the object at `path`: its indirect jumps through a register and through
-// memory, into *registers and *memory, and into *trailing the records after its last indirect jump, its edges' stubs
-// (the padding's int3s left out). Whether it was found.
+// memory, into *registers and *memory, and into *trailing the direct jumps after its last indirect jump: its edges'
+// stubs, each of which ends in one to its label's block, since the dispatch block is laid out last (#1016's review).
+// Whether it was found.
 static bool check_test_tier1_jumps(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* registers, uint32_t* memory,
                                    uint32_t* trailing)
 {
@@ -648,7 +649,7 @@ static bool check_test_tier1_jumps(const char* path, const char* name, X86Decode
         const bool jump = form == X86_FORM_JMP_RM64;
         *registers += jump && records[i].instruction.mode == BUSTER_X86_REGISTER_DIRECT;
         *memory += jump && records[i].instruction.mode != BUSTER_X86_REGISTER_DIRECT;
-        *trailing = jump ? 0 : *trailing + (form != X86_FORM_INT3);
+        *trailing = jump ? 0 : *trailing + (form == X86_FORM_JMP_REL8 || form == X86_FORM_JMP_REL32);
     }
     return count != 0;
 }

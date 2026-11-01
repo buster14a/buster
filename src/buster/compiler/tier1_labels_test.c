@@ -138,6 +138,77 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
     return stub;
 }
 
+// #1016's review, one compile of the chain's function (`fixture` 0) or of the shared labels' with phis (1) or without (2)
+// by one path and one set of options: its emission's error, and where the chain's or the shared labels' without phis
+// emits, its code run on the samples against its oracle. The arenas are as they were after a refusal.
+static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t register_mask)
+{
+    IrFunction function;
+    const bool created = fixture == 0 ? tier1_select_test_indirect_chain_function(&test->input, &function) : tier1_select_test_shared_labels_function(&test->input, fixture == 1, &function);
+    IrDominance dominance;
+    const bool dominated = created && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the review's indirect jumps' fixtures select");
+    const Tier1EmitOptions options = {
+        .register_mask = register_mask,
+        .vector = vector,
+        .rematerialize = rematerialize,
+        .symbol_count = function.symbol_count,
+    };
+    Tier1EmitResult emitted;
+    const uint64_t output_mark = test->output.length;
+    const uint64_t scratch_mark = test->scratch.length;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    tier1_emit_test_expect(test, test->scratch.length == scratch_mark && (error == TIER1_EMIT_OK || test->output.length == output_mark), "the review's fixtures leave the arenas as they were");
+    void* executable = MAP_FAILED;
+    uint64_t bytes = 0;
+    if (error == TIER1_EMIT_OK && fixture != 1 && emitted.label_count == 2 && tier1_labels_load(test, &emitted, &executable, &bytes))
+    {
+        uint64_t random = UINT64_C(0x3c5e7a91b2d4f608) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ ((uint64_t)fixture << 32);
+        for (uint32_t sample = 0; sample < BUSTER_TIER1_LABELS_SAMPLES; sample += 1)
+        {
+            // Each path in turn: both labels, and in the shared labels' function both jumps.
+            const uint64_t x = (tier1_emit_test_random(&random) & ~UINT64_C(3)) | (sample & 3);
+            const uint64_t y = tier1_emit_test_random(&random);
+            const uint64_t expected = fixture == 0 ? tier1_select_test_indirect_chain_oracle(x, y) : tier1_select_test_shared_labels_oracle(x);
+            const uint64_t actual = tier1_emit_test_call(executable, x, y);
+            if (actual != expected && test->failures < 20)
+            {
+                fprintf(stderr, "  labels review fixture=%u vector=%u remat=%u mask=%x x=%016" PRIx64 " y=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", fixture, vector, rematerialize,
+                        register_mask, x, y, actual, expected);
+            }
+            tier1_emit_test_expect(test, actual == expected, "the review's indirect jumps reach their labels natively");
+        }
+    }
+    if (executable != MAP_FAILED)
+    {
+        munmap(executable, bytes);
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->input, 0);
+    return error;
+}
+
+// #1016's review: the chain of a later block that only earlier ones read emits and runs, every compile; two jumps sharing
+// labels whose edges have moves are refused, TIER1_EMIT_UNSUPPORTED, since one label's symbol can't be both jumps'
+// stubs; and two sharing labels whose edges have none emit and run, each label's symbol its block's.
+static void tier1_labels_review(Tier1EmitTest* test)
+{
+    const uint32_t all = tier1_liveness_register_mask();
+    const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDX);
+    for (uint32_t variant = 0; variant < 8; variant += 1)
+    {
+        const bool vector = (variant & 1) != 0;
+        const bool rematerialize = (variant & 2) != 0;
+        const uint32_t mask = (variant & 4) != 0 ? few : all;
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 0, vector, rematerialize, mask) == TIER1_EMIT_OK, "a later block's chain that only earlier blocks read emits");
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 1, vector, rematerialize, mask) == TIER1_EMIT_UNSUPPORTED, "two jumps sharing a label whose edges have stubs are refused");
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 2, vector, rematerialize, mask) == TIER1_EMIT_OK, "two jumps sharing labels whose edges have no moves emit");
+    }
+}
+
 static void tier1_labels_cases(Tier1EmitTest* test)
 {
     const uint32_t all = tier1_liveness_register_mask();
@@ -151,6 +222,7 @@ static void tier1_labels_cases(Tier1EmitTest* test)
         stubs += tier1_labels_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : all);
     }
     tier1_emit_test_expect(test, stubs == 8, "label 0's edge from the indirect jump has its stub, where its symbol goes, in every compile");
+    tier1_labels_review(test);
 }
 
 // The cases in a bounded child, as tier1_divide_tests runs its own: a jump to a wrong record can loop, which must fail

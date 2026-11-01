@@ -1032,9 +1032,12 @@ static Tier1EmitError tier1_emit_cfg_indirect(Tier1EmitResult* emitted, uint32_t
 
 // Each of the function's labels' first record (Tier1EmitResult.label_records, #789): its block's, or where the indirect
 // jump that may go to it has a stub for that edge, the stub's, which the jump reaches through the label's address alone.
-// Each label is on one indirect jump's list at most (a jump table's, or the dispatch block's of GNU C's goto *). A label
-// no block holds, in a function without br_indirect, gets the function's first record. An indirect jump with one
-// successor jumps there directly, and its label is its block's.
+// A label no block holds, in a function without br_indirect, gets the function's first record. An indirect jump with one
+// successor jumps there directly, and its label is its block's. A label is one address for every indirect jump that may
+// go to it. The C lowering puts each on one jump's list (a jump table's, or the dispatch block's of GNU C's goto *), but
+// for a dispatch block that lists none, which may go to every label, where goto * has no label of its own, and the IR
+// doesn't require it. A label two jumps may go to is its block's where neither edge has a stub, and otherwise the
+// function is refused, TIER1_EMIT_UNSUPPORTED: one jump would enter the other's stub (#1016's review).
 static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const uint32_t* block_first, const uint32_t* stub_first, Arena* output, Arena* scratch)
 {
     const IrFunction* function = plan->function;
@@ -1045,9 +1048,16 @@ static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1Em
     uint32_t* records = function->label_count != 0 ? ir_allocate(output, function->label_count, 4, &ok) : 0;
     // The edge from the jump's block to each of its successors, by successor: the CFG's successors are distinct.
     uint32_t* edges = function->label_count != 0 ? ir_allocate(scratch, input->block_count, 4, &ok) : 0;
+    // Each label's indirect jumps that may go to it (the last one's block, and how many), and whether one's edge has a stub.
+    uint32_t* owners = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 4, &ok) : 0;
+    uint32_t* owner_counts = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 4, &ok) : 0;
+    uint8_t* stubbed = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 1, &ok) : 0;
     for (uint32_t k = 0; ok && k < function->label_count; k += 1)
     {
         records[k] = function->labels[k] == BUSTER_IR_NONE ? 0 : block_first[function->labels[k] + added];
+        owners[k] = BUSTER_IR_NONE;
+        owner_counts[k] = 0;
+        stubbed[k] = 0;
     }
     for (uint32_t b = 0; ok && function->label_count != 0 && b < function->block_count; b += 1)
     {
@@ -1066,13 +1076,22 @@ static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1Em
             {
                 const uint32_t label = list ? function->extra[function->b[last] + i] : i;
                 const uint32_t e = edges[function->labels[label] + added];
-                records[label] = cfg->edge_placements[e] == TIER1_CFG_EDGE_SPLIT ? stub_first[e] : records[label];
+                const bool split = cfg->edge_placements[e] == TIER1_CFG_EDGE_SPLIT;
+                owner_counts[label] += owners[label] != b;
+                owners[label] = b;
+                stubbed[label] |= split;
+                records[label] = split ? stub_first[e] : records[label];
             }
         }
     }
-    emitted->label_records = ok ? records : 0;
-    emitted->label_count = ok ? function->label_count : 0;
-    return ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    bool owned = true;
+    for (uint32_t k = 0; ok && k < function->label_count; k += 1)
+    {
+        owned &= owner_counts[k] < 2 || stubbed[k] == 0;
+    }
+    emitted->label_records = ok && owned ? records : 0;
+    emitted->label_count = ok && owned ? function->label_count : 0;
+    return !ok ? TIER1_EMIT_MEMORY : !owned ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_OK;
 }
 
 // Every block's records: see the header.

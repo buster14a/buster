@@ -2968,6 +2968,220 @@ static void tier1_select_test_indirect(Tier1SelectTest* test)
     arena_release(&scratch);
 }
 
+// #1016's review: a dispatch block, last, whose value the labels' blocks read is a chain each of whose values only the
+// next reads: w = 5y, t = x ^ w, u = t + y. The labels' blocks return u - x (label 0) and u ^ y (label 1); the entry
+// picks label 0 where x is even. The selector's walk back passes w, t and u before their uses mark them needed.
+static bool tier1_select_test_indirect_chain_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 19,
+        .block_count = 4,
+        .constant_count = 3,
+        .parameter_count = 2,
+        .label_count = 2,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        static const uint32_t offsets[] = { 0, 10, 12, 14, 19 };
+        static const uint32_t labels[] = { 1, 2 };
+        memcpy(function->block_offsets, offsets, sizeof(offsets));
+        memcpy(function->labels, labels, sizeof(labels));
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->symbol_count = 3;
+        function->constants[0].low = 1;
+        function->constants[1].low = 0;
+        function->constants[2].low = 5;
+        tier1_select_test_node(function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 3, IR_AND, IR_I64, 0, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 4, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 5, IR_ICMP, IR_I1, 3, 4, IR_EQ);
+        tier1_select_test_node(function, 6, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 7, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 8, IR_SELECT, IR_PTR, 5, 6, 7);
+        tier1_select_test_node(function, 9, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 10, IR_SUB, IR_I64, 17, 0, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 12, IR_XOR, IR_I64, 17, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 14, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 15, IR_MUL, IR_I64, 1, 14, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 16, IR_XOR, IR_I64, 0, 15, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 17, IR_ADD, IR_I64, 16, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 18, IR_BR_INDIRECT, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// tier1_select_test_indirect_chain_function's result, from the inputs alone.
+static uint64_t tier1_select_test_indirect_chain_oracle(uint64_t x, uint64_t y)
+{
+    const uint64_t u = (x ^ (y * 5)) + y;
+    return (x & 1) == 0 ? u - x : u ^ y;
+}
+
+// #1016's review: two indirect jumps that may both go to both labels, a block's each, the entry picking the block by x's
+// low bit and each jump the label by its second bit. With `phis`, each label's block takes a phi of x from one jump and of
+// y from the other and reads x and y after it, so that neither edge leaves the phi's value where it was: label 0 returns
+// (v0 - x) ^ y with v0 = x from the first jump and y from the second, label 1 (v1 + x) * y with v1 = y and x. Without,
+// label 0 returns 10 and label 1 returns 20, and no edge has moves.
+static bool tier1_select_test_shared_labels_function(Arena* input, bool phis, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = phis ? 29 : 25,
+        .block_count = 5,
+        .constant_count = phis ? 4 : 6,
+        .parameter_count = 2,
+        .extra_count = phis ? 12 : 4,
+        .label_count = 2,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        static const uint32_t phi_offsets[] = { 0, 7, 14, 21, 25, 29 };
+        static const uint32_t plain_offsets[] = { 0, 7, 14, 21, 23, 25 };
+        static const uint32_t extra[] = { 0, 1, 0, 1, 1, 0, 2, 1, 1, 1, 2, 0 };
+        static const uint32_t labels[] = { 3, 4 };
+        memcpy(function->block_offsets, phis ? phi_offsets : plain_offsets, sizeof(phi_offsets));
+        memcpy(function->extra, extra, sizes.extra_count * sizeof(uint32_t));
+        memcpy(function->labels, labels, sizeof(labels));
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->symbol_count = 3;
+        function->constants[0].low = 1;
+        function->constants[1].low = 0;
+        function->constants[2].low = 2;
+        function->constants[3].low = 2;
+        tier1_select_test_node(function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 3, IR_AND, IR_I64, 0, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 4, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 5, IR_ICMP, IR_I1, 3, 4, IR_EQ);
+        tier1_select_test_node(function, 6, IR_CBR, IR_VOID, 5, 1, 2);
+        tier1_select_test_node(function, 7, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 8, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 9, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 10, IR_AND, IR_I64, 0, 9, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 11, IR_ICMP, IR_I1, 10, 4, IR_EQ);
+        tier1_select_test_node(function, 12, IR_SELECT, IR_PTR, 11, 7, 8);
+        tier1_select_test_node(function, 13, IR_BR_INDIRECT, IR_VOID, 12, 0, 2);
+        tier1_select_test_node(function, 14, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 15, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 16, IR_CONST, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 17, IR_AND, IR_I64, 0, 16, BUSTER_IR_NONE);
+        tier1_select_test_node(function, 18, IR_ICMP, IR_I1, 17, 4, IR_NE);
+        tier1_select_test_node(function, 19, IR_SELECT, IR_PTR, 18, 14, 15);
+        tier1_select_test_node(function, 20, IR_BR_INDIRECT, IR_VOID, 19, 2, 2);
+        if (phis)
+        {
+            tier1_select_test_node(function, 21, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 22, IR_SUB, IR_I64, 21, 0, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 23, IR_XOR, IR_I64, 22, 1, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 24, IR_RET, IR_VOID, 23, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 25, IR_PHI, IR_I64, 8, 2, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 26, IR_ADD, IR_I64, 25, 0, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 27, IR_MUL, IR_I64, 26, 1, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 28, IR_RET, IR_VOID, 27, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else
+        {
+            function->constants[4].low = 10;
+            function->constants[5].low = 20;
+            tier1_select_test_node(function, 21, IR_CONST, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 22, IR_RET, IR_VOID, 21, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 23, IR_CONST, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(function, 24, IR_RET, IR_VOID, 23, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+    }
+    return created;
+}
+
+// tier1_select_test_shared_labels_function's result without phis, from the inputs alone.
+static uint64_t tier1_select_test_shared_labels_oracle(uint64_t x)
+{
+    const bool first = (x & 2) == 0;
+    return (x & 1) == 0 ? (first ? 10 : 20) : (first ? 20 : 10);
+}
+
+// The function's dominance, into *dominance (its columns in `output`): whether the CFG and the analysis succeeded.
+static bool tier1_select_test_dominance(const IrFunction* function, Arena* output, Arena* scratch, IrDominance* dominance)
+{
+    IrCfg cfg = { 0 };
+    Dominators dominators = { 0 };
+    bool built = ir_build_cfg(function, output, scratch, &cfg) == IR_OK;
+    if (built)
+    {
+        const DominatorCfg graph =
+        {
+            .block_count = cfg.block_count,
+            .edge_count = cfg.edge_count,
+            .entry = 0,
+            .successor_offsets = cfg.successor_offsets,
+            .successors = cfg.successors,
+            .predecessor_offsets = cfg.predecessor_offsets,
+            .predecessors = cfg.predecessors,
+        };
+        DominatorOptions options = dominators_options();
+        options.outputs = 0;
+        built = dominators_analyze(output, scratch, &graph, options, &dominators) == DOMINATOR_OK;
+    }
+    *dominance = built ? (IrDominance){ .enter = dominators.preorder, .leave = dominators.subtree_end, .block_count = dominators.block_count } : (IrDominance){ 0 };
+    return built;
+}
+
+// A plan's covered flags and its effective uses agree: no computed node reads a covered one.
+static bool tier1_select_test_plan_consistent(const Tier1SelectPlan* plan)
+{
+    bool consistent = true;
+    for (uint32_t node = 0; node < plan->function->instruction_count; node += 1)
+    {
+        for (uint32_t u = plan->effective_use_offsets[node]; plan->covered[node] == 0 && u < plan->effective_use_offsets[node + 1]; u += 1)
+        {
+            consistent &= plan->covered[plan->effective_use_values[u]] == 0;
+        }
+    }
+    return consistent;
+}
+
+// #1016's review: the chain the labels' blocks read from the dispatch block, each value computed, by both paths, with
+// every computed node's values computed too; and the shared labels' functions select by both paths.
+static void tier1_select_test_indirect_review(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    for (uint32_t fixture = 0; fixture < 3; fixture += 1)
+    {
+        IrFunction function;
+        const bool created = fixture == 0 ? tier1_select_test_indirect_chain_function(&input, &function) : tier1_select_test_shared_labels_function(&input, fixture == 1, &function);
+        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the review's indirect jumps' fixtures are valid IR");
+        IrDominance dominance;
+        bool planned = created && tier1_select_test_dominance(&function, &output, &scratch, &dominance);
+        for (uint32_t path = 0; planned && path < 2; path += 1)
+        {
+            Tier1SelectPlan plan;
+            uint32_t failed = 0;
+            const uint64_t scratch_mark = scratch.length;
+            planned = tier1_select_plan(&function, &dominance, &output, &scratch, path == 0, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
+            tier1_select_test_expect(test, planned, "the review's indirect jumps' fixtures select by both paths");
+            tier1_select_test_expect(test, planned && tier1_select_test_plan_consistent(&plan), "no computed node reads a covered one");
+            tier1_select_test_expect(test, !planned || fixture != 0 || (plan.covered[15] == 0 && plan.covered[16] == 0 && plan.covered[17] == 0),
+                                     "a later block's chain that only earlier blocks read is computed, each value of it");
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 // #989's review: a node's sequence at its room and past it, in the selector's emitter. Each node of s = a + b, then
 // s < b (unsigned) ? s ^ a : s - b, its branch's comparison folded, takes no-ops before its records
 // (Tier1SelectPattern.nops) up to its room: the function emits, with that many more records, and runs as before. One
@@ -3406,6 +3620,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_room(&test);
             tier1_select_test_overlong(&test);
             tier1_select_test_indirect(&test);
+            tier1_select_test_indirect_review(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);
