@@ -502,6 +502,59 @@ static void check_builtin_misc_test_alignment(CheckBuiltinMiscTest* test, TypeTa
     }
 }
 
+// classify_type's classes and its unevaluated operand, eh_return_data_regno's registers and its constant, launder's
+// pointer and its refusals, and dwarf_cfa's pointer of no operand.
+static void check_builtin_misc_test_generic(CheckBuiltinMiscTest* test, TypeTable* table)
+{
+    const TypeId int_pointer = check_builtin_misc_pointer(table, BUSTER_TYPE_INT, 0);
+    const TypeId void_pointer = check_builtin_misc_pointer(table, BUSTER_TYPE_VOID, 0);
+    const struct { TypeId type; int32_t class; } classes[] = {
+        { BUSTER_TYPE_VOID, 0 }, { BUSTER_TYPE_INT, 1 }, { BUSTER_TYPE_CHAR, 1 }, { BUSTER_TYPE_BOOL, 4 }, { int_pointer, 5 },
+        { BUSTER_TYPE_DOUBLE, 8 }, { BUSTER_TYPE_LONG_DOUBLE, 8 }, { BUSTER_TYPE_NULLPTR, -1 },
+        { type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE), 1 }, { type_atomic(table, BUSTER_TYPE_BOOL), 4 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(classes); i += 1)
+    {
+        const CheckValue operand = { .type = classes[i].type, .category = CHECK_LVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT };
+        const CheckBuiltinMiscResult result = check_builtin_misc_test_action(table, CBUILTIN_CLASSIFY_TYPE, &operand, 1);
+        check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT &&
+                                      result.action.value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                                      (__int128)result.action.value.integer == classes[i].class && (result.action.value.flags & BUSTER_CHECK_ICE) != 0 &&
+                                      (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && result.evaluated_operands == 0,
+                                      "classify_type is its operand's class, an ICE whose operand never runs");
+    }
+    const struct { int64_t n; int32_t regno; } registers[] = { { 0, 0 }, { 1, 1 }, { 2, -1 }, { -1, -1 }, { 7, -1 } };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(registers); i += 1)
+    {
+        const CheckValue operand = check_test_integer(BUSTER_TYPE_INT, registers[i].n);
+        const CheckBuiltinMiscResult result = check_builtin_misc_test_action(table, CBUILTIN_EH_RETURN_DATA_REGNO, &operand, 1);
+        check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && (__int128)result.action.value.integer == registers[i].regno &&
+                                      (result.action.value.flags & BUSTER_CHECK_ICE) != 0 && result.evaluated_operands == 0,
+                                      "eh_return_data_regno is rax's 0, rdx's 1 and -1 otherwise");
+    }
+    const CheckValue variable = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+    CheckBuiltinMiscResult result = check_builtin_misc_test_action(table, CBUILTIN_EH_RETURN_DATA_REGNO, &variable, 1);
+    check_builtin_misc_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE, "eh_return_data_regno requires a constant");
+    const CheckValue pointer = { .type = int_pointer, .category = CHECK_RVALUE };
+    result = check_builtin_misc_test_action(table, CBUILTIN_LAUNDER, &pointer, 1);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == int_pointer &&
+                                  result.evaluated_operands == 1 && result.runtime_builtin == CBUILTIN_LAUNDER,
+                                  "launder is its pointer, of its type, evaluated once");
+    const CheckValue refused[] = { { .type = void_pointer, .category = CHECK_RVALUE }, variable };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+    {
+        result = check_builtin_misc_test_action(table, CBUILTIN_LAUNDER, refused + i, 1);
+        check_builtin_misc_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE && result.runtime_builtin == CBUILTIN_NONE,
+                                      "launder refuses a void pointer and an integer");
+    }
+    result = check_builtin_misc_test_action(table, CBUILTIN_DWARF_CFA, NULL, 0);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == void_pointer &&
+                                  result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.runtime_builtin == CBUILTIN_DWARF_CFA,
+                                  "dwarf_cfa is a void pointer of no operand");
+    result = check_builtin_misc_test_action(table, CBUILTIN_DWARF_CFA, &variable, 1);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "dwarf_cfa takes no operand");
+}
+
 static void check_builtin_misc_test_constraints(CheckBuiltinMiscTest* test, TypeTable* table)
 {
     const TypeId pointer = type_pointer(table, BUSTER_TYPE_INT);
@@ -800,6 +853,7 @@ static __attribute__((unused)) int run_check_builtin_misc_tests(int argc, char**
         {
             check_builtin_misc_test_values(&test, &types.table);
             check_builtin_misc_test_alignment(&test, &types.table);
+            check_builtin_misc_test_generic(&test, &types.table);
             check_builtin_misc_test_constraints(&test, &types.table);
             check_builtin_misc_test_pages(&test, &types.table);
         }
