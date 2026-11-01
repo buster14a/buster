@@ -1387,6 +1387,15 @@ static uint64_t check_input_scan_nonzero(const uint8_t* column, uint32_t first, 
     return _mm512_mask_test_epi8_mask(lanes, bytes, bytes);
 }
 
+// Of the 64 tokens from `line`, those from `first` on, before `count`, whose byte in `column` isn't 0: the bytes outside
+// them aren't read.
+static uint64_t check_input_scan_nonzero_from(const uint8_t* column, uint32_t line, uint32_t first, uint32_t count)
+{
+    const __mmask64 lanes = check_input_scan_all(line, count) & (UINT64_MAX << (first - line));
+    const __m512i bytes = _mm512_maskz_loadu_epi8(lanes, column + line);
+    return _mm512_mask_test_epi8_mask(lanes, bytes, bytes);
+}
+
 // Of the next 16, the tokens whose 32-bit value in `column` isn't 0.
 static uint32_t check_input_scan_nonzero32(const uint32_t* column, uint32_t first, uint32_t count)
 {
@@ -5469,19 +5478,25 @@ static bool check_input_visit_of(const Parser* parser, uint8_t syntax, uint32_t 
 // every token, and on the vector path the next one marked (CheckInputReader.visits), 64 at a time, or the pragma's
 // position the walk stops at (CheckInputReader.resolve_limit), or `end`. The tokens between are those at which the walk
 // does nothing: its own writes mark each token at which they make it act (check_input_visit).
+//
+// The scan loads the aligned 64 bytes that hold the next token, with the bytes below it and from `stop` on masked off:
+// `visits` starts on a cache line, so no load crosses one, as a load from the next token did for nearly every visit, and
+// none reads past the column (#529).
 static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_t token, uint32_t end)
 {
     const uint32_t stop = reader->resolve_limit > token && reader->resolve_limit < end ? reader->resolve_limit : end;
     uint32_t next = token + 1;
     if (!reader->parser->options.scalar && next < stop)
     {
-        uint64_t marked = check_input_scan_nonzero(reader->visits, next, stop);
-        while (marked == 0 && stop - next > 64)
+        const uint8_t* const visits = reader->visits;
+        uint32_t line = next & ~63u;
+        uint64_t marked = check_input_scan_nonzero_from(visits, line, next, stop);
+        while (marked == 0 && stop - line > 64)
         {
-            next += 64;
-            marked = check_input_scan_nonzero(reader->visits, next, stop);
+            line += 64;
+            marked = check_input_scan_nonzero(visits, line, stop);
         }
-        next = marked != 0 ? next + (uint32_t)__builtin_ctzll(marked) : stop;
+        next = marked != 0 ? line + (uint32_t)__builtin_ctzll(marked) : stop;
     }
     return next;
 }
