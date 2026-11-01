@@ -13,8 +13,8 @@
 // it is not an executable-only peak. Only --time-stages supplies a separate approximate post-exec RSS report.
 // It prints every run, each compile's medians with their ranges, what --time-stages costs (its median against the
 // default's), the default against the reference, and each stage's median, its range and its share of the median
-// span, ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and
-// exit). Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
+// span (the preprocessor's phases and the reader's expressions' walk, `check-input.expressions`, under their stages),
+// ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and exit). Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
 // be whole, or the command fails. The caller pins it (taskset): the processes inherit its CPUs. DIR is a new directory
 // under --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
 // docs/compile-time.md has the 9700X's numbers for sqlite3.c, against tcc.
@@ -146,11 +146,13 @@ static double measure_compile_median(double* values, uint32_t count)
 }
 
 // A run's row of --time-stages' report: each stage's milliseconds, the preprocessor's rows, the span, the process's
-// wall time outside it, and each stage's system milliseconds, minor faults and peak KB added.
+// wall time outside it, each stage's system milliseconds, minor faults and peak KB added, and the reader's
+// expressions' walk inside its stage (#1038).
 #define BUSTER_MEASURE_SPAN (CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES)
 #define BUSTER_MEASURE_OUTSIDE (BUSTER_MEASURE_SPAN + 1)
 #define BUSTER_MEASURE_USAGE (BUSTER_MEASURE_SPAN + 2)
-#define BUSTER_MEASURE_ROW (BUSTER_MEASURE_USAGE + 3 * CHECK_STAGE_COUNT)
+#define BUSTER_MEASURE_WALK (BUSTER_MEASURE_USAGE + 3 * CHECK_STAGE_COUNT)
+#define BUSTER_MEASURE_ROW (BUSTER_MEASURE_WALK + 1)
 
 // The warm-ups and the rounds, then the report. Returns how many failures it found.
 static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
@@ -177,7 +179,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             double scratch[BUSTER_MEASURE_ROW] = { 0 };
             double* row = warmup ? scratch : rows + (uint64_t)(run - m->warmups) * BUSTER_MEASURE_ROW;
             const bool reported = c != 1 || (errors != NULL && check_clock_read(errors, row, row + CHECK_STAGE_COUNT, row + BUSTER_MEASURE_SPAN,
-                                                                                 row + BUSTER_MEASURE_USAGE));
+                                                                                 row + BUSTER_MEASURE_WALK, row + BUSTER_MEASURE_USAGE));
             if (c == 1)
             {
                 row[BUSTER_MEASURE_OUTSIDE] = (double)one.wall_ns / 1e6 - row[BUSTER_MEASURE_SPAN];
@@ -271,6 +273,11 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
                 const uint32_t index = CHECK_STAGE_COUNT + p;
                 printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", check_clock_phase_names[p], median[index], low[index], high[index],
                        span > 0 ? median[index] * 100.0 / span : 0.0);
+            }
+            if (s == CHECK_STAGE_CHECK_INPUT)
+            {
+                printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", "check-input.expressions", median[BUSTER_MEASURE_WALK], low[BUSTER_MEASURE_WALK],
+                       high[BUSTER_MEASURE_WALK], span > 0 ? median[BUSTER_MEASURE_WALK] * 100.0 / span : 0.0);
             }
         }
         printf("  %-22s %9.3f  (%.3f to %.3f)  the stages' medians add up to %.3f\n", "span", span, low[BUSTER_MEASURE_SPAN], high[BUSTER_MEASURE_SPAN], sum);

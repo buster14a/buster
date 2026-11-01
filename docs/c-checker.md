@@ -3647,6 +3647,168 @@ in the [record](https://github.com/buster14a/buster-performance/tree/703e034725e
 This is the sparse-walk snapshot, before the later combined storage/traversal
 integration, not a new measurement of that combination.
 
+### The coded walk (#1038)
+
+The expressions' walk still took each token it visited through its action's
+chain of about 25 tests of the token's role, kind and columns before it acted,
+every step loading at the token the postorder had reached. Its vector path is
+now the coded walk (`c_check_expression_input.c`); `--scalar` keeps the walk,
+the oracle.
+
+- **Classes.** The classes' pass gives each token the walk acts at a class too
+  (`CheckInputExpressionCode`, in the visits byte's bits 2 to 6): which branch
+  of the walk's tests its role, its kind and the columns the walk doesn't write
+  lead to. Each block of 64 tokens looks its roles up in a table of their
+  classes (`check_input_role_codes`, with `vpermi2b`). An operand's class is its
+  kind's (identifier, literal or the walk's own). A role no test takes is a
+  DROP, but for the kinds the walk refuses. An ignored token is a LIST of a list
+  role and a DROP otherwise. A sparse entry or a type query finishing at the
+  token (`specifier_finishes`, 8 pointers at a time) makes it the walk's.
+  `check_input_expression_code` is the scalar twin, by the walk's tests in their
+  order. The scalar classes' pass computes the codes only for the coded walk:
+  `--scalar`'s walk reads a token's `ACTS` and `SPARSE` bits alone, so it gets
+  no code, and doesn't pay for the code's tests. Baseline builds run the coded
+  walk through the twins, codes and all.
+- **Compaction.** The postorder is read 1,024 positions at a time
+  (`check_input_expression_compact`), 16 tokens' bytes gathered from `visits`
+  and compressed with their tokens into two arrays on the stack. The column has
+  `BUSTER_CHECK_VISITS_PADDING` (2) bytes past its `count + 1`, as far as a
+  four-byte gather at the last token reads. A DROP's action is nothing but its children's chains joined,
+  and no parent reads them: its first value is `NONE`, as the reader's setup
+  wrote it, so its tokens are left out. The scalar twin writes every token and
+  counts the ones it keeps.
+- **Actions.** Each class has its own action, which writes what the walk's does
+  (the node's columns, its leaf, the token's node and values):
+  - an identifier's leaf, as twelve words (no x87 store of its zero floating
+    parts);
+  - a literal's leaf;
+  - prefix, binary, cast, member, subscript, postfix and conditional operators;
+  - lists and groups;
+  - terminators' discards and conditions;
+  - plain calls, with their arguments' slice and the library builtins' marks.
+
+  The node is `check_input_add_node`'s: `check_graph_add`'s, with its checks
+  and columns, and the columns the reader gives every node. `check_input_add`
+  records the nodes before it first. The coded walk doesn't: the next
+  `check_input_add` or `check_graph_record_finish` records them, in node order,
+  from their final columns. An action tests what its class can't say: the
+  values the children have, the columns the walk writes as it goes, a builtin or
+  an intrinsic at the token. Where they don't hold, the token goes to the walk's
+  own visit (`check_input_expression_visit`, the action factored out as
+  `check_input_expression_act`). An action that leaves a token has written only
+  its first value and its children's chains, which the visit writes again as
+  they were. A unit with expressions past its limit or deferred, or with
+  overload tables (any unit that spells `overloadable` or `__overloadable__`,
+  `main.c` among them: below), is the walk's throughout. So are a K&R unit's
+  identifiers and calls and a constexpr object's uses.
+- **The twins.** The scan test checks the classes by both paths against its own
+  reading of the walk's tests. It checks the compaction by both paths, with and
+  without the DROPs, against a random postorder, every column ending at a
+  `PROT_NONE` page. The coded walk counts, by class, the tokens it acted at by
+  the class's action and those it left to the walk's visit
+  (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
+  it to act by class at tokens of every fixture whose features it takes, and
+  the scalar walk at none. Over its fixtures, each class's action must act and,
+  where it can decline, leave a token; a full run prints both counts per class.
+  `benchmark-checker-bindings` prints a file's tokens acted at by class
+  (`expression_classed`), declined by their classes' actions
+  (`expression_declined`) and of the walk's own class (`expression_scalar`). Every comparison of the two paths compares the
+  graphs, leaves, argument slices and `token_nodes` (`test-checker`,
+  `test-checker-corpus`, c-testsuite's objects).
+- **What the walk is made of.** The counts per class that #1038 asked for, as
+  shares of each corpus's tokens: every token is in one row. A class's tokens
+  that its action left to the walk's visit are in parentheses. They were
+  counted from the classes' bytes and `CheckInput.expression_acted` and
+  `expression_left` (#1038's review):
+
+  | class | `sqlite3.c` | `main.c` | musl's 8 directories |
+  | --- | --- | --- | --- |
+  | tokens | 710,061 | 6,710,046 | 1,526,259 (441 units) |
+  | not acted at | 27.89% | 21.30% | 28.23% |
+  | identifier | 13.72% | 14.01% | 5.96% |
+  | list | 10.68% | 8.16% | 25.92% |
+  | terminator | 7.82% | 4.36% | 6.31% |
+  | binary | 6.74% (0.59%) | 10.41% | 5.69% (0.15%) |
+  | drop | 6.72% | 4.07% | 9.51% |
+  | literal | 6.38% | 10.46% | 4.24% |
+  | member | 4.59% | 2.81% | 0.16% |
+  | separator | 3.62% | 10.61% | 0.57% |
+  | group | 3.12% | 3.10% | 4.47% |
+  | call | 1.93% (0.006%) | 1.96% | 1.47% (0.005%) |
+  | condition | 1.63% | 0.48% | 0.13% |
+  | cast | 1.28% | 0.96% | 0.32% |
+  | the walk's own (scalar) | 1.26% | 3.79% | 3.14% |
+  | prefix | 1.22% (0.13%) | 1.87% | 2.65% (1.80%) |
+  | subscript | 1.00% | 1.19% | 0.06% |
+  | postfix | 0.30% | 0.03% | 0.02% |
+  | ternary | 0.09% | 0.43% | 1.14% |
+
+  - **The walk's own action.** It takes the scalar class and the declined
+    tokens: 1.98% of `sqlite3.c`'s tokens and 5.11% of musl's. The coded walk
+    visits 512,058 of `sqlite3.c`'s tokens and acts by class at 450,240 of them.
+    It skips its 47,745 DROPs, which need no action, and leaves 14,073 to the
+    walk.
+  - **The scalar class.** On `sqlite3.c` it holds `return`s (0.61%), string
+    operands (0.27%), `case` labels' colons (0.21%), parenthesized `sizeof`s'
+    and `_Alignof`s' closings (0.13%) and the sparse columns' tokens (0.03%).
+    musl's is mostly `sizeof`'s closings (1.80%), its `return`s (0.46%) and the
+    sparse columns (0.86%, almost all `asm`). Its declined prefixes (1.80%) are
+    those `sizeof`s' keywords. `main.c`'s is string operands (2.48%), `sizeof`
+    (0.78%) and `return`s (0.19%), its sparse columns 0.08%.
+  - **Declines.** The actions that decline valid code do so by design: a binary
+    operator in an initializer's designation or a builtin's, a call of a
+    builtin or an intrinsic, a prefix `sizeof`, `alignof` or a label's address.
+  - **`main.c`.** The coded walk takes none of its tokens, so its column is the
+    classes the coded walk would take. The unit spells `overloadable` (a
+    member's name in `c_check_input.c`), so the reader makes it overload tables
+    (`CheckInput.overload_heads`). In them, every function declaration is a
+    candidate, 18,413 of them, whose head the walk's action carries through its
+    nodes to its calls. The class actions don't carry heads yet, so such a unit
+    is the walk's throughout.
+  - **The trigger is the name.** Any token spelled `overloadable` or
+    `__overloadable__` gives a unit the tables (the reader's count of the
+    unit's names, `CHECK_INPUT_COUNT_OVERLOADABLE`). A member or a variable of
+    that name counts as much as the attribute does, whether or not the unit
+    declares an overloadable function. So one stray identifier turns the coded
+    walk off for the whole unit. `main.c`'s column is hypothetical, and the
+    compiler's own compile gets none of the coded walk. Either way out is
+    #1038's remaining work, beside the numbering below:
+    - tables only for a unit that names the attribute where an attribute goes,
+      rather than for any token's spelling;
+    - class actions that carry the heads.
+  - **The sparse tail.** It has to stay ordered, and is small in all three:
+    0.03%, 0.08% and 0.86%.
+- **Measured.** In a 4-CPU Sapphire Rapids VM without performance counters, `-c`
+  of the frozen `sqlite3.c` (`--lanes 1`, CPU 2) was timed 31 times with
+  rotating builds, by `--time-stages`' new `time-check expressions` row (the
+  TSC across `check_input_expressions`). The walk's minimum went from 41.4 to
+  33.1 ms, its median from 54.9 to 39.6 ms, and the `check-input` stage's
+  median from 172.9 to 153.9 ms. Sampling at 50 µs (8 compiles each) gave the
+  walk about 12,500 samples before and 7,100 after, about 43% less. The VM's page faults land
+  inside the walk's interval (about 8 ms of system time in both builds), and
+  its run-to-run spread is wide, so these figures are the VM's alone. The
+  9700X's counters are the measurement of record.
+- **The review's changes, measured.** These are 21 rotated runs each in the
+  same VM, against the walk before the coded walk. Sharing the node writer with
+  `check_input_add` (`check_input_add_node`, `check_graph_add`'s checks and its
+  leaf's clear) moved the coded walk's minimum from 31.5 to 32.1 ms and its
+  median from 34.3 to 35.1 ms, within the VM's spread. `--scalar`'s walk had
+  paid for the codes' tests: its minimum was 60.7 ms against 56.2 before the
+  coded walk. Since its classes no longer take codes, it is 57.5 against 55.5
+  (another run of both). The
+  action's call at every token is the same code with `noinline` or without it,
+  since clang doesn't inline its 28 KB at two places. No benchmark times that
+  path; it is the oracle.
+- **Tried, and slower.** Identifier leaves built 16 at a time from gathered
+  declaration columns, written before anything could read a leaf. That is
+  before every token left to the walk's visit, whose node records the nodes
+  before it. Those flushes averaged about 3 leaves on `sqlite3.c`, and the
+  walk's minimum rose from 32.1 to 34.2 ms, so the leaves are written by their
+  action. Building the graph data-parallel needs node ids before any node is
+  written, which is #1038's remaining work. That means every value's consumer
+  found (its nearest ancestor that isn't a list, by pointer jumping), the
+  consumers' operand counts as a histogram, and a prefix sum.
+
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
 output fills. Since #572 the graph stores `CheckValue` only for VALUE leaves;

@@ -17,6 +17,35 @@ struct CheckDriverFixture
     uint32_t column;
 };
 
+// test-checker-driver --part K/N: the command's checks are dealt in turn, in program order, to N parts, and this process
+// runs part K's (index K - 1), so that the correctness list runs the command as N commands of one CPU each, which the
+// runner packs beside the others: alone, the driver's checks were the list's longest command (197 s on a hosted
+// runner, 48 s on the 9700X). A check deals one unit, or, where it is a long sweep (check_test_driver_recovery,
+// check_test_driver_error_limits), one per case. Every part goes through the same units in the same order, whatever
+// the others' outcomes, since each unit is dealt before anything it runs decides the next: so the parts together run
+// each unit once, as the whole run runs it: no check draws from CheckTest.random, which the driver leaves at 0, and
+// those that draw numbers seed their own. Without --part, the one part takes every unit.
+typedef struct CheckDriverPart CheckDriverPart;
+struct CheckDriverPart
+{
+    uint32_t index;
+    uint32_t count;
+    // The units dealt so far, and of them this part's.
+    uint32_t dealt;
+    uint32_t taken;
+};
+
+static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
+
+// Whether this part runs the next unit, which it deals.
+static bool check_test_driver_takes(void)
+{
+    const bool taken = check_driver_part.dealt % check_driver_part.count == check_driver_part.index;
+    check_driver_part.dealt += 1;
+    check_driver_part.taken += taken;
+    return taken;
+}
+
 // Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
 // without one -fsyntax-only, and `extra`'s `extra_count` arguments (at most 8) before the source: its first error, as
 // clang's oracle reads one, and its warnings' count.
@@ -2819,8 +2848,8 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
 }
 
 // Reads --time-stages' report in `text` (check_clock_read): whether it has every row once, the stages adding up to the
-// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), and the process's lines.
-// Each stage's milliseconds go to `stages` (by CheckStage).
+// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), the reader's expressions' walk
+// once within the reader's stage (#1038), and the process's lines. Each stage's milliseconds go to `stages` (by CheckStage).
 static bool check_test_driver_time_report(const char* text, double* stages)
 {
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
@@ -2832,7 +2861,8 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
-    bool valid = check_clock_read(text, stages, phases, &total, NULL);
+    double walk = -1;
+    bool valid = check_clock_read(text, stages, phases, &total, &walk, NULL);
     double sum = 0;
     double phase_sum = 0;
     for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
@@ -2847,6 +2877,8 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     {
         valid = strstr(text, process[p]) != NULL;
     }
+    // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too.
+    valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL;
     const double stage_error = sum > total ? sum - total : total - sum;
     const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
     return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
@@ -3000,12 +3032,15 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks") != NULL;
+    // The reader's expressions' walk (#1038), under its stage.
+    const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
+    check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk under its stage");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
@@ -5175,6 +5210,15 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             lazy = true;
         }
+        else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc)
+        {
+            unsigned index = 0;
+            unsigned count = 0;
+            int used = 0;
+            const char* text = argv[++i];
+            options = sscanf(text, "%u/%u%n", &index, &count, &used) == 2 && text[used] == 0 && index >= 1 && index <= count && count <= 64;
+            check_driver_part = (CheckDriverPart){ .index = options ? index - 1 : 0, .count = options ? count : 1 };
+        }
         else
         {
             options = false;
@@ -5183,10 +5227,18 @@ static int run_checker_driver_tests(int argc, char** argv)
     check_test_expect(&test, options, "driver test options are recognized");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
-    check_test_driver_warning_order(&test);
-    check_test_driver_diagnostic_capacity(&test);
-    check_test_driver_reports(&test);
-    check_test_lower_capacity(&test);
+    // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below and
+    // the six sections that take `lazy` (check_test_driver_named_ucns, _loop_hints, _gnu_scopes, _section_pragmas,
+    // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
+    // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
+    // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
+    if (!lazy && check_test_driver_takes())
+    {
+        check_test_driver_warning_order(&test);
+        check_test_driver_diagnostic_capacity(&test);
+        check_test_driver_reports(&test);
+        check_test_lower_capacity(&test);
+    }
     const CheckDriverFixture fixtures[] =
     {
         {
@@ -5639,140 +5691,348 @@ static int run_checker_driver_tests(int argc, char** argv)
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     for (uint32_t i = 0; temporary && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
-        char source[192];
-        char object[192];
-        char description[384];
-        snprintf(source, sizeof(source), "%s/%u.c", directory, i);
-        snprintf(object, sizeof(object), "%s/%u.o", directory, i);
-        CheckCorpusOracle oracle = { 0 };
-        const bool oracle_ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
-                                  check_corpus_clang_file(clang, clang_arguments, fixtures[i].quiet ? 2 : 1, source, &oracle);
-        check_test_expect(&test, oracle_ready && oracle.rejected == fixtures[i].rejected, fixtures[i].name);
-        const uint32_t schedules = executable != NULL ? 4 : 2;
-        const uint32_t routes = schedules * 2;
-        for (uint32_t route = 0; oracle_ready && route < routes; route += 1)
+        if (check_test_driver_takes())
         {
-            unlink(object);
-            CheckCorpusOracle checked = { 0 };
-            uint32_t warnings = 0;
-            const bool external = route % schedules >= 2;
-            const bool dump_static = route >= schedules;
-            const bool ready = check_test_driver_run(external ? executable : NULL, source, object, (route & 1) != 0, dump_static,
-                                                     fixtures[i].quiet, lazy, &checked, &warnings);
-            snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
-                     external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
-            check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
-            if (fixtures[i].message != NULL)
+            char source[192];
+            char object[192];
+            char description[384];
+            snprintf(source, sizeof(source), "%s/%u.c", directory, i);
+            snprintf(object, sizeof(object), "%s/%u.o", directory, i);
+            CheckCorpusOracle oracle = { 0 };
+            const bool oracle_ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                                      check_corpus_clang_file(clang, clang_arguments, fixtures[i].quiet ? 2 : 1, source, &oracle);
+            check_test_expect(&test, oracle_ready && oracle.rejected == fixtures[i].rejected, fixtures[i].name);
+            const uint32_t schedules = executable != NULL ? 4 : 2;
+            const uint32_t routes = schedules * 2;
+            for (uint32_t route = 0; oracle_ready && route < routes; route += 1)
             {
-                snprintf(description, sizeof(description), "%s, %s %s%s: diagnostic and attribute column", fixtures[i].name,
-                         external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "");
-                check_test_expect(&test, ready && checked.column == fixtures[i].column && checked.column == oracle.column &&
-                                  strcmp(checked.message, fixtures[i].message) == 0, description);
-            }
-            snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
-                     external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
-            check_test_expect(&test, warnings == fixtures[i].warnings, description);
-            FILE* emitted = fopen(object, "rb");
-            unsigned char magic[4] = { 0 };
-            const bool elf = emitted != NULL && fread(magic, 1, sizeof(magic), emitted) == sizeof(magic) &&
-                             memcmp(magic, "\177ELF", sizeof(magic)) == 0;
-            check_test_expect(&test, oracle.rejected ? emitted == NULL : elf, "driver emits an ELF object only for accepted original source");
-            if (emitted != NULL)
-            {
-                fclose(emitted);
-            }
-            if (fixtures[i].rejected && route == 0)
-            {
-                static const char preserved[] = "existing output remains intact";
-                const bool written = parse_test_write(object, preserved, sizeof(preserved));
-                const bool rejected = written && check_test_driver_run(NULL, source, object, false, false, fixtures[i].quiet, lazy, &checked, &warnings) && checked.rejected;
-                FILE* prior = fopen(object, "rb");
-                char bytes[sizeof(preserved) + 1] = { 0 };
-                const size_t length = prior != NULL ? fread(bytes, 1, sizeof(bytes), prior) : 0;
-                check_test_expect(&test, rejected && length == sizeof(preserved) && memcmp(bytes, preserved, sizeof(preserved)) == 0,
-                                  "rejected original source preserves an existing output file");
-                if (prior != NULL)
+                unlink(object);
+                CheckCorpusOracle checked = { 0 };
+                uint32_t warnings = 0;
+                const bool external = route % schedules >= 2;
+                const bool dump_static = route >= schedules;
+                const bool ready = check_test_driver_run(external ? executable : NULL, source, object, (route & 1) != 0, dump_static,
+                                                         fixtures[i].quiet, lazy, &checked, &warnings);
+                snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
+                         external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
+                check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
+                if (fixtures[i].message != NULL)
                 {
-                    fclose(prior);
+                    snprintf(description, sizeof(description), "%s, %s %s%s: diagnostic and attribute column", fixtures[i].name,
+                             external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "");
+                    check_test_expect(&test, ready && checked.column == fixtures[i].column && checked.column == oracle.column &&
+                                      strcmp(checked.message, fixtures[i].message) == 0, description);
+                }
+                snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
+                         external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
+                check_test_expect(&test, warnings == fixtures[i].warnings, description);
+                FILE* emitted = fopen(object, "rb");
+                unsigned char magic[4] = { 0 };
+                const bool elf = emitted != NULL && fread(magic, 1, sizeof(magic), emitted) == sizeof(magic) &&
+                                 memcmp(magic, "\177ELF", sizeof(magic)) == 0;
+                check_test_expect(&test, oracle.rejected ? emitted == NULL : elf, "driver emits an ELF object only for accepted original source");
+                if (emitted != NULL)
+                {
+                    fclose(emitted);
+                }
+                if (fixtures[i].rejected && route == 0)
+                {
+                    static const char preserved[] = "existing output remains intact";
+                    const bool written = parse_test_write(object, preserved, sizeof(preserved));
+                    const bool rejected = written && check_test_driver_run(NULL, source, object, false, false, fixtures[i].quiet, lazy, &checked, &warnings) && checked.rejected;
+                    FILE* prior = fopen(object, "rb");
+                    char bytes[sizeof(preserved) + 1] = { 0 };
+                    const size_t length = prior != NULL ? fread(bytes, 1, sizeof(bytes), prior) : 0;
+                    check_test_expect(&test, rejected && length == sizeof(preserved) && memcmp(bytes, preserved, sizeof(preserved)) == 0,
+                                      "rejected original source preserves an existing output file");
+                    if (prior != NULL)
+                    {
+                        fclose(prior);
+                    }
                 }
             }
+            unlink(object);
+            unlink(source);
         }
-        unlink(object);
-        unlink(source);
     }
     if (temporary)
     {
-        check_test_driver_reservation_failure(&test);
-        check_test_driver_link_failure_messages(&test);
-        check_test_driver_error_limits(&test, clang, executable, directory);
-        check_test_driver_recovery(&test, clang, executable, directory);
-        check_test_driver_cleanup_errors(&test, clang, executable, directory);
-        check_test_driver_musttail_errors(&test, clang, executable, directory);
-        check_test_driver_const(&test, clang, executable, directory);
-        check_test_driver_initializer_warnings(&test, clang, executable, directory);
-        check_test_driver_default_warnings(&test, clang, executable, directory);
-        check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
-        check_test_driver_reuse(&test, directory);
-        check_test_driver_large_function(&test, clang, executable, directory);
-        check_test_packed_members(&test, clang, executable, directory);
-        check_test_driver_lazy(&test, clang, executable, directory);
-        check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
-        check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
-        check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
-        check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
-        check_test_driver_target_features(&test, clang, executable, directory);
-        check_test_driver_target_feature_errors(&test, clang, executable, directory);
-        check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_reservation_failure(&test);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_link_failure_messages(&test);
+        }
+        if (!lazy)
+        {
+            check_test_driver_error_limits(&test, clang, executable, directory);
+        }
+        if (!lazy)
+        {
+            check_test_driver_recovery(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_cleanup_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_musttail_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_const(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_initializer_warnings(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_default_warnings(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_reuse(&test, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_large_function(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_packed_members(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_lazy(&test, clang, executable, directory);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_target_features(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_target_feature_errors(&test, clang, executable, directory);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
+        }
         if (executable != NULL)
         {
-            check_test_driver_ignored_pragmas(&test, clang, executable, directory);
-            check_test_driver_libraries(&test, executable, directory);
-            check_test_driver_visibility(&test, clang, executable, directory);
-            check_test_driver_symbols(&test, clang, executable, directory);
-            check_test_driver_aliases(&test, clang, executable, directory);
-            check_test_driver_retained(&test, clang, executable, directory);
-            check_test_driver_implicit(&test, clang, executable, directory);
-            check_test_driver_inline_modes(&test, clang, executable, directory);
-            check_test_driver_late_attributes(&test, clang, executable, directory);
-            check_test_driver_alias_late_attributes(&test, clang, executable, directory);
-            check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
-            check_test_driver_returns(&test, clang, executable, directory);
-            check_test_driver_fortify(&test, clang, executable, directory);
-            check_test_driver_library(&test, clang, executable, directory);
-            check_test_driver_libgcc(&test, executable, directory);
-            check_test_driver_complex(&test, executable, directory);
-            check_test_driver_sockets(&test, clang, executable, directory);
-            check_test_driver_target_selection(&test, executable, directory);
-            check_test_driver_mmx(&test, clang, executable, directory);
-            check_test_driver_halves(&test, clang, executable, directory);
-            check_test_driver_switch_tables(&test, clang, executable, directory);
-            check_test_driver_members(&test, clang, executable, directory);
-            check_test_driver_array_alignment(&test, clang, executable, directory);
-            check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
-            check_test_driver_tier1_divide(&test, clang, executable, directory);
-            check_test_driver_tier1_labels(&test, clang, executable, directory);
-            check_test_driver_tier1_variadic(&test, clang, executable, directory);
-            check_test_driver_tier1_masks(&test, clang, executable, directory);
-            check_test_driver_tier1_lifetimes(&test, clang, executable, directory);
-            check_test_driver_float_classify(&test, executable, directory);
-            check_test_driver_asm_symbols(&test, executable, directory);
-            check_test_driver_split_stack(&test, executable, directory);
-            check_test_driver_damaged_snapshot(&test, executable, directory);
-            check_test_driver_dependencies(&test, clang, executable, directory);
-            check_test_driver_unwinder_dependency(&test, clang, executable, directory);
-            check_test_driver_script_path(&test, clang, executable, directory);
-            check_test_driver_versions(&test, clang, executable, directory);
-            check_test_driver_option_values(&test, executable, directory);
-            check_test_driver_identification(&test, executable, directory);
-            check_test_driver_unsupported_codegen(&test, executable, directory);
-            check_test_driver_preprocess_action(&test, executable, directory);
-            check_test_driver_layout_options(&test, executable, directory);
-            check_test_driver_link_layout_error(&test, executable, directory);
-            check_test_driver_time_stages(&test, executable, directory);
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_ignored_pragmas(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_libraries(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_visibility(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_symbols(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_aliases(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_retained(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_implicit(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_inline_modes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_late_attributes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_alias_late_attributes(&test, clang, executable, directory);
+            }
+            if (check_test_driver_takes())
+            {
+                check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_returns(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_fortify(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_library(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_libgcc(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_complex(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_sockets(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_target_selection(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_mmx(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_halves(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_switch_tables(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_members(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_array_alignment(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_gvn(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_divide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_labels(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_variadic(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_masks(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_lifetimes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_float_classify(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_symbols(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_split_stack(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_damaged_snapshot(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_dependencies(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_unwinder_dependency(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_script_path(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_versions(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_option_values(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_identification(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_unsupported_codegen(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_preprocess_action(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_layout_options(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_link_layout_error(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_time_stages(&test, executable, directory);
+            }
         }
         rmdir(directory);
     }
+    check_test_expect(&test, check_driver_part.taken != 0, "the driver test's part runs some of its checks");
     oracle_cache_report(oracle, "test-checker-driver");
+    if (check_driver_part.count > 1)
+    {
+        printf("checker-driver: part %u of %u: %u of the %u units dealt\n", check_driver_part.index + 1, check_driver_part.count, check_driver_part.taken,
+               check_driver_part.dealt);
+    }
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;
     oracle_epoch_end(epoch);
