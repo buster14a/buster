@@ -976,6 +976,19 @@ designs and the compilers already built this way.
   (`--only published`). [The unwind guide](docs/unwind.md) records the trusted
   private-slot contract, Link fixups and pending target-host qualification.
   Use the shared 9700X lock per command and CPU 2 for timing.
+- `src/buster/compiler/emission_metadata.c` is #1056's tier-neutral source/frame
+  event protocol: bounded, producer-owned events with two-sided record-boundary
+  anchors, explicit generated origins, a frame-rule vocabulary, and transactional
+  count/place/fill resolution against final record starts and ends. Layout
+  validation has an exact scalar path and an AVX-512 twin; source/frame checks and
+  sparse resolution are scalar, with no locked-9700X measurement yet.
+  `src/buster/compiler/emission_metadata_test.c` supplies
+  `test-emission-metadata [--seed N]`, built by `build.sh` and run by the
+  correctness inventory; the standalone wrapper `tests/emission-metadata/test.c`
+  gives the isolated baseline, AVX-512F and sanitizer commands. The driver,
+  `Tier0Code`, the Tier 1 frame adapter and the unwind writer do not consume the
+  protocol yet; #1056 remains open. [The guide](docs/emission-metadata.md)
+  records the record-boundary, ownership and remaining acceptance contracts.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the
@@ -1581,6 +1594,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-calling-convention --cross-check
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
+./build/compiler test-emission-metadata
 ./build/compiler benchmark-backend
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
