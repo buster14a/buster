@@ -879,6 +879,13 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .rejected = true,
         },
         {
+            // #990: the atomic action's operand conversions read const objects in constant contexts too, so clang's
+            // folded lock-free query of a const size object is an integer constant expression. Its answer 1 is a
+            // lock-free size the pointee's alignment covers; no fixture value or memory is executed.
+            .name = "declaration atomic lock-free query of const objects",
+            .source = "static const int x=5; static const int *const p=&x; static const unsigned long size=sizeof x; enum { E=__atomic_always_lock_free(size,p) }; _Static_assert(E==1 && __atomic_always_lock_free(size,p), \"atomic const objects\");\n",
+        },
+        {
             .name = "C23 raw attribute arithmetic",
             .source = "typedef int T [[gnu::aligned(1 << 4)]]; _Static_assert(_Alignof(T)==16, \"raw arithmetic\");\n",
         },
