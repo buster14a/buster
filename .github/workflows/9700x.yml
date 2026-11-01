@@ -29,7 +29,7 @@ jobs:
       BUSTER_HOST_ARCH: znver5
       BASE_SHA: 0d79975f60bb1442f9713c108a217dc2e60d583b
       HEAD_SHA: 210cd5808d4f1f493dcce64789d256f754effcb7
-      SHIFTS: 0 688 1376 2064 2752 3440
+      SHIFTS: 0 704 1408 2048 2752 3456
     steps:
       - name: Verify benchmark host
         run: |
