@@ -3,12 +3,15 @@
 
 // The C driver's --tier1 (#138's piece for #140): a body's typed stream compiled by Tier 1's pipeline rather than by
 // Tier 0: lowered to the shared IR (ir_lower.c), promoted to SSA (ssa_ir.c), optimized (ir_optimize.c's SCCP, dead
-// code and CFG cleanup), its CFG and dominators analyzed, selected (tier1_select.c) and emitted (tier1_emit.c, whose
-// CFG consumer allocates a general CFG's values over it, tier1_cfg.c), each step with --scalar by its scalar twin. The
-// emission's check_program_emit_tier1 calls it for each body and gives Tier 0 the bodies a step refuses, so that a
-// program of both tiers' functions is one System V program. Tier 1's code publishes its frame as Tier 0's does
-// (check_tier1_frame, #177), so that the emission writes its unwind tables as it writes Tier 0's. What Tier 1's code
-// leaves out (-g's rows) the driver refuses with the option. Include after tier1_emit.c and c_check_program_emit.c.
+// code and CFG cleanup), selected (tier1_select.c) using the optimizer's retained final verification analyses
+// (ir_optimize_verified.c, #1055), and emitted (tier1_emit.c, whose CFG consumer allocates a general CFG's values
+// over it, tier1_cfg.c), each step with --scalar by its scalar twin. The emission's check_program_emit_tier1 calls
+// it for each body and gives Tier 0 the bodies a step refuses, so that a program of both tiers' functions is one
+// System V program. Tier 1's code publishes its frame as Tier 0's does (check_tier1_frame, #177), so that the emission
+// writes its unwind tables as it writes Tier 0's. What Tier 1's code leaves out (-g's rows) the driver refuses with
+// the option. Include after tier1_emit.c and c_check_program_emit.c.
+
+#include "ir_optimize_verified.c"
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
 
@@ -126,47 +129,39 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         stage = check.error == IR_OK ? stage : CHECK_TIER1_PROMOTION;
     }
     IrOptimizeResult optimized = { 0 };
+    IrVerifiedRevision revision = { 0 };
+    IrVerifiedAnalysis analysis = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.scalar = scalar;
-        stage = ir_optimize(&promoted, &lane->steps[2], scratch, options, &optimized).error == IR_OK ? stage : CHECK_TIER1_OPTIMIZATION;
+        stage = ir_optimize_verified(&promoted, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis).error == IR_OK ? stage : CHECK_TIER1_OPTIMIZATION;
     }
     const IrFunction* ir = &optimized.function;
-    IrCfg cfg = { 0 };
-    Dominators dominators = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
-        stage = ir_build_cfg(ir, &lane->steps[3], scratch, &cfg) == IR_OK ? stage : CHECK_TIER1_ANALYSIS;
+        stage = ir_verified_current(&analysis, &revision, ir) ? stage : CHECK_TIER1_ANALYSIS;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const DominatorCfg graph = {
-            .block_count = cfg.block_count,
-            .edge_count = cfg.edge_count,
-            .entry = 0,
-            .successor_offsets = cfg.successor_offsets,
-            .successors = cfg.successors,
-            .predecessor_offsets = cfg.predecessor_offsets,
-            .predecessors = cfg.predecessors,
-        };
-        DominatorOptions options = dominators_options();
-        options.outputs = 0;
-        options.path = scalar ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
-        stage = dominators_analyze(&lane->steps[3], scratch, &graph, options, &dominators) == DOMINATOR_OK ? stage : CHECK_TIER1_ANALYSIS;
+        // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered
+        // and promoted IR may borrow from each other, but neither is a dependency of the optimized function. Reuse
+        // their arenas for the plan and emitted records; retain optimized IR and analyses through emission.
+        arena_pop_to(&lane->steps[0], 0);
+        arena_pop_to(&lane->steps[1], 0);
     }
     Tier1SelectPlan plan = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
         const IrDominance dominance = {
-            .enter = dominators.preorder,
-            .leave = dominators.subtree_end,
-            .block_count = dominators.block_count,
+            .enter = analysis.dominators.preorder,
+            .leave = analysis.dominators.subtree_end,
+            .block_count = analysis.dominators.block_count,
         };
         uint32_t node = BUSTER_IR_NONE;
-        // ir_optimize verified its result, its uses dominated by their definitions, before it returned: the plan doesn't
-        // verify it again (#141).
-        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[4], scratch, !scalar, &plan, &node);
+        // Full final SSA verification produced this exact revision and these intervals. No intervening pass mutates
+        // it; the revision and both owners remain live until selection and emission have finished (#1055).
+        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[0], scratch, !scalar, &plan, &node);
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         *operation = selected == TIER1_SELECT_OK ? 0 : selected == TIER1_SELECT_ERROR_UNSUPPORTED ? refused : IR_OP_COUNT + (uint32_t)selected;
         stage = selected == TIER1_SELECT_OK ? stage : CHECK_TIER1_SELECTION;
@@ -182,7 +177,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .symbol_count = function->symbol_count,
         };
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[5], scratch, &emitted, &node);
+        const Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
         *operation = (uint32_t)error;
         stage = error == TIER1_EMIT_OK ? stage : CHECK_TIER1_EMISSION;
     }
@@ -257,6 +252,13 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             *operation = TIER1_EMIT_FRAME;
             stage = CHECK_TIER1_EMISSION;
         }
+    }
+    // Only the copies in output may escape this invocation, on success as on a refusal. Invalidate before retiring
+    // the optimized columns or graph, so no live capability authorizes recycled storage.
+    ir_verified_invalidate(&revision);
+    for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+    {
+        arena_pop_to(&lane->steps[k], 0);
     }
     return stage;
 }
