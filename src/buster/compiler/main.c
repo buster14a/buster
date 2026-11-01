@@ -144,6 +144,8 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_program.c"
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
+// The tier-neutral emission metadata protocol's tests, for test-emission-metadata.
+int run_emission_metadata_tests(int argc, char** argv);
 
 // Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
 #include "buster/compiler/dominators.c"
@@ -989,6 +991,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-schedule") == 0)
     {
         result = run_tier1_schedule_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-emission-metadata") == 0)
+    {
+        result = run_emission_metadata_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
     {

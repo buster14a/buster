@@ -562,6 +562,10 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 ./build/compiler test-ir-inline
 == Test dataflow bitsets
 ./build/compiler test-dataflow
+== Test the emission metadata protocol
+# Bounded source/frame events and their transactional resolution against a final record layout, by the scalar path and
+# the AVX-512 layout twin where the host has it.
+./build/compiler test-emission-metadata
 == Test scoped name-resolution kernels
 ./build/compiler test-bindings
 == Test the partial Zen 5 model and instruction harness
