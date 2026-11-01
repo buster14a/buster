@@ -9,6 +9,8 @@
 // results for a reviewed regeneration. Included after ir_optimize_test.c, whose independent executor and structural
 // comparison it shares; run_ir_optimize_tests calls ir_optimize_text_tests.
 
+#include "ir_optimize_verified_test.c"
+
 typedef enum IrOptimizeTextPass
 {
     IR_OPTIMIZE_TEXT_SCCP,
@@ -318,6 +320,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
 
 static void ir_optimize_text_tests(IrOptimizeTest* test)
 {
+    ir_verified_tests(test);
     Arena source = arena_reserve(1ull << 20);
     Arena output = arena_reserve(8ull << 20);
     Arena twin = arena_reserve(8ull << 20);
