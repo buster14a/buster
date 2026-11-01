@@ -706,6 +706,19 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
 static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2);
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream);
 
+// A graph has room for every node its producer could add, and its columns fill from their starts: the C driver's reader
+// makes room for a node a token, of which sqlite3.c's graph holds 323,557 of 774,038. Pushed one after another, each
+// column's unused tail shared its huge pages with the next column's used start, so that every huge page of the columns
+// was touched: 39 MB of sqlite3.c's peak for 17 MB of nodes. A column of a huge page or more starts one instead, where
+// its tail takes no page (#628).
+static void* check_graph_column(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment)
+{
+    const bool large = count * element_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES;
+    return arena_push_array(arena, count, element_bytes, large ? BUSTER_ARENA_HUGE_PAGE_BYTES : alignment);
+}
+
+#define BUSTER_CHECK_GRAPH_COLUMN(arena, Type, count) ((Type*)check_graph_column((arena), (count), sizeof(Type), _Alignof(Type)))
+
 static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t capacity, uint32_t argument_capacity)
 {
     const uint64_t start = arena->length;
@@ -713,24 +726,25 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
     bool result = capacity <= (1u << 30) && argument_capacity <= (1u << 30);
     if (result && capacity != 0)
     {
-        graph->ops = BUSTER_ARENA_PUSH_ARRAY(arena, CheckOp, capacity);
-        graph->tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->operand0 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->operand1 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->operand2 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->leaves = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, capacity);
-        graph->leaf_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, capacity);
-        graph->members = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->contexts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity);
-        graph->source_positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->argument_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->argument_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
+        // The byte column first, where it shares a huge page with what the arena holds before the graph.
+        graph->contexts = BUSTER_CHECK_GRAPH_COLUMN(arena, uint8_t, capacity);
+        graph->ops = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckOp, capacity);
+        graph->tokens = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->operand0 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->operand1 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->operand2 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->leaves = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckValue, capacity);
+        graph->leaf_slots = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->types = BUSTER_CHECK_GRAPH_COLUMN(arena, TypeId, capacity);
+        graph->members = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->source_positions = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->argument_offsets = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->argument_counts = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         result = graph->ops != 0 && graph->tokens != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0 && graph->leaves != 0 && graph->leaf_slots != 0 && graph->types != 0 && graph->members != 0 && graph->contexts != 0 && graph->source_positions != 0 && graph->argument_offsets != 0 && graph->argument_counts != 0;
     }
     if (result && argument_capacity != 0)
     {
-        graph->argument_nodes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, argument_capacity);
+        graph->argument_nodes = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, argument_capacity);
         result = graph->argument_nodes != 0;
     }
     if (result)

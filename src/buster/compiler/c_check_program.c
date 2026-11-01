@@ -2936,6 +2936,13 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     {
         program->status = CHECK_PROGRAM_RESOURCE;
     }
+    // The scratch's pages past these columns go back to the kernel (arena_discard, #628): in the C driver they are the
+    // parse's and the reader's, which touched 77 MB of sqlite3.c's scratch against these columns' 51, and which this pass
+    // and the backend would otherwise hold while their outputs take pages of their own, through the compile's peak.
+    if (valid)
+    {
+        arena_discard(scratch);
+    }
     uint32_t body_count = 0;
     if (valid)
     {

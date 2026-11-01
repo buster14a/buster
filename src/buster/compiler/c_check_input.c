@@ -871,9 +871,9 @@ struct CheckInputReader
     TypeId* tag_types;
     uint32_t* tag_ends;
     unsigned __int128* enum_values;
-    // The token columns of check_input_run's arena of rare columns, from the first to the end of the last; and where
-    // more than one lane writes them in huge pages, a word per 2 MB region from rare_begin's, which a lane claims before
-    // its first write into the region (check_input_rare_claim, #847), and otherwise 0.
+    // The token columns in the huge pages of check_input_run's arena of rare columns, from the first to the end of the
+    // last; and where more than one lane writes them in huge pages, a word per 2 MB region from rare_begin's, which a lane
+    // claims before its first write into the region (check_input_rare_claim, #847), and otherwise 0.
     uint8_t* rare_begin;
     uint8_t* rare_end;
     uint32_t* rare_claims;
@@ -976,11 +976,12 @@ static uint32_t check_input_library_binding(CheckInputReader* reader, uint32_t n
 // faulted in, 2: in place), faults it in with a store of the byte the lane is about to write, and every other lane that
 // writes the region waits for that, so that no two lanes clear a huge page for it at once (#764, #847). A region holds
 // a page once the top level's walk wrote it, and its claim then costs a store; a region no lane writes is never faulted
-// in, and its reads take the huge zero page. Anywhere else (source order, one lane, base pages) it does nothing.
+// in, and its reads take the huge zero page. Anywhere else (source order, one lane, base pages, a column in the arena's
+// base pages) it does nothing.
 static void check_input_rare_claim(const CheckInputReader* reader, const void* entry)
 {
     uint32_t* const claims = reader->rare_claims;
-    if (claims != 0)
+    if (claims != 0 && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry < reader->rare_end)
     {
         uint32_t* const claim = claims + (((uintptr_t)entry >> 21) - ((uintptr_t)reader->rare_begin >> 21));
         uint32_t state = __atomic_load_n(claim, __ATOMIC_ACQUIRE);
@@ -7709,13 +7710,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.defined = input->defined;
     reader.parameters = input->parameters;
     reader.parameter_next = input->parameter_next;
+    // The graph's byte columns before the others, which start huge pages of their own (check_graph_column): here they
+    // share a huge page with the output columns' end, where they would take one of their own after the graph (#628).
+    uint8_t* recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+    uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+    valid &= warning_suppressed != NULL;
     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
-    input->graph.recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
-    valid &= input->graph.recorded_pure != NULL;
+    input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.const_values = &input->const_values;
-    input->graph.warning_suppressed = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : 0;
-    valid &= input->graph.warning_suppressed != 0;
+    input->graph.warning_suppressed = valid ? warning_suppressed : NULL;
     input->graph.argument_tokens = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
     valid &= input->graph.argument_tokens != 0;
     if (valid && vector_members != 0)
@@ -7777,50 +7781,53 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // a few at its start, in an arena of their own that the reader unmaps when it returns (#572). Its pages are new and
     // zero, so a column that is zero where nothing is written needs no clearing, and takes memory only where the walk
     // writes it: where the walk only reads it, the kernel maps its zero page. In the scratch, which the later stages take
-    // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
-    // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
-    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, and the
-    // binding table, whose events the walk appends and reads no further than the last, are in base pages at the arena's
-    // start. Where more than one lane reads the deferred bodies of a large unit, the arena is base pages throughout
-    // (check_input_sparse_arena, #764, #847).
+    // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The columns
+    // that the walk reads where it never wrote, at every token of a kind, are in huge pages, where those reads take the
+    // huge zero page: in base pages each read would fault its page, 9,600 on sqlite3.c. The others are in base pages at
+    // the arena's start, where they take only the pages the walk writes, since only the tokens that write them read them:
+    // the scope stacks, the enumeration constants' values, the specifiers, tags, sizeof types, designators and the
+    // initializers' finishes that a declaration or an expression writes and reads, and the binding table, whose events
+    // the walk appends and reads no further than the last. In huge pages the few hundred tokens each of those writes on
+    // sqlite3.c, spread over the unit, took every huge page of its column (#628). Where more than one lane reads the
+    // deferred bodies of a large unit, the arena is base pages throughout (check_input_sparse_arena, #764, #847).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
     X(scope_openings, uint32_t) \
-    X(enum_values, unsigned __int128)
+    X(enum_values, unsigned __int128) \
+    X(declaration_specifiers, uint32_t) \
+    X(declaration_deduced, TypeId) \
+    X(initializer_finish_next, uint32_t) \
+    X(designator_indices, uint64_t) \
+    X(designator_ranges, uint32_t) \
+    X(selection_types, TypeId) \
+    X(sizeof_types, TypeId) \
+    X(vla_bounds, uint32_t) \
+    X(parameter_shapes, uint8_t) \
+    X(parameter_declaration_next, uint32_t) \
+    X(tag_types, TypeId) \
+    X(tag_ends, uint32_t)
 #define BUSTER_CHECK_SPARSE_COLUMNS(X) \
     X(specifier_jobs, CheckInputSpecifierJob*) \
     X(specifier_finishes, CheckInputSpecifierJob*) \
     X(attribute_bases, CheckInputAttributes*) \
-    X(declaration_specifiers, uint32_t) \
-    X(declaration_deduced, TypeId) \
     X(declaration_bases, TypeId) \
     X(declaration_storage, uint32_t) \
     X(declaration_flags, uint8_t) \
     X(declaration_abis, uint8_t) \
     X(static_initializers, uint8_t) \
-    X(initializer_finish_next, uint32_t) \
     X(incomplete_array_types, TypeId) \
-    X(designator_indices, uint64_t) \
     X(designator_valid, uint8_t) \
     X(designator_tokens, uint32_t) \
-    X(designator_ranges, uint32_t) \
     X(selection_type_ends, uint32_t) \
-    X(selection_types, TypeId) \
     X(constant_present, uint32_t) \
-    X(sizeof_types, TypeId) \
     X(builtins, uint16_t) \
     X(builtin_type_ends, uint32_t) \
     X(vararg_calls, uint32_t) \
     X(vararg_types, uint32_t) \
-    X(vla_bounds, uint32_t) \
     X(vla_ends, uint32_t) \
     X(vla_scope_ends, uint32_t) \
-    X(warning_suppressed, uint8_t) \
-    X(parameter_shapes, uint8_t) \
-    X(parameter_declaration_next, uint32_t) \
-    X(tag_types, TypeId) \
-    X(tag_ends, uint32_t)
+    X(warning_suppressed, uint8_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
     const uint64_t binding_bytes = c_bindings_bytes(pp->table->count, count * 4 + 1);
     const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + binding_bytes + BUSTER_ARENA_PAGE_BYTES - 1) &
@@ -7837,8 +7844,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid = valid && c_bindings_initialize(&reader.bindings, &sparse, pp->table->count, count * 4 + 1);
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
 #undef BUSTER_CHECK_SPARSE_ARRAY
+    // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).
     reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
-    reader.rare_end = valid ? (uint8_t*)(reader.tag_ends + count + 1) : 0;
+    reader.rare_end = valid ? (uint8_t*)(reader.warning_suppressed + count + 1) : 0;
 #undef BUSTER_CHECK_SPARSE_COLUMNS
 #undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];

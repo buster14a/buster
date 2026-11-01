@@ -11463,13 +11463,32 @@ static uint8_t* parse_depth_stack_reserve(Arena* arena, uint64_t slots, uint64_t
     return bytes != 0 ? bytes + 1024 * quarter + BUSTER_PARSE_DEPTH_PADDING : 0;
 }
 
+// The C driver's reader takes the parse's temporaries' pages again (ParseOptions.scratch), but only as far as its own
+// columns reach: the pages the parse touches past them stay to the compile's end. So these buffers are pushed in the
+// order of where they're touched, each a statement of its own (an initializer list's order of evaluation is C's to
+// choose). First K4's stack in memory, touched at its slots' ends (each push, and the tail's 32 slots); last the
+// statement pass's levels, touched from their start by level, then the twin statements' records, which the vector path
+// touches only when K5 leaves a unit to the twin. Last of the buffers, K4's slots kept three huge pages at 90 to 96 MB
+// of sqlite3.c's scratch, and the levels one at 82 MB, past the reader's 77 MB (#628).
 static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity)
 {
     const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
+    ParseSlots stack = { 0 };
+    const bool stack_reserved = parse_slots_reserve(&stack, arena, capacity);
     uint32_t* open_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots + BUSTER_PARSE_DEPTH_PADDING);
     uint8_t* group_roles = parse_depth_stack_reserve(arena, slots, 0);
     uint8_t* group_typed = parse_depth_stack_reserve(arena, slots, 1);
     uint8_t* group_keywords = parse_depth_stack_reserve(arena, slots, 2);
+    uint8_t* typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
+    uint32_t* lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    uint16_t* left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots);
+    ParseBlockWork* works = BUSTER_ARENA_PUSH_ARRAY(arena, ParseBlockWork, slots / 64 + BUSTER_PARSE_PREPARED_TOGETHER);
+    uint32_t* secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    ParseStatementContext* contexts = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatementContext, slots / 64 + 1);
+    uint32_t* statement_previous = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    uint32_t* statement_owners = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    ParseStatementLevel* statement_levels = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatementLevel, slots);
+    ParseStatement* statements = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatement, slots);
     *buffers = (ParseVectorBuffers){
         .open_stack = open_stack != 0 ? open_stack + BUSTER_PARSE_DEPTH_PADDING : 0,
         .groups = {
@@ -11477,25 +11496,24 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
             .typed = group_typed,
             .keywords = group_keywords,
         },
-        .typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
-        .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
-        .works = BUSTER_ARENA_PUSH_ARRAY(arena, ParseBlockWork, slots / 64 + BUSTER_PARSE_PREPARED_TOGETHER),
-        .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .statements = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatement, slots),
-        .contexts = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatementContext, slots / 64 + 1),
-        .statement_previous = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .statement_owners = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .statement_levels = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatementLevel, slots),
+        .typed = typed,
+        .lefts = lefts,
+        .left_keys = left_keys,
+        .works = works,
+        .secondary = secondary,
+        .statements = statements,
+        .contexts = contexts,
+        .statement_previous = statement_previous,
+        .statement_owners = statement_owners,
+        .statement_levels = statement_levels,
+        .slots = stack,
         .rounds = { 0 },
         .wide_blocks = 0,
         .statement_counts = { 0 },
         .check_twins = 0,
     };
-    bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && group_keywords != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
-                  buffers->secondary != 0 && buffers->statements != 0 && buffers->contexts != 0 && buffers->statement_previous != 0 && buffers->statement_owners != 0 &&
-                  buffers->statement_levels != 0 &&
-                  buffers->works != 0 && parse_slots_reserve(&buffers->slots, arena, capacity);
+    bool result = stack_reserved && open_stack != 0 && group_roles != 0 && group_typed != 0 && group_keywords != 0 && typed != 0 && lefts != 0 && left_keys != 0 &&
+                  works != 0 && secondary != 0 && contexts != 0 && statement_previous != 0 && statement_owners != 0 && statement_levels != 0 && statements != 0;
     if (result)
     {
         for (uint32_t i = 0; i < BUSTER_PARSE_DEPTH_PADDING; i += 1)
