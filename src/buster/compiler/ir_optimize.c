@@ -1706,6 +1706,9 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
         ir_optimize_dce(&work, options);
         check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
     }
+    // Load-bearing: the C driver's --tier1 plans this result by tier1_select_plan_verified, which doesn't verify it again,
+    // its uses dominated by their definitions (c_check_tier1.c, #141). Weakening this verification needs the driver to
+    // verify instead (tier1_select_plan).
     if (check.error == IR_OK)
     {
         check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
