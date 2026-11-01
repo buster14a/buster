@@ -5,21 +5,23 @@ input with Buster Tier 0, Buster Tier 1, Clang `-O0` and Clang `-O2`, then compa
 their complete standard output. `test-differential-harness` tests the harness
 using an original C fixture that deliberately simulates tools and programs.
 
-This implements the harness portion of [#142](https://github.com/buster14a/buster/issues/142).
-It does **not** complete that issue. At the implementation base, Buster's public
-source driver preprocesses and parses; it does not emit a runnable C program.
-The checker, source-to-machine integration and Tier 1 consumer remain separate
-work. Neither fixture results, generator-only checks nor Clang's acceptance
-establish a Buster campaign. No compiler bug reduction or external generated
-corpus is added by this change.
+The harness from [#331](https://github.com/buster14a/buster/pull/331) now drives
+real executable C through the default Tier 0 path and the `--tier1` driver
+from [#970](https://github.com/buster14a/buster/pull/970) and
+[#972](https://github.com/buster14a/buster/pull/972). The
+[#142 acceptance record](differential-acceptance.md) accounts for the October 31,
+2026 both-generator, both-tier 9700X campaigns, their reference failures and
+coverage limits. Neither fixture results, generator-only checks nor Clang's
+acceptance alone establish a Buster campaign. No external generated corpus is
+vendored by the harness.
 
 ## Commands and prerequisites
 
 The command handlers receive arguments after the command name. `main.c` includes
 `differential.c` followed by `differential_test.c` and dispatches
-`run_differential_command` and `run_differential_tests`. They do not depend on
-an IR or on the unfinished source driver. The code uses Linux process APIs and
-the existing libc; it adds no build dependency.
+`run_differential_command` and `run_differential_tests`. They invoke the source
+driver as an external process and do not depend on its IR. The code uses Linux
+process APIs and the existing libc; it adds no build dependency.
 
 Install Csmith and YARPGen as external tools. Csmith additionally needs its
 matching runtime include directory when compiling its output. Clang needs a
@@ -33,19 +35,17 @@ working native C toolchain and runtime. A real Buster campaign also requires:
 - The actual generator and compiler revisions, a controlled host, and preserved
   external runtime/header installations for reproducibility.
 
-The driver compiles by Tier 0 by default (`--tier0-default`), and by Tier 1
-with `--tier1`, which needs `-fno-asynchronous-unwind-tables` (Tier 1's frames
-have no unwind tables yet: [the Tier 1 guide](tier1.md)'s "The C driver's
-`--tier1`"), each its own `--tier1-arg`. A campaign looks like this (each
+The driver compiles by Tier 0 by default (`--tier0-default`), and selects the
+Tier 1 pipeline with `--tier1`, falling back to Tier 0 for unsupported functions.
+It needs `-fno-asynchronous-unwind-tables` (Tier 1's frames have no unwind tables
+yet: [the Tier 1 guide](tier1.md)'s "The C driver's `--tier1`"), each its own
+`--tier1-arg`. These are mixed-tier driver campaigns, not a claim that every
+function uses Tier 1. Add `--tier1-arg --tier1-report` to retain its function
+coverage in the compilation's standard error. A campaign looks like this (each
 environment variable is set to the actual executable, directory or revision):
 
 ```sh
-./build/compiler test-differential \
-  --buster "$BUSTER" --tier0-default --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables \
-  --csmith "$CSMITH" --csmith-include "$CSMITH_INCLUDE" --yarpgen "$YARPGEN" \
-  --clang clang --generator both --seed 138 --count 10 \
-  --revision "$BUSTER_REVISION" --generator-revision "$GENERATOR_REVISIONS" \
-  --output /tmp/buster-differential
+./build/compiler test-differential --buster "$BUSTER" --tier0-default --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables --csmith "$CSMITH" --csmith-include "$CSMITH_INCLUDE" --yarpgen "$YARPGEN" --clang clang --generator both --seed 138 --count 10 --revision "$BUSTER_REVISION" --generator-revision "$GENERATOR_REVISIONS" --output /tmp/buster-differential
 ```
 
 `--count` is the number of programs **per generator**, with consecutive seeds
@@ -78,10 +78,7 @@ their source/revision and verify that they invoke the intended compiler/tier.
 To exercise installed generators while the source compiler is unavailable:
 
 ```sh
-./build/compiler test-differential --generate-only \
-  --csmith "$CSMITH" --yarpgen "$YARPGEN" --generator both \
-  --seed 138 --count 1 --generator-revision "$GENERATOR_REVISIONS" \
-  --output /tmp/buster-generator-controls
+./build/compiler test-differential --generate-only --csmith "$CSMITH" --yarpgen "$YARPGEN" --generator both --seed 138 --count 1 --generator-revision "$GENERATOR_REVISIONS" --output /tmp/buster-generator-controls
 ```
 
 Successful generation still exits **2**, with `status=unavailable`,
@@ -96,7 +93,9 @@ empty program output or output disagreement fails the case. These cases are
 retained and counted, never silently skipped. All selected compiler modes run
 after successful generation so a failed mode can be compared with its peers.
 A Clang failure is an oracle failure requiring investigation, not proof that
-Buster is wrong.
+Buster is wrong. The failure signature names only the first failure; inspect
+all retained command outcomes before concluding that another mode succeeded.
+Only a `passed` case establishes successful agreement across all selected modes.
 
 ## Generator protocol and provenance
 
@@ -197,10 +196,10 @@ The runner is scalar control-plane test tooling: a case launches only a handful
 of processes, and its useful work is performed in those processes. It adds no
 scalar compiler-stage boundary or SIMD performance claim. Campaign throughput
 and compiler quality still require controlled 9700X measurements. Run each
-independent build/test/campaign under the shared `exclusive.sh` lock, with CI
-priority. Use small campaign batches to release the lock between runs; pin
-actual timing comparisons to CPU 2. A local generator control is not 9700X
-acceptance.
+independent build/test/campaign under the shared `exclusive.sh` lock, following
+AGENTS.md's scheduling policy. Use small campaign batches to release the lock
+between runs; pin actual timing comparisons to CPU 2. A local generator control
+is not 9700X acceptance.
 
 ## Replay and reduction
 
@@ -311,9 +310,11 @@ artifacts stay inside the regression driver's private workspace. The driver remo
 that workspace after all eight cases pass, or retains and names it on failure or
 with its own `--keep`. Clang builds the fixtures and `rm` performs normal cleanup.
 
-The pinned real generators were also invoked through the new harness with
-seed 138, producing the expected source files and recording versions/options.
-That control produced two generated programs and zero Buster campaign passes.
-Issue #142 remains open until both generators have recorded, passing campaigns
-at both real Buster tiers on the 9700X, and any discovered bugs have reduced
-source regressions.
+The original seed-138 generator control produced two generated programs and
+zero Buster campaign passes. It remains a protocol control, not compiler
+acceptance. Real both-tier runs subsequently became possible with the C driver's
+`--tier1`. The [acceptance record](differential-acceptance.md) links the immutable
+9700X results: 35 Csmith and 31 YARPGen accepted comparisons at each tier,
+with 14 additional reference-blocked cases explicitly excluded from those
+counts. It also records the complete-batch subset, mixed-tier coverage boundary,
+regression disposition and a bounded strict requalification recipe.
