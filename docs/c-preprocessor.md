@@ -2154,7 +2154,7 @@ differ by up to 1% from code placement alone.
 | Pastes (#122) | Two identifiers, or an identifier and a number, interned without lexing | Lexing every paste | `main.c` (66,520 pastes) 16.5 to 15.2 ms |
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
-| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices, with line markers' breaks as gaps up to each line start that needs a marker | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices; token by token, a line start that needs a marker and chunks with a pragma end, an embed or a spelling past 64 bytes | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms, before #649's spellings; with them, `-E -P`'s printing of `main.c` 5.54–5.59 to 2.71 ns an output token, and `-E`'s with line markers 59.2 to 43.4 ms on `main.c` and 7.30 to 5.63 ms on `sqlite3.c` against the general loop (below); the line markers' batches' are pending (on the Xeon, about 93 to 56 ms and 11.5 to 6.9 ms) |
+| Printer (#124, #649) | Spellings a range at a time and identifiers by their bits, without a branch per token; then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer at prefix-sum offsets, which check for splices, with line markers' breaks as gaps up to each line start that needs a marker | `pp_print_scalar`, through stdio; the general loop for pragma lines, integers, embeds and possible splices; token by token, a line start that needs a marker and chunks with a pragma end, an embed or a spelling past 64 bytes | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms, before #649's spellings; with them, `-E -P`'s printing of `main.c` 5.54–5.59 to 2.71 ns an output token, and `-E`'s with line markers 59.2 to 43.4 ms on `main.c` and 7.30 to 5.63 ms on `sqlite3.c` against the general loop (below); the line markers' batches are pending (on the Xeon, about 93 to 56 ms and 11.5 to 6.9 ms) |
 
 **The directive tables alone** (`benchmark-preprocessor --tables`, the 9700X,
 CPU 2, three runs of 21 passes on the C library corpus: 8,983 files, 13,152,141
@@ -2391,11 +2391,22 @@ and the line starts that need markers took 1.3 ms and 2.3 ms token by token
 before the batches went on after them.
 
 Compacting a run's source bytes (#649's third direction) isn't built. On that
-host, the batches' copies and their offsets are 55% of `-P`'s printing: with
-both stubbed out, printing took 18 against 40 ms on `main.c` and 1.5 against
-3.3 ms on `sqlite3.c` (without the copies alone, 25 and 1.7 ms). Compaction
+host, the batches' copies and their offsets are about half of `-P`'s printing:
+with both stubbed out of the printer above, printing took 17.8–18.6 against
+36.9–38.3 ms on `main.c` and 1.51–1.53 against 3.14–3.19 ms on `sqlite3.c`
+(without the copies alone, 24.6–25.4 and 1.77–1.80 ms; medians of 41 passes,
+each variant beside the printer in one process, two processes). Compaction
 would replace them with a pass over each run's source bytes and the work to
-mark each token's ends; that is #649's step after the line markers' batches.
+mark each token's ends. A prototype that did so for a chunk whose 64 tokens
+come in order from one range within 4 KB of it (each token's start and end
+marked in a byte column, the bytes between a token's end and the next one's
+start dropped by a prefix XOR of the marks, `pclmulqdq`, and `vpcompressb`,
+with the gaps' spaces and breaks written over the bytes before each start)
+printed the same bytes, but 5–7% slower than the printer above (39.6–40.2
+against 37.5–37.8 ms on `main.c`, 3.40–3.62 against 3.18–3.42 ms on
+`sqlite3.c`, in one process, two processes), though it took only the 22% and
+14% of their chunks that qualify: marking a chunk's ends costs more than the
+copies it saves.
 
 The 9700X job times the printer with `pp_print_spellings` against its general
 loop for every chunk (`benchmark-preprocessor --spelling-cost`), on `main.c`
