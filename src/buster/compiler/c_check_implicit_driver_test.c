@@ -462,6 +462,55 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "void a(void) { printf(\"%.*f\\n\", \"x\", 1.0); }\n";
     static const char for_write[] =
         "int f(int x) { for (; x = 2; ) return 1; return 0; }\n";
+    static const char brace_initializers[] =
+        "enum E { A, B };\n"
+        "int a(void) { int x = { 1 }; return x; }\n"
+        "int b(void) { char c = { 'a' }; return c; }\n"
+        "int c(void) { enum E e = { A }; return e; }\n"
+        "int d(void) { int x = { x }; return x; }\n";
+    static const char format_n_unsigned[] =
+        "#include <stdio.h>\n"
+        "#include <stddef.h>\n"
+        "void a(void) { printf(\"%n\\n\", (unsigned int*)0); }\n"
+        "void b(void) { printf(\"%hhn\\n\", (unsigned char*)0); }\n"
+        "void c(void) { printf(\"%hn\\n\", (unsigned short*)0); }\n"
+        "void d(void) { printf(\"%ln\\n\", (unsigned long*)0); }\n"
+        "void e(void) { printf(\"%lln\\n\", (unsigned long long*)0); }\n"
+        "void f(void) { printf(\"%zn\\n\", (size_t*)0); }\n"
+        "void g(void) { printf(\"%tn\\n\", (size_t*)0); }\n"
+        "void h(void) { printf(\"%jn\\n\", (size_t*)0); }\n"
+        "void i(void) { printf(\"%ln\\n\", (long long*)0); }\n"
+        "void j(void) { printf(\"%hhn\\n\", (int*)0); }\n";
+    static const char comma_unparenthesized[] =
+        "int f(void);\n"
+        "int a(void) { int x, y; x = 1, y = 2; return x + y; }\n"
+        "int b(void) { int x, y = 0; (x = 1, y); return x + y; }\n"
+        "int c(void) { int y; (f(), y); return 0; }\n"
+        "int d(int x, int y) { x++, y; return 0; }\n"
+        "int e(int x, int y) { x, y; return 0; }\n";
+    static const char positional_format_edges[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%2$s\\n\", 1, \"x\"); }\n"
+        "void b(void) { printf(\"%2$d\\n\", \"x\", 1); }\n"
+        "void c(void) { printf(\"%2$s %1$d\\n\", 1, \"x\"); }\n"
+        "void d(void) { printf(\"%2$d\\n\", 1); }\n"
+        "void e(void) { printf(\"%1$d\\n\", 1, 2); }\n"
+        "void f(void) { printf(\"%3$*1$d\\n\", 2, 0, 7); }\n"
+        "void g(void) { printf(\"%1$*2$d\\n\", 7, 2); }\n"
+        "void h(void) { printf(\"%1$d %d\\n\", 1, 2); }\n"
+        "void i(void) { printf(\"%0$d\\n\", 1); }\n"
+        "void j(void) { printf(\"%1$.*2$f\\n\", 1.0, 2); }\n";
+    static const char format_integer_class[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%ld\\n\", 1UL); }\n"
+        "void b(void) { printf(\"%lld\\n\", 1ULL); }\n"
+        "void c(void) { printf(\"%lu\\n\", 1L); }\n"
+        "void d(void) { printf(\"%llu\\n\", 1LL); }\n"
+        "void e(void) { printf(\"%b\\n\", 1L); }\n"
+        "void f(void) { printf(\"%lb\\n\", 1ULL); }\n"
+        "void g(void) { printf(\"%hhd\\n\", 1L); }\n"
+        "void h(void) { printf(\"%hd\\n\", 1L); }\n"
+        "void i(void) { printf(\"%tu\\n\", 1LL); }\n";
     static const struct
     {
         const char* source;
@@ -498,6 +547,11 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { format_exact, { "-Wall", NULL, NULL, NULL } },
         { format_precision, { "-Wall", NULL, NULL, NULL } },
         { for_write, { "-Wall", "-Wextra", NULL, NULL } },
+        { brace_initializers, { "-Wall", NULL, NULL, NULL } },
+        { format_n_unsigned, { "-Wall", NULL, NULL, NULL } },
+        { comma_unparenthesized, { "-Wall", "-Wextra", NULL, NULL } },
+        { positional_format_edges, { "-Wall", NULL, NULL, NULL } },
+        { format_integer_class, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
     };

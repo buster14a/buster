@@ -3324,25 +3324,30 @@ variably modified type's bound), a void cast, an address computation, an
 unselected `&&`/`||`/`?:` arm, a static selection's unselected arms and
 controlling expression, and an assignment target are not reads, while an
 initializer's value, a compound assignment and an increment are, with the write
-ordered after the read. A variable read in its own initializer gets Clang's
-"within its own initialization" message. An unmodeled write through inline
+ordered after the read. A brace initializer writes its object even without an
+expression node, and a variable read in its own initializer (braced or not) gets
+Clang's "within its own initialization" message. An unmodeled write through inline
 assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
 keeps a separate read that is not the target of the same compound assignment or
 increment.
 `-Wformat` checks the four `printf`-family names, a declaration's
-`format(printf, ...)` attribute, the exact integer type for every length
-modifier (`long` against `long long`, `%zd`, `%jd`, `%td`, ...), `%n`'s exact
-integer pointer (`signed char *`, `short *`, `int *`, `long *`, `long long *`),
+`format(printf, ...)` attribute, the integer class for every length modifier
+(`long` against `long long`, `%zd`, `%jd`, `%td`, ...; the signed and unsigned
+types of one class agree), `%n`'s integer pointer by class (`signed char *`,
+`short *`, `int *`, `long *`, `long long *`, and the unsigned counterparts),
 each `*` field width's `int` and `.*` field precision's `int`, extra and
-insufficient arguments, positional `%1$d`/`%2$d`, C23 `%b`/`%B`, and wide
-`%ls`/`%lc` (and `%S`/`%C`) arguments with a signed 32-bit `wchar_t` or
-`wint_t`, and literal formats' common conversions and sizes. Its
-literal-internal diagnostics keep Clang's column and the diagnostic collector's
-source order.
+insufficient arguments, positional `%1$d`/`%2$d` conversions with positional
+widths and precisions and their used-argument counting, C23 `%b`/`%B` (whose
+expected name is the signed class), and wide `%ls`/`%lc` (and `%S`/`%C`)
+arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal formats'
+common conversions and sizes. Its literal-internal diagnostics keep Clang's
+column and the diagnostic collector's source order.
 `-Wunused-value` covers a bare identifier or literal, a parenthesized
 comparison, a cast (including a typedef of `void`), a conditional, and a comma
 expression, parenthesized or not; a comma operand with a call, assignment or
-increment has an effect and does not get the left-operand warning.
+increment has an effect and does not get the left-operand warning. Its reports
+complete with the function's closing brace, as Clang's do, after the body's
+own warnings and before an unused declaration's.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -3364,8 +3369,10 @@ uninitialized evaluation contexts, static selections, self-initialization,
 read-modify-writes and VLA bounds, wide and width-mismatched formats, enum
 aliases, fixed-underlying and shadowing definitions, zero sign comparisons,
 array-member/nested/zero-length bounds, declaration chains, scope-aware enum
-definitions, bare/parenthesized/cast/conditional/comma unused values with
-side-effect operands, `for` conditions and writes, positional/C23/exact/
+definitions, brace initializers and self-initialization, bare/parenthesized/
+cast/conditional/comma unused values with side-effect operands and their
+function-end order, `for` conditions and writes, positional indexing and used-
+argument counting, C23 `%b`, integer classes, unsigned `%n` pointers, exact and
 precision formats, and returned stack addresses line for line against Clang on
 both check paths. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by

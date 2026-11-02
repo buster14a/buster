@@ -67,6 +67,30 @@ static void check_common_report_at(const Parser* parser, Preprocessor* pp, const
     }
 }
 
+// A function-end warning: its location is the declaration, but it completes with the function's closing brace, after
+// the body's own warnings. The return phase orders it before the semantic groups at the same boundary.
+static void check_common_report_phase_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
+                                         uint32_t id, bool default_ignored, PPDiagnosticPhase phase, const char* message, Arena* scratch)
+{
+    if (token >= parser->tokens.count || publication >= parser->tokens.count || pp->fatal)
+    {
+        return;
+    }
+    const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
+        const bool error = severity >= CHECK_WARNING_ERROR;
+        const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
+        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (suffix != NULL)
+        {
+            pp_diagnose_output_phase(pp, disposition, parser->tokens.sources[token], parser->tokens.sources[publication], phase, "%s%s", message, suffix);
+        }
+    }
+}
+
 static void check_common_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
                                 bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
 {
@@ -312,6 +336,76 @@ static uint32_t check_common_parent(const Parser* parser, uint32_t token)
     return result;
 }
 
+// The closing brace of the function around `token`: Clang defers an unused result and an unused-but-set parameter to
+// the end of the function, after the body's own warnings. A token outside a body keeps its own place.
+static uint32_t check_common_function_end(const Parser* parser, uint32_t token)
+{
+    uint32_t result = token;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        if (role == PARSE_ROLE_OPEN_BODY)
+        {
+            result = parser->tree.parents[at];
+        }
+        else if (role == PARSE_ROLE_CLOSE_BODY)
+        {
+            result = at;
+        }
+        const uint32_t parent = parser->tree.parents[at];
+        if (parent == BUSTER_CHECK_NONE || parent >= parser->tokens.count || parent == at)
+        {
+            break;
+        }
+        at = parent;
+    }
+    return result;
+}
+
+// The first token of the subtree rooted at `root`: the left operand of an unparenthesized comma has no group
+// opener, so its start is the leftmost token whose parent chain reaches the operand's root.
+static uint32_t check_common_subtree_start(const Parser* parser, uint32_t root)
+{
+    uint32_t result = root;
+    bool found = false;
+    for (uint32_t at = root; at-- > 0;)
+    {
+        uint32_t node = at;
+        bool descendant = false;
+        for (uint32_t steps = 0; node < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        {
+            if (node == root)
+            {
+                descendant = true;
+                break;
+            }
+            const uint32_t parent = parser->tree.parents[node];
+            if (parent == BUSTER_CHECK_NONE || parent >= parser->tokens.count || parent == node)
+            {
+                break;
+            }
+            node = parent;
+        }
+        if (descendant)
+        {
+            result = at;
+            found = true;
+        }
+        else if (found)
+        {
+            break;
+        }
+    }
+    return result;
+}
+
+static void check_common_report_unused(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
+                                       const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
+{
+    check_common_report_at(parser, pp, input, token, check_common_function_end(parser, token), id, false, message, notes, note_count, scratch);
+}
+
 // A closer's opener is the token whose parent it is; the closer's own parent is the enclosing construct.
 static uint32_t check_common_cast_opener(const Parser* parser, uint32_t closer)
 {
@@ -435,7 +529,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 const bool direct = parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR;
                 if (!direct)
                 {
-                    check_common_report(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_VALUE, false, "expression result unused", NULL, 0, scratch);
+                    check_common_report_unused(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, scratch);
                 }
                 else
                 {
@@ -462,19 +556,37 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                     break;
                 }
             }
-            const uint32_t left = opener != BUSTER_CHECK_NONE && opener + 1 < token ? opener + 1 : token > 0 ? token - 1 : token;
+            uint32_t left = token > 0 ? token - 1 : token;
+            if (opener != BUSTER_CHECK_NONE && opener + 1 < token)
+            {
+                left = opener + 1;
+            }
+            else
+            {
+                uint32_t root = left;
+                for (uint32_t steps = 0; steps < parser->tokens.count; steps += 1)
+                {
+                    const uint32_t up = parser->tree.parents[root];
+                    if (up == BUSTER_CHECK_NONE || up >= token || up == root)
+                    {
+                        break;
+                    }
+                    root = up;
+                }
+                left = check_common_subtree_start(parser, root);
+            }
             const uint32_t right = token + 1 < parent ? token + 1 : token;
             if (!nested && left < token && right < parent)
             {
                 if (!check_common_expression_has_effect(parser, left, token))
                 {
-                    check_common_report(parser, pp, input, left, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                        "left operand of comma operator has no effect", NULL, 0, scratch);
+                    check_common_report_unused(parser, pp, input, left, CHECK_WARNING_ID_UNUSED_VALUE,
+                                               "left operand of comma operator has no effect", NULL, 0, scratch);
                 }
                 if (!check_common_expression_has_effect(parser, right, parent))
                 {
-                    check_common_report(parser, pp, input, right, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                        "expression result unused", NULL, 0, scratch);
+                    check_common_report_unused(parser, pp, input, right, CHECK_WARNING_ID_UNUSED_VALUE,
+                                               "expression result unused", NULL, 0, scratch);
                 }
             }
         }
@@ -482,7 +594,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                  check_common_statement_terminator(parser, parser->tree.parents[parent]))
         {
             const uint32_t last = parent + 1 < parser->tokens.count ? parent + 1 : token;
-            check_common_report(parser, pp, input, last, CHECK_WARNING_ID_UNUSED_VALUE, false, "expression result unused", NULL, 0, scratch);
+            check_common_report_unused(parser, pp, input, last, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, scratch);
         }
         else if (check_common_statement_terminator(parser, parent) && check_common_effect_role(role) &&
                  role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY && role != PARSE_ROLE_RELATIONAL &&
@@ -491,8 +603,8 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                  parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS)
         {
             const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) : token;
-            check_common_report(parser, pp, input, report != BUSTER_CHECK_NONE ? report : token, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                "expression result unused", NULL, 0, scratch);
+            check_common_report_unused(parser, pp, input, report != BUSTER_CHECK_NONE ? report : token, CHECK_WARNING_ID_UNUSED_VALUE,
+                                       "expression result unused", NULL, 0, scratch);
         }
     }
 }
@@ -847,28 +959,41 @@ static uint32_t check_common_format_index(String8 name)
     return result;
 }
 
-static bool check_common_format_integer(TypeTable* types, TypeId type, uint32_t required_width, TypeId exact)
+// Whether an integer argument has the class a length modifier names: an `int`-or-narrower value promoted for the
+// unspecified and h/hh lengths, or the long or long long class (signed or unsigned) for the wider lengths. The two
+// 64-bit classes share a width on x86-64, so the exact class, not the width, distinguishes them.
+static bool check_common_format_integer_class(TypeTable* types, TypeId type, char length_modifier, bool pointer)
 {
     uint32_t width = 0;
     bool sign = false;
-    // A narrower integer argument is promoted to int for the unspecified and h/hh lengths; the wider lengths need
-    // their exact type (long and long long share a width on x86-64).
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
     bool result = check_action_integer_type(types, type, &width, &sign);
-    result = result && (exact != 0 ? type_unqualified(type_strip_aligned(types, type)) == exact :
-                        required_width == 32 ? width <= 32 : width == required_width);
+    if (result)
+    {
+        switch (length_modifier)
+        {
+            case 'H': result = pointer ? width == 8 : width <= 32; break;
+            case 'h': result = pointer ? width == 16 : width <= 32; break;
+            case 'l':
+            case 'z':
+            case 'j':
+            case 't': result = stripped == BUSTER_TYPE_LONG || stripped == BUSTER_TYPE_ULONG; break;
+            case 'L': result = stripped == BUSTER_TYPE_LLONG || stripped == BUSTER_TYPE_ULLONG; break;
+            default: result = pointer ? width == 32 : width <= 32; break;
+        }
+    }
     return result;
 }
 
-// A pointer to the exact integer type of a `%n` conversion.
-static bool check_common_format_integer_pointer(TypeTable* types, TypeId type, TypeId exact)
+// A pointer to an integer of the class a `%n` conversion names.
+static bool check_common_format_integer_pointer(TypeTable* types, TypeId type, char length_modifier)
 {
     TypeId element = type_unqualified(type_strip_aligned(types, type));
     if (type_kind(types, element) != BUSTER_TYPE_KIND_POINTER)
     {
         return false;
     }
-    element = type_unqualified(type_element(types, element));
-    return element == exact;
+    return check_common_format_integer_class(types, type_element(types, element), length_modifier, true);
 }
 
 static bool check_common_format_width(TypeTable* types, TypeId type)
@@ -941,14 +1066,34 @@ static const char* check_common_format_integer_expected(uint8_t conversion, char
     {
         return length_modifier == 'l' || conversion == 'C' ? "'wint_t' (aka 'unsigned int')" : "'int'";
     }
-    if (conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X' || conversion == 'b' || conversion == 'B')
+    // `%b` and `%B` take any 32-bit-or-narrower integer but name the signed type, as Clang's message does.
+    const bool unsigned_conversion = conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X';
+    switch (length_modifier)
     {
-        return length_modifier == 'z' ? "'size_t' (aka 'unsigned long')" : length_modifier == 'l' ? "'unsigned long'" :
-               length_modifier == 'L' ? "'unsigned long long'" : length_modifier == 'j' ? "'uintmax_t' (aka 'unsigned long')" :
-               length_modifier == 't' ? "'unsigned long'" : "'unsigned int'";
+        case 'H': return unsigned_conversion ? "'unsigned char'" : "'char'";
+        case 'h': return unsigned_conversion ? "'unsigned short'" : "'short'";
+        case 'l': return unsigned_conversion ? "'unsigned long'" : "'long'";
+        case 'L': return unsigned_conversion ? "'unsigned long long'" : "'long long'";
+        case 'z': return unsigned_conversion ? "'size_t' (aka 'unsigned long')" : "'signed size_t' (aka 'long')";
+        case 'j': return unsigned_conversion ? "'uintmax_t' (aka 'unsigned long')" : "'intmax_t' (aka 'long')";
+        case 't': return unsigned_conversion ? "'unsigned ptrdiff_t' (aka 'unsigned long')" : "'ptrdiff_t' (aka 'long')";
+        default: return unsigned_conversion ? "'unsigned int'" : "'int'";
     }
-    return length_modifier == 'z' ? "'signed size_t' (aka 'long')" : length_modifier == 'l' ? "'long'" : length_modifier == 'L' ? "'long long'" :
-           length_modifier == 'j' ? "'intmax_t' (aka 'long')" : length_modifier == 't' ? "'ptrdiff_t' (aka 'long')" : "'int'";
+}
+
+static const char* check_common_format_integer_pointer_expected(char length_modifier)
+{
+    switch (length_modifier)
+    {
+        case 'H': return "'signed char *'";
+        case 'h': return "'short *'";
+        case 'l': return "'long *'";
+        case 'L': return "'long long *'";
+        case 'z': return "'signed size_t *' (aka 'long *')";
+        case 'j': return "'intmax_t *' (aka 'long *')";
+        case 't': return "'ptrdiff_t *' (aka 'long *')";
+        default: return "'int *'";
+    }
 }
 
 // The first token of an argument expression: back over nested parentheses to a cast or group opener, or to a call's
@@ -1010,6 +1155,65 @@ static void check_common_format_report_offset(const Parser* parser, Preprocessor
             pp->diagnostic_position = saved;
         }
     }
+}
+
+// Parses `N$` at `*at`, leaving it past the `$`; otherwise leaves it where it was.
+static bool check_common_format_position(const uint8_t* bytes, uint64_t length, uint64_t* at, uint32_t* position)
+{
+    uint64_t cursor = *at;
+    uint64_t value = 0;
+    while (cursor < length && bytes[cursor] >= '0' && bytes[cursor] <= '9')
+    {
+        value = value * 10 + (uint64_t)(bytes[cursor] - '0');
+        value = value > UINT32_MAX ? UINT32_MAX : value;
+        cursor += 1;
+    }
+    const bool result = cursor < length && bytes[cursor] == '$';
+    if (result)
+    {
+        *at = cursor + 1;
+        *position = (uint32_t)value;
+    }
+    return result;
+}
+
+// Marks a positional conversion's data argument used, or reports its position as invalid.
+static bool check_common_format_data_position(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                              uint64_t percent_offset, uint64_t conversion_offset, uint32_t position, uint32_t data_count,
+                                              uint8_t* used, Arena* scratch)
+{
+    const bool result = position != 0 && position <= data_count;
+    if (position == 0)
+    {
+        check_common_format_report_offset(parser, pp, input, format_token, percent_offset, CHECK_WARNING_ID_FORMAT,
+                                          "position arguments in format strings start counting at 1 (not 0)", scratch);
+    }
+    else if (position > data_count)
+    {
+        const char* message = check_warning_text(scratch, "data argument position '%u' exceeds the number of data arguments (%u)",
+                                                 position, data_count);
+        check_common_format_report_offset(parser, pp, input, format_token, conversion_offset, CHECK_WARNING_ID_FORMAT, message, scratch);
+    }
+    if (result && used != NULL)
+    {
+        used[position - 1] = 1;
+    }
+    return result;
+}
+
+static void check_common_format_missing_width(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                              uint64_t offset, bool precision, Arena* scratch)
+{
+    const char* message = precision ? "'.*' specified field precision is missing a matching 'int' argument" :
+                                      "'*' specified field width is missing a matching 'int' argument";
+    check_common_format_report_offset(parser, pp, input, format_token, offset, CHECK_WARNING_ID_FORMAT, message, scratch);
+}
+
+static void check_common_format_invalid_position(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                                 uint64_t offset, bool precision, Arena* scratch)
+{
+    const char* message = precision ? "invalid position specified for field precision" : "invalid position specified for field width";
+    check_common_format_report_offset(parser, pp, input, format_token, offset, CHECK_WARNING_ID_FORMAT, message, scratch);
 }
 
 static void check_common_format_report_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -1094,15 +1298,25 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 const uint8_t* bytes = input->strings[string].bytes;
                 uint64_t length = input->strings[string].byte_count;
                 uint32_t argument = first_argument;
+                const uint32_t data_count = count - first_argument;
+                uint8_t* used = data_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, data_count) : NULL;
+                const bool usable = data_count == 0 || used != NULL;
+                if (used != NULL)
+                {
+                    memset(used, 0, data_count);
+                }
                 bool insufficient = false;
-                bool positional_format = false;
+                bool positional_seen = false;
+                bool plain_seen = false;
+                bool malformed = false;
                 uint64_t insufficient_offset = 0;
-                for (uint64_t at = 0; at < length && !pp->fatal; at += 1)
+                for (uint64_t at = 0; usable && at < length && !pp->fatal; at += 1)
                 {
                     if (bytes[at] != '%')
                     {
                         continue;
                     }
+                    const uint64_t percent = at;
                     at += 1;
                     if (at >= length)
                     {
@@ -1117,60 +1331,47 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     {
                         at += 1;
                     }
+                    // The value's position comes before the width: `%2$*1$d` names value 2 and width 1.
+                    uint32_t value_position = 0;
+                    const bool value_positioned = check_common_format_position(bytes, length, &at, &value_position);
+                    bool width_argument = false;
+                    bool width_positioned = false;
+                    uint32_t width_position = 0;
+                    uint64_t width_offset = at;
                     if (at < length && bytes[at] == '*')
                     {
-                        if (argument >= count)
-                        {
-                            insufficient = true;
-                            insufficient_offset = at;
-                            break;
-                        }
-                        const uint32_t width_node = graph->argument_nodes[offset + argument];
-                        const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
-                        if (!check_common_format_width(types, width_type))
-                        {
-                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, argument, format_token, at + 1, false, scratch);
-                        }
-                        argument += 1;
+                        width_argument = true;
+                        width_offset = at;
                         at += 1;
+                        width_positioned = check_common_format_position(bytes, length, &at, &width_position);
                     }
-                    while (at < length && bytes[at] >= '0' && bytes[at] <= '9')
+                    else
                     {
-                        at += 1;
-                    }
-                    if (at < length && bytes[at] == '$')
-                    {
-                        positional_format = true;
-                        at += 1;
-                    }
-                    if (at < length && bytes[at] == '.')
-                    {
-                        at += 1;
-                        if (at < length && bytes[at] == '*')
-                        {
-                            if (argument >= count)
-                            {
-                                insufficient = true;
-                                insufficient_offset = at;
-                                break;
-                            }
-                            const uint32_t width_node = graph->argument_nodes[offset + argument];
-                            const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
-                            if (!check_common_format_width(types, width_type))
-                            {
-                                check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, argument, format_token, at, true, scratch);
-                            }
-                            argument += 1;
-                            at += 1;
-                        }
                         while (at < length && bytes[at] >= '0' && bytes[at] <= '9')
                         {
                             at += 1;
                         }
-                        if (at < length && bytes[at] == '$')
+                    }
+                    bool precision_argument = false;
+                    bool precision_positioned = false;
+                    uint32_t precision_position = 0;
+                    uint64_t precision_offset = at;
+                    if (at < length && bytes[at] == '.')
+                    {
+                        precision_offset = at;
+                        at += 1;
+                        if (at < length && bytes[at] == '*')
                         {
-                            positional_format = true;
+                            precision_argument = true;
                             at += 1;
+                            precision_positioned = check_common_format_position(bytes, length, &at, &precision_position);
+                        }
+                        else
+                        {
+                            while (at < length && bytes[at] >= '0' && bytes[at] <= '9')
+                            {
+                                at += 1;
+                            }
                         }
                     }
                     char length_modifier = 0;
@@ -1198,15 +1399,136 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     const bool conversion_float = conversion == 'f' || conversion == 'F' || conversion == 'e' || conversion == 'E' ||
                                                   conversion == 'g' || conversion == 'G' || conversion == 'a' || conversion == 'A';
                     const bool conversion_number = conversion == 'n';
-                    if (conversion_integer || conversion_string || conversion_pointer || conversion_float || conversion_number)
+                    const bool conversion_argument = conversion_integer || conversion_string || conversion_pointer || conversion_float || conversion_number;
+                    positional_seen |= value_positioned || width_positioned || precision_positioned;
+                    plain_seen |= (width_argument && !width_positioned) || (precision_argument && !precision_positioned);
+                    // Resolve the width and precision first: they take their data arguments before the value.
+                    if (width_argument)
                     {
-                        if (argument >= count)
+                        uint32_t width_index = first_argument;
+                        if (width_positioned)
+                        {
+                            if (width_position == 0 || width_position > data_count)
+                            {
+                                check_common_format_missing_width(parser, pp, input, format_token, width_offset, false, scratch);
+                                malformed = true;
+                            }
+                            else
+                            {
+                                width_index = first_argument + width_position - 1;
+                                used[width_position - 1] = 1;
+                            }
+                        }
+                        else if (positional_seen)
+                        {
+                            check_common_format_invalid_position(parser, pp, input, format_token, width_offset, false, scratch);
+                            malformed = true;
+                        }
+                        else if (argument >= count)
+                        {
+                            check_common_format_missing_width(parser, pp, input, format_token, width_offset, false, scratch);
+                            malformed = true;
+                        }
+                        else
+                        {
+                            width_index = argument++;
+                        }
+                        if (malformed)
+                        {
+                            break;
+                        }
+                        const uint32_t width_node = graph->argument_nodes[offset + width_index];
+                        const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
+                        if (!check_common_format_width(types, width_type))
+                        {
+                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, width_index, format_token, width_offset + 1, false, scratch);
+                        }
+                    }
+                    if (precision_argument)
+                    {
+                        uint32_t precision_index = first_argument;
+                        if (precision_positioned)
+                        {
+                            if (precision_position == 0 || precision_position > data_count)
+                            {
+                                check_common_format_missing_width(parser, pp, input, format_token, precision_offset, true, scratch);
+                                malformed = true;
+                            }
+                            else
+                            {
+                                precision_index = first_argument + precision_position - 1;
+                                used[precision_position - 1] = 1;
+                            }
+                        }
+                        else if (positional_seen)
+                        {
+                            check_common_format_invalid_position(parser, pp, input, format_token, precision_offset + 1, true, scratch);
+                            malformed = true;
+                        }
+                        else if (argument >= count)
+                        {
+                            check_common_format_missing_width(parser, pp, input, format_token, precision_offset, true, scratch);
+                            malformed = true;
+                        }
+                        else
+                        {
+                            precision_index = argument++;
+                        }
+                        if (malformed)
+                        {
+                            break;
+                        }
+                        const uint32_t precision_node = graph->argument_nodes[offset + precision_index];
+                        const TypeId precision_type = precision_node < graph->count ? check_stream_type(stream, precision_node) : 0;
+                        if (!check_common_format_width(types, precision_type))
+                        {
+                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, precision_index, format_token, precision_offset + 1, true, scratch);
+                        }
+                    }
+                    bool value_valid = true;
+                    uint32_t value_index = first_argument;
+                    if (conversion_argument)
+                    {
+                        if (value_positioned)
+                        {
+                            value_valid = check_common_format_data_position(parser, pp, input, format_token, percent, at, value_position,
+                                                                            data_count, used, scratch);
+                            if (value_valid)
+                            {
+                                value_index = first_argument + value_position - 1;
+                            }
+                        }
+                        else if (positional_seen)
+                        {
+                            plain_seen = true;
+                        }
+                        else if (argument >= count)
                         {
                             insufficient = true;
                             insufficient_offset = at;
                             break;
                         }
-                        const uint32_t argument_node = graph->argument_nodes[offset + argument];
+                        else
+                        {
+                            value_index = argument++;
+                            plain_seen = true;
+                        }
+                    }
+                    if (positional_seen && plain_seen)
+                    {
+                        check_common_format_report_offset(parser, pp, input, format_token, at, CHECK_WARNING_ID_FORMAT,
+                                                          "cannot mix positional and non-positional arguments in format string", scratch);
+                        malformed = true;
+                        break;
+                    }
+                    if (!value_valid)
+                    {
+                        malformed = true;
+                        break;
+                    }
+                    if (conversion_argument)
+                    {
+                        const uint32_t argument_node = graph->argument_nodes[offset + value_index];
                         const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
                         const bool long_double = length_modifier == 'L';
                         bool accepted = false;
@@ -1214,17 +1536,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         if (conversion_integer)
                         {
                             const bool character = conversion == 'c' || conversion == 'C';
-                            const bool unsigned_conversion = conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X' ||
-                                                             conversion == 'b' || conversion == 'B';
-                            TypeId exact = 0;
-                            if (!character)
-                            {
-                                exact = length_modifier == 'l' || length_modifier == 'z' || length_modifier == 'j' || length_modifier == 't' ?
-                                        (unsigned_conversion ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
-                                        length_modifier == 'L' ? (unsigned_conversion ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) : 0;
-                            }
-                            const uint32_t required_width = character || length_modifier == 0 || length_modifier == 'h' || length_modifier == 'H' ? 32u : 64u;
-                            accepted = check_common_format_integer(types, type, required_width, exact);
+                            accepted = check_common_format_integer_class(types, type, character ? 0 : length_modifier, false);
                             expected = check_common_format_integer_expected(conversion, length_modifier);
                         }
                         else if (conversion_string)
@@ -1244,31 +1556,46 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         else
                         {
-                            const TypeId exact = length_modifier == 'H' ? BUSTER_TYPE_SCHAR : length_modifier == 'h' ? BUSTER_TYPE_SHORT :
-                                                 length_modifier == 'l' || length_modifier == 'z' || length_modifier == 'j' || length_modifier == 't' ? BUSTER_TYPE_LONG :
-                                                 length_modifier == 'L' ? BUSTER_TYPE_LLONG : BUSTER_TYPE_INT;
-                            accepted = check_common_format_integer_pointer(types, type, exact);
-                            expected = exact == BUSTER_TYPE_SCHAR ? "'signed char *'" : exact == BUSTER_TYPE_SHORT ? "'short *'" :
-                                       exact == BUSTER_TYPE_LONG ? "'long *'" : exact == BUSTER_TYPE_LLONG ? "'long long *'" : "'int *'";
+                            accepted = check_common_format_integer_pointer(types, type, length_modifier);
+                            expected = check_common_format_integer_pointer_expected(length_modifier);
                         }
                         if (!accepted)
                         {
-                            check_common_format_report_type(parser, pp, input, stream, types, spell, graph, offset, argument, format_token, expected, false, scratch);
+                            check_common_format_report_type(parser, pp, input, stream, types, spell, graph, offset, value_index, format_token, expected, false, scratch);
                         }
-                        argument += 1;
                     }
                 }
-                if (!positional_format && insufficient)
+                if (usable && !malformed)
                 {
-                    check_common_format_report_offset(parser, pp, input, format_token, insufficient_offset, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
-                                                      "more '%' conversions than data arguments", scratch);
-                }
-                else if (!positional_format && argument < count)
-                {
-                    const uint32_t extra_node = graph->argument_nodes[offset + argument];
-                    const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
-                    check_common_report(parser, pp, input, extra_token, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
-                                        "data argument not used by format string", NULL, 0, scratch);
+                    if (!positional_seen)
+                    {
+                        if (insufficient)
+                        {
+                            check_common_format_report_offset(parser, pp, input, format_token, insufficient_offset, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
+                                                              "more '%' conversions than data arguments", scratch);
+                        }
+                        else if (argument < count)
+                        {
+                            const uint32_t extra_node = graph->argument_nodes[offset + argument];
+                            const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
+                            check_common_report(parser, pp, input, extra_token, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
+                                                "data argument not used by format string", NULL, 0, scratch);
+                        }
+                    }
+                    else
+                    {
+                        for (uint32_t i = 0; i < data_count; i += 1)
+                        {
+                            if (used[i] == 0)
+                            {
+                                const uint32_t extra_node = graph->argument_nodes[offset + first_argument + i];
+                                const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
+                                check_common_report(parser, pp, input, extra_token, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
+                                                    "data argument not used by format string", NULL, 0, scratch);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             else if (count == first_argument)
@@ -1746,13 +2073,23 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         {
             memset(self_read, 0, graph->count);
         }
-        // A declaration's initializer writes the object after its own value is evaluated.
+        // A declaration's initializer writes the object after its own value is evaluated. A brace initializer has
+        // no expression node, so its write is before every later read; a read inside it is still its own.
         for (uint32_t declaration = 0; declaration < count; declaration += 1)
         {
             const uint32_t node = input->initializer_nodes != NULL ? input->initializer_nodes[declaration] : BUSTER_CHECK_NONE;
-            if (input->declaration_kinds[declaration] == C_BINDING_OBJECT && node < graph->count)
+            if (input->declaration_kinds[declaration] == C_BINDING_OBJECT)
             {
-                first_write[declaration] = node + 1;
+                if (node < graph->count)
+                {
+                    first_write[declaration] = node + 1;
+                }
+                else if (input->initializer_begins != NULL && input->initializer_ends != NULL &&
+                         input->initializer_begins[declaration] != BUSTER_CHECK_NONE &&
+                         input->initializer_ends[declaration] != BUSTER_CHECK_NONE)
+                {
+                    first_write[declaration] = 0;
+                }
             }
         }
         // A variably modified type's bound is evaluated even where the graph's sizeof operand is not; read it from
@@ -1913,11 +2250,56 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             const bool scalar = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER ||
                                 kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_NULLPTR;
             const uint32_t name = parser->tokens.names[declaration];
-            if (plain && scalar && first_read[declaration] != BUSTER_CHECK_NONE &&
-                (first_write[declaration] == BUSTER_CHECK_NONE || first_read[declaration] < first_write[declaration]))
+            const uint32_t initializer_begin = input->initializer_begins != NULL ? input->initializer_begins[declaration] : BUSTER_CHECK_NONE;
+            const uint32_t initializer_end = input->initializer_ends != NULL ? input->initializer_ends[declaration] : BUSTER_CHECK_NONE;
+            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? graph->tokens[first_read[declaration]] : BUSTER_CHECK_NONE;
+            // A lone identifier in a brace initializer (`int x = { x };`) is a self-read the graph's value column does
+            // not retain; the declaration's own token range finds it. An expression initializer's reads are the
+            // graph's, so only a braced range is scanned, and not through a sizeof operand.
+            const bool braced = (initializer_begin < parser->tokens.count && parser->tokens.kinds[initializer_begin] == PARSE_KIND_L_BRACE) ||
+                                (declaration + 2 < parser->tokens.count && parser->tree.roles[declaration + 1] == PARSE_ROLE_ASSIGN &&
+                                 parser->tree.roles[declaration + 2] == PARSE_ROLE_OPEN_INITIALIZER);
+            uint32_t scan_begin = initializer_begin;
+            uint32_t scan_end = initializer_end;
+            if (braced && (scan_begin == BUSTER_CHECK_NONE || scan_end == BUSTER_CHECK_NONE) && declaration + 2 < parser->tokens.count)
             {
-                const uint32_t initializer = input->initializer_nodes != NULL ? input->initializer_nodes[declaration] : BUSTER_CHECK_NONE;
-                const bool self_initialization = initializer < graph->count && first_read[declaration] < initializer;
+                scan_begin = declaration + 2;
+                const uint32_t close = parser->tree.parents[declaration + 2];
+                scan_end = close < parser->tokens.count ? close + 1 : parser->tokens.count;
+            }
+            for (uint32_t at = scan_begin; braced && scan_end != BUSTER_CHECK_NONE &&
+                 at < scan_end && at < parser->tokens.count; at += 1)
+            {
+                const bool member = at > 0 && (parser->tokens.kinds[at - 1] == PARSE_KIND_PERIOD ||
+                                               parser->tokens.kinds[at - 1] == PARSE_KIND_ARROW);
+                const uint32_t node = input->token_nodes != NULL && at < input->token_count ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+                bool query = false;
+                for (uint32_t up = at, steps = 0; up < parser->tokens.count && steps < parser->tokens.count && !query; steps += 1)
+                {
+                    const uint8_t up_role = parser->tree.roles[up];
+                    query = up_role == PARSE_ROLE_OPEN_SIZEOF || up_role == PARSE_ROLE_CLOSE_SIZEOF;
+                    const uint32_t parent = parser->tree.parents[up];
+                    if (parent == BUSTER_CHECK_NONE || parent >= parser->tokens.count || parent == up)
+                    {
+                        break;
+                    }
+                    up = parent;
+                }
+                // A token the graph leaves out is the brace initializer's read; one it marks non-read (an address or
+                // void cast) is not, and a sizeof operand is not either.
+                const bool read = node >= graph->count || nonread[node] == 0;
+                if (read && !query && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name && !member)
+                {
+                    read_token = at;
+                }
+            }
+            const bool self_initialization = initializer_begin != BUSTER_CHECK_NONE && initializer_end != BUSTER_CHECK_NONE &&
+                                             read_token != BUSTER_CHECK_NONE && read_token >= initializer_begin && read_token < initializer_end;
+            const bool has_read = first_read[declaration] != BUSTER_CHECK_NONE || read_token != BUSTER_CHECK_NONE;
+            if (plain && scalar && has_read &&
+                (self_initialization || first_write[declaration] == BUSTER_CHECK_NONE ||
+                 (first_read[declaration] != BUSTER_CHECK_NONE && first_read[declaration] < first_write[declaration])))
+            {
                 const char* message = self_initialization ?
                     check_warning_text(scratch, "variable '%.*s' is uninitialized when used within its own initialization",
                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name)) :
@@ -1927,7 +2309,6 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     check_warning_text(scratch, "initialize the variable '%.*s' to silence this warning",
                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name)) };
                 const uint32_t body = input->declaration_bodies[declaration];
-                const uint32_t read_token = graph->tokens[first_read[declaration]];
                 const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : read_token;
                 check_common_report_at(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
                                        self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
@@ -1937,7 +2318,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             {
                 const char* message = check_warning_text(scratch, "parameter '%.*s' set but not used",
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                check_common_report_at(parser, pp, input, declaration, declaration, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true, message, NULL, 0, scratch);
+                const uint32_t body = input->declaration_bodies[declaration];
+                const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : declaration;
+                check_common_report_phase_at(parser, pp, input, declaration, publication, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true,
+                                             PP_DIAGNOSTIC_RETURN, message, scratch);
             }
         }
     }
