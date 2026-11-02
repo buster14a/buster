@@ -2,9 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #1125: requests for unimplemented hardening must fail before any output is published. The independent CLI
-// fixtures name the reported options rather than deriving expectations from the driver's refusal table. Of the six
-// families #1125 reported, -fsanitize-coverage= is instrumentation that #1112 refuses only when code is emitted
-// (c_check_instrumentation_driver_test.c); its auxiliary -fsanitize-coverage-* options and the bare spelling stay here.
+// fixtures name the six reported options rather than deriving expectations from the driver's refusal table.
 
 static int check_test_driver_hardening_command(const char* executable, const char* source, const char* output, uint32_t action, bool scalar, bool tier1, const char* const* options, uint32_t option_count, char** text)
 {
@@ -18,7 +16,8 @@ static int check_test_driver_hardening_command(const char* executable, const cha
         { "--dump-static", NULL },
         { "-E", NULL },
     };
-    assert(action < BUSTER_ARRAY_LENGTH(actions) && option_count <= 8);
+    // The executable, two action words, --scalar, --tier1, -std, -o, its output, the source and the null leave 14.
+    assert(action < BUSTER_ARRAY_LENGTH(actions) && option_count <= 14);
     char* arguments[24] = { 0 };
     uint32_t count = 0;
     arguments[count++] = (char*)executable;
@@ -54,36 +53,38 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
         "-ftrivial-auto-var-init=zero",
         "-ftrapv",
         "-fzero-call-used-regs=all",
+        "-fsanitize-coverage=trace-pc",
         "-fsplit-stack",
         "-mcmodel=large",
     };
-    static const char* const variants[] = {
-        "-ftrivial-auto-var-init=pattern",
-        "-ftrivial-auto-var-init=",
-        "-ftrivial-auto-var-init",
-        "-ftrivial-auto-var-init=uninitialized-bogus",
-        "-ftrivial-auto-var-init-stop-after=1",
-        "-ftrivial-auto-var-init-max-size=1024",
-        "-ftrapv-handler=handler",
-        "-fzero-call-used-regs=used-gpr",
-        "-fzero-call-used-regs=skip,all",
-        "-fzero-call-used-regs=",
-        "-fzero-call-used-regs",
-        "-fsanitize-coverage",
-        "-fsanitize-coverage-allowlist=coverage.txt",
-        "-fsanitize-coverage-ignorelist=coverage.txt",
-        "-fsanitize-coverage-stack-depth-callback-min=1",
-        "-fsanitize-coverage-type=1",
-        "-fsplit-stack=bogus",
-        "-mcmodel=medium",
-        "-mcmodel=kernel",
-        "-mcmodel=small-bogus",
-        "-mcmodel=",
-        "-mcmodel",
+    // Each spelling refused, with clang's own error where clang refuses the spelling itself.
+    static const char* const variants[][2] = {
+        { "-ftrivial-auto-var-init=pattern", NULL },
+        { "-ftrivial-auto-var-init=", NULL },
+        { "-ftrivial-auto-var-init", NULL },
+        { "-ftrivial-auto-var-init=uninitialized-bogus", NULL },
+        { "-ftrivial-auto-var-init-stop-after=1", NULL },
+        { "-ftrivial-auto-var-init-max-size=1024", NULL },
+        { "-ftrapv-handler=handler", NULL },
+        { "-fzero-call-used-regs=used-gpr", NULL },
+        { "-fzero-call-used-regs=skip,all", NULL },
+        { "-fzero-call-used-regs=", NULL },
+        { "-fzero-call-used-regs", NULL },
+        { "-fsanitize-coverage=trace-pc-guard,trace-cmp", NULL },
+        { "-fsanitize-coverage=0,trace-pc", "error: unsupported argument '0' to option '-fsanitize-coverage='" },
+        { "-fsanitize-coverage", NULL },
+        { "-fsplit-stack=bogus", NULL },
+        { "-mcmodel=medium", NULL },
+        { "-mcmodel=kernel", NULL },
+        { "-mcmodel=small-bogus", NULL },
+        { "-mcmodel=", NULL },
+        { "-mcmodel", NULL },
     };
     static const char* const inactive[] = {
         "-ftrivial-auto-var-init=uninitialized",
         "-fzero-call-used-regs=skip",
+        "-fsanitize-coverage=0",
+        "-fsanitize-coverage=",
         "-mcmodel=small",
         "-fno-split-stack",
         "-fno-strict-aliasing",
@@ -119,6 +120,10 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
         const char* options[] = { reported[flag] };
         char expected[160];
         snprintf(expected, sizeof(expected), "error: unsupported code generation option '%s'", reported[flag]);
+        // -fsanitize-coverage= is #1138's: its features resolve as clang's do, after every option (a later
+        // -fno-sanitize-coverage= among them), and only an emitting command refuses what is left
+        // (c_check_instrumentation_driver_test.c), so a non-emitting one keeps the predefines and succeeds.
+        const bool resolved = strncmp(reported[flag], "-fsanitize-coverage=", 20) == 0;
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
             for (uint32_t tier1 = 0; tier1 < 2; tier1 += 1)
@@ -146,11 +151,15 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
             char* text = NULL;
             const int status = check_test_driver_hardening_command(executable, source, output, action, false, false, options, 1, &text);
             snprintf(label, sizeof(label), "hardening %s non-emitting action=%u", reported[flag], action);
-            check_test_expect(test, action == 7 ? status == 0 : status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0, label);
+            const bool succeeds = action == 7 || resolved;
+            check_test_expect(test, succeeds ? status == 0 && (action == 7 || access(output, F_OK) != 0) :
+                                               status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0,
+                              label);
             free(text);
         }
-        // A flag after the source is still an option; another refusal must not replace the first one's name.
-        char* late[] = { (char*)executable, "-c", "-o", output, source, (char*)reported[flag], "-pg", NULL };
+        // A flag after the source is still an option; another refusal by name must not replace the first one's. A
+        // resolved family's refusal waits for every option, so it comes alone.
+        char* late[] = { (char*)executable, "-c", "-o", output, source, (char*)reported[flag], resolved ? NULL : "-pg", NULL };
         unlink(output);
         char* text = NULL;
         const int status = check_test_driver_spawn(late, &text);
@@ -179,14 +188,15 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
     }
     for (uint32_t flag = 0; written && flag < BUSTER_ARRAY_LENGTH(variants); flag += 1)
     {
-        const char* options[] = { variants[flag] };
+        const char* options[] = { variants[flag][0] };
         char expected[160];
-        snprintf(expected, sizeof(expected), "error: unsupported code generation option '%s'", variants[flag]);
+        snprintf(expected, sizeof(expected), "error: unsupported code generation option '%s'", variants[flag][0]);
         unlink(output);
         char* text = NULL;
         const int status = check_test_driver_hardening_command(executable, source, output, 0, false, false, options, 1, &text);
-        snprintf(label, sizeof(label), "hardening family variant %s", variants[flag]);
-        check_test_expect(test, status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0, label);
+        snprintf(label, sizeof(label), "hardening family variant %s", variants[flag][0]);
+        const char* message = variants[flag][1] != NULL ? variants[flag][1] : expected;
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, message) != NULL && access(output, F_OK) != 0, label);
         free(text);
     }
     for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)

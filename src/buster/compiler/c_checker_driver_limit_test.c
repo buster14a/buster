@@ -9,13 +9,14 @@ struct CheckDriverDiagnosticCounts
     uint32_t errors;
     uint32_t fatal;
     uint32_t notes;
+    uint32_t first_error_line;
     uint32_t last_error_line;
     bool after_fatal;
     char summary[128];
 };
 
-// Ignore Clang's source excerpts and carets, but independently compare published severities, the last original
-// error's source line, attached notes and the complete summary. Do not infer any count from the summary itself.
+// Ignore Clang's source excerpts and carets, but independently compare published severities, the first and last
+// original error's source line, attached notes and the complete summary. Do not infer any count from the summary.
 static CheckDriverDiagnosticCounts check_test_driver_diagnostic_counts(const char* text)
 {
     CheckDriverDiagnosticCounts counts = { 0 };
@@ -27,15 +28,22 @@ static CheckDriverDiagnosticCounts check_test_driver_diagnostic_counts(const cha
         const bool failed = memmem(at, length, ": error: ", 9) != NULL;
         const bool stopped = memmem(at, length, "fatal error: ", 13) != NULL;
         const bool noted = memmem(at, length, ": note: ", 8) != NULL;
-        counts.after_fatal |= counts.fatal != 0 && (warned || failed || stopped || noted);
+        // Notes attached to the fatal diagnostic follow it; only a later primary diagnostic is post-fatal.
+        counts.after_fatal |= counts.fatal != 0 && (warned || failed || stopped);
         counts.warnings += warned;
         counts.errors += failed || stopped;
         counts.fatal += stopped;
         counts.notes += noted;
-        if (failed)
+        if (failed || stopped)
         {
+            // A locationless fatal (the -ferror-limit cutoff) keeps the last located error's line.
             uint32_t column = 0;
-            sscanf(at, "%*[^:]:%u:%u:", &counts.last_error_line, &column);
+            uint32_t line = 0;
+            if (sscanf(at, "%*[^:]:%u:%u:", &line, &column) == 2 && line != 0)
+            {
+                counts.first_error_line = counts.first_error_line != 0 ? counts.first_error_line : line;
+                counts.last_error_line = line;
+            }
         }
         if (memmem(at, length, " generated.", 11) != NULL && length < sizeof(counts.summary))
         {
@@ -146,6 +154,222 @@ static void check_test_driver_system_error_limits(CheckTest* test, const char* c
     }
     unlink(source);
     unlink(header);
+    unlink(object);
+}
+
+// -Wfatal-errors makes the first error, a warning mapped to one included, clang's fatal error and stops publication
+// there; -Wno-fatal-errors restores the ordinary error budget. Clang is the oracle for each stage's counts and summary,
+// and the last option on the line decides, as it does for Clang.
+static void check_test_driver_fatal_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/fatal-errors.c", directory);
+    snprintf(object, sizeof(object), "%s/fatal-errors.o", directory);
+    static const struct
+    {
+        const char* source;
+        bool promoted;
+        // Clang's code generation also checks an x86 builtin's target features, which the range fixture needs; its
+        // default-error policy is compared by -fsyntax-only alone.
+        bool codegen;
+        // A fixture whose nonfatal form has other pre-existing diagnostic differences is compared only where the
+        // fatal cutoff applies.
+        bool fatal_only;
+    } fixtures[] =
+    {
+        { "int f(void){return x;}\nint g(void){return y;}\n", false, true },
+        { "int f(void){ return 1 }\nint g(void){ return 2 }\n", false, true },
+        { "#error one\n#error two\n", false, true },
+        { "int f(a) int a; { return a; }\nint g(b) int b; { return b; }\n", true, true },
+        { "int f(void){return 1 << 32;}\n", false, true },
+        { "#pragma clang diagnostic error \"-Wshift-count-overflow\"\n"
+          "int f(void){return 1 << 32;}\nint g(void){return 1 << 33;}\n", false, true },
+        { "typedef char V __attribute__((vector_size(16)));\n"
+          "unsigned f(V a){return __builtin_ia32_cmpb128_mask(a,a,8,65535);}\n"
+          "unsigned g(V a){return __builtin_ia32_cmpb128_mask(a,a,9,65535);}\n", false, false },
+        { "int f(void){ return 1 }\n#error later\n", false, true },
+        { "int f(void){ return 1 }\n#warning later\n", false, true },
+        { "#warning before\nint f(void){return x;}\n", false, true },
+        { "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint f(void)\n{\nreturn 0\n#pragma STDC FENV_ACCESS MAYBE\n}\n", false, true },
+        { "typedef char V __attribute__((vector_size(16)));\n"
+          "#pragma clang diagnostic error \"-Wargument-outside-range\"\n"
+          "unsigned f(V a){return __builtin_ia32_cmpb128_mask(a,a,8,65535);}\n"
+          "unsigned g(V a){return __builtin_ia32_cmpb128_mask(a,a,9,65535);}\n", false, false },
+        { "_Complex x;\n", true, true },
+        { "#define F(x) x\nint a = F(1;\n", false, true, true },
+    };
+    const char* policies[][2] =
+    {
+        { "-Wfatal-errors", NULL },
+        { "-Wno-fatal-errors", NULL },
+        { "-Wfatal-errors", "-Wno-fatal-errors" },
+        { "-Wno-fatal-errors", "-Wfatal-errors" },
+        { "-Wfatal-errors", "-ferror-limit=1" },
+        { "-Wno-fatal-errors", "-ferror-limit=1" },
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        const bool made = parse_test_write(source, fixtures[fixture].source, strlen(fixtures[fixture].source));
+        check_test_expect(test, made, "fatal-errors fixture can be written");
+        for (uint32_t policy = 0; made && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
+        {
+            bool policy_fatal = false;
+            for (uint32_t flag = 0; flag < BUSTER_ARRAY_LENGTH(policies[policy]); flag += 1)
+            {
+                if (policies[policy][flag] != NULL && strcmp(policies[policy][flag], "-Wfatal-errors") == 0)
+                {
+                    policy_fatal = true;
+                }
+                else if (policies[policy][flag] != NULL && strcmp(policies[policy][flag], "-Wno-fatal-errors") == 0)
+                {
+                    policy_fatal = false;
+                }
+            }
+            if (fixtures[fixture].fatal_only && !policy_fatal)
+            {
+                continue;
+            }
+            for (uint32_t route = 0; route < 6; route += 1)
+            {
+                if (!fixtures[fixture].codegen && route >= 2 && route < 4)
+                {
+                    continue;
+                }
+                char* arguments[20] = { (char*)clang, "-std=gnu17", "-fno-color-diagnostics" };
+                uint32_t count = 3;
+                if (route < 2)
+                {
+                    arguments[count++] = "-fsyntax-only";
+                }
+                else if (route < 4)
+                {
+                    arguments[count++] = "-c";
+                    arguments[count++] = "-o";
+                    arguments[count++] = object;
+                }
+                else
+                {
+                    arguments[count++] = "-E";
+                }
+                if (fixtures[fixture].promoted)
+                {
+                    arguments[count++] = "-Werror";
+                }
+                for (uint32_t flag = 0; flag < BUSTER_ARRAY_LENGTH(policies[policy]); flag += 1)
+                {
+                    if (policies[policy][flag] != NULL)
+                    {
+                        arguments[count++] = (char*)policies[policy][flag];
+                    }
+                }
+                arguments[count++] = source;
+                char* text = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &text);
+                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
+                free(text);
+                char* checked[20] = { (char*)(executable != NULL ? executable : "/proc/self/exe") };
+                uint32_t used = 1;
+                if (route >= 4)
+                {
+                    checked[used++] = "-E";
+                }
+                checked[used++] = "-std=gnu17";
+                if ((route & 1) != 0)
+                {
+                    checked[used++] = "--scalar";
+                }
+                if (route < 2)
+                {
+                    checked[used++] = "-fsyntax-only";
+                }
+                else if (route < 4)
+                {
+                    checked[used++] = "-c";
+                    checked[used++] = "-o";
+                    checked[used++] = object;
+                }
+                if (fixtures[fixture].promoted)
+                {
+                    checked[used++] = "-Werror";
+                }
+                for (uint32_t flag = 0; flag < BUSTER_ARRAY_LENGTH(policies[policy]); flag += 1)
+                {
+                    if (policies[policy][flag] != NULL)
+                    {
+                        checked[used++] = (char*)policies[policy][flag];
+                    }
+                }
+                checked[used++] = source;
+                text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                char description[192];
+                snprintf(description, sizeof(description), "fatal-errors fixture=%u policy=%u route=%u: warning/error/fatal/note %u/%u/%u/%u vs Clang %u/%u/%u/%u",
+                         fixture, policy, route, actual.warnings, actual.errors, actual.fatal, actual.notes,
+                         expected.warnings, expected.errors, expected.fatal, expected.notes);
+                check_test_expect(test, status == oracle && actual.warnings == expected.warnings && actual.errors == expected.errors &&
+                                  actual.fatal == expected.fatal && actual.notes == expected.notes &&
+                                  actual.first_error_line == expected.first_error_line && actual.last_error_line == expected.last_error_line &&
+                                  !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0, description);
+                free(text);
+                unlink(object);
+            }
+        }
+    }
+    // The flag suffix follows the published severity: a promoted warning names its flag while it is an error and
+    // omits -Werror once it is fatal. Clang is the oracle for both.
+    {
+        static const char complex[] = "_Complex x;\n";
+        const bool written = parse_test_write(source, complex, sizeof(complex) - 1);
+        check_test_expect(test, written, "fatal-errors suffix fixture can be written");
+        char* fatal_arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", "-Werror", "-Wfatal-errors", source, NULL };
+        char* error_arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", "-Werror", source, NULL };
+        char* checked_fatal[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17", "-fsyntax-only", "-Werror", "-Wfatal-errors", source, NULL };
+        char* checked_error[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17", "-fsyntax-only", "-Werror", source, NULL };
+        char* text = NULL;
+        const int oracle_fatal = check_test_driver_spawn(fatal_arguments, &text);
+        const bool oracle_fatal_text = oracle_fatal == 1 && text != NULL && strstr(text, "fatal error: plain '_Complex'") != NULL &&
+                                       strstr(text, "[-Werror]") == NULL;
+        free(text);
+        text = NULL;
+        const int status_fatal = check_test_driver_spawn(checked_fatal, &text);
+        const bool actual_fatal_text = status_fatal == 1 && text != NULL && strstr(text, "fatal error: plain '_Complex'") != NULL &&
+                                       strstr(text, "[-Werror]") == NULL;
+        free(text);
+        text = NULL;
+        const int oracle_error = check_test_driver_spawn(error_arguments, &text);
+        const bool oracle_error_text = oracle_error == 1 && text != NULL && strstr(text, "error: plain '_Complex'") != NULL &&
+                                       strstr(text, "[-Werror]") != NULL;
+        free(text);
+        text = NULL;
+        const int status_error = check_test_driver_spawn(checked_error, &text);
+        const bool actual_error_text = status_error == 1 && text != NULL && strstr(text, "error: plain '_Complex'") != NULL &&
+                                       strstr(text, "[-Werror]") != NULL;
+        check_test_expect(test, oracle_fatal_text && actual_fatal_text && oracle_error_text && actual_error_text,
+                          "a promoted event warning keeps [-Werror] while it is an error and omits it once fatal");
+        free(text);
+    }
+    {
+        static const char range[] = "typedef char V __attribute__((vector_size(16)));\n"
+                                    "unsigned f(V a){return __builtin_ia32_cmpb128_mask(a,a,8,65535);}\n";
+        const bool written = parse_test_write(source, range, sizeof(range) - 1);
+        check_test_expect(test, written, "fatal-errors range suffix fixture can be written");
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", "-Wfatal-errors", source, NULL };
+        char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17", "-fsyntax-only", "-Wfatal-errors", source, NULL };
+        char* text = NULL;
+        const int oracle = check_test_driver_spawn(arguments, &text);
+        const bool oracle_text = oracle == 1 && text != NULL &&
+                                 strstr(text, "fatal error: argument value 8 is outside the valid range [0, 7] [-Wargument-outside-range]") != NULL;
+        free(text);
+        text = NULL;
+        const int status = check_test_driver_spawn(checked, &text);
+        const bool actual_text = status == 1 && text != NULL &&
+                                 strstr(text, "fatal error: argument value 8 is outside the valid range [0, 7] [-Wargument-outside-range]") != NULL;
+        check_test_expect(test, oracle_text && actual_text, "a fatal default-error warning keeps its flag suffix");
+        free(text);
+    }
+    unlink(source);
     unlink(object);
 }
 
@@ -435,6 +659,10 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
     }
     unlink(source);
     unlink(object);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_fatal_errors(test, clang, executable, directory);
+    }
     if (check_test_driver_takes())
     {
         check_test_driver_system_error_limits(test, clang, executable, directory);
