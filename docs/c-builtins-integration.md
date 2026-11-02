@@ -2193,7 +2193,15 @@ take a `va_list` by reference. Each is a builtin of the unit unless `-fno-builti
 `ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. A declaration of such a name is the library's function, which calls
+answers by. The list is pinned to Clang 23.1.4, CI's reference: its GNU rows
+include `strlcat` and `strlcpy`, which 23.1.5's table drops. The oracles compare
+`clang --version` with the release, print `expected clang 23.1.4, found …`
+when another release is found, and skip only the plain names the found release
+is known to classify differently (`cbuiltin_library_table_differences`: 23.1.5's
+`strlcat` and `strlcpy`), a difference no named release explains still failing.
+Neither `strlcat` nor `strlcpy` is folded: a call
+of either stays a call of the library's function in every mode. A declaration
+of such a name is the library's function, which calls
 reach as any function's; where it has external linkage and the row's
 prototype, its calls fold as `__builtin_X`'s do (Sema's `BuiltinAttr`:
 `check_input_library_call` marks them, `check_builtin_library_fold_plain` folds

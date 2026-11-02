@@ -64,7 +64,16 @@ requirements. [Command index](README.md).
   `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
   `-ffreestanding` say, declared implicitly with their prototypes as clang
   declares them; `test-checker --program-library` and `test-checker-driver`
-  check them against clang (the guide's "Library builtins"). The floating
+  check them against clang (the guide's "Library builtins"). The plain table is
+  pinned to Clang 23.1.4, CI's reference release: its GNU library builtins
+  include `strlcat` and `strlcpy`, which 23.1.5's table drops. The preprocessor
+  and checker oracles compare `clang --version` with it, report
+  `expected clang 23.1.4, found …` when another release is found, and skip only
+  the plain names the found release is known to classify differently (the named
+  list `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`),
+  a difference no named release explains still failing. A fixture reruns the
+  comparisons under a fake clang 23.1.5, so CI's reference release exercises the
+  skip path too. The floating
   classifications past the first ones (`isnormal` to `isfpclass`, `signbitf`,
   `signbitl` and `canonicalize`: `c_check_builtin_float.c`,
   `c_builtin_float_lower.c`) test their `FPClassTest` masks by a table, an x87
