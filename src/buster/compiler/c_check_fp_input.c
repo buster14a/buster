@@ -44,6 +44,9 @@ static bool check_input_fp_name(const CheckInputReader* reader, uint32_t source,
 // Only complete supported extension forms acquire a handled mark. In particular, a recognized prefix must not
 // swallow another clang fp clause, a float_control stack operation, a macro argument or malformed punctuation.
 // Unsupported forms remain with the semantic-pragma diagnostic, which retains their original spelling.
+// clang enables fenv_access only under -fms-extensions or a strict floating model, and silently ignores a mid-block
+// spelling. Buster refuses that mode, so #1135 recognizes these spellings unconditionally; a spelling at a placement
+// this reader cannot apply stays unhandled, and the semantic-pragma diagnostic refuses it.
 static bool check_input_fp_extension(CheckInputReader* reader, uint64_t** macros, uint32_t source, uint32_t* end, uint8_t* kind, uint8_t* state)
 {
     const PPTokens* output = &reader->pp->output;

@@ -5707,6 +5707,20 @@ static int run_checker_driver_tests(int argc, char** argv)
             1,
         },
         {
+            .name = "file-scope GCC unroll names its source pragma at the directive",
+            .source = "#pragma GCC unroll 4\nint x;\n",
+            .rejected = true,
+            .message = "invalid '#pragma GCC unroll' directive",
+            .column = 1,
+        },
+        {
+            .name = "a misplaced GCC unroll uses clang's normalized name at the statement",
+            .source = "int f(void){\n#pragma GCC unroll 4\nreturn 0;}\n",
+            .rejected = true,
+            .message = "expected a for, while, or do-while loop to follow '#pragma unroll'",
+            .column = 1,
+        },
+        {
             "unknown complex pragma state can be promoted at end of file",
             "int value;\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC CX_LIMITED_RANGE MAYBE\n",
             true,

@@ -594,17 +594,21 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
                             check_input_loop_unroll(reader, source + (gcc ? 4 : 3), end, category, word, unroll || jam || gcc, &hints, &message, &at, pragma_kind);
             messages[pragma] = state >= 3 ? message : 0;
             const bool active = reader->output->deferred_tokens == 0 || reader->deferred != 0 || reader->output->deferred_tokens[token] == 0;
-            const char* name = gcc ? "GCC unroll" : check_loop_pragma_names[pragma_kind];
+            // At file scope the diagnostic names the source pragma; a placement report uses clang's normalized name,
+            // where GCC unroll is unroll, and the annotated statement's first token as its source.
+            const char* source_name = gcc ? "GCC unroll" : check_loop_pragma_names[pragma_kind];
+            const char* placement_name = check_loop_pragma_names[pragma_kind];
             if ((state == 2 || state == 0) && bodies == 0)
             {
                 state = 3;
                 messages[pragma] = CHECK_INPUT_LOOP_HINT;
                 if (active)
                 {
-                    // File-scope rejection is immediate, not a completed-statement error. Keep its spelling in
-                    // the existing diagnostic record without changing conflict normalization or count semantics.
+                    // File-scope rejection is immediate, not a completed-statement error. Keep its source and spelling
+                    // in the existing diagnostic record without changing conflict normalization or count semantics.
                     at.position = token;
-                    snprintf(at.text, sizeof(at.text), "invalid '#pragma %s' directive", name);
+                    at.source = source + 1;
+                    snprintf(at.text, sizeof(at.text), "invalid '#pragma %s' directive", source_name);
                     check_input_loop_first(delayed, &at);
                 }
             }
@@ -614,7 +618,7 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
                 {
                     at.source = token < count ? parser->tokens.sources[token] : reader->pp->output.count;
                     at.message = CHECK_INPUT_LOOP_PLACEMENT;
-                    snprintf(at.text, sizeof(at.text), "expected a for, while, or do-while loop to follow '#pragma %s'", name);
+                    snprintf(at.text, sizeof(at.text), "expected a for, while, or do-while loop to follow '#pragma %s'", placement_name);
                     check_input_loop_first(delayed, &at);
                 }
                 else

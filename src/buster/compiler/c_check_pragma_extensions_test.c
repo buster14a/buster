@@ -142,6 +142,9 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n#pragma clang fp contract(fast)\nint x;\n", .records = 3, .accepted = true },
         { .source = "#pragma float_control(precise, on)\nint x;\n", .records = 1, .accepted = true },
         { .source = "int f(void){\n#pragma fenv_access(on)\n#pragma clang fp contract(off)\n#pragma float_control(precise, on)\nreturn 0;}\n", .records = 3, .accepted = true },
+        { .source = "#define ACCESS _Pragma(\"fenv_access(on)\")\nACCESS\ndouble f(double x){return x/3.0;}\n", .records = 1, .accepted = true },
+        { .source = "#define CONTRACT _Pragma(\"clang fp contract(fast)\")\nCONTRACT\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#define PRECISE _Pragma(\"float_control(precise, on)\")\nPRECISE\nint x;\n", .records = 1, .accepted = true },
         { .source = "#pragma STDC FENV_ACCESS ON\n#pragma fenv_access(off)\nint x;\n", .records = 2, .accepted = true },
         { .source = "#define fenv_access unused\n#pragma fenv_access(on)\nint x;\n", .records = 1, .accepted = true },
         { .source = "#define fp unused\n#pragma clang fp contract(on)\nint x;\n", .records = 1, .accepted = true },
@@ -175,6 +178,7 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "struct S{\n#pragma fenv_access(on)\nint x;};\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "int x=\n#pragma fenv_access(on)\n1;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma GCC unroll 4\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
+        { .source = "#pragma GCC unroll 4\nint f(void){return 0;}\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
         { .source = "int x;\n#pragma GCC unroll 4\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
         { .source = "#pragma GCC unroll 4\n#pragma clang loop unroll_count(4)\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
         { .source = "#pragma clang loop unroll_count(4)\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma clang loop' directive" },
@@ -183,7 +187,7 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma unroll_and_jam 4\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma unroll_and_jam' directive" },
         { .source = "#pragma nounroll_and_jam\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma nounroll_and_jam' directive" },
         { .source = "int f(void){\n#pragma GCC unroll 4\nreturn 0;}\n", .message = CHECK_INPUT_LOOP_PLACEMENT,
-          .loop_text = "expected a for, while, or do-while loop to follow '#pragma GCC unroll'" },
+          .loop_text = "expected a for, while, or do-while loop to follow '#pragma unroll'" },
         { .source = "int f(int n){\n#pragma GCC unroll 4\nfor(int i=0;i<n;i++){}return n;}\n", .accepted = true },
         { .source = "int f(int n){\n#pragma GCC unroll 0\nfor(int i=0;i<n;i++){}return n;}\n", .accepted = true },
         { .source = "int f(int n){\n#pragma GCC unroll 1\nfor(int i=0;i<n;i++){}return n;}\n", .accepted = true },
@@ -216,6 +220,11 @@ static void check_test_pragma_extension_sources(CheckTest* test)
                 check_test_expect(test, rejected && input.loop_diagnostic != NULL && input.loop_diagnostic->pragma == 1 &&
                                        input.loop_diagnostic->message == expected->message && strcmp(input.loop_diagnostic->text, expected->loop_text) == 0,
                                   "loop placement diagnostics preserve the original pragma family and earliest source order");
+                if (expected->message == CHECK_INPUT_LOOP_HINT)
+                {
+                    check_test_expect(test, input.loop_diagnostic != NULL && input.loop_diagnostic->source == parser.tokens.pragma_sources[0] + 1,
+                                      "file-scope loop diagnostics point at the directive");
+                }
             }
             parse_release(&parser);
             check_test_types_close(&types);
