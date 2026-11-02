@@ -126,12 +126,17 @@ static bool tier1_cert_oracle_original(Tier1CertOracle* oracle, uint64_t* state,
     }
     for (uint32_t i = 0; valid && oracle->checking && i < source->use_count; i += 1)
     {
-        valid = tier1_cert_oracle_has(oracle, state, source->operands[i].value, in.locations[i]);
+        // A recipe operand reads no storage: the shared correspondence check
+        // admitted it only where the source allows the integer recipe.
+        valid = in.locations[i] == BUSTER_CERT_NONE || tier1_cert_oracle_has(oracle, state, source->operands[i].value, in.locations[i]);
     }
     if (valid)
     {
-        // Save reads before any definition, implicit clobber, or tied write.
-        memcpy(oracle->saved, state, oracle->cells * sizeof(uint64_t));
+        // Save reads before any definition, implicit clobber, or tied write. Only a copy reads the saved state.
+        if (source->copy)
+        {
+            memcpy(oracle->saved, state, oracle->cells * sizeof(uint64_t));
+        }
         const uint32_t count = source->use_count + source->def_count;
         for (uint32_t d = source->use_count; d < count; d += 1)
         {
@@ -169,18 +174,22 @@ static bool tier1_cert_oracle_original(Tier1CertOracle* oracle, uint64_t* state,
         {
             tier1_cert_oracle_kill(oracle, state, source->after[i]);
         }
+        // A definition at BUSTER_CERT_NONE leaves its value to its recipe: no storage holds it.
         for (uint32_t d = source->use_count; d < count; d += 1)
         {
-            const uint32_t value = source->operands[d].value;
-            const Tier1CertLocation l = program->locations[in.locations[d]];
-            tier1_cert_oracle_kill(oracle, state, in.locations[d]);
-            if (source->copy)
+            if (in.locations[d] != BUSTER_CERT_NONE)
             {
-                memcpy(state + (size_t)l.unit * values, oracle->copy, (size_t)l.width * values * sizeof(uint64_t));
-            }
-            for (uint32_t lane = 0; lane < l.width; lane += 1)
-            {
-                state[(size_t)(l.unit + lane) * values + value] |= UINT64_C(1) << lane;
+                const uint32_t value = source->operands[d].value;
+                const Tier1CertLocation l = program->locations[in.locations[d]];
+                tier1_cert_oracle_kill(oracle, state, in.locations[d]);
+                if (source->copy)
+                {
+                    memcpy(state + (size_t)l.unit * values, oracle->copy, (size_t)l.width * values * sizeof(uint64_t));
+                }
+                for (uint32_t lane = 0; lane < l.width; lane += 1)
+                {
+                    state[(size_t)(l.unit + lane) * values + value] |= UINT64_C(1) << lane;
+                }
             }
         }
         oracle->report->instructions += 1;
@@ -195,7 +204,9 @@ static bool tier1_cert_oracle_move(Tier1CertOracle* oracle, uint64_t* state, Tie
     const Tier1CertLocation a = oracle->program->locations[in.a];
     const Tier1CertLocation b = oracle->program->locations[in.b];
     bool valid = true;
-    memcpy(oracle->saved, state, oracle->cells * sizeof(uint64_t));
+    // The move reads its two locations' rows alone: save those before either is written.
+    memcpy(oracle->saved + (size_t)b.unit * values, state + (size_t)b.unit * values, (size_t)b.width * values * sizeof(uint64_t));
+    memcpy(oracle->saved + (size_t)a.unit * values, state + (size_t)a.unit * values, (size_t)a.width * values * sizeof(uint64_t));
     for (uint32_t lane = 0; valid && oracle->checking && lane < a.width; lane += 1)
     {
         valid = tier1_cert_oracle_known(oracle, oracle->saved + (size_t)(b.unit + lane) * values);
@@ -424,6 +435,22 @@ static bool tier1_cert_oracle_rename(Tier1CertOracle* oracle, uint64_t* state, T
         }
     }
     return valid;
+}
+
+// The oracle's scratch for `program`, alignment slack included, or 0 past its bounds (or for invalid domain sizes):
+// its dense per-block states, working copies and expression rows.
+static __attribute__((unused)) size_t tier1_certificate_oracle_scratch_size(const Tier1CertProgram* program)
+{
+    size_t result = 0;
+    if (program != 0 && program->block_count != 0 && program->value_count <= BUSTER_CERT_ORACLE_VALUES && program->unit_count <= BUSTER_CERT_ORACLE_UNITS && program->block_count <= BUSTER_CERT_ORACLE_BLOCKS)
+    {
+        const uint64_t cells = (uint64_t)program->unit_count * program->value_count;
+        const uint64_t words = ((uint64_t)program->unit_count + 63) / 64;
+        const uint64_t values = program->value_count;
+        const uint64_t blocks = program->block_count;
+        result = (size_t)(8 * ((blocks + 3) * cells + BUSTER_CERT_MAX_WIDTH * values + program->unit_count * words + BUSTER_CERT_MAX_WIDTH * words) + 12 * values + 5 * blocks + 16 * 13);
+    }
+    return result;
 }
 
 static Tier1CertError tier1_certificate_oracle(const Tier1CertProgram* program, void* scratch, size_t capacity, Tier1CertReport* report)
