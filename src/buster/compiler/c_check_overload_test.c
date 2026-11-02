@@ -521,6 +521,16 @@ static __attribute__((noinline)) void check_test_overload_sources(CheckTest* tes
         { .name = "typeof cannot choose latest overload", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O;\n__typeof__(f) p;\n", .rejected = true },
         { .name = "typeof cast supplies exact overload context", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; __typeof__((int(*)(int))f) p; _Static_assert(__builtin_types_compatible_p(__typeof__(p),int(*)(int)),\"typed address\");\n" },
         { .name = "unavailable singleton in unchosen generic association", .source = "int f(int) __attribute__((overloadable,unavailable));\n_Static_assert(_Generic(0,int:1,default:f),\"type\");\n", .rejected = true },
+        // Which units get overload tables (#1038): a name of the attribute's inside an attribute list, in each spelling and
+        // place, but no other token of that name, which gave main.c tables and left its expressions' walk scalar.
+        { .name = "overload names outside attribute lists make no tables", .source = "struct s { int overloadable; };\nint __overloadable__;\nint get(struct s* p){int overloadable = p->overloadable; return overloadable + __overloadable__;}\nint run(void){struct s v = {3}; return get(&v);}\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_NONE },
+        { .name = "overload attribute after another in its list", .source = "int f(int) __attribute__((unused, overloadable)); double f(double) __attribute__((__overloadable__)); _Static_assert(_Generic(f(1.0),double:1,default:0),\"listed\"); int run(void){return f(2);}\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
+        { .name = "overload attribute with empty arguments", .source = "__attribute__((overloadable())) int f(int); __attribute__((overloadable)) double f(double); _Static_assert(_Generic(f(1.0),double:1,default:0),\"empty\");\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
+        { .name = "overload standard attribute in clang's namespace", .source = "[[clang::overloadable]] long q(long); [[clang::overloadable]] char* q(char*); _Static_assert(_Generic(q((char*)0),char*:1,default:0),\"standard\"); long run(void){long (*p)(long) = &q; return (__extension__ q)(4) + p(5) + (&q)(6);}\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
         { .name = "unavailable selected address from a set remains usable", .source = "#define O __attribute__((overloadable))\nint f(int) O __attribute__((unavailable)); double f(double) O; int take(int(*)(int)) O; double take(char*) O; _Static_assert(_Generic(take(_Generic(0,int:f,default:0)),int:1,default:0),\"selected argument\"); int g(void){return ((int(*)(int))f)(1);}\n" },
     };
     char directory[] = "/tmp/buster-check-overload-source-XXXXXX";

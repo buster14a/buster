@@ -89,16 +89,25 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
     return values;
 }
 
-// An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, and a
-// static initializer's context.
+// An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, a static
+// initializer's context, and in a unit with overload tables the token's overload head, which an address of an operand
+// (ADDRESS) and __extension__ (SELECT) take from their operand's token and every other operator clears, so that a call
+// finds its callee's set through them (the walk's action's last step).
 static uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
     const uint32_t node = check_input_add_node(reader, op, token, a, b, c);
     if (node != BUSTER_CHECK_NONE)
     {
-        CheckGraph* graph = &reader->output->graph;
+        CheckInput* input = reader->output;
+        CheckGraph* graph = &input->graph;
         graph->types[node] = reader->query_types[token];
         graph->contexts[node] = reader->static_initializers[token] ? BUSTER_CHECK_CONTEXT_STATIC : 0;
+        if (input->overload_heads != NULL)
+        {
+            const uint32_t count = reader->parser->tokens.count;
+            const uint32_t operand = (op == CHECK_OP_ADDRESS || op == CHECK_OP_SELECT) && a != BUSTER_CHECK_NONE ? graph->tokens[a] : count;
+            input->overload_heads[token] = operand < count ? input->overload_heads[operand] : 0;
+        }
     }
     return node;
 }
@@ -140,9 +149,10 @@ _Static_assert(sizeof(CheckValue) == 96 && offsetof(CheckValue, category) == 4 &
                sizeof(CheckConstantKind) == 4,
                "an identifier's leaf is written as twelve words");
 
-// An identifier's leaf, into `leaf`: the twelve words of its type, category, flags, constant kind, value and object, all
-// else zero (no x87 store of the zero floating parts), as the walk's action makes it of the identifier's declaration.
-static void check_input_identifier_leaf(const CheckInputReader* reader, TypeId type, uint32_t declaration, CheckValue* leaf)
+// An identifier's leaf, into `leaf`: the twelve words of its type, category, flags, constant kind, value, object and
+// overload head (`head`, the set the use names in a unit with overload tables, else 0), all else zero (no x87 store of
+// the zero floating parts), as the walk's action makes it of the identifier's declaration.
+static void check_input_identifier_leaf(const CheckInputReader* reader, TypeId type, uint32_t declaration, uint32_t head, CheckValue* leaf)
 {
     const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
     const uint64_t category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
@@ -161,7 +171,7 @@ static void check_input_identifier_leaf(const CheckInputReader* reader, TypeId t
         0,
         0,
         0,
-        reader->objects[declaration],
+        reader->objects[declaration] | (uint64_t)head << 32,
         0,
         0,
         0,
@@ -169,9 +179,10 @@ static void check_input_identifier_leaf(const CheckInputReader* reader, TypeId t
     memcpy(leaf, words, sizeof(words));
 }
 
-// An identifier operand: a VALUE node of its declaration and its leaf, or nothing for one without a declared type. A K&R
-// unit's identifiers, whose types a K&R function's designator interns, and a constexpr object's, which reads its value,
-// are the walk's.
+// An identifier operand: a VALUE node of its declaration and its leaf, or nothing for one without a declared type. In a
+// unit with overload tables the leaf holds the use's overload head, which the reader's run wrote at the token, and which
+// the walk's action writes back there unchanged. A K&R unit's identifiers, whose types a K&R function's designator
+// interns, and a constexpr object's, which reads its value, are the walk's.
 static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t token)
 {
     const TypeId type = reader->declared_types[token];
@@ -182,15 +193,16 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
         const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
-            check_input_identifier_leaf(reader, type, declaration, check_graph_leaf_of(&reader->output->graph, node));
+            const uint32_t head = reader->output->overload_heads != NULL ? reader->output->overload_heads[token] : 0;
+            check_input_identifier_leaf(reader, type, declaration, head, check_graph_leaf_of(&reader->output->graph, node));
             check_input_expression_value(reader, token, node);
         }
     }
     return acted;
 }
 
-// A number or a character operand: its literal's VALUE node, or the report of an invalid one. A function's name is the
-// walk's, as its tests take it after the literals.
+// A number or a character operand: its literal's VALUE node, or the report of an invalid one; in a unit with overload
+// tables, its token's head is its leaf's, none. A function's name is the walk's, as its tests take it after the literals.
 static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
@@ -207,7 +219,12 @@ static bool check_input_expression_literal(CheckInputReader* reader, uint32_t to
             const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(&reader->output->graph, node) = check_input_literal_value(reader, token, literal);
+                CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
+                *leaf = check_input_literal_value(reader, token, literal);
+                if (reader->output->overload_heads != NULL)
+                {
+                    reader->output->overload_heads[token] = leaf->overload_head;
+                }
                 check_input_expression_value(reader, token, node);
             }
         }
@@ -342,7 +359,9 @@ static bool check_input_expression_condition(CheckInputReader* reader, uint32_t 
 
 // A call of a function: the callee's value its operand, and the arguments' values its own slice of argument_nodes, each
 // with its first token; a call of a plain library builtin's declaration that clang folds marked in its members
-// (check_input_library_call, #148). A builtin's, an intrinsic's and a K&R unit's calls are the walk's.
+// (check_input_library_call, #148); and in a unit with overload tables, a call whose callee's token names an overload set
+// recorded with the set's head (CheckGraph.overload_calls), in node order as the walk records them. A builtin's, an
+// intrinsic's and a K&R unit's calls are the walk's.
 static bool check_input_expression_call(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     CheckInput* input = reader->output;
@@ -362,6 +381,19 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
                 const uint32_t use = designator < node && graph->ops[designator] == CHECK_OP_VALUE ? graph->tokens[designator] : BUSTER_CHECK_NONE;
                 const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
                 graph->members[node] = library != 0 ? library : graph->members[node];
+            }
+            const uint32_t callee_token = input->overload_heads != NULL ? graph->tokens[callee] : reader->parser->tokens.count;
+            const uint32_t head = callee_token < reader->parser->tokens.count ? input->overload_heads[callee_token] : 0;
+            if (head != 0)
+            {
+                if (graph->overload_count < graph->overload_capacity)
+                {
+                    graph->overload_calls[graph->overload_count++] = (CheckOverloadCall){ .node = node, .head = head - 1 };
+                }
+                else
+                {
+                    input->resource = true;
+                }
             }
             graph->argument_offsets[node] = graph->argument_count;
             graph->argument_counts[node] = values.count - 1;
@@ -475,17 +507,16 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
-// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred,
-// or with overload tables (CheckInput.overload_heads: a unit that spells `overloadable` or `__overloadable__`, whose
-// every function declaration is a candidate whose head the walk's action carries through its nodes to its calls), is
-// acted at by the walk's visit throughout, though still compacted.
+// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
+// is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
+// overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
+// candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
 static void check_input_expressions_coded(CheckInputReader* reader)
 {
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
     // Every token's expression ends by the count, so that within these limits none is past them.
-    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count &&
-                       input->overload_heads == NULL;
+    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];

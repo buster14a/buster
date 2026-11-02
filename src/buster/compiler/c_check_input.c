@@ -7809,6 +7809,27 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
                      (string ? BUSTER_CHECK_SYNTAX_STRING : 0));
 }
 
+// Whether `token` is inside an attribute list: an ancestor of it closes one (PARSE_ROLE_CLOSE_ATTRIBUTE_LIST), as every
+// GNU and standard attribute's name has (check_input_attribute_read_item reads them from such lists alone), or there is
+// no tree to say otherwise. A name of the overloadable attribute's counts only so (#1038): a member or a variable named
+// overloadable, which main.c has, gave its unit overload tables, which made every function declaration a candidate and
+// left the expressions' walk to its scalar path. An attribute's argument is inside the list too, a superset that costs a
+// unit at most the tables.
+static bool check_input_attribute_inside(const Parser* parser, uint32_t token)
+{
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* parents = parser->tree.parents;
+    const uint32_t count = parser->tokens.count;
+    bool inside = roles == 0 || parents == 0;
+    uint32_t ancestor = !inside && token < count ? parents[token] : count;
+    for (uint32_t steps = 0; !inside && ancestor < count && steps < count; steps += 1)
+    {
+        inside = roles[ancestor] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+        ancestor = parents[ancestor];
+    }
+    return inside;
+}
+
 // One pass over the tokens' kinds, roles and names for every count check_input_run needs before it reads (#529), where
 // it made one pass for each, and for the walk's syntax bits of each token, which `syntax` (count + 1 bytes, or null for
 // none) receives, and its marks (check_input_visit_of), which `visits` (count + 1 bytes, or null for none) receives.
@@ -7891,7 +7912,13 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             }
             for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
             {
-                result.groups[group] += (uint32_t)__builtin_popcount(matched[group]);
+                result.groups[group] += group != CHECK_INPUT_COUNT_OVERLOADABLE ? (uint32_t)__builtin_popcount(matched[group]) : 0;
+            }
+            // overloadable's names count where they are inside an attribute list, a test of each name's ancestors: names
+            // so spelled are few.
+            for (uint32_t bits = matched[CHECK_INPUT_COUNT_OVERLOADABLE]; bits != 0; bits &= bits - 1)
+            {
+                result.groups[CHECK_INPUT_COUNT_OVERLOADABLE] += check_input_attribute_inside(parser, token + part + (uint32_t)__builtin_ctz(bits));
             }
             __mmask16 syntax_matched[3] = { 0 };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
@@ -7953,7 +7980,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         }
         for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
         {
-            result.groups[group] += matched[group];
+            result.groups[group] += matched[group] && (group != CHECK_INPUT_COUNT_OVERLOADABLE || check_input_attribute_inside(parser, token));
         }
         const uint8_t bits = check_input_syntax_of(parser, token);
         if (syntax != 0)

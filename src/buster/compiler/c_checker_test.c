@@ -2176,6 +2176,15 @@ struct CheckSourceFixture
     const TypeCapacity* capacity;
     // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
     double* check_seconds;
+    // Whether the reader must make the unit overload tables (CHECK_TEST_OVERLOAD_TABLES) or none (CHECK_TEST_OVERLOAD_NONE),
+    // on both paths: a name of the overloadable attribute's counts only inside an attribute list (#1038). 0 checks neither.
+    uint8_t overload_tables;
+};
+
+enum
+{
+    CHECK_TEST_OVERLOAD_TABLES = 1,
+    CHECK_TEST_OVERLOAD_NONE = 2,
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -2264,6 +2273,40 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
     }
     printf("\n");
     check_test_expect(test, test->expression_left[CHECK_INPUT_CODE_SCALAR] != 0, "the coded walk leaves the scalar class's tokens to the walk's visit");
+}
+
+// Whether the two paths' readers built the same expression graph of a unit of `tokens` tokens: its nodes, their leaves,
+// the arguments' slices and the overload calls, and the tokens' nodes and overload heads (#1038: the coded walk's twin,
+// the walk, must give the graph node for node, which a typed stream compares only as the checker's results).
+static bool check_test_source_graphs_equal(const CheckInput* a, const CheckInput* b, uint32_t tokens)
+{
+    const CheckGraph* x = &a->graph;
+    const CheckGraph* y = &b->graph;
+    bool equal = x->count == y->count && x->leaf_count == y->leaf_count && x->argument_count == y->argument_count && x->overload_count == y->overload_count &&
+                 (a->overload_heads == NULL) == (b->overload_heads == NULL);
+    for (uint32_t node = 0; equal && node < x->count; node += 1)
+    {
+        equal = x->ops[node] == y->ops[node] && x->tokens[node] == y->tokens[node] && x->operand0[node] == y->operand0[node] &&
+                x->operand1[node] == y->operand1[node] && x->operand2[node] == y->operand2[node] && x->types[node] == y->types[node] &&
+                x->members[node] == y->members[node] && x->contexts[node] == y->contexts[node] && x->leaf_slots[node] == y->leaf_slots[node] &&
+                x->argument_offsets[node] == y->argument_offsets[node] && x->argument_counts[node] == y->argument_counts[node] &&
+                (x->source_positions == NULL || x->source_positions[node] == y->source_positions[node]);
+        equal = equal && (x->ops[node] != CHECK_OP_VALUE || check_test_value_equal(check_graph_leaf_of(x, node), check_graph_leaf_of(y, node)));
+    }
+    for (uint32_t argument = 0; equal && argument < x->argument_count; argument += 1)
+    {
+        equal = x->argument_nodes[argument] == y->argument_nodes[argument] &&
+                (x->argument_tokens == NULL || x->argument_tokens[argument] == y->argument_tokens[argument]);
+    }
+    for (uint32_t call = 0; equal && call < x->overload_count; call += 1)
+    {
+        equal = x->overload_calls[call].node == y->overload_calls[call].node && x->overload_calls[call].head == y->overload_calls[call].head;
+    }
+    for (uint32_t token = 0; equal && token < tokens; token += 1)
+    {
+        equal = a->token_nodes[token] == b->token_nodes[token] && (a->overload_heads == NULL || a->overload_heads[token] == b->overload_heads[token]);
+    }
+    return equal;
 }
 
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
@@ -2368,9 +2411,15 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                                                 input[0].expression_left[CHECK_INPUT_CODE_SCALAR];
                 snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
                          fixture->name, classed, input[1].expression_visits, scalar_counted);
-                const bool coded = input[1].overload_heads != NULL || input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
+                const bool coded = input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
                                    (classed != 0 && classed <= input[1].expression_visits);
                 check_test_expect(test, coded && scalar_counted == 0, resource_message);
+            }
+            if (fixture->overload_tables != 0)
+            {
+                snprintf(resource_message, sizeof(resource_message), "%s: the %s path's reader makes %s", fixture->name, p == 0 ? "scalar" : "vector",
+                         fixture->overload_tables == CHECK_TEST_OVERLOAD_TABLES ? "overload tables" : "no overload tables");
+                check_test_expect(test, (input[p].overload_heads != NULL) == (fixture->overload_tables == CHECK_TEST_OVERLOAD_TABLES), resource_message);
             }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;
@@ -2456,6 +2505,12 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     if (ready)
     {
         check_test_expect(test, rejected[0] == rejected[1] && lines[0] == lines[1], "source paths disagree on acceptance or first-error line");
+        if (!rejected[0] && !rejected[1])
+        {
+            char graphs[256];
+            snprintf(graphs, sizeof(graphs), "%s: the source paths build the same expression graph", fixture->name);
+            check_test_expect(test, check_test_source_graphs_equal(&input[0], &input[1], input[0].token_count), graphs);
+        }
         if (checked[0] && checked[1])
         {
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
