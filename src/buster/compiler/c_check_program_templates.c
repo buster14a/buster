@@ -236,8 +236,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     const bool left_pointer = arithmetic && (check_lower_facts(writer, type_a) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
     const bool right_pointer = arithmetic && (check_lower_facts(writer, type_b) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
     const bool pointers = left_pointer || right_pointer;
-    const CheckAction action = { .extensions = graph->extensions };
-    const uint64_t stride = left_pointer ? check_action_pointer_stride(types, type_a, &action) : 0;
+    const uint64_t stride = left_pointer ? check_action_pointer_stride(types, type_a) : 0;
     CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
     if (value->overload_head != 0 || (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) != 0)
     {
@@ -533,12 +532,11 @@ static void check_lower_template_own(const CheckLowerWriter* writer, uint32_t no
     }
     else if (kind == CHECK_LOWER_TEMPLATE_POINTER)
     {
-        const CheckAction action = { .extensions = graph->extensions };
         if (op == CHECK_OP_SUBTRACT)
         {
             check_lower_template_put(entries, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
         }
-        check_lower_template_put(entries, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(types, stream->conversions[node].operands[0].type, &action));
+        check_lower_template_put(entries, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(types, stream->conversions[node].operands[0].type));
         if (op == CHECK_OP_SUBSCRIPT && !address && !address_value)
         {
             check_lower_template_put(entries, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value->type));
@@ -1023,8 +1021,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         }
         else if (arithmetic && !element && left_pointer && !right_pointer && (op != CHECK_OP_SUBSCRIPT || !reads || check_lower_template_class(class)))
         {
-            const CheckAction action = { .extensions = graph->extensions };
-            const uint64_t stride = check_action_pointer_stride(program->types, type_a, &action);
+            const uint64_t stride = check_action_pointer_stride(program->types, type_a);
             if (stride != 0)
             {
                 if (op == CHECK_OP_SUBTRACT)

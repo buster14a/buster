@@ -76,6 +76,11 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "const-initializer-receipt-byte-lifetime",
       "int f(void){const char a[]=\"abc\";const char* const p=\"xyz\";enum{E=a[1]+p[2]};_Static_assert(E==220,\"first bytes\");return E;}\n"
       "int g(void){const char a[]=\"def\";const char* const p=\"uvw\";enum{E=a[1]+p[2]};_Static_assert(E==220,\"second bytes\");return E;}\n", true },
+    { "const-builtin-receipts-in-bodies",
+      "static const int top=7;\n"
+      "int f(void){const int k=5;enum{A=__builtin_popcount(k)};_Static_assert(A==2,\"first\");return A+__builtin_popcount(top);}\n"
+      "int g(void){const int k=8;enum{B=__builtin_popcount(k),C=__builtin_ctz(k)};_Static_assert(B==1&&C==3,\"second\");"
+      "return B+C+__builtin_clz(k);}\n", true },
     { "const-initializer-receipt-future-definition-cutoff",
       "extern const int later;int f(void){enum{E=later};return E;}const int later=3;int g(void){enum{E=later};return E;}\n", false },
     { "nested-selection-warnings",

@@ -99,7 +99,7 @@ static void check_test_function_abi_relations(CheckTest* test, TypeTable* table)
         { .type = functions[TYPE_FUNCTION_ABI_MICROSOFT], .declaration = 1, .canonical = 1, .object = 101, .previous = UINT32_MAX, .scope = 1, .position = 1, .flags = BUSTER_CHECK_OVERLOADABLE },
         { .type = other, .declaration = 2, .canonical = 2, .object = 102, .previous = 0, .scope = 1, .position = 2, .flags = BUSTER_CHECK_OVERLOADABLE },
     };
-    const CheckOverloadContext context = { .source_position = 3 };
+    const CheckOverloadContext context = { .semantic.source_position = 3 };
     Arena scratch = arena_reserve(65536);
     const CheckOverloadResult wrong = check_overload_address(table, candidates, 2, 1, type_pointer(table, functions[0]), &context, &scratch);
     const CheckOverloadResult exact = check_overload_address(table, candidates, 2, 1, type_pointer(table, functions[TYPE_FUNCTION_ABI_MICROSOFT]), &context, &scratch);
