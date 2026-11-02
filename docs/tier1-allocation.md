@@ -616,10 +616,12 @@ change:
 - a constant;
 - a symbol's address, from rip, or from its GOT slot where the emission's
   access column reaches it so;
-- a frame object's address, a lea from rsp at the offset the frame's layout
-  gives the object, which `tier1_emit_cfg_frame` fills in after the layout:
-  selection refuses the dynamic stack, so nothing moves rsp between the
-  prologue and the epilogues;
+- a frame object's address, a lea from the frame's base at the offset the
+  frame's layout gives the object, which `tier1_emit_cfg_frame` fills in after
+  the layout: the base is rsp where nothing moves rsp between the prologue and
+  the epilogues, and rbp (or a realigned frame's r15) where the dynamic stack
+  moves it (#141: an `alloca`'s `sub rsp`, a call's outgoing area taken from rsp
+  around it), so the address never depends on where rsp is;
 - a copy of one of them: the C driver's typed streams carry pointers as 64-bit
   integers, so every address the front end keeps in a variable reaches its uses
   through a `ptrtoint` and an `inttoptr`, the selector's `TIER1_RULE_COPY`, with

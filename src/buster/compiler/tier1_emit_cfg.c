@@ -274,8 +274,8 @@ static uint16_t tier1_emit_cfg_inverse(uint16_t form)
 // The values a fragment may recompute rather than reload (#178), by node, into the recipes' columns (zero where none):
 // - a constant;
 // - a symbol's address, from rip or read from its GOT slot as its access says (a thread-local's the consumer refuses);
-// - a frame object's address, from the frame's base, which nothing moves between the prologue and the epilogues
-//   (selection refuses the dynamic stack);
+// - a frame object's address, from the frame's base, which nothing moves between the prologue and the epilogues: rsp
+//   where nothing else moves rsp either, and rbp (or a realigned frame's r15) where the dynamic stack does (#141);
 // - a copy of one of them: a pointer's conversion, which the C driver's typed streams put around every address, their
 //   pointers being 64-bit integers, has its operand's bits (TIER1_RULE_COPY);
 // - a symbol's or a frame object's address plus a constant (a member's, or a constant index's: TIER1_RULE_ADDRESS without
