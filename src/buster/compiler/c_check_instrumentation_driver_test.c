@@ -10,6 +10,9 @@ static void check_test_driver_instrumentation(CheckTest* test, const char* execu
         "#if defined(EXPECT_ADDRESS) && !defined(__SANITIZE_ADDRESS__)\n"
         "#error address predefine lost\n"
         "#endif\n"
+        "#if defined(EXPECT_THREAD) && !defined(__SANITIZE_THREAD__)\n"
+        "#error thread predefine lost\n"
+        "#endif\n"
         "#if defined(EXPECT_OPENMP) && !defined(_OPENMP)\n"
         "#error OpenMP predefine lost\n"
         "#endif\n"
@@ -34,7 +37,8 @@ static void check_test_driver_instrumentation(CheckTest* test, const char* execu
         { "-fno-sanitize=address", "-fsanitize=address", "-fsanitize=address" },
         { "-fsanitize=address", "-fno-sanitize=thread", "-fsanitize=address" },
         { "-fsanitize=fuzzer-no-link", NULL, "-fsanitize=fuzzer-no-link" },
-        { "-fsanitize-coverage=trace-pc-guard", NULL, "-fsanitize-coverage" },
+        { "-fsanitize-coverage=trace-pc-guard", NULL, "-fsanitize-coverage=trace-pc-guard" },
+        { "-fsanitize-coverage=trace-pc-guard,indirect-calls", "-fno-sanitize-coverage=indirect-calls", "-fsanitize-coverage=trace-pc-guard" },
         { "-fopenmp", NULL, "-fopenmp" },
         { "-fopenmp=libomp", NULL, "-fopenmp=libomp" },
         { "-fopenmp=libgomp", NULL, "-fopenmp=libgomp" },
@@ -144,7 +148,7 @@ static void check_test_driver_instrumentation(CheckTest* test, const char* execu
     static const char* const modeled[][2] = {
         { "-fsanitize=address", "-DEXPECT_ADDRESS" },
         { "-fsanitize=undefined", NULL },
-        { "-fsanitize=thread", NULL },
+        { "-fsanitize=thread", "-DEXPECT_THREAD" },
         { "-fsanitize-coverage=trace-pc-guard", NULL },
         { "-fopenmp", "-DEXPECT_OPENMP" },
         { "-fopenmp=libomp", "-DEXPECT_OPENMP" },

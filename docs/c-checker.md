@@ -4262,10 +4262,12 @@ GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
-not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
-active `-fopenmp` request, including alternate runtime selections, is refused
-until execution semantics are implemented; it must not silently produce serial
-code. A subsequent `-fno-openmp` restores the ignore behavior.
+not a definition of `_OPENMP`, determines whether OpenMP was requested. An active
+`-fopenmp` request, including alternate runtime selections, must not silently
+produce serial code: a code-generating action refuses the option itself before
+reading source (the instrumentation boundary in the introduction), while a
+non-emitting action refuses each `#pragma omp` directive through the checker. A
+subsequent `-fno-openmp` restores the ignore behavior for both.
 
 Known unsupported semantic effects remain hard, named errors, including
 `redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing

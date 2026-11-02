@@ -3633,7 +3633,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (options.predefines.sanitize_coverage)
         {
-            fprintf(stderr, "error: unsupported code generation option '-fsanitize-coverage' (coverage instrumentation is not implemented)\n");
+            char spelling[1024];
+            const char* option = predefines_coverage_last(&options.predefines, options.predefines.coverage_features, spelling, sizeof(spelling));
+            fprintf(stderr, "error: unsupported code generation option '%s' (coverage instrumentation is not implemented)\n",
+                    option[0] != 0 ? option : "-fsanitize-coverage");
         }
         else
         {
