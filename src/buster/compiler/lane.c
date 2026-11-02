@@ -1089,6 +1089,9 @@ static __attribute__((unused)) uint64_t lane_parts_by_cost(const uint64_t* cost_
 // the parts with no sync before their first take (c_check_deferred.c's first lane reads the costliest part while the
 // others wake). The lanes read boundaries and order as lane_run's dispatch publishes them.
 static __attribute__((unused)) uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order);
+// The same for `parts` parts (no more than `count`, and at most BUSTER_LANE_MAX_PARTS), whatever the lanes: for a caller
+// whose parts are fewer per lane than lane_parts_by_cost's (c_check_program_emit.c's growing teams).
+static __attribute__((unused)) uint64_t parts_cut_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t parts, uint64_t* boundaries, uint32_t* order);
 // The next number this lane takes from its group's counter: 0, 1, 2, ... across the group's lanes, and `parts` or more
 // once they are all taken. Every lane of the group takes until it gets `parts` or more, and then no more until the
 // lanes have synced: the last take of the loop resets the counter for the next one.
@@ -1445,15 +1448,21 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
     return parts;
 }
 
+static uint64_t parts_cut_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t parts, uint64_t* boundaries, uint32_t* order)
+{
+    uint64_t cut = parts < count ? parts : count;
+    cut = cut < BUSTER_LANE_MAX_PARTS ? cut : BUSTER_LANE_MAX_PARTS;
+    for (uint64_t i = 0; i <= cut; i += 1)
+    {
+        boundaries[i] = lane_part_boundary(cost_prefix, count, i, cut);
+    }
+    lane_parts_order(cost_prefix, boundaries, cut, order);
+    return cut;
+}
+
 static uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order)
 {
-    const uint64_t parts = lane_part_count_for(count, lanes < BUSTER_LANE_MAX_COUNT ? lanes : BUSTER_LANE_MAX_COUNT);
-    for (uint64_t i = 0; i <= parts; i += 1)
-    {
-        boundaries[i] = lane_part_boundary(cost_prefix, count, i, parts);
-    }
-    lane_parts_order(cost_prefix, boundaries, parts, order);
-    return parts;
+    return parts_cut_by_cost(cost_prefix, count, lane_part_count_for(count, lanes < BUSTER_LANE_MAX_COUNT ? lanes : BUSTER_LANE_MAX_COUNT), boundaries, order);
 }
 
 static uint64_t lane_take(uint64_t parts)

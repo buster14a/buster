@@ -59,12 +59,17 @@
 //   when its second lane fails to start (BUSTER_TEST_LANE_FAIL_AT), the one created, after which the command runs on one
 //   lane, writing --lanes 1's object. --time-stages reports the lanes asked for and those run on: 3 and 3 for --lanes 3,
 //   the cores' for the default, and 4 and 1 for that failure.
-// - A growing team (#673's tail): the first program of 600 functions by --lanes 4 under a jobserver pipe of no token or
-//   one, its lane 0 writing none, 2, 3 or 5 more after its first part (BUSTER_TEST_WORKER_SUPPLY), as another recipe
-//   returning them would: --time-stages reports the lanes the jobserver granted as it started, the lanes it ran on at
-//   its end and those it grew by, up to 4, and no more lanes that took a part than it had admitted (with one token and
-//   none supplied, 2 of a round of 4); its object is
-//   --lanes 1's; and afterwards the pipe holds each token once, the supplied ones among them, the 2 of 5 it had no lane
+// - A growing team (#673's tail). The growth gate alone (check_program_emit_grow), under a jobserver pipe of 7 tokens:
+//   parts left of one token fewer than pay for a guardian don't grow a team of 1 of 8 lanes, and the least that pays
+//   grows it by 7; --lanes N grows it whatever they pay; the parts left, the lanes left and the spare tokens each bound
+//   the growth; no part left, none; a guardian only for a growth, and the tokens back after each. Then the driver: the
+//   first program of 600 functions by --lanes 4, and programs of 4,000 and 100 functions by the default policy (with
+//   --worker-budget 3 and without), under a jobserver pipe of no token or one, its lane 0 writing none, 2, 3 or 5 more
+//   after its first part (BUSTER_TEST_WORKER_SUPPLY), as another recipe returning them would: --time-stages reports the
+//   lanes the lane rule asked for, those the jobserver granted as it started, the lanes it ran on at its end and those
+//   it grew by, up to its lanes and the cap, none for the 100 functions, whose parts don't pay for a guardian, and no
+//   more lanes that took a part than it had admitted (with one token and none supplied, 2 of a round of 4); its object
+//   is --lanes 1's; and afterwards the pipe holds each token once, the supplied ones among them, those it had no lane
 //   for never taken.
 // - Commands in one process (#905): a session of 4 lanes whose flow runs, three times, a command that fails, one that
 //   writes an object on 4 lanes, one on 2 by --worker-budget 2, a -fsyntax-only, and -fsyntax-only of two sources by 3
@@ -73,7 +78,8 @@
 //   a process of its own; then the same on a lazy session, whose lane 1 creates the others while lane 0 runs the first
 //   command. And, with 4 CPUs or more, a growing team's command on a session of 4 lanes in this process, under a
 //   jobserver pipe without a token whose lane 0 supplies 3: the pipe holds them once as the command returns, while
-//   anything it leaked would still hold them, and the object is --lanes 1's.
+//   anything it leaked would still hold them, the object is --lanes 1's, and the caller's MAKEFLAGS and test hook are
+//   as they were.
 
 #include "buster/compiler/test_paths.h"
 #include "worker_budget_test.c"
@@ -1632,69 +1638,194 @@ static bool check_lanes_test_report_budget(const char* path, uint32_t* reported)
     return found;
 }
 
+// The growth gate (check_program_emit_grow) alone, under a jobserver pipe of 7 tokens, as the default policy takes it
+// (see the file's comment).
+static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
+{
+    // A team of `admitted` of up to `lanes` lanes, `ticket` of 100 parts taken, the parts left of `rest` tokens, --lanes
+    // N's or not, and the lanes it must admit. With 1 of 8 admitted and 7 spare, the least that pays is the ceiling of
+    // BUSTER_CHECK_EMIT_GROW_TOKENS × 1 × 8 / 7.
+    typedef struct CheckLanesGate CheckLanesGate;
+    struct CheckLanesGate
+    {
+        uint64_t ticket;
+        uint64_t rest;
+        uint32_t admitted;
+        uint32_t lanes;
+        bool every_lane;
+        uint32_t more;
+        const char* what;
+    };
+    const uint64_t least = ((uint64_t)BUSTER_CHECK_EMIT_GROW_TOKENS * 8 + 6) / 7;
+    const CheckLanesGate gates[] = {
+        { 0, least - 1, 1, 8, false, 0, "parts left just short of paying for a guardian don't grow the team" },
+        { 0, least, 1, 8, false, 7, "parts left that just pay for a guardian grow the team by every spare token" },
+        { 0, 1, 1, 8, false, 0, "too little work left doesn't grow the team, whatever is spare" },
+        { 0, 1, 1, 8, true, 7, "--lanes N grows the team whatever the parts left pay" },
+        { 98, UINT64_C(1) << 40, 1, 8, false, 2, "a team grows by no more lanes than parts left" },
+        { 0, UINT64_C(1) << 40, 6, 8, false, 2, "a team grows by no more lanes than it may take" },
+        { 0, UINT64_C(1) << 40, 1, 16, false, 7, "a team grows by no more lanes than spare tokens" },
+        { 100, UINT64_C(1) << 40, 1, 8, false, 0, "a team with no part left doesn't grow" },
+    };
+    static const uint8_t tokens[] = { 1, 2, 3, 4, 5, 6, 7 };
+    int fds[2] = { -1, -1 };
+    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 && write(fds[1], tokens, sizeof(tokens)) == (ssize_t)sizeof(tokens);
+    check_lanes_test_expect(tally, ready, "the growth gate's jobserver pipe holds its 7 tokens", NULL);
+    char flags[96];
+    snprintf(flags, sizeof(flags), "-j --jobserver-auth=%d,%d", fds[0], fds[1]);
+    WorkerBudget budget;
+    worker_budget_initialize(&budget, flags, 64);
+    static uint64_t rest[101];
+    for (uint32_t g = 0; ready && g < BUSTER_ARRAY_LENGTH(gates); g += 1)
+    {
+        const CheckLanesGate* gate = gates + g;
+        CheckProgramLanes lanes = { .every_lane = gate->every_lane };
+        CheckEmitRun run = { .lanes = &lanes };
+        CheckEmitGrowth growth = { .ticket = gate->ticket, .parts = 100, .rest = rest };
+        rest[gate->ticket] = gate->rest;
+        WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+        const uint32_t more = check_program_emit_grow(&run, &growth, gate->admitted, gate->lanes, &budget, &lease);
+        // A guardian only for a growth, and its tokens only while it holds them.
+        const bool guarded = lease.child > 0;
+        const int held = worker_budget_test_available(fds[0]);
+        const bool returned = worker_budget_release(&lease);
+        char detail[96];
+        snprintf(detail, sizeof(detail), "admitted %u more, expected %u; %d tokens left in the pipe", more, gate->more, held);
+        check_lanes_test_expect(tally, more == gate->more && guarded == (more != 0) && held == (int)(7 - more) && returned &&
+                                           worker_budget_test_available(fds[0]) == 7,
+                                gate->what, detail);
+    }
+    worker_budget_close(&budget);
+    check_lanes_test_expect(tally, !ready || worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)), "the growth gate's tokens all come back once", NULL);
+    if (fds[0] >= 0)
+    {
+        close(fds[0]);
+    }
+    if (fds[1] >= 0)
+    {
+        close(fds[1]);
+    }
+}
+
 // A growing team in the driver (#673's tail; see the file's comment): the first generated program of 600 functions,
-// `program_N.c` for N `programs`, by --lanes 4 under a jobserver pipe of a case's tokens, lane 0 writing a case's more
-// after its first part (BUSTER_TEST_WORKER_SUPPLY).
+// `program_N.c` for N `programs`, by --lanes 4, and programs of 4,000 and of 100 functions of the test's own by the
+// default policy, under a jobserver pipe of a case's tokens, lane 0 writing a case's more after its first part
+// (BUSTER_TEST_WORKER_SUPPLY).
 static void check_lanes_test_driver_growth(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs)
 {
-    // The tokens in the pipe as the driver starts, and those its lane 0 supplies.
-    static const uint32_t cases[][2] = {
-        { 0, 0 },
-        { 1, 0 },
-        { 0, 3 },
-        { 1, 2 },
-        { 0, 5 },
+    // A case's program (0 the 600 functions', 1 the 4,000's, 2 the 100's), the tokens in the pipe as the driver starts,
+    // those its lane 0 supplies, and its options: --lanes 4 (every lane, whatever its parts pay), or the default policy,
+    // with --worker-budget 3 or without. The 4,000 functions' parts pay for every growth here; the 100's tokens, fewer
+    // than BUSTER_CHECK_EMIT_GROW_TOKENS, for none.
+    typedef struct CheckLanesGrowthCase CheckLanesGrowthCase;
+    struct CheckLanesGrowthCase
+    {
+        uint32_t program;
+        uint32_t initial;
+        uint32_t supply;
+        const char* options[2];
     };
+    static const CheckLanesGrowthCase cases[] = {
+        { 0, 0, 0, { "--lanes", "4" } },
+        { 0, 1, 0, { "--lanes", "4" } },
+        { 0, 0, 3, { "--lanes", "4" } },
+        { 0, 1, 2, { "--lanes", "4" } },
+        { 0, 0, 5, { "--lanes", "4" } },
+        { 1, 0, 5, { NULL, NULL } },
+        { 1, 0, 5, { "--worker-budget", "3" } },
+        { 1, 1, 0, { "--worker-budget", "3" } },
+        { 2, 0, 5, { NULL, NULL } },
+    };
+    static const uint32_t sizes[] = { 0, 4000, 100 };
     const uint32_t cpus = check_driver_cpus();
-    const uint32_t lanes = cpus < 4 ? cpus : 4;
-    char program[PATH_MAX];
-    char reference[PATH_MAX];
+    // The cores of those CPUs, whose lanes the default policy asks for (lane_test_process_cores, as the session's test
+    // counts them).
+    const uint32_t listed = lane_test_process_cores();
+    const uint32_t cores = listed != 0 ? listed : lane_core_count();
+    char sources[3][PATH_MAX];
+    char references[3][PATH_MAX];
     char object[PATH_MAX];
     char errors[PATH_MAX];
-    char detail[160];
-    snprintf(program, sizeof(program), "%s/program_%u.c", directory, programs);
-    snprintf(reference, sizeof(reference), "%s/growth_reference.o", directory);
+    char detail[192];
+    snprintf(sources[0], sizeof(sources[0]), "%s/program_%u.c", directory, programs);
     snprintf(object, sizeof(object), "%s/growth.o", directory);
     snprintf(errors, sizeof(errors), "%s/growth.errors", directory);
-    char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", reference, program, NULL };
-    const bool referenced = check_lanes_test_run(reference_arguments, errors) == 0;
-    check_lanes_test_expect(tally, referenced, "the growing team's reference object on one lane", program);
-    for (uint32_t c = 0; referenced && lanes > 1 && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    const uint64_t capacity = UINT64_C(1) << 24;
+    char* text = malloc(capacity);
+    bool referenced = text != NULL;
+    for (uint32_t p = 0; referenced && p < 3; p += 1)
     {
-        const uint32_t initial = cases[c][0];
-        // The team starts on a lane per spare token, its own first; only a team short of its lanes grows, and supplies.
-        const uint32_t granted = 1 + (initial < lanes - 1 ? initial : lanes - 1);
-        const uint32_t supplied = granted < lanes ? cases[c][1] : 0;
-        const uint32_t active = granted + supplied < lanes ? granted + supplied : lanes;
+        snprintf(references[p], sizeof(references[p]), "%s/growth_reference_%u.o", directory, p);
+        if (p != 0)
+        {
+            snprintf(sources[p], sizeof(sources[p]), "%s/growth_%u.c", directory, sizes[p]);
+            const uint64_t length = check_lanes_test_generate(tally, text, capacity, sizes[p]);
+            FILE* file = fopen(sources[p], "wb");
+            const bool written = file != NULL && fwrite(text, 1, length, file) == length;
+            referenced = file != NULL && fclose(file) == 0 && written;
+        }
+        char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", references[p], sources[p], NULL };
+        referenced = referenced && check_lanes_test_run(reference_arguments, errors) == 0;
+        check_lanes_test_expect(tally, referenced, "the growing team's reference object on one lane", sources[p]);
+    }
+    free(text);
+    for (uint32_t c = 0; referenced && cpus > 1 && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const CheckLanesGrowthCase* growth = cases + c;
+        int fds[2] = { -1, -1 };
         uint8_t tokens[16];
-        for (uint32_t i = 0; i < initial; i += 1)
+        for (uint32_t i = 0; i < growth->initial; i += 1)
         {
             tokens[i] = (uint8_t)(0x10 + i);
         }
-        for (uint32_t i = 0; i < supplied; i += 1)
-        {
-            tokens[initial + i] = (uint8_t)(BUSTER_CHECK_EMIT_SUPPLY_BYTE + i);
-        }
-        int fds[2] = { -1, -1 };
-        const bool ready = pipe(fds) == 0 && (initial == 0 || write(fds[1], tokens, initial) == (ssize_t)initial);
+        const bool ready = pipe(fds) == 0 && (growth->initial == 0 || write(fds[1], tokens, growth->initial) == (ssize_t)growth->initial);
         char makeflags[96];
         char supply[64];
         snprintf(makeflags, sizeof(makeflags), "MAKEFLAGS=-j --jobserver-auth=%d,%d", fds[0], fds[1]);
-        snprintf(supply, sizeof(supply), "BUSTER_TEST_WORKER_SUPPLY=%u", cases[c][1]);
+        snprintf(supply, sizeof(supply), "BUSTER_TEST_WORKER_SUPPLY=%u", growth->supply);
         unlink(object);
-        char* arguments[] = { (char*)"env", makeflags, supply, (char*)executable, (char*)"--lanes", (char*)"4", (char*)"-c", (char*)"--time-stages",
-                              (char*)"-o", object, program, NULL };
+        char* arguments[14] = { (char*)"env", makeflags, supply, (char*)executable };
+        uint32_t count = 4;
+        for (uint32_t o = 0; o < 2 && growth->options[o] != NULL; o += 1)
+        {
+            arguments[count++] = (char*)growth->options[o];
+        }
+        const char* tail[] = { "-c", "--time-stages", "-o", object, sources[growth->program] };
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(tail); t += 1)
+        {
+            arguments[count++] = (char*)tail[t];
+        }
+        arguments[count] = NULL;
         const int status = ready ? check_lanes_test_run(arguments, errors) : -1;
         uint32_t reported[6] = { 0 };
         const bool found = check_lanes_test_report_budget(errors, reported);
-        snprintf(detail, sizeof(detail), "%u tokens, %u supplied: status %d, granted %u, active %u, grown %u, worked %u", initial, cases[c][1], status,
-                 reported[2], reported[3], reported[4], reported[5]);
-        check_lanes_test_expect(tally, status == 0 && check_test_driver_same_files(object, reference), "a growing team's object is --lanes 1's", detail);
+        // The lanes the team may take: those the lane rule asked for (`requested`), up to the cap. It starts on a lane
+        // per spare token, its own first; only a team short of them grows, and supplies, and it grows where its parts
+        // pay, by the tokens supplied, up to them.
+        const bool every_lane = growth->options[0] != NULL && strcmp(growth->options[0], "--lanes") == 0;
+        const uint32_t cap = growth->options[0] != NULL && !every_lane ? 3 : 64;
+        const uint32_t room = reported[1] < cap ? reported[1] : cap;
+        const uint32_t granted = 1 + (room == 0 ? 0 : growth->initial < room - 1 ? growth->initial : room - 1);
+        const uint32_t supplied = granted < room ? growth->supply : 0;
+        const bool pays = every_lane || growth->program == 1;
+        const uint32_t active = !pays ? granted : granted + supplied < room ? granted + supplied : room;
+        for (uint32_t i = 0; i < supplied; i += 1)
+        {
+            tokens[growth->initial + i] = (uint8_t)(BUSTER_CHECK_EMIT_SUPPLY_BYTE + i);
+        }
+        snprintf(detail, sizeof(detail), "case %u: %u tokens, %u supplied: status %d, requested %u, granted %u, active %u, grown %u, worked %u", c,
+                 growth->initial, growth->supply, status, reported[1], reported[2], reported[3], reported[4], reported[5]);
+        check_lanes_test_expect(tally, status == 0 && check_test_driver_same_files(object, references[growth->program]), "a growing team's object is --lanes 1's",
+                                detail);
+        check_lanes_test_expect(tally, found && (!every_lane || reported[1] == (cpus < 4 ? cpus : 4)) && (growth->program != 1 || cores < 2 || reported[1] > 1),
+                                "the growing team's request is the lane rule's", detail);
         check_lanes_test_expect(tally, found && reported[2] == granted && reported[3] == active && reported[4] == active - granted,
-                                "a team short of its lanes grows by the tokens that come back, up to its lanes", detail);
-        check_lanes_test_expect(tally, found && reported[5] >= 1 && reported[5] <= active && (active > 1 || reported[5] == 1),
-                                "no lane of a growing team takes a part before it is admitted", detail);
-        check_lanes_test_expect(tally, ready && worker_budget_test_tokens(fds[0], tokens, initial + supplied),
+                                pays ? "a team short of its lanes grows by the tokens that come back, up to its lanes and the cap" :
+                                       "a team whose parts left don't pay for a guardian doesn't grow",
+                                detail);
+        check_lanes_test_expect(tally, found && reported[5] >= 1 && reported[5] <= active, "no lane of a growing team takes a part before it is admitted",
+                                detail);
+        check_lanes_test_expect(tally, ready && worker_budget_test_tokens(fds[0], tokens, growth->initial + supplied),
                                 "a growing team returns every token it took once, its growths' too", detail);
         if (fds[0] >= 0)
         {
@@ -2234,11 +2365,17 @@ static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const ch
     char object[PATH_MAX];
     char errors[PATH_MAX];
     snprintf(program, sizeof(program), "%s/program_%u.c", directory, programs);
-    snprintf(reference, sizeof(reference), "%s/growth_reference.o", directory);
+    snprintf(reference, sizeof(reference), "%s/growth_reference_0.o", directory);
     snprintf(object, sizeof(object), "%s/session_growth.o", directory);
     snprintf(errors, sizeof(errors), "%s/session_growth.errors", directory);
     int fds[2] = { -1, -1 };
-    const bool opened = check_driver_cpus() >= 4 && pipe(fds) == 0;
+    // The caller's MAKEFLAGS and test hook, as a make that runs the test sets them, restored after.
+    const char* caller_makeflags = getenv("MAKEFLAGS");
+    const char* caller_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
+    char* saved_makeflags = caller_makeflags != NULL ? strdup(caller_makeflags) : NULL;
+    char* saved_supply = caller_supply != NULL ? strdup(caller_supply) : NULL;
+    const bool saved = (caller_makeflags == NULL || saved_makeflags != NULL) && (caller_supply == NULL || saved_supply != NULL);
+    const bool opened = saved && check_driver_cpus() >= 4 && pipe(fds) == 0;
     char makeflags[64];
     snprintf(makeflags, sizeof(makeflags), "-j --jobserver-auth=%d,%d", fds[0], fds[1]);
     const bool set = opened && setenv("MAKEFLAGS", makeflags, 1) == 0 && setenv("BUSTER_TEST_WORKER_SUPPLY", "3", 1) == 0;
@@ -2250,23 +2387,26 @@ static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const ch
         growth.arguments[i] = i == 5 ? object : i == 6 ? program : arguments[i];
     }
     fflush(stderr);
-    const int saved = dup(STDERR_FILENO);
+    const int saved_errors = dup(STDERR_FILENO);
     const int report = open(errors, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    const bool redirected = set && saved >= 0 && report >= 0 && dup2(report, STDERR_FILENO) == STDERR_FILENO;
+    const bool redirected = set && saved_errors >= 0 && report >= 0 && dup2(report, STDERR_FILENO) == STDERR_FILENO;
     static LaneSession lanes;
     const uint32_t ran = redirected ? lane_session_run(&lanes, 4, NULL, check_lanes_test_growth_flow, &growth, 0) : 0;
     fflush(stderr);
-    if (saved >= 0)
+    if (saved_errors >= 0)
     {
-        dup2(saved, STDERR_FILENO);
-        close(saved);
+        dup2(saved_errors, STDERR_FILENO);
+        close(saved_errors);
     }
     if (report >= 0)
     {
         close(report);
     }
-    unsetenv("MAKEFLAGS");
-    unsetenv("BUSTER_TEST_WORKER_SUPPLY");
+    const bool restored = saved && (saved_makeflags != NULL ? setenv("MAKEFLAGS", saved_makeflags, 1) == 0 : unsetenv("MAKEFLAGS") == 0) &&
+                          (saved_supply != NULL ? setenv("BUSTER_TEST_WORKER_SUPPLY", saved_supply, 1) == 0 : unsetenv("BUSTER_TEST_WORKER_SUPPLY") == 0);
+    check_lanes_test_expect(tally, restored, "the growing team's command restores the caller's MAKEFLAGS and test hook", NULL);
+    free(saved_makeflags);
+    free(saved_supply);
     if (opened)
     {
         uint32_t reported[6] = { 0 };
@@ -2363,6 +2503,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_rule(&tally, directory);
             check_lanes_test_driver(&tally, executable, directory, programs, id_order);
             check_lanes_test_driver_failing(&tally, executable, directory, id_order);
+            check_lanes_test_grow_gate(&tally);
             check_lanes_test_driver_growth(&tally, executable, directory, programs);
             check_lanes_test_session_threads(&tally, executable, directory);
             check_lanes_test_session_commands(&tally, executable, directory);

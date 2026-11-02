@@ -76,10 +76,17 @@ large files reach their emissions together, the first takes the six spare
 tokens and the second none, and without growth the second ran its bodies on one
 lane after the first team had given its tokens back. Such a team, in the C
 driver's flow and under a jobserver, cuts its bodies' parts for every lane it may
-take (the lane rule's, the explicit cap's and the session's), costliest first in
-one order. Lane 0 takes them alone, or in a round of all those lanes once it has
-admitted another, where each lane past the admitted ones sleeps on the
-admission's word until lane 0 admits it. Between its parts, at most every
+take (the lane rule's, the explicit cap's and the session's), 16 per lane rather
+than a round's 64, and takes them in one order: the costliest first, then the
+others in source order. Lane 0 takes most of the parts of a team that grows late
+or never, and each part, and cost order, costs it some of one lane's locality:
+on the 9700X, `sqlite3.c`'s `-c` under a jobserver without a spare token took
+1.36% more wall time than main's one-lane emission in cost order with 64 parts
+per lane, 0.83% in this order with 64, 0.70% with 32 and 0.20% with 16
+(`time-runs`, medians of 22 runs over two copies of each executable). Lane 0 takes
+them alone, or in a round of all those lanes once it has admitted another, where
+each lane past the admitted ones sleeps on the admission's word until lane 0
+admits it. Between its parts, at most every
 100 µs, lane 0 reads the jobserver's spare tokens (`FIONREAD`,
 `worker_budget_available`). It takes them under a lease of its own
 (`worker_budget_grow`, a guardian like the first's), up to the lanes it may
@@ -92,15 +99,22 @@ admission, so that the lanes still asleep leave, and the round ends as every
 round does. Every lease is returned after the round, before a serial retry or
 the merge. The output is one lane's, whatever lanes took the parts.
 
-A team that never grows takes its parts on lane 0 alone, without waking a lane,
-at the cost of the clock read per part and a `FIONREAD` per 100 µs.
+A team that starts on one lane and never grows takes its parts on lane 0 alone,
+without waking a lane, at the cost of the clock read per part and a `FIONREAD`
+per 100 µs, and of its parts' order and count. A team the jobserver granted
+some of its lanes starts its round at once on all of them: the lanes past the
+grant wake for the round, sleep until lane 0 admits them, and wake again as it
+closes, which the round's end waits for.
 Ownership stays the jobserver's: a team takes only spare tokens, never waits
 for one, and no machine-wide idle sampling decides anything.
 
 With `--time-stages`, `worker-budget` reports the external mode, explicit cap,
 requested and granted workers, the team at its end, the lanes it grew by, the
-lanes that took a part (never more than the team) and the serial-fallback
-reason.
+lanes that took a part of the bodies (one when the calling thread ran them
+alone, a serial retry's among them; never more than the team) and the
+serial-fallback reason. The team, its growth and its lanes are a single unit's
+emission's: with several source files, the team is their units' lanes, and
+the other two are 0.
 This also identifies pipe-style recipes whose descriptors were unavailable;
 ordinary source diagnostics retain their previous bytes and ordering.
 

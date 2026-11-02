@@ -266,7 +266,9 @@ struct CheckEmitBoard
 
 // A team that grows while it runs (#673's tail): in a command's flow, an emission whose GNU make jobserver gave it fewer
 // lanes than its bodies pay for, as when another recipe held the spare tokens as it started. Its parts are cut for every
-// lane it may take and taken costliest first in one order, a place in it a take of `ticket`: by lane 0 alone, then in a
+// lane it may take (BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE each) and taken in one order, the costliest first and the
+// others in source order, a place in it a take of
+// `ticket`: by lane 0 alone, then in a
 // round of all those lanes once it has admitted another (check_program_emit_growing), in which each lane past the
 // admitted ones sleeps until lane 0 admits it (check_program_emit_admitted). Between its parts, lane 0 reads whether the
 // jobserver has spare tokens, at most every BUSTER_CHECK_EMIT_GROW_NANOSECONDS, and takes them under a lease of its own,
@@ -289,6 +291,11 @@ struct CheckEmitGrowth
 // (worker_budget_grow: 161 to 164 µs on the 9700X, #937), at about 10 ns a token (sqlite3.c's on one lane).
 #define BUSTER_CHECK_EMIT_GROW_TOKENS 16384u
 #define BUSTER_CHECK_EMIT_GROW_LEASES 8u
+// A growing team's parts per lane it may take, a quarter of a round's (BUSTER_LANE_PARTS_PER_LANE): each part costs lane
+// 0, which takes most of a team's parts that grows late or never, some of one lane's locality. On the 9700X, sqlite3.c's
+// -c under a jobserver without a spare token took 0.83% more wall time than one lane's emission with 64 parts per lane,
+// 0.70% with 32 and 0.20% with 16 (medians of 22 runs).
+#define BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE 16u
 // The first of a test's supplied tokens (CheckProgramLanes.grow_supply).
 #define BUSTER_CHECK_EMIT_SUPPLY_BYTE 0xa0u
 
@@ -485,8 +492,9 @@ struct CheckProgramLanes
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
     // What the last emission ran: its lanes (a growing team's at its end) and parts, the lanes a growing team admitted
-    // after it started, the lanes that took a part on lanes (0 for none), the lane that took the squeezed part (its index
-    // plus one, 0 for none), and whether it ran them again on one lane and why; with `timing`, how long its steps took:
+    // after it started, the lanes that took a part of the bodies that made its output (1 for the calling thread alone, a
+    // serial retry's among them; on the units' board, the helping lanes too; 0 without bodies), the lane that took the
+    // squeezed part (its index plus one, 0 for none), and whether it ran them again on one lane and why; with `timing`, how long its steps took:
     // from its start to the lanes' (the lowering's preparation and the access column), the lanes' run (with their
     // threads' start), and from the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
     uint32_t active;
@@ -1083,8 +1091,7 @@ static bool check_program_emit_round(LaneFlow* flow, CheckEmitRun* run, uint32_t
 // How many more lanes a growing team (CheckEmitGrowth) of `admitted` lanes, of up to `lanes`, admits now, under the
 // lease `lease`: as many as the jobserver has spare tokens, up to the lanes it may take and the parts left, if the parts
 // left pay for the guardian's start: their tokens on `admitted` lanes less on that many more (rest × more / (admitted ×
-// (admitted + more))) at least BUSTER_CHECK_EMIT_GROW_TOKENS, or whatever they pay with --lanes N (every_lane). A
-// guardian that took no token holds its lease until the team returns it.
+// (admitted + more))) at least BUSTER_CHECK_EMIT_GROW_TOKENS, or whatever they pay with --lanes N (every_lane).
 static uint32_t check_program_emit_grow(const CheckEmitRun* run, const CheckEmitGrowth* growth, uint32_t admitted, uint32_t lanes, WorkerBudget* budget,
                                         WorkerBudgetLease* lease)
 {
@@ -1097,7 +1104,14 @@ static uint32_t check_program_emit_grow(const CheckEmitRun* run, const CheckEmit
     const uint64_t rest = left != 0 ? growth->rest[ticket] : 0;
     const bool pays = run->lanes->every_lane || rest * more >= (uint64_t)BUSTER_CHECK_EMIT_GROW_TOKENS * admitted * (admitted + more);
     *lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
-    return more != 0 && pays ? worker_budget_grow(budget, (uint32_t)more, lease) : 0;
+    const uint32_t granted = more != 0 && pays ? worker_budget_grow(budget, (uint32_t)more, lease) : 0;
+    // A guardian that took none (another recipe took the tokens since FIONREAD) goes at once, rather than hold a lease
+    // of the team's. One that took fewer stays: its start is paid, and each token it holds is a lane's.
+    if (granted == 0)
+    {
+        worker_budget_release(lease);
+    }
+    return granted;
 }
 
 // A test's `count` tokens for the jobserver's writer `fd` (CheckProgramLanes.grow_supply), as another recipe returning
@@ -1129,9 +1143,22 @@ static __attribute__((noinline)) void check_program_emit_supply(int fd, uint32_t
 static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, CheckEmitGrowth* growth, uint32_t lanes, uint32_t admitted, WorkerBudget* budget,
                                            WorkerBudgetLease* leases, uint32_t* lease_count)
 {
-    const uint64_t parts = parts_by_cost(run->costs, run->body_count, lanes, run->boundaries, run->orders[0]);
+    const uint64_t parts = parts_cut_by_cost(run->costs, run->body_count, (uint64_t)BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE * lanes, run->boundaries, run->orders[0]);
+    // The costliest part first, as in every lane's order, then the others in source order: lane 0 alone takes most of
+    // them, and in source order its lowering and code keep more of one lane's locality than in cost order.
+    uint32_t* order = run->orders[0];
+    const uint32_t costliest = order[0];
+    uint64_t next = 1;
+    for (uint32_t part = 0; part < parts; part += 1)
+    {
+        if (part != costliest)
+        {
+            order[next] = part;
+            next += 1;
+        }
+    }
     growth->parts = parts;
-    growth->order = run->orders[0];
+    growth->order = order;
     // The tokens of the parts from each place in the order on, its last place's first.
     uint64_t rest = 0;
     growth->rest[parts] = 0;
@@ -2108,7 +2135,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         room = active > room ? active : room;
     }
     const bool growing = room > active;
-    const uint64_t part_room = room > 1 ? (uint64_t)BUSTER_LANE_PARTS_PER_LANE * room : 1;
+    const uint64_t per_lane = growing ? BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE : BUSTER_LANE_PARTS_PER_LANE;
+    const uint64_t part_room = room > 1 ? per_lane * room : 1;
     // On the board, a state for the sharing lane and one for each lane that may take its parts, its place plus one.
     const uint32_t states = board != NULL && active > 1 ? (board->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? board->lanes + 1 : BUSTER_CHECK_EMIT_MAX_LANES) : room;
     run.parts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitPart, part_room) : 0;
@@ -2209,6 +2237,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // lanes' run is one stage, and they read none (CheckLowerShared.timed, false since check_lower_prepare).
             shared.timed = stage_clock != NULL;
             check_program_emit_alone(&run);
+            worked = 1;
         }
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
