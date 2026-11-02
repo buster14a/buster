@@ -121,6 +121,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: vectorelements of an integer", .source = "unsigned long f(int n)\n{\nreturn __builtin_vectorelements(n);\n}\n", .rejected = true },
         { .name = "generic: vectorelements of an integer type", .source = "unsigned long f(void)\n{\nreturn __builtin_vectorelements(int);\n}\n", .rejected = true },
         { .name = "generic: LINE of an argument", .source = "unsigned f(void)\n{\nreturn __builtin_LINE(1);\n}\n", .rejected = true },
+        { .name = "generic: complex of an int", .source = "_Complex double f(void)\n{\nreturn __builtin_complex(1, 2.0);\n}\n", .rejected = true },
+        { .name = "generic: complex of an int second", .source = "_Complex double f(double x)\n{\nreturn __builtin_complex(x, 2);\n}\n", .rejected = true },
+        { .name = "generic: complex of two types", .source = "_Complex double f(void)\n{\nreturn __builtin_complex(1.0f, 2.0);\n}\n", .rejected = true },
+        { .name = "generic: complex of a complex", .source =
+          "_Complex double f(_Complex double z)\n{\nreturn __builtin_complex(z, z);\n}\n", .rejected = true },
+        { .name = "generic: complex of an atomic", .source =
+          "_Atomic double a;\n_Complex double f(void)\n{\nreturn __builtin_complex(a, 1.0);\n}\n", .rejected = true },
+        { .name = "generic: complex of one", .source = "_Complex double f(void)\n{\nreturn __builtin_complex(1.0);\n}\n", .rejected = true },
+        { .name = "generic: complex's address", .source = "void* p = &__builtin_complex(1.0, 2.0);\n", .rejected = true },
+        { .name = "generic: complex of variables in static data", .source =
+          "double x;\n_Complex double z = __builtin_complex(x, 2.0);\n", .rejected = true },
+        { .name = "generic: complex of a const object in static data", .source =
+          "static const double c = 1.0;\n_Complex double z = __builtin_complex(c, 2.0);\n" },
+        { .name = "generic: complex in a static assertion", .source = "_Static_assert(__builtin_complex(1.0, 2.0) == 1.0 + 2.0i, \"\");\n" },
+        { .name = "generic: complex of qualified and aligned operands", .source =
+          "typedef double D __attribute__((aligned(16)));\nvolatile D v;\nconst double c;\n_Complex double f(void)\n{\nreturn __builtin_complex(v, c);\n}\n" },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
     char directory[] = "/tmp/buster-checker-generic-XXXXXX";
@@ -245,6 +261,31 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix(__builtin_omp_required_simd_align(double));mix(sizeof(__builtin_FILE()));mix(_Generic(__builtin_LINE(),unsigned:1,default:2));\n"
         "mix(_Generic(__builtin_FILE(),char*:3,default:4));mix(_Generic(__builtin_vectorelements(v),unsigned long:5,default:6));return (int)(h^(h>>32));}\n",
         "generic-source-places-and-type-queries", clang);
+    // __builtin_complex (#148): its folds in static data (signed zeros, an infinity, a NaN, a const object's value, long
+    // double's and _Float16's) and in an enumerator, and its values at run time, of each real floating type, from
+    // qualified, aligned and volatile operands, evaluated once each, in order, and taken apart, multiplied and summed.
+    check_test_program_source(test,
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+        "static void mixd(double d){unsigned long long b;__builtin_memcpy(&b,&d,8);mix(b);}static const double c=1.5;"
+        "static _Complex double zd=__builtin_complex(1.0,-0.0);static _Complex float zf=__builtin_complex(__builtin_inff(),2.5f);"
+        "static _Complex long double zl=__builtin_complex(3.0L,4.0L);static _Complex double zc=__builtin_complex(c,2.0);"
+        "static _Complex _Float16 zh=__builtin_complex((_Float16)1.5,(_Float16)-2);"
+        "static _Complex double zn=__builtin_complex(__builtin_nan(\"\"),-__builtin_inf());enum{E=(int)__imag__ __builtin_complex(3.0,7.0)};"
+        "static int order;static double at(double v,int t){order=order*10+t;return v;}typedef double D __attribute__((aligned(16)));"
+        "int tested(int n){h=(unsigned)n;mixd(__real__ zd);mixd(__imag__ zd);mixd(__real__ zf);mixd(__imag__ zf);"
+        "mixd((double)__real__ zl);mixd((double)__imag__ zl);mixd(__real__ zc);mixd(__imag__ zc);mixd((double)__real__ zh);mixd((double)__imag__ zh);"
+        "mix(__real__ zn!=__real__ zn);mixd(__imag__ zn);mix(E);double x=n*0.5,y=-n;_Complex double a=__builtin_complex(x,y);mixd(__real__ a);mixd(__imag__ a);"
+        "_Complex double b=__builtin_complex(at(x,1),at(y,2))*__builtin_complex(y,x);mixd(__real__ b);mixd(__imag__ b);mix((unsigned)order);"
+        "float fx=(float)n;volatile float vf=2.0f;_Complex float f=__builtin_complex(fx,vf);mixd(__real__ f);mixd(__imag__ f);"
+        "long double lx=n*3.0L;_Complex long double l=__builtin_complex(lx,-lx);mixd((double)__real__ l);mixd((double)__imag__ l);"
+        "D dd=n+0.25;const double cd=-n;_Complex double g=__builtin_complex(dd,cd);mixd(__real__ g);mixd(__imag__ g);"
+        "_Float16 hx=(_Float16)n;_Complex _Float16 hh=__builtin_complex(hx,(_Float16)0.5);mixd((double)__real__ hh);mixd((double)__imag__ hh);"
+        "__bf16 bx=(__bf16)n;mixd((double)(float)__real__ __builtin_complex(bx,bx));mixd((double)(float)__imag__ __builtin_complex(bx,(__bf16)3));"
+        "__float128 qx=n;_Complex __float128 qq=__builtin_complex(qx,qx*2);mixd((double)__real__ qq);mixd((double)__imag__ qq);"
+        "mix(sizeof(__builtin_complex(1.0f,2.0f)));mix(_Generic(__builtin_complex(1.0,2.0),_Complex double:1,default:2));"
+        "_Complex double s[2]={__builtin_complex(x,1.0),__builtin_complex(2.0,y)};mixd(__real__ s[1]);mixd(__imag__ s[0]);"
+        "mixd(__imag__ (__builtin_complex(x,y)+1.0));return (int)(h^(h>>32));}",
+        "generic-complex", clang);
 }
 
 static __attribute__((noinline)) void check_test_generic_builtins(CheckTest* test, const char* clang)

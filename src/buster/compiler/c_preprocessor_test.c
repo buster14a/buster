@@ -7573,6 +7573,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ANNOTATION, "__builtin_annotation", false, true, false },
         { CBUILTIN_ADDRESSOF, "__builtin_addressof", false, true, true },
         { CBUILTIN_FUNCTION_START, "__builtin_function_start", false, true, true },
+        { CBUILTIN_COMPLEX, "__builtin_complex", false, true, true },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

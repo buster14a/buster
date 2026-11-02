@@ -1141,6 +1141,27 @@ to 0x3fb (`check_builtin_misc_more`):
 - `function_start(f)` is f's address, a `void*`, of a function designator that
   names a function, an address constant.
 
+`__builtin_complex(re, im)`, catalog code 0x3fc (`check_builtin_misc_complex`),
+is the complex number re + im·i, of type `_Complex T`, where re and im are of
+one real floating type T once lvalue-converted (`float` to `long double`, and
+`_Float16`, `__bf16` and `__float128`, as clang 23 takes them), and neither is
+converted otherwise. As clang's Sema, it checks each argument's type before its
+conversion first, so that an `_Atomic double` is refused, and an integer or a
+complex value, then the two types against each other; the checker's errors are
+its own generic ones at the call's `)`, where clang's are "argument type ... is
+not a real floating point type" at the argument and "arguments are of different
+types" at re (pending, as for the other miscellaneous builtins). It folds where both are
+floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
+static data and an enumerator's `__imag__` an integer constant: the folds keep
+signed zeros, infinities and NaNs, a `static const` object's value, and long
+double's and `_Float16`'s parts. `__float128`'s constants aren't folded
+(`check_action_float_supported`), so a `_Complex __float128` of constants is
+computed at run time and refused in static data, where clang takes it. At run
+time the lowering evaluates both arguments in order into temporaries and stores
+them into a frame object of the two parts, whose address is its value, as every
+complex value's is (`check_lower_complex_builtin`: a `__float128` part's 16
+bytes copied 8 at a time).
+
 `__builtin_stdarg_start` is the old name of `__builtin_va_start`, which clang's
 Sema checks as that: the catalogue resolves it to `va_start`'s entry
 (`cbuiltin_alias_entry`). In C23 it takes its second argument still, where
@@ -1210,9 +1231,11 @@ table of register sizes, each rounding mode in the control word and MXCSR and a
 division rounded by it, the extended pointer, the values `unwind_init` leaves,
 `verbose_trap`'s SIGILL in a child process, and the alloca variants' bytes and
 alignments in a loop whose allocations stay apart, the checks' values, the
-annotation's integer evaluated once, and `addressof`'s and `function_start`'s
-addresses of a local, a member, an array, a function and in static data
-(`c_check_program_generic_builtins_test.c`). `test-checker-driver` compares
+annotation's integer evaluated once, `addressof`'s and `function_start`'s
+addresses of a local, a member, an array, a function and in static data, and
+`complex`'s folds in static data and an enumerator and its values at run time of
+every real floating type, from qualified, aligned and volatile operands, each
+evaluated once in order (`c_check_program_generic_builtins_test.c`). `test-checker-driver` compares
 `verbose_trap`'s errors, their places and messages, with clang's by both paths
 (`c_check_generic_builtin_driver_test.c`).
 
@@ -1666,10 +1689,10 @@ for a C library function X, and its rows with attribute `f`, X itself where
 clang makes the name a builtin of the unit. `c_builtin_library.c` holds both
 lists, `c_check_builtin_library.c` their folds.
 
-**Calls.** `c_builtin_library_calls.inc` lists the 387 `F` rows that compile as
+**Calls.** `c_builtin_library_calls.inc` lists the 393 `F` rows that compile as
 calls of their functions: the math library's (`sin` to `tgammaf128`, the complex
 functions, `powi`'s aside, and the `__fp16` forms below), the string and memory functions, the formatted
-input and output that takes no `FILE` (`printf`, `snprintf`, `vsscanf`), the
+input and output (`printf`, `snprintf`, `vsscanf`, and the `FILE` builtins below), the
 allocation functions, `abort`, the wide-character functions and
 `__get_unsafe_stack_*`. The checker gives each call its row's ordinary
 prototype (`c_builtin_intrinsic_types.c` decodes it) and checks it as a call
@@ -1753,9 +1776,9 @@ folding, for which its `-pedantic` warns; this doesn't). Pointer results
 (`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
-**Plain names.** `c_builtin_library_plain.inc` lists the 354 `f` rows of C's
-modes but those whose prototypes need the unit's `FILE`, `jmp_buf` or
-`ucontext_t`, or that have none to check (`setjmp` and its kin, `vfork`,
+**Plain names.** `c_builtin_library_plain.inc` lists the 361 `f` rows of C's
+modes but those whose prototypes need the unit's `jmp_buf` or `ucontext_t`, or
+that have none to check (`setjmp` and its kin, `vfork`,
 `umask`, `pthread_create`), and `<stdarg.h>`'s `va_start`, `va_end` and
 `va_copy`. Each is a builtin of the unit unless `-fno-builtin`,
 `-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
@@ -1787,8 +1810,25 @@ not calls. The alloca variants are the catalogue's miscellaneous builtins
 table's other `F` rows stay refused, and `__has_builtin` answers 0 for them.
 The signaling NaNs and the `_Float128` and
 `_Float16` NaNs, which clang folds, are the floating builtins' constants
-("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the matrix builtins, and the `FILE`
-builtins (`fprintf` and its kin).
+("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the matrix builtins.
+
+**The `FILE` builtins.** `__builtin_fprintf`, `__builtin_fscanf`,
+`__builtin_vfprintf`, `__builtin_vfscanf` and the fortified
+`__builtin___fprintf_chk` and `__builtin___vfprintf_chk` are calls of their
+functions too, whose prototypes take the unit's `FILE` (clang's prototype code
+`P`): the type of the last typedef named `FILE` at file scope before the call,
+as clang's `ASTContext` keeps it (`setFILEDecl`), whatever its type
+(`check_input_file_type`, `BuiltinIntrinsicTypeInput.file_type`). A local
+object named `FILE` doesn't hide it, and a block-scope typedef of the name is
+none; a unit without one refuses the call, as clang does ("use of unknown
+builtin"). A deferred body's lane leaves a call of one to source order, as its
+bindings hold only the names the body spells. Their plain names (`fopen`,
+`fprintf`, `fread`, `fscanf`, `fwrite`, `vfprintf` and `vfscanf`) are plain
+library builtins too, of the implicit declarations' rules: undeclared, a call
+declares the function with its row's prototype where the unit has a `FILE`
+(C99's error, C89's warning), and warns that it needs `<stdio.h>` where it
+hasn't, as clang does. `test-checker-driver` compares the errors of calls
+without a `FILE` with clang's (`c_check_generic_builtin_driver_test.c`).
 
 `test-checker` (`c_check_program_library_test.c`, alone with
 `--program-library`) checks the lists against clang's table and accounts for

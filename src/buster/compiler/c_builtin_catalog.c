@@ -60,7 +60,7 @@
 // isnormal to isfpclass, signbitf and signbitl, canonicalize and its __fp16 form) 0x3d0 to 0x3da, and the alignment builtins and
 // __builtin_expect_with_probability 0x3e0 to 0x3e3, the signaling NaNs and the _Float16 and __float128 constants 0x3e4 to
 // 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa, launder, the alloca variants, allow_runtime_check,
-// allow_sanitize_check, annotation, addressof and function_start (c_check_builtin_misc.c's) 0x3f0 to 0x3fb. Those
+// allow_sanitize_check, annotation, addressof, function_start and complex (c_check_builtin_misc.c's) 0x3f0 to 0x3fc. Those
 // last families are the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
 // least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
@@ -437,7 +437,8 @@
     X(ALLOW_SANITIZE_CHECK, 0x3f8u, "__builtin_allow_sanitize_check", BUSTER_CBUILTIN_SOURCE) \
     X(ANNOTATION, 0x3f9u, "__builtin_annotation", BUSTER_CBUILTIN_SOURCE) \
     X(ADDRESSOF, 0x3fau, "__builtin_addressof", BUSTER_CBUILTIN_CONSTANT) \
-    X(FUNCTION_START, 0x3fbu, "__builtin_function_start", BUSTER_CBUILTIN_CONSTANT)
+    X(FUNCTION_START, 0x3fbu, "__builtin_function_start", BUSTER_CBUILTIN_CONSTANT) \
+    X(COMPLEX, 0x3fcu, "__builtin_complex", BUSTER_CBUILTIN_CONSTANT)
 
 typedef enum CBuiltinId
 {

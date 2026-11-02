@@ -3,7 +3,8 @@
 //
 // #148's generic builtins' own errors by the driver against clang, on original fixtures: __builtin_verbose_trap's
 // arguments, each a constant string without a `$` (check_input_verbose_trap_arguments), a literal's under parentheses
-// and casts, __func__'s, a variable's, a null pointer's and an integer's. The errors are compared, their places and
+// and casts, __func__'s, a variable's, a null pointer's and an integer's; and a FILE builtin's call in a unit without a
+// file-scope FILE (check_input_file_type), clang's "use of unknown builtin". The errors are compared, their places and
 // messages, in order, with the exit status, by both paths of -fsyntax-only (each function's first error alone, as the
 // checker reports them). Warnings aren't compared. Include after c_check_label_attribute_driver_test.c.
 
@@ -24,6 +25,8 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
         { "verbose_trap of a null pointer", "void g(void) {\n__builtin_verbose_trap((const char*)0, \"m\");\n}\n" },
         { "verbose_trap of a call", "const char* f(void);\nvoid g(void) {\n__builtin_verbose_trap(\"c\", f());\n}\n" },
         { "verbose_trap in two functions", "void g(const char* p) {\n__builtin_verbose_trap(p, \"m\");\n}\nvoid h(void) {\n__builtin_verbose_trap(\"$\", \"m\");\n}\n" },
+        { "fprintf without FILE", "int g(void* p) {\nreturn 1 + __builtin_fprintf(p, \"x\");\n}\n" },
+        { "vfscanf with a FILE of block scope", "void h(void) {\ntypedef int FILE;\n}\nint g(void* p, __builtin_va_list a) {\nreturn __builtin_vfscanf(p, \"x\", a);\n}\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/generic-builtins.c", directory);

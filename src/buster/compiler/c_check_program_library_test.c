@@ -26,8 +26,8 @@ static void check_test_library_note(char* list, size_t capacity, uint32_t* count
 // each list in its names' order, within its bound, and each lookup finding exactly the listed names, at an unreadable
 // page too. Then every row of C's languages: an F row of all languages without features is one __has_builtin advertises
 // (the catalog's, the fortified builtins', the list's, powi's), or one whose prototype the checker doesn't decode
-// (__fp16's, custom checking's, FILE's);
-// and an f row is listed, or has no prototype to check (attribute T, or none), or needs FILE or va_list's reference.
+// (custom checking's);
+// and an f row is listed, or has no prototype to check (attribute T, or none), or needs va_list's reference.
 static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
 {
     bool ordered = true;
@@ -50,8 +50,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         const CBuiltinLibraryPlain* plain = cbuiltin_library_plains + p;
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(plain->name, plain->length);
         plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && memchr(info->attributes, 'T', info->attributes_length) == NULL &&
-                  !info->custom_typechecking && info->encoding_length != 0 && memchr(info->encoding, 'P', info->encoding_length) == NULL &&
-                  memchr(info->encoding, 'J', info->encoding_length) == NULL && memchr(info->encoding, 'K', info->encoding_length) == NULL &&
+                  !info->custom_typechecking && info->encoding_length != 0 && memchr(info->encoding, 'J', info->encoding_length) == NULL && memchr(info->encoding, 'K', info->encoding_length) == NULL &&
                   memchr(info->encoding, 'A', info->encoding_length) == NULL && info->features_length == 0 &&
                   strcmp(info->language_token, plain->gnu ? "ALL_GNU_LANGUAGES" : "ALL_LANGUAGES") == 0;
         plains &= plain->length == strlen(plain->name) && plain->length <= BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME &&
@@ -112,7 +111,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         if (c && memchr(info->attributes, 'f', info->attributes_length) != NULL && cbuiltin_library_plain(info->name, info->name_length) == NULL)
         {
             const bool unchecked = memchr(info->attributes, 'T', info->attributes_length) != NULL || info->encoding_length == 0;
-            const bool reference = memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'A', info->encoding_length) != NULL;
+            const bool reference = memchr(info->encoding, 'A', info->encoding_length) != NULL;
             unlisted += 1;
             if (!unchecked && !reference)
             {
@@ -270,6 +269,37 @@ static const CheckSourceFixture check_library_source_fixtures[] =
         .source = "static unsigned long strlen(const char* s){return 0;}static const unsigned long n = strlen(\"abcd\");\n",
         .rejected = true,
     },
+    {
+        .name = "FILE builtins: the unit's FILE at file scope",
+        .source = "typedef struct F FILE;\nint f(FILE* p, __builtin_va_list a){return __builtin_fprintf(p, \"%d\", 1) + __builtin_vfscanf(p, \"x\", a) + "
+                  "__builtin___fprintf_chk(p, 1, \"x\") + __builtin___vfprintf_chk(p, 1, \"x\", a);}\n",
+        .rejected = false,
+    },
+    {
+        .name = "FILE builtins: a local object named FILE leaves the file scope's",
+        .source = "typedef int FILE;\nint f(FILE* p){int FILE = 3;return __builtin_fprintf(p, \"%d\", FILE);}\n",
+        .rejected = false,
+    },
+    {
+        .name = "FILE builtins: no FILE",
+        .source = "int f(void* p){return __builtin_fprintf(p, \"x\");}\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: a FILE of block scope alone",
+        .source = "void g(void){typedef int FILE;}\nint f(void* p){return __builtin_fscanf(p, \"x\");}\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: FILE declared after the call",
+        .source = "int f(void* p){return __builtin_vfprintf(p, \"x\", 0);}\ntypedef struct F FILE;\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: a FILE of the wrong type",
+        .source = "typedef int FILE;\nint f(long* p){return __builtin_fprintf(p, \"x\");}\n",
+        .rejected = true,
+    },
 };
 
 static __attribute__((noinline)) void check_test_library_sources(CheckTest* test, const char* clang)
@@ -378,6 +408,18 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "float sum=__builtin_fmaxf16(x,y)+__builtin_fabsf16(z);h=hash(h,&sum,4);"
         "static const float folded=__builtin_fmaxf16(1.5f,2.5f)+__builtin_fminimum_numf16(-0.0f,0.0f);h=hash(h,&folded,4);return out(h)+e*3+(int)sizeof(__builtin_fabsf16(x));}",
         "library-math-half", clang);
+    // The FILE builtins (#148), whose prototypes take the unit's FILE: fprintf, the fortified __fprintf_chk and vfprintf and
+    // __vfprintf_chk through variadic helpers write a temporary file, which fscanf and vfscanf read back.
+    check_test_program_source(test,
+        "typedef struct _IO_FILE FILE;FILE* tmpfile(void);int fclose(FILE*);void rewind(FILE*);"
+        "static int vp(FILE* f,const char* m,...){__builtin_va_list a;__builtin_va_start(a,m);int r=__builtin_vfprintf(f,m,a);__builtin_va_end(a);return r;}"
+        "static int vs(FILE* f,const char* m,...){__builtin_va_list a;__builtin_va_start(a,m);int r=__builtin_vfscanf(f,m,a);__builtin_va_end(a);return r;}"
+        "static int vc(FILE* f,const char* m,...){__builtin_va_list a;__builtin_va_start(a,m);int r=__builtin___vfprintf_chk(f,1,m,a);__builtin_va_end(a);return r;}"
+        "int tested(int n){FILE* f=tmpfile();if(!f)return -1;int w=__builtin_fprintf(f,\"%d %s \",n,\"ab\");w+=vp(f,\"%x %c \",n*7,'q');"
+        "w+=__builtin___fprintf_chk(f,1,\"%ld \",(long)n*1000);w+=vc(f,\"%u\\n\",n+3u);rewind(f);int a=0;char s[8]={0};unsigned x=0;char q=0;long l=0;unsigned u=0;"
+        "int r=__builtin_fscanf(f,\"%d %7s\",&a,s);r+=vs(f,\"%x %c\",&x,&q);r+=__builtin_fscanf(f,\"%ld %u\",&l,&u);fclose(f);"
+        "return w*1000003+r*10007+a+s[0]+s[1]*3+(int)x*5+q*7+(int)l*11+(int)u*13;}",
+        "library-file", clang);
     check_test_program_source(test,
         BUSTER_CHECK_TEST_LIBRARY_FOLD
         "int tested(int n){_Complex double c;__real__ c=n*0.37+0.11;__imag__ c=1.5-n*0.25;_Complex float g;__real__ g=n*0.5f;__imag__ g=0.75f;"

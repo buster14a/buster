@@ -892,6 +892,48 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
     }
 }
 
+// __builtin_complex(re, im): the complex number re + im i, of type _Complex T, where re and im are of one real floating
+// type T (clang 23 takes _Float16, __bf16 and __float128 too) once lvalue-converted, and are never converted otherwise, as
+// clang's Sema checks them: each argument's type before its conversion first, so that an _Atomic one is refused (clang's
+// "argument type is not a real floating point type"), then the two converted types (its "arguments are of different
+// types"). It folds where both arguments are floating constants of a type whose complex constants the folds, the
+// lowering and the data keep (float, double, long double and the half formats; not __float128's), as clang's evaluator
+// folds it: what glibc's CMPLX of a static initializer reads.
+static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, const CheckValue* values)
+{
+    const TypeId real = type_unqualified(type_strip_aligned(table, values[0].type));
+    const TypeId imaginary = type_unqualified(type_strip_aligned(table, values[1].type));
+    if (check_action_kind(table, input->arguments[0].type) != BUSTER_TYPE_KIND_FLOATING)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+    }
+    else if (check_action_kind(table, input->arguments[1].type) != BUSTER_TYPE_KIND_FLOATING)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 1);
+    }
+    else if (real != imaginary)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+    }
+    else
+    {
+        const TypeId complex = type_complex(table, real);
+        const bool folds = values[0].constant_kind == CHECK_CONSTANT_FLOATING && values[1].constant_kind == CHECK_CONSTANT_FLOATING &&
+                           (check_action_float_supported(table, real) || check_action_half_format(real) != CHECK_HALF_NONE);
+        output->action.value.type = complex;
+        output->action.value.category = CHECK_RVALUE;
+        output->action.value.constant_kind = folds ? CHECK_CONSTANT_COMPLEX : CHECK_CONSTANT_NONE;
+        output->action.value.floating = folds ? values[0].floating : 0.0L;
+        output->action.value.imaginary = folds ? values[1].floating : 0.0L;
+        output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED |
+                                        BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_LITERAL_ZERO);
+        if (complex == 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
+        }
+    }
+}
+
 #include "c_check_builtin_bits.c"
 
 static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output)
@@ -929,7 +971,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_FUNCTION_START: minimum = maximum = 1; break;
         case CBUILTIN_ALLOCA_WITH_ALIGN:
         case CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED:
-        case CBUILTIN_ANNOTATION: minimum = maximum = 2; break;
+        case CBUILTIN_ANNOTATION:
+        case CBUILTIN_COMPLEX: minimum = maximum = 2; break;
         case CBUILTIN_DWARF_CFA: minimum = maximum = 0; break;
         default:
             if (cbuiltin_bits(input->id))
@@ -1010,6 +1053,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                 case CBUILTIN_ANNOTATION:
                 case CBUILTIN_ADDRESSOF:
                 case CBUILTIN_FUNCTION_START: check_builtin_misc_more(table, input, output, values); break;
+                case CBUILTIN_COMPLEX: check_builtin_misc_complex(table, input, output, values); break;
                 default:
                     if (cbuiltin_bits(input->id))
                     {

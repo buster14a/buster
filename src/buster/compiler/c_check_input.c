@@ -109,6 +109,9 @@ typedef enum CheckInputMessage
     // with a `$` (check_input_verbose_trap_arguments).
     CHECK_INPUT_VERBOSE_TRAP_STRING,
     CHECK_INPUT_VERBOSE_TRAP_DOLLAR,
+    // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
+    // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
+    CHECK_INPUT_UNKNOWN_BUILTIN,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -179,6 +182,7 @@ static const char* const check_input_messages[] =
     "fallthrough annotation is outside switch statement",
     "argument to __builtin_verbose_trap must be a pointer to a constant string",
     "argument to __builtin_verbose_trap must not contain $",
+    "use of unknown builtin",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and

@@ -70,6 +70,10 @@ struct BuiltinIntrinsicTypeInput
     // _Float16 where the prototype has __fp16, which no function type may, and the caller gives the call's arguments and
     // result __fp16 (result_type and parameters keep it).
     bool half_prototypes;
+    // The unit's FILE, which clang's prototype code P names (the FILE builtins: fprintf and its kin, #148): the type of
+    // the last file-scope typedef named FILE before the call, as clang's ASTContext keeps it (setFILEDecl), or 0 where
+    // the unit has none, which leaves P unsupported, as clang refuses the builtin ("use of unknown builtin").
+    TypeId file_type;
 };
 
 typedef struct BuiltinIntrinsicTypeResult BuiltinIntrinsicTypeResult;
@@ -286,6 +290,11 @@ static TypeId builtin_intrinsic_type_scalar(BuiltinIntrinsicTypeReader* reader, 
                 type = 0;
             }
         }
+    }
+    else if (code == 'P' && reader->input->file_type != 0)
+    {
+        modifiers = plain;
+        type = reader->input->file_type;
     }
     else if (code == 'F' || code == 'G' || code == 'H' || code == 'M' || code == 'P' || code == 'J' || code == 'K' || code == 'p')
     {

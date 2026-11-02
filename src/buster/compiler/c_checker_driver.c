@@ -116,6 +116,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_FALLTHROUGH_SWITCH: result = "fallthrough annotation is outside switch statement"; break;
         case CHECK_INPUT_VERBOSE_TRAP_STRING: result = "argument to __builtin_verbose_trap must be a pointer to a constant string"; break;
         case CHECK_INPUT_VERBOSE_TRAP_DOLLAR: result = "argument to __builtin_verbose_trap must not contain $"; break;
+        case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
     }
     return result;
 }
@@ -1056,11 +1057,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  scope != 0 ? (const char*)intern_bytes(pp->table, scope) : "", scope != 0 ? "::" : "", (int)intern_length(pp->table, name),
                                                  (const char*)intern_bytes(pp->table, name), ending);
                         }
-                        else if (kind == CHECK_INPUT_UNDECLARED && named)
+                        else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
-                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            // clang's unknown builtin is an error of -Wimplicit-function-declaration's group, which it names.
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of %s '%.*s'%s", kind == CHECK_INPUT_UNDECLARED ? "undeclared identifier" :
+                                                 "unknown builtin", (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
+                                                 kind == CHECK_INPUT_UNDECLARED ? "" : " [-Wimplicit-function-declaration]");
                         }
                         else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
                         {

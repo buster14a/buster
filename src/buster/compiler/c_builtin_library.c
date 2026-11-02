@@ -20,8 +20,8 @@
 // rintf, roundevenf, roundf, fmaxf, fminf, fmaximum_numf, fminimum_numf or frexpf of the arguments converted to float, or
 // of fma of them converted to double, the result converted back to __fp16, and fabsf16's and copysignf16's bits. Its other
 // F rows stay refused, and __has_builtin answers 0 for them: the matrix builtins and C++'s __builtin_trivially_relocate,
-// and the FILE builtins (fprintf and its kin, whose prototypes need the unit's FILE), whose prototypes don't decode
-// (c_builtin_intrinsic_types.c). The alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c),
+// whose prototypes don't decode (c_builtin_intrinsic_types.c). The FILE builtins (fprintf and its kin) are calls whose
+// prototypes take the unit's FILE (c_check_intrinsic_input.c's check_input_file_type). The alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c),
 // which take them first.
 //
 // The rows with attribute f are the C library's functions by their own names (sin, strlen, printf), which clang makes
@@ -30,7 +30,7 @@
 // library's function, which calls of it reach as of any function; undeclared, its call declares it implicitly with the
 // row's prototype, which C99 and later make an error and C89 a warning, each naming the prototype and the header
 // (c_check_input.c's implicit library functions). c_builtin_library_plain.inc lists the rows this compiler implements so:
-// all of clang's in C's modes but those that need the unit's FILE, jmp_buf or ucontext_t or have no prototype to check
+// all of clang's in C's modes but those that need the unit's jmp_buf or ucontext_t or have no prototype to check
 // (setjmp and its kin, vfork, umask, pthread_create), and stdarg.h's va_start, va_end and va_copy.
 // Names are bounded slices, which need no terminator or readable padding.
 #ifndef BUSTER_C_BUILTIN_LIBRARY_INCLUDED

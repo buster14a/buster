@@ -6763,6 +6763,57 @@ static void check_lower_varargs_emit(CheckLowerWriter* writer, CheckLowerTask ta
     check_lower_builtin_finish(writer, &buffer, result, check_lower_half_of(writer, task.type) != CHECK_HALF_NONE ? BUSTER_TYPE_USHORT : task.type);
 }
 
+// __builtin_complex(re, im) at run time (the checker folds it where both arguments are constants: c_check_builtin_misc.c),
+// of a complex type the lowering takes (check_lower_complex): its arguments, of its element type, evaluated in order into
+// temporaries, then a frame object of the two parts, the real one then the imaginary one, whose address is its value, as
+// every complex value's is. A part is stored as its element's class, or an aggregate part's (__float128's) bytes, whose
+// value is their address, copied 8 at a time.
+static void check_lower_complex_builtin(CheckLowerWriter* writer, uint32_t node)
+{
+    const TypeTable* types = writer->program->types;
+    const CheckStream* stream = writer->program->stream;
+    const uint32_t first = writer->program->input->graph.argument_offsets[node];
+    const TypeId type = check_stream_type(stream, node);
+    const TypeId element = check_lower_complex_element(types, type);
+    if (element == 0 || !check_lower_complex(writer, type))
+    {
+        check_lower_unsupported(writer, check_lower_type_feature(types, type));
+    }
+    else
+    {
+        const uint64_t size = type_size(types, element);
+        const bool aggregate = check_lower_aggregate(writer, element);
+        const uint8_t class = aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, element);
+        const uint32_t words = aggregate ? (uint32_t)(size / 8) : 1;
+        const uint32_t object = check_lower_object(writer, 2 * size, type_alignment_log2(types, type));
+        const uint32_t parts[2] = { check_lower_temporary(writer, class), check_lower_temporary(writer, class) };
+        // The tasks run in the reverse of their pushes: the arguments first, then each part's stores, then the address.
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        for (uint32_t part = 2; part-- > 0;)
+        {
+            for (uint32_t word = words; word-- > 0;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                if (aggregate)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (uint64_t)word * 8);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, parts[part]);
+                check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, part * size + (uint64_t)word * 8);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            }
+        }
+        for (uint32_t argument = 2; argument-- > 0;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, parts[argument]);
+            check_lower_operand(writer, node, 3 + argument, false, stream->argument_conversions[first + argument].type);
+        }
+    }
+}
+
 static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -6788,6 +6839,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         // Its operand's address, as the & operator's: a local's makes it addressed.
         check_lower_operand(writer, node, 3, true, check_stream_type(stream, node));
+    }
+    else if (runtime == CBUILTIN_COMPLEX)
+    {
+        check_lower_complex_builtin(writer, node);
     }
     else if (runtime == CBUILTIN_ANNOTATION)
     {
