@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 // The same nested integer/misc builtin expression crosses every source context. Clang supplies an independent
 // accept/reject and diagnostic-location oracle; check_test_source compares the two checker paths' typed streams.
+
+#include "buster/compiler/test_paths.h"
 #ifndef BUSTER_C_CHECK_CONTEXT_SOURCE_TEST_INCLUDED
 #define BUSTER_C_CHECK_CONTEXT_SOURCE_TEST_INCLUDED
 
@@ -23,8 +26,7 @@ static __attribute__((noinline)) void check_test_semantic_context_sources(CheckT
         "enum { U=sizeof(V) };\n",
         "int f(void) { return V; }\n",
     };
-    const char* temporary = getenv("TMPDIR");
-    temporary = temporary != NULL && *temporary != 0 ? temporary : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     char directory[256];
     const int directory_length = snprintf(directory, sizeof(directory), "%s/buster-semantic-context-XXXXXX", temporary);
     const bool created = directory_length > 0 && (size_t)directory_length < sizeof(directory) && mkdtemp(directory) != NULL;

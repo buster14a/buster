@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Whole foreign-input pipeline with optional terminal CIE pooling. Include after foreign_test.c. Original frozen
 // ET_REL files are generated once, outside timing. Each measured sample reserves its own link/name arenas, maps
@@ -17,6 +18,7 @@
 // reference ticks, not core cycles. Pin externally to CPU 2 under the approved host lock. This command does not
 // change the opt-in default, and timings become evidence only after repeated controlled approved-host runs.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_FOREIGN_UNWIND_DEDUP_BENCHMARK_MAX_UNITS 16384
 #define BUSTER_FOREIGN_UNWIND_DEDUP_BENCHMARK_CIE_BYTES 32
 #define BUSTER_FOREIGN_UNWIND_DEDUP_BENCHMARK_FDE_BYTES 24
@@ -664,7 +666,7 @@ static int run_foreign_unwind_dedup_benchmark(int argc, char** argv)
     bool interleaved = true;
     bool keep = false;
     bool valid = true;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     for (int i = 0; valid && i < argc; i += 1)
     {
         const bool value = i + 1 < argc;

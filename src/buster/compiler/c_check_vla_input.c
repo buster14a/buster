@@ -343,7 +343,7 @@ static void check_input_vla_parameters(CheckInputReader* reader, uint32_t body)
     // outside their range keeps a body read on a lane (#113) from reading what another lane's body writes.
     uint32_t first = BUSTER_CHECK_NONE;
     uint32_t last = 0;
-    for (uint32_t p = reader->parameters[body]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+    for (uint32_t p = check_sparse_get(reader->parameters, body); p != BUSTER_CHECK_NONE; p = check_sparse_get(reader->parameter_next, p))
     {
         first = p < first ? p : first;
         last = p > last ? p : last;
@@ -353,7 +353,7 @@ static void check_input_vla_parameters(CheckInputReader* reader, uint32_t body)
     {
         CheckInputVla* vla = &reader->output->vlas[i];
         const uint32_t declaration = vla->declaration;
-        if (declaration >= first && declaration <= last && reader->output->declaration_bodies[declaration] == body)
+        if (declaration >= first && declaration <= last && check_sparse_get(reader->output->declaration_bodies, declaration) == body)
         {
             vla->body = body;
             vla->scope_begin = body;
@@ -586,11 +586,11 @@ static void check_input_vla_finish(CheckInputReader* reader)
         uint32_t target = BUSTER_CHECK_NONE;
         if (parser->tokens.kinds[token] == PARSE_KIND_GOTO)
         {
-            target = reader->output->label_targets[token];
+            target = check_sparse_get(reader->output->label_targets, token);
         }
         else if (parser->tree.roles[token] == PARSE_ROLE_OPEN_CASE)
         {
-            const uint32_t owner = reader->output->control_owners[token];
+            const uint32_t owner = check_sparse_get(reader->output->control_owners, token);
             source = owner < parser->tokens.count ? reader->first_child[owner] : BUSTER_CHECK_NONE;
             target = token;
         }
@@ -622,7 +622,7 @@ static void check_input_vla_finish(CheckInputReader* reader)
             uint32_t last_label = 0;
             for (uint32_t token = opening + 1; token < closing; token += 1)
             {
-                const uint32_t label = check_input_label_address(parser, token) ? reader->output->label_targets[token] : BUSTER_CHECK_NONE;
+                const uint32_t label = check_input_label_address(parser, token) ? check_sparse_get(reader->output->label_targets, token) : BUSTER_CHECK_NONE;
                 if (label < parser->tokens.count && reader->scope_marks[label] != 0)
                 {
                     const uint32_t declaration = reader->scope_marks[label] - 1;

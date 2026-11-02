@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The type table's tests, for the test-types command:
 //
@@ -43,6 +44,7 @@
 // Layout, in this order: the tally, the random numbers and the table helpers; the fixtures; hash-consing; batches;
 // layout; conversions; compatibility; printing; #113's deferred bodies (c_types_deferred_test.c); run_type_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -3651,8 +3653,8 @@ static bool type_test_clang(uint64_t seed, uint32_t count, const char* clang, bo
 {
     TypeTestTally tally = { 0 };
     char directory[BUSTER_TYPE_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-types-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-types-XXXXXX", temporary);
     TypeTestWorld world = { 0 };
     world.arena = arena_reserve(BUSTER_TYPE_TEST_ARENA_BYTES);
     Arena text_arena = arena_reserve(BUSTER_TYPE_TEST_ARENA_BYTES);
@@ -3822,8 +3824,8 @@ static bool type_test_machine_modes(const char* clang, bool keep)
     Arena text_arena = arena_reserve(1ull << 20);
     Arena read_arena = arena_reserve(1ull << 20);
     char directory[BUSTER_TYPE_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-modes-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-modes-XXXXXX", temporary);
     const bool ready = type_test_table_open(&test, 256) && text_arena.base != 0 && read_arena.base != 0;
     if (type_test_expect(&tally, ready && mkdtemp(directory) != 0, "machine modes", "can't initialize the test"))
     {

@@ -56,7 +56,7 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
             uint32_t cutoff = parser.tokens.count;
             for (uint32_t token = 0; token < input.token_count && declaration == BUSTER_CHECK_NONE; token += 1)
             {
-                if (input.initializer_begins[token] != BUSTER_CHECK_NONE)
+                if (check_sparse_get(input.initializer_begins, token) != BUSTER_CHECK_NONE)
                 {
                     declaration = token;
                 }
@@ -75,15 +75,15 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
             const bool diagnosed = check_initializers_diagnose(&diagnostic, &input, &stream, &parser, &types.table,
                                                                 BUSTER_CHECK_NONE, &output, &scratch);
             const bool expected = error_offset != BUSTER_CHECK_NONE;
-            const uint32_t token = expected && declaration != BUSTER_CHECK_NONE ? input.initializer_begins[declaration] + error_offset : BUSTER_CHECK_NONE;
+            const uint32_t token = expected && declaration != BUSTER_CHECK_NONE ? check_sparse_get(input.initializer_begins, declaration) + error_offset : BUSTER_CHECK_NONE;
             char description[224];
             snprintf(description, sizeof(description), "initializer ordering %.35s: expected token %u, got %u/status %u on %s path", source,
                      token, diagnostic.token, diagnostic.status, path == 0 ? "scalar" : "vector");
             check_test_expect(test, diagnosed && diagnostic.token == token && diagnostic.status == (expected ? CHECK_INIT_INVALID : CHECK_INIT_OK) &&
                                    (!expected || diagnostic.token < cutoff), description);
             check_test_expect(test, (diagnostic.warning_count != 0) == (warning_count != 0) &&
-                                   (warning_count == 0 || (declaration != BUSTER_CHECK_NONE && diagnostic.warning_token >= input.initializer_begins[declaration] &&
-                                                 diagnostic.warning_token < input.initializer_ends[declaration])),
+                                   (warning_count == 0 || (declaration != BUSTER_CHECK_NONE && diagnostic.warning_token >= check_sparse_get(input.initializer_begins, declaration) &&
+                                                 diagnostic.warning_token < check_sparse_get(input.initializer_ends, declaration))),
                               "diagnostic initializer warnings remain distinct from the first hard error");
             bool untouched = output.length == 64 && scratch.length == 64 && input.report_count == input_reports && memcmp(&before, &stream, sizeof(before)) == 0;
             for (uint32_t i = 0; i < 64; i += 1)
@@ -121,7 +121,7 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
             if (expected && declaration != BUSTER_CHECK_NONE)
             {
                 CheckInitDiagnostic limited = { 0 };
-                const uint32_t begin = input.initializer_begins[declaration];
+                const uint32_t begin = check_sparse_get(input.initializer_begins, declaration);
                 check_test_expect(test, check_initializers_diagnose(&limited, &input, &stream, &parser, &types.table, begin, &output, &scratch) &&
                                        limited.status == CHECK_INIT_OK && limited.token == BUSTER_CHECK_NONE,
                                   "an explicit earlier phase cutoff excludes the entire initializer span");

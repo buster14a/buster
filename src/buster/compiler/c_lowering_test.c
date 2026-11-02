@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Tests of the selective-lowering declaration/edge contract, independent of source extraction. The reachability
 // oracle scans the original unsorted references with a plain work queue; it reads no production CSR or bitsets.
@@ -9,6 +10,7 @@
 // eligibility, attributes and actual emitted dependencies (including initializer and evaluated VLA references).
 // No external source, fixture corpus or generated table is incorporated. Include after c_lowering.c.
 
+#include "buster/compiler/test_paths.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1205,9 +1207,8 @@ static int run_c_lowering_tests(int argc, char** argv)
     bool ready = valid && arena.base != 0;
     if (ready && test.clang != 0)
     {
-        const char* temporary = getenv("TMPDIR");
-        temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
-        const int length = snprintf(test.directory, sizeof(test.directory), "%s/buster-lowering-XXXXXX", temporary);
+        const char* temporary = oracle_temporary_directory();
+            const int length = snprintf(test.directory, sizeof(test.directory), "%s/buster-lowering-XXXXXX", temporary);
         ready = length > 0 && (uint64_t)length < sizeof(test.directory) && mkdtemp(test.directory) != 0;
     }
     c_lowering_test_check(&test, ready, "test setup failed");

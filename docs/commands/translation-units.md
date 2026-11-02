@@ -22,8 +22,9 @@ the guide's "One cache for all the lanes, measured"). Each unit's diagnostics
 go to a stream of its own, printed in the command line's order after every
 unit has run. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
-release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED` and the
-mappings kept for the next reservations of their shapes); and the arenas of a
+release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED`, and
+the mappings and their writable prefixes kept for the next reservations they
+hold, #1128); and the arenas of a
 unit of less than 1 MB of source start with 16 MB of base pages
 (`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
 which every reservation took for writing, were what limited the lanes.

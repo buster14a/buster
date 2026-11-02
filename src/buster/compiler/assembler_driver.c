@@ -174,7 +174,14 @@ static void asm_diagnostic(const char* path, String8 source, AsmResult result, b
             column += 1;
         }
     }
-    fprintf(stderr, "%s:%u:%u: error: %s\n", path, line, column, result.error);
+    if (result.error_name.length != 0)
+    {
+        fprintf(stderr, "%s:%u:%u: error: %s: %.*s\n", path, line, column, result.error, (int)result.error_name.length, result.error_name.pointer);
+    }
+    else
+    {
+        fprintf(stderr, "%s:%u:%u: error: %s\n", path, line, column, result.error);
+    }
 }
 
 static int run_assembler_command(int count, char** arguments)
