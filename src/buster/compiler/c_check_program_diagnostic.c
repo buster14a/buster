@@ -323,8 +323,11 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
                 {
                     check_program_constraint(&program, owner);
                 }
-                else if (label && ends != 0 && ends[owner] < cutoff && ends[owner] < local)
+                else if (label && ends != 0 && ends[owner] < cutoff)
                 {
+                    // A case whose value holds no missing name is one of its switch's, wherever the switch's other
+                    // statements hold one, as clang checks a switch's cases at its end (#1077); the switch's end, where
+                    // its conflicts are published, must come before the unit's cutoff.
                     const uint32_t node = input->token_nodes[end];
                     const uint32_t high = input->case_ranges[end] != BUSTER_CHECK_NONE ? input->case_ranges[end] : node;
                     const bool fallback = parser->tokens.kinds[token] == PARSE_KIND_DEFAULT;
