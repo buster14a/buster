@@ -231,8 +231,13 @@ At the commit that adds this:
 ## Cost
 
 The driver's added work is per command, not per token: a few string
-comparisons per argument (the same ones its loop made before), one refusal
-check and a copy of three fields. The preparation's added work is outside
+comparisons per argument (the same ones its loop made before, the hardening,
+object and linkage families' among them), one refusal check, which reads the
+resolved instrumentation from the predefines and, only for a refused
+sanitizer or coverage request, spells the option into
+`CheckRequestRefusal.spelling` (its 1 KiB is zeroed with the refusal, once
+before and once after the options are parsed), and a copy of three fields
+into the program's options. The preparation's added work is outside
 every benchmark's timed region: `-c`'s target-feature check, which most units
 skip whole (no target attribute and no x86 builtin), and the receipt's hash of
 the predefined macros' text.
