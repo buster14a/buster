@@ -3248,13 +3248,18 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
 // differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values
 // and their auxiliary options; only the exact inactive/default requests below are admitted. This does not yet audit
 // every -f/-m option. Negative options outside these families retain their existing handling.
+// -fsanitize-coverage= itself is instrumentation, not one of them: the predefines resolve it with every
+// -fno-sanitize-coverage=, and the command refuses what remains on only when it emits code (#1112, as for sanitizers
+// and OpenMP). Its auxiliary -fsanitize-coverage-* options (the allow and ignore lists, the stack-depth threshold, and
+// cc1's spellings that clang's driver doesn't know) and the bare -fsanitize-coverage, which clang's driver doesn't
+// know either, are still refused here by name in every mode: the generic -f fallback would otherwise drop them unread.
 static bool check_driver_unsupported_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
         "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
         "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
-        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double", "-fsanitize-coverage",
     };
     static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
                                             "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
@@ -3262,7 +3267,7 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
                                             "-ftrivial-auto-var-init",
                                             "-ftrapv",
                                             "-fzero-call-used-regs",
-                                            "-fsanitize-coverage",
+                                            "-fsanitize-coverage-",
                                             "-fsplit-stack",
                                             "-mcmodel" };
     bool unsupported = false;
@@ -3281,7 +3286,6 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
     static const char* const inactive[] = {
         "-ftrivial-auto-var-init=uninitialized",
         "-fzero-call-used-regs=skip",
-        "-fsanitize-coverage=0",
         "-mcmodel=small",
     };
     for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)

@@ -2,7 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #1125: requests for unimplemented hardening must fail before any output is published. The independent CLI
-// fixtures name the six reported options rather than deriving expectations from the driver's refusal table.
+// fixtures name the reported options rather than deriving expectations from the driver's refusal table. Of the six
+// families #1125 reported, -fsanitize-coverage= is instrumentation that #1112 refuses only when code is emitted
+// (c_check_instrumentation_driver_test.c); its auxiliary -fsanitize-coverage-* options and the bare spelling stay here.
 
 static int check_test_driver_hardening_command(const char* executable, const char* source, const char* output, uint32_t action, bool scalar, bool tier1, const char* const* options, uint32_t option_count, char** text)
 {
@@ -52,7 +54,6 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
         "-ftrivial-auto-var-init=zero",
         "-ftrapv",
         "-fzero-call-used-regs=all",
-        "-fsanitize-coverage=trace-pc",
         "-fsplit-stack",
         "-mcmodel=large",
     };
@@ -68,10 +69,11 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
         "-fzero-call-used-regs=skip,all",
         "-fzero-call-used-regs=",
         "-fzero-call-used-regs",
-        "-fsanitize-coverage=trace-pc-guard,trace-cmp",
-        "-fsanitize-coverage=0,trace-pc",
-        "-fsanitize-coverage=",
         "-fsanitize-coverage",
+        "-fsanitize-coverage-allowlist=coverage.txt",
+        "-fsanitize-coverage-ignorelist=coverage.txt",
+        "-fsanitize-coverage-stack-depth-callback-min=1",
+        "-fsanitize-coverage-type=1",
         "-fsplit-stack=bogus",
         "-mcmodel=medium",
         "-mcmodel=kernel",
@@ -82,7 +84,6 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
     static const char* const inactive[] = {
         "-ftrivial-auto-var-init=uninitialized",
         "-fzero-call-used-regs=skip",
-        "-fsanitize-coverage=0",
         "-mcmodel=small",
         "-fno-split-stack",
         "-fno-strict-aliasing",

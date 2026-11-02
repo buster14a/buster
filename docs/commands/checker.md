@@ -68,16 +68,28 @@ requirements. [Command index](README.md).
 ## Unsupported hardening requests
 
 The semantic C driver refuses the option families `-ftrivial-auto-var-init`,
-`-ftrapv`, `-fzero-call-used-regs`, `-fsanitize-coverage`, `-fsplit-stack` and
-`-mcmodel` by name (#1125). It does not yet implement the requested automatic
-initialization, overflow traps, return-register clearing, coverage callbacks,
-split-stack prologues or alternative code models. Family-prefix matching also
-refuses bare flags, empty or unknown values and auxiliary hardening options;
-unknown values never silently select a weaker default.
+`-ftrapv`, `-fzero-call-used-regs`, `-fsplit-stack` and `-mcmodel` by name
+(#1125). It does not yet implement the requested automatic initialization,
+overflow traps, return-register clearing, split-stack prologues or alternative
+code models. Family-prefix matching also refuses bare flags, empty or unknown
+values and auxiliary hardening options; unknown values never silently select a
+weaker default.
+
+`-fsanitize-coverage=` is not one of these families: it is instrumentation,
+which the final option state decides as for sanitizers and OpenMP (#1112; see
+[the checker design](../c-checker.md)). A later `-fno-sanitize-coverage=` or
+`-fsanitize-coverage=0` cancels it, and only
+`-c` or a link refuses what remains on, naming the active spelling; syntax-only
+checks, dumps and `-E` keep its predefines. The auxiliary options that refine
+coverage (`-fsanitize-coverage-allowlist=`, `-fsanitize-coverage-ignorelist=`,
+`-fsanitize-coverage-stack-depth-callback-min=` and cc1's other
+`-fsanitize-coverage-*` spellings) and the bare `-fsanitize-coverage`, which
+Clang's driver doesn't know, remain refused here by name in every mode, so the
+generic `-f` fallback never drops them unread.
 
 Only the complete spellings `-ftrivial-auto-var-init=uninitialized`,
-`-fzero-call-used-regs=skip`, `-fsanitize-coverage=0` and `-mcmodel=small` are
-admitted as the existing inactive/default behavior. Negative flags retain their
+`-fzero-call-used-regs=skip` and `-mcmodel=small` are admitted as the existing
+inactive/default behavior. Negative flags retain their
 existing handling. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
 Clang's last-option-wins policy. Unlike `-fstack-protector*` and
@@ -93,8 +105,8 @@ of code-generation support. Option values such as `-include -ftrapv` remain
 filenames, not hardening requests.
 
 `c_check_hardening_driver_test.c`, included in `test-checker-driver --executable
-./build/compiler`, checks all six reported options, missing and existing output
-files, a missing source, option-looking include and output names, both tiers
+./build/compiler`, checks the five families' reported options, the coverage
+auxiliaries, missing and existing output files, a missing source, option-looking include and output names, both tiers
 and paths, non-emitting actions, malformed/auxiliary forms and exact inactive
 defaults. This closes these option families, not the driver's entire unknown
 `-f`/`-m` acceptance policy; the wider allowlist audit and #1112, #1123 and
