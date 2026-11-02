@@ -1638,10 +1638,12 @@ against clang at 64, 4,800 of 29,242 and 91,609; and against GCC at 64, 4,800
 of 28,388 and 89,309.
 
 Again on the 9700X (2026-11-02, the same compilers), once the producer passed
-vectors of 1 and 2 bytes and of `bool` by their bytes (#137) and the compiled
-worlds drew them (clang's of `bool` too), every run passes at seeds 1 to 12.
-The compiled runs make, against clang at 16 bytes, 4,800 signatures of 28,824
-arguments and 90,508 checks; against GCC at 16, 4,800 of 28,792 and 90,415;
+vectors of 1 and 2 bytes and of `bool` by their bytes (#137), and returned
+three doubles' and three longs' elements a register each at 16 bytes
+(`tier0_element_parts`), and the compiled worlds drew them all (clang's of
+`bool` too), every run passes at seeds 1 to 12. The compiled runs make,
+against clang at 16 bytes, 4,800 signatures of 28,900 arguments and 90,779
+checks; against GCC at 16, 4,800 of 28,792 and 90,415;
 against clang at 64, 4,800 of 28,820 and 90,623; and against GCC at 64, 4,800
 of 28,323 and 89,183. At seed 1 the compiled clang runs' callees take 23 and
 17 vectors of 1 or 2 bytes and 13 and 17 of `bool` themselves (at 16 and 64
