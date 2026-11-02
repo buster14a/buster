@@ -77,9 +77,9 @@
 //   throughout, the session's barrier advancing, no thread created, the failure's status and each object --lanes 1's in
 //   a process of its own; then the same on a lazy session, whose lane 1 creates the others while lane 0 runs the first
 //   command. And, with 4 CPUs or more, a growing team's command on a session of 4 lanes in this process, under a
-//   jobserver pipe without a token whose lane 0 supplies 3: the pipe holds them once as the command returns, while
-//   anything it leaked would still hold them, the object is --lanes 1's, and the caller's MAKEFLAGS and test hook are
-//   as they were.
+//   jobserver pipe without a token whose lane 0 supplies 3: it grows to 4 lanes, and with --worker-budget 2, which the
+//   session's 4 lanes don't bound, to 2; the pipe holds the 3 once as the command returns, while anything it leaked
+//   would still hold them; the object is --lanes 1's; and the caller's MAKEFLAGS and test hook are as they were.
 
 #include "buster/compiler/test_paths.h"
 #include "worker_budget_test.c"
@@ -2354,10 +2354,11 @@ static void check_lanes_test_growth_flow(void* argument)
 }
 
 // The first program of 600 functions, `program_N.c` for N `programs`, by --lanes 4 in a command on a session of 4 lanes
-// in this process, under a jobserver pipe without a token, whose lane 0 supplies 3 after its first part: the pipe must
-// hold them as the command returns, while this process and anything it leaked still live, and the object must be the
-// growth's reference (check_lanes_test_driver_growth's, --lanes 1's).
-static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const char* directory, uint32_t programs)
+// in this process, with `cap` workers by --worker-budget (0 for none), under a jobserver pipe without a token, whose lane
+// 0 supplies 3 after its first part: the team must grow to 4 lanes, or to the cap, which the session's lanes don't bound
+// here as a command's own session's do; the pipe must hold the 3 as the command returns, while this process and anything
+// it leaked still live; and the object must be the growth's reference (check_lanes_test_driver_growth's, --lanes 1's).
+static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const char* directory, uint32_t programs, uint32_t cap)
 {
     static const uint8_t supplied[] = { BUSTER_CHECK_EMIT_SUPPLY_BYTE, BUSTER_CHECK_EMIT_SUPPLY_BYTE + 1, BUSTER_CHECK_EMIT_SUPPLY_BYTE + 2 };
     char program[PATH_MAX];
@@ -2380,12 +2381,15 @@ static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const ch
     snprintf(makeflags, sizeof(makeflags), "-j --jobserver-auth=%d,%d", fds[0], fds[1]);
     const bool set = opened && setenv("MAKEFLAGS", makeflags, 1) == 0 && setenv("BUSTER_TEST_WORKER_SUPPLY", "3", 1) == 0;
     static CheckLanesGrowthSession growth;
-    static char* const arguments[] = { (char*)"--lanes", (char*)"4", (char*)"-c", (char*)"--time-stages", (char*)"-o", NULL, NULL };
-    growth = (CheckLanesGrowthSession){ .count = 7, .status = -1 };
-    for (uint32_t i = 0; i < 7; i += 1)
+    char workers[32];
+    snprintf(workers, sizeof(workers), "--worker-budget=%u", cap);
+    char* const arguments[] = { (char*)"--lanes", (char*)"4", (char*)"-c", (char*)"--time-stages", (char*)"-o", object, program, workers };
+    growth = (CheckLanesGrowthSession){ .count = cap != 0 ? 8 : 7, .status = -1 };
+    for (uint32_t i = 0; i < growth.count; i += 1)
     {
-        growth.arguments[i] = i == 5 ? object : i == 6 ? program : arguments[i];
+        growth.arguments[i] = arguments[i];
     }
+    const uint32_t active = cap != 0 ? cap : 4;
     fflush(stderr);
     const int saved_errors = dup(STDERR_FILENO);
     const int report = open(errors, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -2416,8 +2420,10 @@ static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const ch
                  reported[4], reported[5]);
         check_lanes_test_expect(tally, ran == 4 && growth.status == 0 && check_test_driver_same_files(object, reference),
                                 "a growing team in a command in this process writes --lanes 1's object", detail);
-        check_lanes_test_expect(tally, found && reported[2] == 1 && reported[3] == 4 && reported[4] == 3 && reported[5] <= 4,
-                                "a growing team in a command in this process grows by the tokens supplied", detail);
+        check_lanes_test_expect(tally, found && reported[2] == 1 && reported[3] == active && reported[4] == active - 1 && reported[5] <= active,
+                                cap != 0 ? "a growing team in a command in this process grows no further than --worker-budget" :
+                                           "a growing team in a command in this process grows by the tokens supplied",
+                                detail);
         check_lanes_test_expect(tally, worker_budget_test_tokens(fds[0], supplied, sizeof(supplied)),
                                 "a growing team returns every token before its command returns", detail);
         close(fds[0]);
@@ -2507,7 +2513,8 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_driver_growth(&tally, executable, directory, programs);
             check_lanes_test_session_threads(&tally, executable, directory);
             check_lanes_test_session_commands(&tally, executable, directory);
-            check_lanes_test_session_growth(&tally, directory, programs);
+            check_lanes_test_session_growth(&tally, directory, programs, 0);
+            check_lanes_test_session_growth(&tally, directory, programs, 2);
             check_lanes_test_benchmark_sections(&tally, executable, directory);
         }
         if (!keep && tally.failures == 0)
