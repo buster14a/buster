@@ -291,7 +291,8 @@ static bool memory_partial_commit(void)
             memset(first, 0xa5, 4096);
         }
         // A VMA boundary inside the next commit's span, at 4 MiB of the reservation; the first push's geometric
-        // commit already consumed the reservation's own NOHUGEPAGE head.
+        // commit already reaches the end of the base pages, past which the reservation has no advice of its own until a
+        // commit gets there.
         uint8_t* const tail = arena.base + (UINT64_C(64) << 10);
         const uint64_t boundary = (UINT64_C(4) << 20) - arena.mapping_offset;
         valid = valid && madvise(arena.base + boundary, UINT64_C(64) << 10, MADV_NOHUGEPAGE) == 0;

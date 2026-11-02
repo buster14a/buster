@@ -170,6 +170,13 @@ struct CheckClock
     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
     // #1038), which the report gives on a `time-check` line.
     uint64_t expression_ticks;
+    // Within `check-expressions`, the graph run's memoized transitions (#1050, CheckStatistics' transition counts): the nodes
+    // an earlier node's answer completed, those probed and not found, and those an operand's payload sent to their actions
+    // (most often a constant to fold), with the table's entries; each a `time-check transitions` line.
+    uint64_t transition_hits;
+    uint64_t transition_misses;
+    uint64_t transition_folds;
+    uint64_t transition_entries;
 };
 
 // Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock. The driver calls it, but
@@ -301,6 +308,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
     const double expressions = (double)stage_clock->expression_ticks / ticks_per_millisecond;
     fprintf(stream, "time-check\texpressions\t%.3f\t%.1f\n", expressions, total > 0 ? expressions * 100.0 / total : 0.0);
+    fprintf(stream, "time-check\ttransition-hits\t%llu\n", (unsigned long long)stage_clock->transition_hits);
+    fprintf(stream, "time-check\ttransition-misses\t%llu\n", (unsigned long long)stage_clock->transition_misses);
+    fprintf(stream, "time-check\ttransition-folds\t%llu\n", (unsigned long long)stage_clock->transition_folds);
+    fprintf(stream, "time-check\ttransition-entries\t%llu\n", (unsigned long long)stage_clock->transition_entries);
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);

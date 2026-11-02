@@ -16,7 +16,9 @@ requirements. [Command index](README.md).
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, `--lower-all`
+  checking every function's records with `x86_validate`, `--check-transitions`
+  checking the expressions by #1050's memoized transitions (opt-in, each hit's
+  action run too with `--verify`), `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
