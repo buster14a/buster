@@ -11,9 +11,10 @@ unwind writer and the driver's Tier 1 `-g` restriction are unchanged.
 The protocol has a normal in-tree command, `./build/compiler
 test-emission-metadata [--seed N]`. `build.sh` compiles
 `src/buster/compiler/emission_metadata_test.c` as a translation unit that
-includes the module, and `tools/ci/correctness.tests` runs the command. The
-production driver still does not consume the protocol; the test command is its
-only current consumer, and the module is not in a compiler hot path.
+includes the module, and `tools/ci/correctness.tests` runs the command. The C
+driver's `-g` source-row path now consumes the protocol for validation
+(`c_check_debug.c`, below); the common emitted-function result and producer-owned
+frame publication remain. Compilation without `-g` does not run the protocol.
 
 The module neither produces machine code nor proves that a supplied unwind rule
 matches that code. Its checker establishes bounded, ordered, canonical metadata
@@ -122,9 +123,10 @@ marks on every failure.
 Layout validation has a contiguous 16-record AVX-512 path and an exact scalar
 path. Masked loads cover only the valid tail; a shifted end vector checks each
 record against its predecessor, including across batch boundaries. The module is
-included by `emission_metadata_test.c` after `host_isa.h`; a production consumer
-must include it the same way. The standalone wrapper's vector command enables
-`BUSTER_HOST_VECTOR` through `BUSTER_EMISSION_METADATA_TEST_VECTOR`.
+included by `emission_metadata_test.c` and by `c_check_program.c` before
+`c_check_debug.c`, after the host ISA is selected. The standalone wrapper's
+vector command enables `BUSTER_HOST_VECTOR` through
+`BUSTER_EMISSION_METADATA_TEST_VECTOR`.
 
 Sparse event resolution and frame-state protocol checking currently use scalar
 code. There is no locked-9700X measurement demonstrating whether further
@@ -132,6 +134,20 @@ vectorization pays, and this prerequisite makes no speedup claim. Integration
 must measure the retained storage and total compile cost, including the layout
 arrays, rather than treating this module's allocation-free implementation as
 proof that the complete path is free.
+
+## Tier 0 source-row consumer
+
+For `-g`, `c_check_debug.c` builds a function's declaration/origin events and
+its kept entries' events from Tier 0's entry records and tokens, uses the
+records' exact starts and ends after branch sizing as the layout, and resolves
+them through `emission_metadata_plan`/`resolve`. The resolved offsets and origins
+must equal the raw rows that the existing scalar/vector builders produce; when
+the layout, an anchor or a resolved row disagrees, the emission fails as an
+internal backend error rather than publishing rows the protocol cannot justify.
+The raw rows remain the publication until the common emitted-function result
+lands, and only `-g` pays for this validation. `test-check-debug`'s random
+raw-row cases exercise the positive and negative paths, and its `--cross-check`
+compiles and runs the resulting DWARF.
 
 ## Reproducible correctness checks
 

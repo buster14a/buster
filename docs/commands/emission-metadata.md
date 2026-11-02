@@ -20,6 +20,8 @@ baseline, AVX-512F and sanitizer commands. The design, ownership contract,
 record-boundary rules and remaining acceptance are in
 [the emission metadata guide](../emission-metadata.md).
 
-The driver, `Tier0Code`, the Tier 1 frame adapter and the unwind writer do not
-consume the protocol yet. The common emitted-function result, producer-owned
-frame publication, Tier 1 `-g` and the unwind writer remain; #1056 remains open.
+The driver's `-g` source-row path (`c_check_debug.c`) is the current production
+consumer: it validates Tier 0's declaration, kept-entry and epilogue rows through
+the protocol and fails closed on disagreement. The common emitted-function
+result, producer-owned frame publication, Tier 1 `-g` and the unwind writer
+remain; #1056 remains open.
