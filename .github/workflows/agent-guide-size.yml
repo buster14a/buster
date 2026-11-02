@@ -61,7 +61,8 @@ jobs:
           printf '\303\251%.0s' {1..15000} > "$fixtures/utf8"
           check_size "$fixtures/utf8" 30000
           printf '\303\251' >> "$fixtures/utf8"
-          ln -s guide "$fixtures/symlink"
+          printf 'x' > "$fixtures/valid"
+          ln -s valid "$fixtures/symlink"
           for path in "$fixtures/utf8" "$fixtures/missing" "$fixtures" "$fixtures/symlink"; do
               if check_size "$path" 30000 > /dev/null 2>&1; then
                   echo '::error::Agent-guide byte/file-kind self-test failed.'

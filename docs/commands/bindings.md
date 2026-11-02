@@ -17,7 +17,7 @@ and body slots through `c_check_environment.c` (the C driver's
 `check_input_compile` doesn't, as nothing in a compile reads them: #572);
 `test-checker` checks their
 scratch lifetime and scalar/vector replay. `c_check_deferred.c` is their
-consumer: the deferred reader below ([Deferred function bodies](deferred.md#deferred-function-bodies)).
+consumer: the deferred reader ([Deferred function bodies](deferred.md#deferred-function-bodies)).
 [docs/c-environments.md](../../docs/c-environments.md) records the API and boundaries.
 `c_check_body_bindings.c` supplies the next independent name-resolution
 consumer: private per-body views/replay, source-position file fallbacks and

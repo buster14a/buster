@@ -13,7 +13,8 @@ requirements. [Command index](README.md).
   `test-preprocessor-fuzz`, the harness's own checks; `main.c` includes all
   four. `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
   measuring the external test harness. `c_preprocessor_fuzz.c` attaches the
-  preprocessor to it: `test-preprocessor --fuzz`, below.
+  preprocessor to it: `test-preprocessor --fuzz` in
+  [Preprocessor tests](preprocessor.md#preprocessor-tests).
   `docs/preprocessor-fuzz.md` records the contract, the comparison and the
   qualification runs.
 ## Preprocessor harness tests
@@ -60,8 +61,9 @@ rejection.
 
 This is test tooling outside the compile path and has no new vector path.
 These self-tests check the harness alone, with the minimizer on its planted
-comparison; `test-preprocessor --fuzz` (below) runs the preprocessor through
-it. `docs/preprocessor-fuzz.md` has the harness's contract and its use.
+comparison; `test-preprocessor --fuzz` ([Preprocessor
+tests](preprocessor.md#preprocessor-tests)) runs the preprocessor through it.
+`docs/preprocessor-fuzz.md` has the harness's contract and its use.
 
 ## Preprocessor harness benchmark
 

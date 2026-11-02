@@ -32,8 +32,9 @@ requirements. [Command index](README.md).
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`); `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
-  semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
-  mutations" below), and `benchmark-checker-source` measures checking of real
+  semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
+  mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
+  `benchmark-checker-source` measures checking of real
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
