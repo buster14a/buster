@@ -501,6 +501,45 @@ struct CheckLowerBuiltinOperands
     uint32_t locals[3][BUSTER_TYPED_CLASSES];
 };
 
+// #1048's inventory of node templates (c_check_lower_inventory.c): with CheckLowerWriter.owners, the lowering with the
+// entries' source tokens (check_program_lower_owners) gives each entry its owner in their place: the expression node whose
+// task wrote it (its index), with BUSTER_CHECK_LOWER_OWNER_CONVERSION where a conversion task the node pushed wrote it
+// (check_lower_expression's, of an operand to what the node asks of it), BUSTER_CHECK_LOWER_OWNER_CONTROL and a control's
+// index for a nested control's task, and BUSTER_CHECK_LOWER_OWNER_TOKEN and a token for what a body writes outside the
+// tasks' loop (its statements' controls, its parameters, its end). A token change inside the loop (a call's, an
+// initializer part's) keeps the owner. Each EXPRESSION task popped is logged with the owner that pushed it.
+#define BUSTER_CHECK_LOWER_OWNER_CONVERSION UINT32_C(0x20000000)
+#define BUSTER_CHECK_LOWER_OWNER_CONTROL UINT32_C(0x80000000)
+#define BUSTER_CHECK_LOWER_OWNER_TOKEN UINT32_C(0xC0000000)
+#define BUSTER_CHECK_LOWER_OWNER_TRACKED 0x80u
+
+// One EXPRESSION task as the tasks' loop popped it: the body, the node, the owner that pushed it, how many entries the
+// body had then, and the task's flags (CheckLowerTaskPacked's byte 5: address, initialized, discard, volatile_copy and
+// bit_int from bit 0), with BUSTER_CHECK_LOWER_OWNER_TRACKED where the body tracks its stack (CheckLowerWriter.track).
+typedef struct CheckLowerOwnerPop CheckLowerOwnerPop;
+struct CheckLowerOwnerPop
+{
+    uint32_t body;
+    uint32_t node;
+    uint32_t pusher;
+    uint32_t entry;
+    // The type the conversion task pushed with it converts its value to (the task just below it, from the same owner),
+    // which then owns that conversion's entries; 0 for none.
+    TypeId target;
+    uint8_t flags;
+};
+
+typedef struct CheckLowerOwners CheckLowerOwners;
+struct CheckLowerOwners
+{
+    CheckLowerOwnerPop* pops;
+    uint64_t count;
+    uint64_t capacity;
+    // Whether the tasks' loop runs (check_lower_drain_sources), and whether a pop found the log full.
+    bool draining;
+    bool overflow;
+};
+
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
 {
@@ -713,6 +752,8 @@ struct CheckLowerWriter
     // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
     // until the writer first asks.
     uint64_t first_classification;
+    // #1048's inventory: each entry's owner in place of its token (CheckLowerOwners), with `sources`; null otherwise.
+    CheckLowerOwners* owners;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -1708,8 +1749,13 @@ static inline __attribute__((always_inline)) void check_lower_settle(CheckLowerW
 // The token whose lowering writes the next entries (CheckLowerWriter.source). Out of line, as only -g reaches it.
 static __attribute__((noinline)) void check_lower_change_source(CheckLowerWriter* writer, uint32_t token)
 {
-    check_lower_settle(writer);
-    writer->source = token;
+    // The inventory's owners (CheckLowerOwners): inside the tasks' loop a change keeps the owner, outside it a token owns.
+    const CheckLowerOwners* owners = writer->owners;
+    if (owners == NULL || !owners->draining)
+    {
+        check_lower_settle(writer);
+        writer->source = owners == NULL ? token : BUSTER_CHECK_LOWER_OWNER_TOKEN | token;
+    }
 }
 
 // The token whose lowering writes the next entries, where a call or an initializer part sets it in the middle of a task,
@@ -9409,15 +9455,77 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
 // it last changed).
+// The task's owner for #1048's inventory (CheckLowerOwners), in place of its token: an expression's node, logged with the
+// owner that pushed it; a nested control's index; a conversion's node's, marked; any other task's, its pusher's.
+static __attribute__((noinline)) uint32_t check_lower_task_owner(CheckLowerWriter* writer, CheckLowerTask task, uint32_t pushed)
+{
+    CheckLowerOwners* owners = writer->owners;
+    uint32_t owner = pushed;
+    if (task.kind == CHECK_LOWER_EXPRESSION)
+    {
+        owner = task.node;
+        if (owners->count < owners->capacity)
+        {
+            owners->pops[owners->count++] = (CheckLowerOwnerPop){
+                .body = (uint32_t)(writer->body - writer->program->bodies),
+                .node = task.node,
+                .pusher = pushed,
+                .entry = writer->count,
+                .flags = (uint8_t)((uint32_t)task.address | (uint32_t)task.initialized << 1 | (uint32_t)task.discard << 2 | (uint32_t)task.volatile_copy << 3 |
+                                   (uint32_t)task.bit_int << 4 | (writer->track ? BUSTER_CHECK_LOWER_OWNER_TRACKED : 0u)),
+            };
+        }
+        else
+        {
+            owners->overflow = true;
+        }
+    }
+    else if (task.kind == CHECK_LOWER_CONTROL)
+    {
+        owner = BUSTER_CHECK_LOWER_OWNER_CONTROL | task.node;
+    }
+    else if (task.kind == CHECK_LOWER_CONVERSION && (pushed & BUSTER_CHECK_LOWER_OWNER_CONTROL) == 0)
+    {
+        owner = pushed | BUSTER_CHECK_LOWER_OWNER_CONVERSION;
+    }
+    return owner;
+}
+
+// An EXPRESSION task's conversion, which check_lower_expression pushed just below it with the same owner: its entries the
+// expression's node's (marked as a conversion), and its target the node's pop's in the inventory's log.
+static __attribute__((noinline)) void check_lower_owner_conversion(CheckLowerWriter* writer, uint32_t node, uint32_t pushed)
+{
+    CheckLowerOwners* owners = writer->owners;
+    const uint32_t below = writer->depth - 1;
+    if (writer->depth != 0 && below < writer->settled && writer->task_sources[below] == pushed)
+    {
+        const CheckLowerTask conversion = check_lower_task_unpack(writer->tasks[below]);
+        if (conversion.kind == CHECK_LOWER_CONVERSION)
+        {
+            writer->task_sources[below] = node | BUSTER_CHECK_LOWER_OWNER_CONVERSION;
+            if (owners->count != 0 && owners->pops[owners->count - 1].node == node)
+            {
+                owners->pops[owners->count - 1].target = conversion.type;
+            }
+        }
+    }
+}
+
 static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CheckProgram* program = writer->program;
     const uint32_t index = writer->depth;
-    const uint32_t token = task.kind == CHECK_LOWER_EXPRESSION ? program->input->graph.tokens[task.node] :
+    const uint32_t pushed = index < writer->settled ? writer->task_sources[index] : writer->source;
+    const uint32_t token = writer->owners != NULL ? check_lower_task_owner(writer, task, pushed) :
+                           task.kind == CHECK_LOWER_EXPRESSION ? program->input->graph.tokens[task.node] :
                            task.kind == CHECK_LOWER_CONTROL ? program->controls[writer->body->first + task.node].token :
-                           index < writer->settled ? writer->task_sources[index] : writer->source;
+                           pushed;
     writer->settled = index < writer->settled ? index : writer->settled;
     check_lower_settle(writer);
+    if (writer->owners != NULL && task.kind == CHECK_LOWER_EXPRESSION)
+    {
+        check_lower_owner_conversion(writer, task.node, pushed);
+    }
     writer->source = token;
 }
 
@@ -9573,7 +9681,15 @@ static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWrite
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter* writer)
 {
+    if (writer->owners != NULL)
+    {
+        writer->owners->draining = true;
+    }
     check_lower_drain_body(writer, true, writer->bit_ints);
+    if (writer->owners != NULL)
+    {
+        writer->owners->draining = false;
+    }
 }
 
 // An initializer's value, converted to its part's type: its expression, or the object an overloaded function's
@@ -12251,7 +12367,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
 // source tokens too (CheckProgramLowered.entry_tokens). Its bodies are one part, lowered by one writer
 // (check_lower_part).
 static inline __attribute__((always_inline)) bool check_program_lower_body(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
-                                                                          Arena* output, Arena* scratch)
+                                                                          CheckLowerOwners* owners, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -12270,6 +12386,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     }
     if (valid)
     {
+        writer.owners = owners;
         if (sources)
         {
             check_lower_part_sources(&writer, &shared, &part, output, scratch);
@@ -12297,7 +12414,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
 {
     (void)scalar;
 
-    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), false, output, scratch);
+    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), false, NULL, output, scratch);
 }
 
 // The lowering with each function's entries' source tokens (CheckProgramLowered.entry_tokens), for -g's rows: a copy of
@@ -12307,5 +12424,13 @@ static __attribute__((noinline)) bool check_program_lower_sources(CheckProgramLo
 {
     (void)scalar;
 
-    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), true, output, scratch);
+    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), true, NULL, output, scratch);
+}
+
+// The lowering of #1048's inventory (c_check_lower_inventory.c): the scalar path's, with each entry's owner in
+// CheckProgramLowered.entry_tokens and the EXPRESSION tasks it popped in `owners` (CheckLowerOwners).
+static __attribute__((noinline)) bool check_program_lower_owners(CheckProgramLowered* lowered, const CheckProgram* program, CheckLowerOwners* owners,
+                                                                 Arena* output, Arena* scratch)
+{
+    return check_program_lower_body(lowered, program, true, true, owners, output, scratch);
 }

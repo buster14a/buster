@@ -514,6 +514,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_deferred_benchmark.c"
 // #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
 #include "buster/compiler/c_lowering_source_benchmark.c"
+// #1048's measure-lowering-templates: how much of the lowering a table of node templates covers.
+#include "buster/compiler/c_check_lower_inventory.c"
 // #136's benchmark-backend-source: benchmark-backend's variants on the functions -c compiles of real units.
 #include "buster/compiler/tier0_source_benchmark.c"
 // #151's benchmark-check-lanes: a unit's functions compiled on lanes, against one lane.
@@ -523,6 +525,7 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize off
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
+#include "buster/compiler/c_check_lower_inventory_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_lanes_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
@@ -1313,6 +1316,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-lowering-templates") == 0)
+    {
+        result = run_lowering_inventory(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
     {

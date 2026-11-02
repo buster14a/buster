@@ -239,6 +239,122 @@ and a neighboring body's local map. Guarded pending stacks check mixed tasks,
 labels, every entry-capacity limit, invalid classes and untouched
 output tails. Source fixtures also compare native effects with Clang.
 
+## Node templates over a body: the inventory (#1048)
+
+#1048 proposes to lower each body's postorder by node templates, data-parallel,
+instead of the task loop's push, pop and dispatch per node: each node's context
+from its parent, a template id per node, a prefix sum of the templates' entry
+counts, and an expansion of the templates into the columns, with the existing
+rules for the exceptions. Its first step is an inventory: how much of the
+lowering a table of templates covers. `measure-lowering-templates`
+(`c_check_lower_inventory.c`) takes it:
+
+```sh
+./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N] \
+    [--ignore-tracking] [--allow CATEGORY]... [-E's options] file...
+```
+
+Each file is checked and its definitions selected as `-c` selects them, then
+lowered by the task loop with each entry's owner
+(`check_program_lower_owners`): the lowering with `-g`'s source tokens, whose
+tokens are the owners instead (`CheckLowerWriter.owners`, which only that path
+reads). An entry's owner is the expression node whose task wrote it, or, marked,
+the node whose value a conversion task converts for its consumer
+(`check_lower_expression`'s, which the inventory moves from the consumer to the
+operand, as the design puts a conversion in the operand's context), or a control
+or a token for what a body writes outside the expressions. Every popped
+`EXPRESSION` task is logged with its context (the task's address, initialized,
+discard and `_BitInt` flags), its conversion's target and the owner that pushed
+it, which gives each node its children. The run lowers the file again without
+the owners and fails it unless every function's entries are the same.
+
+A node's key is what a classifier can read from the columns: its op and
+context, its type's class and facts (#570's table), whether it is a folded
+constant and of which kind, its category, a bit-field, vector-element or
+overload flag, a `VALUE`'s or constant address's object's kind (a symbol, a
+compound literal, static) and whether the constant's offset is past the
+object's start, whether a member's offset is past its record's start, its first
+two operands' types, its conversion's target, and a store's destination's
+kind. Its pattern is its own entries' kinds and classes, its conversion's
+marked apart, interleaved with its children's subtrees. A key is deterministic
+where every node of it has one pattern. A node is an exception by the issue's
+list: a body that tracks its stack, a node popped twice (a compound literal's
+initialization), a call, a builtin or `va_arg`, `&&`, `||` and `?:`, a
+statement expression, a variable-length array's bound, extent or size, a
+bit-field's access, or a complex, `_BitInt`, atomic, vector or half-precision
+type. `--allow CATEGORY` counts a category as ordinary, and `--ignore-tracking`
+classifies a tracked body's nodes by the other rules. An abstract pattern writes
+each class as what gives it, the node's own, an operand's or its conversion's
+target: the table a classifier would hold, each node taking its classes from
+its own columns.
+
+On `sqlite3.c` 3.53.2 (the frozen corpus's bytes, with #518's `-c` options and
+this container's system headers), 2,668 bodies:
+
+| | |
+| --- | ---: |
+| node occurrences (`lowering-nodes`' evaluated) | 266,853 |
+| entries | 407,396 |
+| entries owned by nodes / their conversions / statements and frames | 79.3% / 13.1% / 7.6% |
+| ordinary nodes, of nodes / of expression entries | 93.0% / 85.6% |
+| calls / `&&` `\|\|` `?:` / bit-fields / builtins, of nodes | 5.1% / 1.5% / 0.27% / 0.07% |
+| the same, of expression entries | 4.3% / 7.1% / 1.7% / 1.3% |
+| ordinary keys, deterministic | 2,056, 2,054 |
+| their nodes / expression entries / all entries | 92.99% / 85.54% / 79.0% |
+| abstract patterns | 187 |
+| the first 32 of them: nodes / expression entries | 88.1% / 76.1% |
+| the first 64 | 91.9% / 82.1% |
+| the first 128 | 92.9% / 85.3% |
+| bodies without an exception: of bodies / of entries | 12.4% / 2.8% |
+| maximal covered subtrees, nodes each | 80,071, 2.83 |
+| statements' expressions covered whole | 69.4% |
+
+The two undetermined keys are aggregate assignments, a `COPY` or a `memcpy`
+call by the size. Every pattern is postfix (its own entries after its
+children's) but 1,522 nodes' (updates through memory, which `DUP` the address
+or take a temporary). With `--allow '&&-||-?:'` the short-circuit and
+conditional operators are deterministic templates too (their own entries
+between their operands', their labels the payloads): 225 abstract patterns, and
+93.4% of the nodes and 87.4% of the expression entries.
+
+Lua 5.4.8's 34 units (`-std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX`): 1,104
+bodies, 67,586 nodes, 91,790 entries; 91.3% of the nodes and 85.3% of the
+expression entries ordinary, all 944 keys deterministic, 145 abstract patterns
+(the first 64: 90.4% of the nodes, 81.7% of the expression entries), 8.8% of
+the bodies without an exception, maximal covered subtrees of 2.72 nodes. Both
+corpora together have 197 abstract patterns: Lua adds 10 to `sqlite3.c`'s.
+
+This compiler's `main.c` (`-march=znver5`, `build.sh`'s other flags): 11,512
+bodies, 2.04 million nodes, 4.81 million entries, every body tracked, since a
+program with a terminal helper (`__builtin_trap` or `__builtin_unreachable`
+lowered to a helper, `CheckLowerShared.terminal`) tracks every body's stack.
+With `--ignore-tracking`: 87.7% of the nodes ordinary but 66.5% of the
+expression entries, as `&&`, `||` and `?:` hold 18.7% of them (5.0% of the
+nodes); 3,339 of 3,353 keys deterministic, 219 abstract patterns (the first 64:
+84.9% of the nodes, 64.6% of the expression entries), 19.0% of the entries a
+body's statements' and frame's, 5.4% of the bodies without an exception, and
+maximal covered subtrees of 2.23 nodes.
+
+What the design takes from it:
+
+- A table of reasonable size covers most nodes: 64 to 128 abstract templates,
+  whose key the columns give, cover 90% of the nodes of `sqlite3.c` and Lua and
+  85% of `main.c`'s.
+- The exceptions are in nearly every body: a body without one holds under 5% of
+  the entries. Falling back per body would leave the task loop nearly all of
+  them, so the exceptions take their places within a body's expansion.
+- A maximal subtree of template nodes has 2.2 to 2.9 nodes: expanding one
+  subtree at a time can't amortize its setup (#868's fragments failed so). The
+  classification, the counts' prefix sums and the expansion run over a whole
+  body or program's nodes at once, and what stays scalar (the controls and the
+  exceptions) places the expanded ranges.
+- `&&`, `||` and `?:` are 7% of `sqlite3.c`'s expression entries and 19% of
+  `main.c`'s: worth templates whose labels a prefix sum over the body's label
+  allocations numbers.
+- Stack tracking is decided per program: a program with a terminal helper
+  tracks every body, so its templates must keep the tracked stack, or tracking
+  be decided per body.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

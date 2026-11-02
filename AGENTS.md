@@ -5755,6 +5755,20 @@ lowers other than its warm-up, and a run that measures no file fail the command
 the 9700X's lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
 contract, the comparisons' results and the completed `main.c` measurement.
 
+`./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N]
+[--ignore-tracking] [--allow CATEGORY]... [preprocessor options] file...`
+(`c_check_lower_inventory.c`) is #1048's inventory of node templates: each
+file's selected definitions lowered by the task loop with every entry's owner
+(`check_program_lower_owners`, the `-g` path's tokens replaced by owners through
+`CheckLowerWriter.owners`, which no compile sets) and again without, which must
+give the same entries; each node's key from the columns and its pattern; the
+exceptions by category; the coverage of the deterministic keys and of their
+abstract patterns; the bodies without an exception; and the maximal subtrees of
+template nodes. It counts rather than times, so it needs no lock beyond the
+build's. `test-checker` checks it on a fixture (`c_check_lower_inventory_test.c`).
+The lowering guide's "Node templates over a body: the inventory (#1048)" has
+`sqlite3.c`'s, Lua's and `main.c`'s results and what the design takes from them.
+
 ## Type tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`
