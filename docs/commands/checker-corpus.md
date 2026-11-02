@@ -22,7 +22,7 @@ reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
 `always_inline` function, which clang inlines everywhere), and a file the
 backend refuses is counted with its feature. A constant `if`'s dead arm is no
 reason: `-c` leaves it out as clang does, with what only it reaches
-(`CheckProgram.dropped_arms`, #1108).
+(`CheckProgram.dropped_ranges`, #1108).
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
 directories so, with the count they compare. `--id-order N` checks each file

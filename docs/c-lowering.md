@@ -169,13 +169,20 @@ definition. Its flags and edges:
   condition holds a label itself (`ContainsLabel`, which sees one in `sizeof`'s
   operand too). A condition whose `&&` or `||` leaves an operand unevaluated is
   a constant, a call in that operand among them: `main.c`'s
-  `BUSTER_IN_UNIT(X) && argc >= 2 && strcmp(...) == 0` branches. The dead arm
-  takes its references with it, its block-scope statics' too, and its
-  statement expressions, whose regions it writes empty
-  (`CheckProgram.dropped_arms`, the arms' token ranges). So a function that
-  only a dead arm calls is neither selected nor lowered, nor checked by code
-  generation's target features (#775): `if (BUSTER_VECTOR_PATH(vector))` in a
-  baseline build no longer emits the AVX-512 kernel it calls. A constant
+  `BUSTER_IN_UNIT(X) && argc >= 2 && strcmp(...) == 0` branches. The
+  condition is its source value, as clang's constant evaluation has it, not a
+  builtin query's runtime value: `__builtin_constant_p(n)` of a variable folds
+  nothing, `__builtin_constant_p(5)` does. The condition and the dead arm are
+  left out with their references, their block-scope statics (a `used` one is no
+  root either) and their statement expressions, whose regions are written empty
+  (`CheckProgram.dropped_ranges`, their token ranges), and the lowering gives
+  their locals no place, so a variable-length array declared there needs no
+  allocation. So a function that only a dead arm calls is neither selected nor
+  lowered, nor checked by code generation's target features (#775):
+  `if (BUSTER_VECTOR_PATH(vector))` in a baseline build no longer emits the
+  AVX-512 kernel it calls. A variable-length array's address is read only after
+  its allocation, which the lowering checks at each read: one in an operand that
+  a constant condition never evaluates is never allocated, nor read. A constant
   `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
   `FindCaseStatementsForValue`) are still written and selected.
 

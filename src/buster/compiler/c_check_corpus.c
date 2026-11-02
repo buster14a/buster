@@ -1084,7 +1084,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 //   (its always-inliner) and emits none of a local one it inlined everywhere, as of SQLite's SQLITE_INLINE
 //   allocateSpace; Tier 0 calls it.
 // The arm of an if that an integer constant condition never runs, which clang -O0 doesn't emit
-// (CodeGenFunction::EmitIfStmt), -c leaves out too, with what only it refers to (CheckProgram.dropped_arms, #1108).
+// (CodeGenFunction::EmitIfStmt), -c leaves out too, with what only it refers to (CheckProgram.dropped_ranges, #1108).
 typedef enum CheckCorpusSymbolReason
 {
     CHECK_CORPUS_SYMBOL_FOLDED,
@@ -1409,7 +1409,7 @@ static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const Check
 // The reason a difference of an accepted file's comparison has, or CHECK_CORPUS_SYMBOL_REASONS for none, from `index`
 // (check_corpus_symbol_index's), whose `selected` is what -c emitted and `reached` what the selection reaches with
 // unselected operands counted: clang's model, whose constant ifs leave their dead arms out as -c's do
-// (CheckProgram.dropped_arms).
+// (CheckProgram.dropped_ranges).
 static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifference* difference, const CheckCorpusPath* path, const CheckCorpusSymbolIndex* index,
                                                           uint8_t* explained_objects)
 {
@@ -1716,10 +1716,10 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
                  a->case_count == b->case_count && a->region_count == b->region_count && a->reference_count == b->reference_count &&
                  a->object_count == b->object_count && a->symbol_count == b->symbol_count && a->builtin_count == b->builtin_count &&
                  a->asm_target_count == b->asm_target_count && a->output_bytes == b->output_bytes && (a->asm_offsets == NULL) == (b->asm_offsets == NULL) &&
-                 a->dropped_arm_count == b->dropped_arm_count;
-    for (uint32_t i = 0; equal && i < a->dropped_arm_count; i += 1)
+                 a->dropped_range_count == b->dropped_range_count;
+    for (uint32_t i = 0; equal && i < a->dropped_range_count; i += 1)
     {
-        equal = a->dropped_arms[i] == b->dropped_arms[i];
+        equal = a->dropped_ranges[i] == b->dropped_ranges[i];
     }
     for (uint32_t i = 0; equal && i < a->control_count; i += 1)
     {

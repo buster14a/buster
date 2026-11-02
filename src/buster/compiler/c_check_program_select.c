@@ -310,16 +310,16 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
     return body;
 }
 
-// Whether `token` is in one of the arms the program's writer left out (CheckProgram.dropped_arms, in token order and
+// Whether `token` is in one of the ranges the program's writer left out (CheckProgram.dropped_ranges, in token order and
 // apart): the last to start at or before it, if it ends at or after it.
 static bool check_program_token_dropped(const CheckProgram* program, uint32_t token)
 {
     uint32_t low = 0;
-    uint32_t high = program->dropped_arm_count;
+    uint32_t high = program->dropped_range_count;
     while (low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        if ((uint32_t)(program->dropped_arms[middle] >> 32) <= token)
+        if ((uint32_t)(program->dropped_ranges[middle] >> 32) <= token)
         {
             low = middle + 1;
         }
@@ -328,7 +328,7 @@ static bool check_program_token_dropped(const CheckProgram* program, uint32_t to
             high = middle;
         }
     }
-    return low != 0 && token <= (uint32_t)program->dropped_arms[low - 1];
+    return low != 0 && token <= (uint32_t)program->dropped_ranges[low - 1];
 }
 
 // Whether the program's bodies are in token order and apart, as check_program_token_body needs them.
@@ -420,7 +420,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
             const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
             bool gnu_inline = false;
-            roots[group] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
+            // A block-scope static that code the writer left out declares is no root, `used` as it may be: clang emits
+            // it only where it emits its declaration's statement (#1108).
+            const bool dropped = !function && input->linkage[token] == 0 && input->declaration_bodies[token] != BUSTER_CHECK_NONE &&
+                                 check_program_token_dropped(full, token);
+            const uint32_t attribute_roots = check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
+            roots[group] |= dropped ? 0 : attribute_roots;
             inline_rules[group] |= gnu_inline ? 2 : 0;
             const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
             // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself
@@ -555,8 +560,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     kinds[edges++] = target != 0 ? C_LOWERING_REFERENCE_EVALUATED : C_LOWERING_REFERENCE_EXTERNAL;
                 }
             }
-            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body, unless an
-            // arm the writer left out declares it: clang emits it where it emits its declaration's statement (#1108).
+            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body, unless
+            // code the writer left out declares it: clang emits it where it emits its declaration's statement (#1108).
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
             const uint32_t body = declaration < input->token_count && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE &&

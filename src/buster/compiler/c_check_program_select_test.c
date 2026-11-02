@@ -5,7 +5,7 @@
 // ELF objects after semantic selection. The fixture counts are stated independently of the reachability solver.
 // Every object emitted is also compared with clang -O0 -c's of the same source (#129): the same functions, objects
 // and string literals (c_lowering_symbols.c). The constant ifs' fixtures (check_test_program_folded_ifs) leave their
-// dead arms out, as clang -O0 does (CheckProgram.dropped_arms, #1108), and select nothing that only those arms reach.
+// dead arms out, as clang -O0 does (CheckProgram.dropped_ranges, #1108), and select nothing that only those arms reach.
 
 // Whether clang -O0 -c's object of `source` defines what `bytes` does (lowering_symbols_compare and _strings, with the
 // source's `names`); if not, the differences are printed under `name`. Then each pair of `patches` (a list of strings
@@ -274,7 +274,8 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
 // conditions of a floating or pointer type or with a side effect keep both arms, as clang keeps them. A dead arm's
 // block-scope statics go with it, and so do its statement expressions, a break in a loop in one among them, inside the
 // body and inside a live statement expression; a condition whose && leaves a call unevaluated is a constant (main.c's
-// BUSTER_IN_UNIT branches), and an asm goto in a dead arm jumps nowhere.
+// BUSTER_IN_UNIT branches), and an asm goto in a dead arm jumps nowhere. The folded condition is left out too, with
+// its statement expressions' locals and statics.
 static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
 {
     typedef struct CheckFoldedIf CheckFoldedIf;
@@ -319,6 +320,22 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
           "return ({int r=n;if(0){for(;r;){r=({if(r>3)continue;inner(r);});}}r+1;});}", 1, 0 },
         { "folded-if-dead-arm-asm-goto",
           "static int helper(int n){return n+1;}int tested(int n){if(0){asm goto(\"jmp %l0\"::::out);n=helper(n);}return n;out:return n+1;}", 1, 0 },
+        // #1154's review: the locals of code left out get no place, a variable-length array's among them, whose
+        // allocation went with it, in a dead arm and in a folded condition's statement expression, and in an operand a
+        // constant condition never evaluates; a `used` block-scope static of a dead arm or condition is no root; and a
+        // condition folds by its source value, as clang's constant evaluation does: __builtin_constant_p of a variable
+        // keeps both arms, of a constant folds.
+        { "folded-if-dead-arm-variable-length-array",
+          "static int helper(int n){return n+1;}int tested(int n){if(0){int a[n];a[0]=helper(n);n=a[0];}return n;}", 1, 0 },
+        { "folded-if-condition-variable-length-array",
+          "int tested(int n){if(0&&({int a[n];a[0]=n;a[0];}))return 1;return n;}", 1, 0 },
+        { "unevaluated-operand-variable-length-array",
+          "int tested(int n){return n+(0&&({int a[n];a[0]=n;a[0];}));}", 1, 0 },
+        { "folded-if-used-block-scope-statics",
+          "int tested(int n){if(0){static int x __attribute__((used))=1;n+=x;}if(0&&({static int y __attribute__((used))=2;y;}))return 1;return n;}", 1, 0 },
+        { "folded-if-builtin-constant-p",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}"
+          "int tested(int n){if(__builtin_constant_p(n))n=a(n);if(__builtin_constant_p(5))n=b(n);else n=c(n);return n;}", 3, 0 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
