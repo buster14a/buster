@@ -390,8 +390,30 @@ whose order rotates:
 Each is given per IR instruction (time, cycles, instructions, IPC) and in
 cycles per certificate item: the operands, edits, facts and renames the
 checker's work is linear in. The 9700X job runs it on the frozen `sqlite3.c`
-where its sources change (`changes`' `tier1-certificate`). Its results are on
-#939, and the raw logs and record go in `buster14a/buster-performance`.
+where its sources change (`changes`' `tier1-certificate`).
+
+On the 9700X at `fee05dd6`, the frozen `sqlite3.c`'s 2,600 functions and
+486,651 IR instructions gave these medians per IR instruction:
+
+| Variant | ns | Cycles | IPC |
+| --- | ---: | ---: | ---: |
+| `allocate` | 143.5 | 795 | 2.72 |
+| `publish` | 89.5 | 496 | 2.85 |
+| `check` | 86.6 | 480 | 4.59 |
+| `certify` | 171.2 | 949 | 3.81 |
+| `verify` | 125.5 | 695 | 3.14 |
+
+Certifying an allocation costs 1.19 times making it.
+
+Per IR instruction, a certificate holds 0.86 facts, 0.16 edits and 1.8 source
+operands, in 470.8 bytes. 92% of those bytes are fixed-width records: a source
+record reserves eight operand slots and eight clobber slots on each side, but
+the records average 1.13 operands. A packed layout would make certificates
+several times smaller. The checker's scratch is 44 bytes per IR instruction.
+
+[The frozen record](https://github.com/buster14a/buster-performance/tree/b468d3c8a50ef36de1a56bc622af4098e3f26ed5/docs/measurements/tier1-certificate-939-2026-11-02)
+has the run, the sizes by record and the limitations. It is one process in one
+job.
 
 ## What the certificate proves
 
