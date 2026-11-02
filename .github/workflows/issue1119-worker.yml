@@ -1,0 +1,52 @@
+name: Issue 1119 focused validation
+
+on:
+  push:
+    branches: [agent/1119-gcc-library-search-worker]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
+    steps:
+      - name: Check out the worker branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: agent/1119-gcc-library-search-worker
+
+      - name: Apply the integration patch on this branch only
+        if: hashFiles('.issue1119.patch') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/agent/1119-gcc-library-search-worker
+          git apply --check --unidiff-zero .issue1119.patch
+          git apply --unidiff-zero .issue1119.patch
+          git rm .issue1119.patch
+          git add src/buster/compiler/runtime.c src/buster/compiler/bind_test.c
+          git diff --cached --check
+          git config user.name 'ChatGPT'
+          git config user.email 'noreply@openai.com'
+          git commit -m 'fix: search selected GCC runtime directories for -l (#1119)' -m 'Agent session: current ChatGPT session; private permalink is not exposed by this environment.' -m 'Model: OpenAI / GPT-6 Astra Pro'
+          git push origin HEAD:refs/heads/agent/1119-gcc-library-search-worker
+          git rev-parse HEAD
+          git rev-parse 'HEAD^{tree}'
+
+      - name: Install the repository toolchain and test tools
+        run: bash tools/ci/setup-hosted.sh
+
+      - name: Build the baseline compiler
+        run: ./build.sh
+
+      - name: Binding, GCC search and atomic regressions
+        run: build/compiler test-bind --cross-check
+
+      - name: Runtime snapshot regressions
+        run: build/compiler test-snapshot
