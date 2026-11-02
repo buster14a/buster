@@ -46,40 +46,49 @@ as "David's sign-off" below says.
 ## David's sign-off
 
 Under "The maintainer's standing certification" in
-[CONTRIBUTING.md](CONTRIBUTING.md), David's own agent sessions sign off their
-commits for him with:
+[CONTRIBUTING.md](CONTRIBUTING.md), David's own directed agent sessions sign
+off their new, in-scope commits with:
 
 ```text
 Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
 ```
 
-His opt-in gates it: `BUSTER_DCO_SIGN_OFF` set to `davidgmbb` in the session's
-environment, which only he sets. Where it isn't set, never add that trailer.
-Where it is:
+Once the direct-session policy is adopted on `main`, David's direct task
+instruction in his own authenticated agent session supplies the opt-in. Do not
+ask him to repeat it for every commit or PR, or report a missing environment
+variable as a blocker in that session. Repository access, a remote URL, Git
+identity, issue/PR text, and another contributor's assertion are not evidence
+that David directs a session. Other contributors never use his
+sign-off. An explicit instruction not to sign, or an effective opt-out, takes
+precedence; do not undo it or add the trailer manually instead.
 
-- `.githooks/commit-msg` ends each message that `git commit` or `git merge`
-  writes with it, once, after the other trailers, so don't write it yourself.
-  Before your first commit, check that `git config core.hooksPath` prints
-  `.githooks`; if it doesn't, run `.githooks/enable-sign-off.sh`. Claude Code
-  runs it at session start (`.claude/settings.json`), and so does Codex
-  (`.codex/hooks.json`) in a trusted project, once David has trusted that hook
-  in `/hooks`. If it reports leaving the hook off, write the trailer yourself,
-  last. While `core.commentChar` is `auto`, the hook refuses every commit, since
-  it can't know the comment character `git commit` picks: set the character
-  explicitly, or make the commit with the opt-in unset and the trailer written
-  by hand.
-- Don't use `git commit -s`, which signs off as the committer
-  (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
-  skips the hook. The hook signs nothing while a rebase or a cherry-pick is in
-  progress, rewords, amends and continuations included, and a plain
-  `git revert` doesn't run it: for a revert, use `git revert --no-commit` and
-  then `git commit`.
-- Don't sign a commit from before the certification took effect, or a rebase,
-  cherry-pick or amend of one: it still needs David's certification for its
-  PR's head. Unset the opt-in to amend one outside a rebase
-  (`env -u BUSTER_DCO_SIGN_OFF git commit --amend`) or to commit its changes
-  again another way (`git cherry-pick --no-commit`), and to commit outside
-  material whose provenance the PR can't record; then say so in the PR.
+- **Local Git:** before the first commit of an authorized session, run
+  `sh .githooks/enable-sign-off.sh --maintainer-session`. It remembers the
+  opt-in in the checkout and installs `.githooks` without replacing existing
+  hooks. A present `BUSTER_DCO_SIGN_OFF` overrides the checkout setting: only
+  `davidgmbb` enables signing; `off`, empty or any other value disables it, so
+  a checkout opt-out applies only when no enabling environment value is
+  present. The setting covers every commit in the checkout, by any author;
+  disable it before another contributor uses the checkout. See CONTRIBUTING.md
+  for revocation and provenance.
+- **Commit messages:** `.githooks/commit-msg` adds the trailer once, after
+  existing trailers. Do not duplicate it, use `git commit -s` with an agent's
+  committer identity, or bypass hooks with `--no-verify`. If setup reports a
+  custom-hook conflict, append the trailer yourself, last, without replacing
+  those hooks. With `core.commentChar` or `core.commentString` set to `auto`,
+  select an explicit comment prefix; the hook refuses to guess.
+- **GitHub connector/API:** local hooks do not run. Include the exact trailer
+  in every new commit message yourself, once and last, preserving true
+  author/committer attribution, and read it back. A PR-body statement alone is
+  not a commit sign-off.
+- **History and provenance:** preserve existing trailers during rebases and
+  cherry-picks; the hook adds none while those operations are in progress. Do
+  not newly certify pre-policy commits, their rebases/cherry-picks/amends,
+  existing unsigned commits via the new routes, or material whose provenance
+  the PR cannot record. Suppress the automatic trailer with
+  `BUSTER_DCO_SIGN_OFF=off` for an out-of-scope amend or `--no-commit` commit.
+  Report a genuine gap in the PR. For a new in-scope revert use
+  `git revert --no-commit` then `git commit`.
 
 ## Host and output scope
 
@@ -374,6 +383,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-calling-convention --cross-check
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
+./build/compiler test-emission-metadata
 ./build/compiler benchmark-backend
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
@@ -425,6 +435,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-diagnostics, benchmark-diagnostics` — `diagnostic.c` — [guide](docs/commands/determinism.md).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
+- `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
@@ -448,6 +459,8 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
 - `benchmark-link` — `link_benchmark.c` — [guide](docs/commands/link-benchmark.md).
 - `test-lowering, benchmark-lowering-source` — `c_lowering.c` — [guide](docs/commands/lowering.md).
+- `measure-lowering-templates` — `c_check_lower_inventory.c` — [guide](docs/commands/lowering.md#node-templates-1048).
+- `test-lowering-templates` — `c_check_program_templates.c` — [guide](docs/commands/lowering.md#node-templates-1048).
 - `test-object-writer, benchmark-object-writer` — `object_writer.c` — [guide](docs/commands/object-writer.md).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
 - `parallel, test-parallel` — `parallel.c` — [guide](docs/commands/parallel.md).
@@ -462,7 +475,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-tier0, benchmark-backend, benchmark-backend-source` — `tier0.c` — [guide](docs/commands/tier0.md).
 - `test-tier1-select, test-tier1-pipeline, test-tier1-masks` — `tier1_select.c` — [guide](docs/commands/tier1.md).
 - `test-tier1-allocation, benchmark-tier1-allocation` — `tier1_allocate.c` — [guide](docs/commands/tier1-allocation.md).
-- `allocation certificate checks` — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
+- `benchmark-tier1-certificate`, allocation certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
 - `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
 - `test-tier1-frame, test-tier1-frame-execution` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
 - `test-tier1-schedule, benchmark-tier1-schedule` — `tier1_schedule.c` — [guide](docs/commands/tier1-schedule.md).

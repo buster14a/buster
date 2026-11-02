@@ -294,6 +294,128 @@ static void tier1_cert_test_xors(Tier1CertInstruction* code, uint32_t a, uint32_
     code[2] = tier1_cert_test_edit(TIER1_CERT_XOR, a, a, b);
 }
 
+// Recipe operands (BUSTER_CERT_RECIPE): a use that is its value's integer
+// recipe itself (an immediate) and a definition no location keeps, and
+// integer recipes of the vector and opmask classes, each materialized only
+// into a register of its own class.
+static void tier1_cert_test_recipe_operands(Tier1CertTest* test)
+{
+    Tier1CertFixture f;
+    tier1_cert_test_init(&f);
+    f.values[2].recipe = TIER1_CERT_INTEGER_RECIPE;
+    f.values[2].payload = 42;
+    tier1_cert_test_use(&f, 0, 2, 0, false);
+    f.source[0][0].operands[0].flags = BUSTER_CERT_RECIPE;
+    f.code[0][0].locations[0] = BUSTER_CERT_NONE;
+    tier1_cert_test_pair(test, &f, 1, "a use the source allows to be its recipe, as an immediate");
+    f.source[0][0].operands[0].flags = BUSTER_CERT_MEMORY;
+    tier1_cert_test_pair(test, &f, 0, "a recipe operand the source doesn't allow");
+    f.source[0][0].operands[0].flags = BUSTER_CERT_RECIPE;
+    f.values[2].recipe = TIER1_CERT_NO_RECIPE;
+    tier1_cert_test_pair(test, &f, 0, "a recipe operand of a value without a recipe");
+    f.values[2].recipe = TIER1_CERT_FRAME_RECIPE;
+    f.values[2].dependency = 0;
+    f.values[2].stable = true;
+    f.values[2].payload = 16;
+    tier1_cert_test_pair(test, &f, 0, "a frame recipe as an operand, which needs its base");
+
+    tier1_cert_test_init(&f);
+    f.values[2].recipe = TIER1_CERT_INTEGER_RECIPE;
+    f.values[2].payload = 42;
+    tier1_cert_test_def(&f, 0, 2, 0);
+    f.source[0][0].operands[0].flags = BUSTER_CERT_RECIPE;
+    f.code[0][0].locations[0] = BUSTER_CERT_NONE;
+    tier1_cert_test_pair(test, &f, 1, "a definition no location keeps, left to its recipe");
+    f.code[0][f.blocks[0].code_count++] = (Tier1CertInstruction){
+        .immediate = 42,
+        .a = 2,
+        .value = 2,
+        .op = TIER1_CERT_CONSTANT,
+    };
+    tier1_cert_test_use(&f, 0, 2, 2, false);
+    tier1_cert_test_pair(test, &f, 1, "a recipe definition's value materialized before its use");
+    f.code[0][1] = tier1_cert_test_edit(TIER1_CERT_MOVE, 2, 0, 0);
+    tier1_cert_test_pair(test, &f, 0, "a recipe definition's use without its materialization");
+    f.source[0][0].operands[0].flags = 0;
+    f.code[0][1] = (Tier1CertInstruction){
+        .immediate = 42,
+        .a = 2,
+        .value = 2,
+        .op = TIER1_CERT_CONSTANT,
+    };
+    tier1_cert_test_pair(test, &f, 0, "a definition without a location the source doesn't allow");
+
+    tier1_cert_test_init(&f);
+    f.values[2].recipe = TIER1_CERT_INTEGER_RECIPE;
+    f.values[2].payload = 42;
+    f.source[0][0] = (Tier1CertSource){
+        .opcode = 99,
+        .use_count = 1,
+        .def_count = 1,
+    };
+    f.source[0][0].operands[0] = tier1_cert_test_operand(2);
+    f.source[0][0].operands[0].flags = BUSTER_CERT_RECIPE;
+    f.source[0][0].operands[1] = tier1_cert_test_operand(3);
+    f.source[0][0].operands[1].tie = 1;
+    f.code[0][0] = (Tier1CertInstruction){
+        .opcode = 99,
+        .locations = { BUSTER_CERT_NONE, 2 },
+        .operand_count = 2,
+        .op = TIER1_CERT_ORIGINAL,
+    };
+    f.blocks[0].source_count = 1;
+    f.blocks[0].code_count = 1;
+    tier1_cert_test_pair(test, &f, 0, "a definition tied to a recipe operand");
+    f.source[0][0].operands[1].tie = 0;
+    tier1_cert_test_pair(test, &f, 1, "an untied definition beside a recipe operand");
+
+    tier1_cert_test_init(&f);
+    f.values[2] = (Tier1CertValue){
+        .payload = 7,
+        .width = 16,
+        .class = TIER1_CERT_VECTOR,
+        .recipe = TIER1_CERT_INTEGER_RECIPE,
+    };
+    f.values[3] = (Tier1CertValue){
+        .payload = 9,
+        .width = 2,
+        .class = TIER1_CERT_MASK,
+        .recipe = TIER1_CERT_INTEGER_RECIPE,
+    };
+    f.code[0][0] = (Tier1CertInstruction){
+        .immediate = 7,
+        .a = 9,
+        .value = 2,
+        .op = TIER1_CERT_CONSTANT,
+    };
+    f.code[0][1] = (Tier1CertInstruction){
+        .immediate = 9,
+        .a = 12,
+        .value = 3,
+        .op = TIER1_CERT_CONSTANT,
+    };
+    f.blocks[0].code_count = 2;
+    tier1_cert_test_use(&f, 0, 2, 9, false);
+    tier1_cert_test_use(&f, 0, 3, 12, false);
+    tier1_cert_test_pair(test, &f, 1, "vector and opmask constants materialized in their own classes");
+    f.code[0][1].a = 13;
+    tier1_cert_test_pair(test, &f, 0, "an opmask constant materialized into another register than its use reads");
+    f.code[0][1].a = 12;
+    f.values[3].width = 16;
+    f.values[3].class = TIER1_CERT_VECTOR;
+    f.code[0][1].a = 10;
+    f.source[0][1].operands[0].value = 3;
+    f.code[0][3].locations[0] = 10;
+    tier1_cert_test_pair(test, &f, 1, "two vector constants in two registers");
+    f.code[0][0].a = 10;
+    tier1_cert_test_pair(test, &f, 0, "a vector constant overwritten by another before its use");
+    f.code[0][0].a = 9;
+    f.values[2].width = 8;
+    f.values[2].class = TIER1_CERT_GPR;
+    f.values[2].payload = 7;
+    tier1_cert_test_pair(test, &f, 0, "a general constant materialized into a vector register");
+}
+
 static void tier1_cert_test_cases(Tier1CertTest* test)
 {
     Tier1CertFixture f;
@@ -552,6 +674,7 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     };
     f.blocks[0].code_count = 2;
     tier1_cert_test_pair(test, &f, 0, "wrong materialized constant");
+    tier1_cert_test_recipe_operands(test);
     f.values[2].recipe = TIER1_CERT_FRAME_RECIPE;
     f.values[2].dependency = 0;
     f.values[2].stable = true;

@@ -49,8 +49,12 @@ retain the body's source declaration, rather than pretending to map an IR
 index back to a token.
 
 Selection keeps its refused operation separately. The emitter's optional
-`Tier1EmitDiagnostic` preserves nested liveness, IR CFG, allocator and frame
-errors before its public error wraps them; the outcome keeps both codes.
+`Tier1EmitDiagnostic` preserves nested liveness, IR CFG, allocator, frame and
+allocation-certificate errors before its public error wraps them; the outcome
+keeps both codes. The certificate checker runs only where `--verify` asks for
+it (`Tier1EmitOptions.certify`, #939). Its refusal (`TIER1_EMIT_CERTIFICATE`,
+cause `certificate`) is an allocation the allocator got wrong, so it is
+internal; its capacity is a resource failure.
 Neither the diagnostic nor the refused result borrows an arena pointer.
 
 Failure restores the publication arena, clears code/count outputs, and

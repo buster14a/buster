@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+// Original issue #1135 fixtures. Exercise the retained policy, not just directive acceptance, through both
+// parser schedules and tree-only input. The unsupported surface must continue to fail closed.
+
+static void check_test_pragma_extension_history(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source =
+        "#pragma fenv_access(on)\ndouble file_on;\n"
+        "#pragma clang fp contract(fast)\n#pragma float_control(precise, on)\n"
+        "double f(void){\n#pragma fenv_access(off)\ndouble local_off=0;{\n"
+        "#pragma STDC FENV_ACCESS ON\ndouble inner_on=0;}double restored_off=0;return 0;}double restored_on;\n"
+        "#pragma fenv_access(off)\ndouble file_off;\n"
+        "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n";
+    const uint8_t kinds[] = { CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_PRECISE,
+                             CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FENV_ACCESS,
+                             CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_FP_CONTRACT };
+    const uint8_t states[] = { 1, 2, 1, 0, 1, 0, 1, 0 };
+    const char* names[] = { "file_on", "local_off", "inner_on", "restored_off", "restored_on", "file_off" };
+    const uint8_t expected[] = { 1, 0, 1, 0, 1, 0 };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    Arena arena = arena_reserve(UINT64_C(1) << 16);
+    Arena scratch = arena_reserve(UINT64_C(1) << 16);
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && arena.base != 0 && scratch.base != 0 && pp_run_source(&pp, "pragma-extension-history.c", (const uint8_t*)source, strlen(source));
+    check_test_expect(test, ready, "FP extension history fixture initializes");
+    for (uint32_t schedule = 0; ready && schedule < 4; schedule += 1)
+    {
+        const ParseOptions parse_options = { .scalar = (schedule & 1) != 0, .tree_only = (schedule & 2) != 0 };
+        const bool parsed = parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        const bool retained = parsed && parser.tokens.pragma_count == BUSTER_ARRAY_LENGTH(kinds);
+        check_test_expect(test, retained, "all eight FP extension/STDC directives are retained on every parser schedule");
+        const uint64_t arena_capacity = arena.capacity;
+        const uint64_t scratch_capacity = scratch.capacity;
+        uint64_t required = 31;
+        if (retained)
+        {
+            arena.length = 0;
+            scratch.length = 0;
+            memset(arena_push(&arena, arena.capacity, 1), 0xa5, arena.capacity);
+            memset(arena_push(&scratch, scratch.capacity, 1), 0x5a, scratch.capacity);
+        }
+        for (uint32_t pass = 0; retained && pass < 3; pass += 1)
+        {
+            const uint64_t attempts = pass == 1 ? required - 31 : 1;
+            for (uint64_t limit = 0; limit < attempts; limit += 1)
+            {
+                arena.length = 31;
+                arena.capacity = pass == 1 ? 31 + limit : arena_capacity;
+                scratch.length = 29;
+                scratch.capacity = pass == 2 ? 29 : scratch_capacity;
+                uint8_t handled[BUSTER_ARRAY_LENGTH(kinds)] = { 0 };
+                CheckInput input = { .graph = { .capacity = parser.tokens.count * 2 } };
+                CheckInputReader reader = { .output = &input, .parser = &parser, .pp = &pp, .arena = &arena, .scratch = &scratch };
+                const bool valid = check_input_fp_pragmas(&reader, handled);
+                if (pass == 0)
+                {
+                    required = arena.length;
+                    const bool published = valid && !input.resource && input.fp_pragma_count == BUSTER_ARRAY_LENGTH(kinds) &&
+                                           input.fp_pragmas != 0 && input.fp_environments != 0 && input.cx_limited_ranges != 0 &&
+                                           input.graph.fp_environments != 0;
+                    check_test_expect(test, published && scratch.length == 29, "FP extensions initialize poisoned policy storage and restore scratch");
+                    if (published)
+                    {
+                        for (uint32_t pragma = 0; pragma < BUSTER_ARRAY_LENGTH(kinds); pragma += 1)
+                        {
+                            const CheckInputFpPragma* record = input.fp_pragmas + pragma;
+                            check_test_expect(test, handled[pragma] == 2 && record->kind == kinds[pragma] && record->environment == states[pragma] &&
+                                                   record->valid && record->warnings == 0 && record->pragma == pragma &&
+                                                   record->source_begin == parser.tokens.pragma_sources[pragma] &&
+                                                   record->source_end > record->source_begin && record->source_end <= pp.output.count &&
+                                                   record->token == parser.tokens.pragma_positions[pragma] && record->scope_end <= parser.tokens.count &&
+                                                   ((record->scope != BUSTER_CHECK_NONE) == (pragma == 3 || pragma == 4)),
+                                              "FP extension records retain exact state, scope, spelling span and source order");
+                        }
+                        uint32_t found = 0;
+                        for (uint32_t token = 0; token < parser.tokens.count; token += 1)
+                        {
+                            const uint32_t name = parser.tokens.names[token];
+                            for (uint32_t item = 0; name != 0 && item < BUSTER_ARRAY_LENGTH(names); item += 1)
+                            {
+                                if (intern_length(&identifiers, name) == strlen(names[item]) && memcmp(intern_bytes(&identifiers, name), names[item], strlen(names[item])) == 0)
+                                {
+                                    found += 1;
+                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0,
+                                                      "fenv_access and STDC settings share scope restoration without changing complex-range policy");
+                                }
+                            }
+                        }
+                        check_test_expect(test, found == BUSTER_ARRAY_LENGTH(names), "FP extension history visits every policy marker");
+                        bool zeroed = true;
+                        for (uint32_t node = 0; node < input.graph.capacity; node += 1)
+                        {
+                            zeroed &= input.graph.fp_environments[node] == 0;
+                        }
+                        check_test_expect(test, zeroed, "the retained graph policy column starts initialized before node construction");
+                    }
+                }
+                else
+                {
+                    bool untouched = true;
+                    for (uint32_t pragma = 0; pragma < BUSTER_ARRAY_LENGTH(handled); pragma += 1)
+                    {
+                        untouched &= handled[pragma] == 0;
+                    }
+                    check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 &&
+                                           input.fp_environments == 0 && input.cx_limited_ranges == 0 && input.graph.fp_environments == 0 &&
+                                           untouched && arena.length == 31 && scratch.length == 29,
+                                      "FP extension allocation failure publishes neither state nor handled marks");
+                }
+            }
+        }
+        arena.capacity = arena_capacity;
+        scratch.capacity = scratch_capacity;
+        parse_release(&parser);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+    arena_release(&scratch);
+    arena_release(&arena);
+}
+
+typedef struct CheckPragmaExtensionFixture CheckPragmaExtensionFixture;
+struct CheckPragmaExtensionFixture
+{
+    const char* source;
+    const char* loop_text;
+    CheckInputMessage message;
+    uint32_t records;
+    bool accepted;
+};
+
+static void check_test_pragma_extension_sources(CheckTest* test)
+{
+    static const CheckPragmaExtensionFixture fixtures[] =
+    {
+        { .source = "#pragma fenv_access(on)\ndouble f(double x){return x/3.0;}\n", .records = 1, .accepted = true },
+        { .source = "#pragma fenv_access(off)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n#pragma clang fp contract(fast)\nint x;\n", .records = 3, .accepted = true },
+        { .source = "#pragma float_control(precise, on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "int f(void){\n#pragma fenv_access(on)\n#pragma clang fp contract(off)\n#pragma float_control(precise, on)\nreturn 0;}\n", .records = 3, .accepted = true },
+        { .source = "#define ACCESS _Pragma(\"fenv_access(on)\")\nACCESS\ndouble f(double x){return x/3.0;}\n", .records = 1, .accepted = true },
+        { .source = "#define CONTRACT _Pragma(\"clang fp contract(fast)\")\nCONTRACT\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#define PRECISE _Pragma(\"float_control(precise, on)\")\nPRECISE\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma STDC FENV_ACCESS ON\n#pragma fenv_access(off)\nint x;\n", .records = 2, .accepted = true },
+        { .source = "#define fenv_access unused\n#pragma fenv_access(on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#define fp unused\n#pragma clang fp contract(on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#define STATE on\n#pragma fenv_access(STATE)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define on off\n#pragma fenv_access(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define off on\n#pragma fenv_access(off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define contract reassociate\n#pragma clang fp contract(off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define fast off\n#pragma clang fp contract(fast)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define precise except\n#pragma float_control(precise, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define on off\n#pragma float_control(precise, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define on off\n#undef on\n#pragma fenv_access(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma fenv_access(ON)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma fenv_access(default)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma fenv_access(on\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma fenv_access(on) trailing\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma fenv_access(\n#pragma fenv_access(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp contract(unknown)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp contract(off\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp contract(off) reassociate(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp reassociate(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(precise, off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(except, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(push)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(pop)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(precise, on, push)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(precise on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(precise, on) trailing\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int f(void){int x=0;\n#pragma fenv_access(on)\nreturn x;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int f(void){int x=0;\n#pragma clang fp contract(off)\nreturn x;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int f(void){int x=0;\n#pragma float_control(precise, on)\nreturn x;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "struct S{\n#pragma fenv_access(on)\nint x;};\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int x=\n#pragma fenv_access(on)\n1;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma GCC unroll 4\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
+        { .source = "#pragma GCC unroll 4\nint f(void){return 0;}\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
+        { .source = "int x;\n#pragma GCC unroll 4\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
+        { .source = "#pragma GCC unroll 4\n#pragma clang loop unroll_count(4)\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
+        { .source = "#pragma clang loop unroll_count(4)\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma clang loop' directive" },
+        { .source = "#pragma unroll 4\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma unroll' directive" },
+        { .source = "#pragma nounroll\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma nounroll' directive" },
+        { .source = "#pragma unroll_and_jam 4\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma unroll_and_jam' directive" },
+        { .source = "#pragma nounroll_and_jam\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma nounroll_and_jam' directive" },
+        { .source = "int f(void){\n#pragma GCC unroll 4\nreturn 0;}\n", .message = CHECK_INPUT_LOOP_PLACEMENT,
+          .loop_text = "expected a for, while, or do-while loop to follow '#pragma unroll'" },
+        { .source = "int f(int n){\n#pragma GCC unroll 4\nfor(int i=0;i<n;i++){}return n;}\n", .accepted = true },
+        { .source = "int f(int n){\n#pragma GCC unroll 0\nfor(int i=0;i<n;i++){}return n;}\n", .accepted = true },
+        { .source = "int f(int n){\n#pragma GCC unroll 1\nfor(int i=0;i<n;i++){}return n;}\n", .accepted = true },
+    };
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        const CheckPragmaExtensionFixture* expected = fixtures + fixture;
+        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+        ready = ready && pp_run_source(&pp, "pragma-extensions.c", (const uint8_t*)expected->source, strlen(expected->source));
+        check_test_expect(test, ready, "pragma extension source fixture preprocesses");
+        for (uint32_t schedule = 0; ready && schedule < 4; schedule += 1)
+        {
+            CheckTestTypes types = { 0 };
+            Arena arena = arena_reserve(UINT64_C(1) << 24);
+            Arena scratch = arena_reserve(UINT64_C(1) << 24);
+            const ParseOptions parse_options = { .scalar = (schedule & 1) != 0, .tree_only = (schedule & 2) != 0 };
+            const bool parsed = check_test_types_open(&types) && arena.base != 0 && scratch.base != 0 &&
+                                parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+            CheckInput input = { 0 };
+            const bool adapted = parsed && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+            const bool accepted = parsed && !input.resource && adapted && input.report_count == 0;
+            const bool rejected = parsed && !input.resource && input.report_count != 0 && input.reports[0].message == expected->message;
+            check_test_expect(test, expected->accepted ? accepted && input.fp_pragma_count == expected->records : rejected, expected->source);
+            if (expected->loop_text != NULL)
+            {
+                check_test_expect(test, rejected && input.loop_diagnostic != NULL && input.loop_diagnostic->pragma == 1 &&
+                                       input.loop_diagnostic->message == expected->message && strcmp(input.loop_diagnostic->text, expected->loop_text) == 0,
+                                  "loop placement diagnostics preserve the original pragma family and earliest source order");
+                if (expected->message == CHECK_INPUT_LOOP_HINT)
+                {
+                    check_test_expect(test, input.loop_diagnostic != NULL &&
+                                                 input.loop_diagnostic->source ==
+                                                     parser.tokens.pragma_sources[input.loop_diagnostic->pragma - 1] + 1,
+                                      "file-scope loop diagnostics point at the directive");
+                }
+            }
+            parse_release(&parser);
+            check_test_types_close(&types);
+            arena_release(&scratch);
+            arena_release(&arena);
+        }
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
+static void check_test_pragma_extensions(CheckTest* test)
+{
+    check_test_pragma_extension_history(test);
+    check_test_pragma_extension_sources(test);
+}
