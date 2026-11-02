@@ -94,6 +94,8 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
     char saved[256];
     char reference[256];
     char header[256];
+    char valued[256];
+    char missing[256];
     char label[256];
     snprintf(source, sizeof(source), "%s/hardening-driver.c", directory);
     snprintf(output, sizeof(output), "%s/hardening-driver.out", directory);
@@ -101,6 +103,16 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
     snprintf(reference, sizeof(reference), "%s/hardening-driver.reference", directory);
     const bool written = parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(saved, sentinel, sizeof(sentinel) - 1);
     check_test_expect(test, written, "hardening source and output sentinel are written");
+    // The refusal happens before the source is read: a missing source does not replace the hardening diagnostic.
+    snprintf(missing, sizeof(missing), "%s/hardening-driver-missing.c", directory);
+    unlink(missing);
+    unlink(output);
+    char* missing_text = NULL;
+    char* missing_arguments[] = { (char*)executable, "-c", "-o", output, missing, (char*)"-ftrapv", NULL };
+    const int missing_status = check_test_driver_spawn(missing_arguments, &missing_text);
+    check_test_expect(test, missing_status == 1 && missing_text != NULL && strstr(missing_text, "unsupported code generation option '-ftrapv'") != NULL && access(output, F_OK) != 0,
+                      "a hardening request is refused before the source is read");
+    free(missing_text);
     for (uint32_t flag = 0; written && flag < BUSTER_ARRAY_LENGTH(reported); flag += 1)
     {
         const char* options[] = { reported[flag] };
@@ -143,6 +155,16 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
         const int status = check_test_driver_spawn(late, &text);
         check_test_expect(test, status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0, "hardening after the source retains the first unsupported spelling");
         free(text);
+        // An output name that spells one of these options is a value, not a request.
+        snprintf(valued, sizeof(valued), "%s/%s", directory, reported[flag]);
+        unlink(valued);
+        char* value_arguments[] = { (char*)executable, "-c", "-o", valued, "-std=gnu17", source, NULL };
+        text = NULL;
+        const int valued_status = check_test_driver_spawn(value_arguments, &text);
+        snprintf(label, sizeof(label), "hardening %s as an output name is a value", reported[flag]);
+        check_test_expect(test, valued_status == 0 && access(valued, F_OK) == 0, label);
+        free(text);
+        unlink(valued);
         // A consumed option value is a filename, even when it spells one of these options.
         snprintf(header, sizeof(header), "%s/%s", directory, reported[flag]);
         const bool header_written = parse_test_write(header, "\n", 1);

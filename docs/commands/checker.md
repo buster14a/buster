@@ -78,10 +78,12 @@ unknown values never silently select a weaker default.
 Only the complete spellings `-ftrivial-auto-var-init=uninitialized`,
 `-fzero-call-used-regs=skip`, `-fsanitize-coverage=0` and `-mcmodel=small` are
 admitted as the existing inactive/default behavior. Negative flags retain their
-existing handling. As with the other refusal-table options, any unsupported
-request is an error even when a later option requests an inactive/default form;
-this is not Clang's last-option-wins policy. The diagnostic retains the first
-unsupported spelling.
+existing handling. Within these families, any unsupported request is an error
+even when a later option requests an inactive/default form; this is not
+Clang's last-option-wins policy. Unlike `-fstack-protector*` and
+`-fcf-protection=*`, which are resolved separately and do honor a later
+disabling spelling, a later inactive spelling cannot cancel an earlier request.
+The diagnostic retains the first unsupported spelling from this refusal table.
 
 Refusal happens before reading a translation unit or opening an output, for
 both tiers, the scalar and vector paths, `-c`, direct linking and the explicit
@@ -92,7 +94,8 @@ filenames, not hardening requests.
 
 `c_check_hardening_driver_test.c`, included in `test-checker-driver --executable
 ./build/compiler`, checks all six reported options, missing and existing output
-files, both tiers and paths, non-emitting actions, malformed/auxiliary forms,
-option-looking filenames and exact inactive defaults. This closes these option
-families, not the driver's entire unknown `-f`/`-m` acceptance policy; the wider
-allowlist audit and #1112, #1123 and #1124 remain separate work.
+files, a missing source, option-looking include and output names, both tiers
+and paths, non-emitting actions, malformed/auxiliary forms and exact inactive
+defaults. This closes these option families, not the driver's entire unknown
+`-f`/`-m` acceptance policy; the wider allowlist audit and #1112, #1123 and
+#1124 remain separate work.

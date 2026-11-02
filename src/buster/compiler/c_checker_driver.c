@@ -3243,8 +3243,9 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
         unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
     }
     // These complete spellings request the behavior already emitted. Do not use prefix matches for exemptions:
-    // e.g. -mcmodel=small-bogus and -fzero-call-used-regs=skip,all must still be refused by name. Like the other
-    // refusal-table options, an earlier unsupported request is not cancelled by a later inactive spelling.
+    // e.g. -mcmodel=small-bogus and -fzero-call-used-regs=skip,all must still be refused by name. Within these
+    // families, an earlier unsupported request is not cancelled by a later inactive spelling; the stack-protector
+    // and CET families are resolved separately and do honor a later disabling spelling.
     static const char* const inactive[] = {
         "-ftrivial-auto-var-init=uninitialized",
         "-fzero-call-used-regs=skip",
