@@ -581,6 +581,14 @@ that poison every caller-saved register (`tier1_call_test.c`):
   each call-save store loaded back before the code branches, returns or traps
   (`tier1_emit_test_saves_loaded`).
 
+Measured with #1116's 32-bit moves ([the record](https://github.com/buster14a/buster-performance/tree/f33ee4f927a8ac3d31402ea0fc51c95874e5d754/docs/measurements/tier1-code-quality-1116-2026-11-02)):
+
+- **Lua 5.4.8 by `--tier1 -c`:** `call_stores` go from 4,940 to 2,575, `call_loads` from 4,940 to 4,289, and `.text` from
+  289,595 to 265,526 bytes.
+- **The frozen `sqlite3.c`:** `call_stores` go from 13,929 to 8,370.
+- **speedtest1 by `--tier1`, on the 9700X:** 2.0% fewer instructions and 1.2% less time.
+- **Compile time:** `--tier1 -c` of `sqlite3.c` takes 0.1% more instructions, for the scan.
+
 An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value
 is stays the allocation's, which `tier1_cfg_verify` checks unchanged. The cost is a scan of each node's uses and transitions while some
