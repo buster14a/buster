@@ -119,8 +119,8 @@ static bool run(char* const* arguments)
 // ADDITIONS*i + (0+...+ADDITIONS-1). Summing i=0..FUNCTIONS-1 is independent of the emitted loop/CFG execution.
 // One construct keeps the fixture mixed: widen's long double, which Tier 1's selection refuses (the x87's values; #141
 // took the SSE floating values that anchored it before, and #789 the variadic definition beside it, which still reads
-// its unnamed argument through its incoming frame). The matrix skips with status 77, naming this file, if a later
-// Tier 1 covers it too.
+// its unnamed argument through its incoming frame). The matrix fails, naming this file, if a later Tier 1 covers it
+// too: a skip (77) let both earlier anchors go stale unnoticed, so the change that lifts the refusal re-anchors it.
 static bool write_sources(void)
 {
     const unsigned n = BUSTER_MULTICORE_FUNCTIONS;
@@ -369,11 +369,11 @@ static int matrix(const char* compiler, unsigned maximum)
     }
     if (!mixed)
     {
-        printf("multicore: %u cohorts; requested and observed teams 1..%u; SKIP (Tier 1 covered every function)\n",
+        printf("multicore: %u cohorts; requested and observed teams 1..%u; FAIL (Tier 1 covered every function)\n",
                cohorts, maximum);
         fprintf(stderr, "multicore: the mixed-tier fixture is stale: Tier 1 compiled every function; re-anchor it in "
-                        "tests/driver/multicore.c and docs/multicore-acceptance.md\n");
-        return 77;
+                        "tests/driver/multicore.c and docs/multicore-acceptance.md on a construct Tier 1 still refuses\n");
+        return 1;
     }
     printf("multicore: %u cohorts; requested and observed teams 1..%u; PASS\n", cohorts, maximum);
     return 0;
