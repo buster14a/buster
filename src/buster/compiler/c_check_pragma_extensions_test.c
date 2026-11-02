@@ -222,7 +222,9 @@ static void check_test_pragma_extension_sources(CheckTest* test)
                                   "loop placement diagnostics preserve the original pragma family and earliest source order");
                 if (expected->message == CHECK_INPUT_LOOP_HINT)
                 {
-                    check_test_expect(test, input.loop_diagnostic != NULL && input.loop_diagnostic->source == parser.tokens.pragma_sources[0] + 1,
+                    check_test_expect(test, input.loop_diagnostic != NULL &&
+                                                 input.loop_diagnostic->source ==
+                                                     parser.tokens.pragma_sources[input.loop_diagnostic->pragma - 1] + 1,
                                       "file-scope loop diagnostics point at the directive");
                 }
             }
