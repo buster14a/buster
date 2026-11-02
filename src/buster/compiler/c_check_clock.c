@@ -126,8 +126,9 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
 
 // The lowering's phases inside its stage (#1048), whose TSC ticks the emission adds to the clock (check_clock_lower):
 // check_lower_prepare's; and on one lane, each part's (check_lower_part) bodies' statements, their controls and tasks'
-// loops; the rest of its bodies' walks, their frames, parameters, locals, labels and columns' copies; and its calling
-// conventions and its functions' validation (tier0_validate).
+// loops; the rest of its bodies' walks, their frames, parameters, locals, labels and columns' copies; and its ABI rows
+// (the calls' and the locations', the signatures' checks and each function's parameters and result), abi_assign and its
+// functions' validation (tier0_validate).
 typedef enum CheckClockLower
 {
     CHECK_CLOCK_LOWER_PREPARE,
@@ -154,12 +155,15 @@ static const char* const check_clock_phase_names[] = {
 };
 
 #define BUSTER_CHECK_CLOCK_PHASES (sizeof(check_clock_phase_names) / sizeof(check_clock_phase_names[0]))
-// The preprocessor's rows are the first, its main loop the last of them; the lowering's follow.
+// The preprocessor's rows are the first, its main loop the last of them; the lowering's follow, CheckClockLower's and the
+// rest, which the report's last row of each run assumes.
 #define BUSTER_CHECK_CLOCK_PREPROCESS_PHASES 5u
 #define BUSTER_CHECK_CLOCK_LOWER_FIRST BUSTER_CHECK_CLOCK_PREPROCESS_PHASES
+_Static_assert(BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_COUNT + 1 == BUSTER_CHECK_CLOCK_PHASES,
+               "every phase of the lowering has a row, and its stage's rest one more");
 
 // The stage each row is inside, which the report's readers group them by (measure-compile, the tests).
-static __attribute__((unused)) const CheckStage check_clock_phase_stages[BUSTER_CHECK_CLOCK_PHASES] = {
+static const CheckStage check_clock_phase_stages[BUSTER_CHECK_CLOCK_PHASES] = {
     CHECK_STAGE_PREPROCESS,
     CHECK_STAGE_PREPROCESS,
     CHECK_STAGE_PREPROCESS,

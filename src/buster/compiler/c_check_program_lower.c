@@ -1971,6 +1971,7 @@ static bool check_lower_resolve_labels_scalar(const uint8_t* kinds, uint64_t* va
 
 _Static_assert(BUSTER_TYPED_BRANCH_FALSE < BUSTER_TYPED_JUMP_VALUE && BUSTER_TYPED_JUMP_VALUE - BUSTER_TYPED_BRANCH_FALSE == 3,
                "the branches' kinds are four, in a row");
+_Static_assert(BUSTER_TYPED_JUMP_VALUE <= UCHAR_MAX, "the branches' kinds are bytes, as the kinds' compares take them");
 
 // The same, the kinds 64 at a time: a mask of the branches among them, whose entries then take their targets in order,
 // rather than a compare and a branch an entry, which the branches' places in the entries make mispredicted. The loads
@@ -11065,7 +11066,7 @@ struct CheckLowerPart
     uint64_t template_fast;
     uint64_t template_mismatches;
     // The TSC's ticks of its bodies' statements (their controls and tasks' loops), of the rest of its bodies' walks, and
-    // of its calling conventions and functions' validation: --time-stages' lower.statements, lower.bodies and
+    // of its ABI rows, abi_assign and functions' validation: --time-stages' lower.statements, lower.bodies and
     // lower.validate (check_clock_lower).
     uint64_t statement_ticks;
     uint64_t body_ticks;
@@ -11139,8 +11140,9 @@ static bool check_lower_local_declaration(const CheckInput* input, uint32_t toke
 
 // The counts of the program's nodes that bound the lowering's room (check_lower_prepare): its builtins (the integer
 // ones too, whose recipes share a pool), the nodes that may lower an atomic access (an atomic builtin, or a node whose type
-// or whose update's destination is _Atomic), and the C library's calls of a libm builtin of a vector, one a lane, with
-// their arguments (check_lower_vector_calls).
+// or whose update's destination is _Atomic), and the C library's calls of a vector's libm builtin or strict round
+// (check_lower_strict_round: __builtin_elementwise_round under FENV_ACCESS), one a lane, with their arguments
+// (check_lower_vector_calls).
 typedef struct CheckLowerNodeCounts CheckLowerNodeCounts;
 struct CheckLowerNodeCounts
 {

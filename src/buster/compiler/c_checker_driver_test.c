@@ -3085,14 +3085,19 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, object_report && stages[CHECK_STAGE_ENCODE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] > 0 && stages[CHECK_STAGE_EXECUTABLE] == 0 &&
                                 stages[CHECK_STAGE_LANES] == 0,
                       "--time-stages -c reports every stage once, adding up to its total, its functions on one lane");
-    // The lowering's rows (#1048), which add up to its stage: its preparation's reads the whole unit, <stdio.h>'s too.
+    // The lowering's rows (#1048), which add up to its stage: each measured, not left to the rest's row. Its preparation
+    // reads the whole unit, <stdio.h>'s too, and on one lane each of the two functions' statements, the rest of its walk
+    // and its validation take some time of their own.
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double read_stages[CHECK_STAGE_COUNT] = { 0 };
     double read_total = 0;
     double read_walk = 0;
     check_test_expect(test, object_report && check_clock_read(text, read_stages, phases, &read_total, &read_walk, NULL) &&
-                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_PREPARE] > 0,
-                      "--time-stages -c reports the lowering's preparation inside its stage");
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_PREPARE] > 0 &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_STATEMENTS] > 0 &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_BODIES] > 0 &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_VALIDATE] > 0,
+                      "--time-stages -c reports the lowering's preparation, statements, bodies and validation inside its stage");
     check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
     uint64_t expression_nodes = 0;
     uint64_t batch_nodes = 0;

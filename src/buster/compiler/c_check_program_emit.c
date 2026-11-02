@@ -1722,7 +1722,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
         valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
         check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
-        shared.timed = stage_clock != NULL;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
@@ -1914,6 +1913,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
             }
             run.stage_clock = stage_clock;
+            // The parts read the TSC for the lowering's rows on one lane alone, whose clock takes them; on several, the
+            // lanes' run is one stage, and they read none (CheckLowerShared.timed, false since check_lower_prepare).
+            shared.timed = stage_clock != NULL;
             check_program_emit_alone(&run);
         }
     }

@@ -2366,10 +2366,14 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
             if (built)
             {
                 // The lowering's bounds' node counts (check_lower_node_counts), by 16 ops at a time, are their scalar twin's.
+                // A fixture named for the ops' masks has no _Atomic kind in its type table, so that they, not the rules,
+                // take it.
                 const CheckLowerNodeCounts twin = check_lower_node_counts_scalar(&program);
                 const CheckLowerNodeCounts counted = check_lower_node_counts(&program);
+                const bool atomic_kinds = memchr(types.table.types.kind, BUSTER_TYPE_KIND_ATOMIC, types.table.types.count) != NULL;
                 check_test_expect(test, counted.builtins == twin.builtins && counted.integer_builtins == twin.integer_builtins && counted.atomics == twin.atomics &&
-                                            counted.lane_calls == twin.lane_calls && counted.lane_arguments == twin.lane_arguments,
+                                            counted.lane_calls == twin.lane_calls && counted.lane_arguments == twin.lane_arguments &&
+                                            (strstr(name, "node-counts-masks") == NULL || (!atomic_kinds && twin.atomics != 0)),
                                   "the lowering's node counts are their scalar twin's");
                 uint32_t writes = 0;
                 for (uint32_t i = 0; i < program.control_count; i += 1)
@@ -4945,6 +4949,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int o;return (int)(w[0]+p[1])+__builtin_popcount(n)+__builtin_add_overflow(n,1,&o)+(int)__builtin_fabs((double)n);}",
             "node-counts-vector-libm", true, true, 0, 3);
         check_test_program_boundary(test, "_Atomic int a;int tested(int n){a+=n;int x=a;return x+__builtin_popcount(n);}", "node-counts-atomic-type", true, true, 1, 1);
+        // The atomic builtins on plain objects, which the ops' masks count (no _Atomic kind in the table).
+        check_test_program_boundary(test,
+            "signed char a;unsigned long d;int tested(int n){__atomic_store_n(&a,n-120,5);__atomic_store_n(&d,(unsigned long)n+9,3);"
+            "__atomic_thread_fence(5);__sync_synchronize();int x=__atomic_load_n(&a,0);return x+(int)__atomic_fetch_add(&d,1,5);}",
+            "node-counts-masks-atomic-builtins", true, true, 2, 1);
         check_test_program_boundary(test, "int tested(int n){return (int)__builtin_sqrt(n+4);}", "math-runtime-symbol-rollback", true, true, 0, 0);
         check_test_program_boundary(test, "double __errno_location(void);int tested(int n){return (int)__builtin_sqrt(n+4);}",
                                     "incompatible-errno-accessor-function", true, false, 0, 0);

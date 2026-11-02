@@ -460,7 +460,8 @@ Before the bodies, `check_lower_prepare` bounds the writers' room by counts
 over every node of the unit's graph: its builtins (the integer ones too, which
 share a recipe pool), the nodes that may lower an atomic access (an atomic
 builtin, or a node whose type or whose update's destination is `_Atomic`), and
-the C library's calls of a vector's libm builtins, one a lane. Its loop read
+the C library's calls of a vector's libm builtins and strict rounds
+(`__builtin_elementwise_round` under `FENV_ACCESS`), one a lane. Its loop read
 both types' kinds through `type_strip_aligned` for every node. callgrind on
 `sqlite3.c` (#136's options, a baseline build of main at `171d6301`) counts
 49.1 M instructions in `check_lower_prepare`, 19.6 M of them that loop's,
@@ -474,8 +475,9 @@ unit without one reads no node's type, and a unit with one takes the rules
 for every node. A vector builtin's node takes the rules for its lane calls.
 The loop is the scalar twin (`check_lower_node_counts_scalar`, which
 `--scalar` takes), and `test-checker` compares the two on every boundary
-fixture of its program tests, among them a vector's libm builtins and an
-`_Atomic` global.
+fixture of its program tests, among them a vector's libm builtins, an
+`_Atomic` global (the rules) and the atomic builtins on plain objects (the
+masks, whose fixture's table the test requires to have no `_Atomic` kind).
 
 After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
 take their targets: their labels' entries. The loop compared every entry's
@@ -492,7 +494,12 @@ On the 9700X (`measure-compile`'s medians of 11 runs on `sqlite3.c`), the
 `lower` stage went from 13.541 ms (13.472 to 13.603, #1143's last run at
 `425f57c7`) to 12.485 ms (12.399 to 12.708) with both, and perf's share of
 `check_lower_prepare`'s own samples from 1.46% to 0.75% of the compile's.
-`--time-stages`' rows (#1048) then split the stage:
+`--time-stages`' rows (#1048) then split the stage, on one lane (the step pins
+the compile to one CPU; on several lanes the parts' time is the `lanes`
+stage's), each row its own median, so that they add up to 12.508 ms, 0.023 ms
+more than the stage's median. That run's `--time-stages` costs 0.588 ms
+(0.51%) of the default compile's median wall time, against 0.196 ms (0.10%)
+in the compile-time guide's older figure, which later splits compare with:
 
 | row | ms | of `lower` |
 | --- | ---: | ---: |
