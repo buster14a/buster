@@ -682,8 +682,17 @@ They are sparse columns now (`c_check_sparse.c`):
   empty directory entry, then takes, fills and publishes the block; another
   lane's write waits for it. A read of a claimed entry reads block 0, which is
   right, as the reading lane hasn't written its own token there yet.
+  - The lanes take blocks one after another, so two lanes' first fills can fall
+    in one fresh 2 MB region of the pool. As with the rare columns
+    (`check_input_rare_claim`, #764, #847), the first lane to fill a block in a
+    region claims it and faults it in, and the others wait
+    (`check_sparse_region`), so no two lanes clear a huge page for it at once.
+  - A shared pool's directories are cleared on the reading's own thread, so
+    their pages are in place before the lanes start.
 - **The deferred merge** maps `string_ids` at its entries by
-  `check_sparse_entries`, which skips 16 tokens without a block with one load.
+  `check_sparse_entries`, which skips 16 tokens without a block with one load,
+  and loads a block's values in its lane's range alone: a neighboring lane
+  writes the others of a block that straddles the range's end.
 
 The reader's own six NONE columns (`activate`, `first_value` and the others), in
 the scratch, are filled a column at a time on the vector path too, as the
@@ -693,7 +702,10 @@ its one loop over every token.
 `test-checker`'s scans test checks the columns against columns of a value a
 token at every count to 200: random writes, every token's value, every 16
 tokens' vector at every start, the masks and the entries' lists by both paths,
-with the directory ending at a `PROT_NONE` page. The tests that build a
+with the directory ending at a `PROT_NONE` page. Three lanes then write one
+shared pool's columns at once, interleaved tokens of the same blocks, and scan
+and write their own ranges, which start and end inside blocks: every value, every
+block taken once, and every region's claim settled. The tests that build a
 `CheckInput` by hand build its sparse columns from their values.
 
 On the 9700X, CPU 2 under the host's lock, main `dac5b770` against the change

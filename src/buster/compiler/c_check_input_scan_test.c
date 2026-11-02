@@ -279,7 +279,7 @@ static void check_test_sparse_lane_writes(void* argument)
         }
     }
     lane_sync();
-    const uint32_t begin = (uint32_t)((uint64_t)(lanes->count + 1) * lane / lanes->lanes) | 5;
+    const uint32_t begin = lane == 0 ? 0 : (uint32_t)((uint64_t)(lanes->count + 1) * lane / lanes->lanes) | 5;
     const uint32_t end = lane + 1 == lanes->lanes ? lanes->count + 1 : (uint32_t)((uint64_t)(lanes->count + 1) * (lane + 1) / lanes->lanes) | 5;
     bool scanned = true;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lanes->columns); c += 1)
