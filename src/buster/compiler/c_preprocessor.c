@@ -19820,8 +19820,8 @@ static bool pp_print_spellings(const Preprocessor* pp, const uint32_t* directory
     for (uint64_t bits = result ? read : 0; bits != 0; bits &= bits - 1)
     {
         const uint32_t k = (uint32_t)__builtin_ctzll(bits);
-        first = _mm512_mask_set1_epi8(first, _blsi_u64(bits), (char)spellings[k][0]);
-        last = _mm512_mask_set1_epi8(last, _blsi_u64(bits), (char)spellings[k][lengths[k] - 1]);
+        first = _mm512_mask_set1_epi8(first, 1ull << k, (char)spellings[k][0]);
+        last = _mm512_mask_set1_epi8(last, 1ull << k, (char)spellings[k][lengths[k] - 1]);
     }
     _mm512_store_si512(firsts, first);
     _mm512_store_si512(lasts, last);
