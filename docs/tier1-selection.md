@@ -132,6 +132,48 @@ patterns are:
   stub's where that edge has one (`tier1_emit_cfg_labels`), since the jump
   enters it through the label's address. A `br_indirect` that can go to one label
   alone jumps there.
+- Floating values (#141): `F32` and `F64` in the vector class's registers that
+  the CFG consumer allocates, by SSE2's scalar forms, the baseline target's
+  (`TIER1_RULE_FLOAT_CONSTANT` to `TIER1_RULE_FLOAT_RETURN`). A constant is zero's
+  `xorps`, or its bits through the scratch register (`mov`, then `movd` or
+  `movq`), and an integer constant's conversion is the floating constant it
+  converts to. A copy is a `movaps`. Addition, subtraction, multiplication and
+  division are the two-operand `ss` or `sd` forms, the right operand from memory
+  where it folds a load, as an integer's. A negation `xorps` the sign bit, which
+  the scratch register moves into xmm15. Loads and stores are one `movss` or
+  `movsd`, folded through their addresses as an integer's. A comparison's truth
+  value is `ucomis`, `setcc` and `movzx`, where `<` and `<=` swap their operands
+  so that `seta` and `setae` are false for unordered ones; `==` and `!=` combine
+  `sete` or `setne` with the parity flag's `setnp` or `setp`, by `and` or `or`,
+  since unordered operands set ZF too. A branch on `<`, `<=`, `>` or
+  `>=` folds the comparison into `ja` or `jae`, and its negation through C's
+  truth values into `jbe` or `jb`, which are true for unordered operands as
+  `!(a > b)` is: the unsigned conditions, whose negations the integer table
+  already has. `==` and `!=` read the parity flag too, which one jump can't, so
+  a branch tests their truth value. The conversions from and to integers of 8
+  to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
+  sign-extended into the scratch register first and an unsigned `I32` converted
+  as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
+  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
+  zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
+  alone, which would otherwise wait for the register's last writer. An unsigned
+  64-bit integer's conversions, whose values past `INT64_MAX` no single
+  conversion takes, are sequences of the fixed-register path's room
+  (`TIER1_RULE_FLOAT_CONVERT_WIDE`, through the scratch registers alone). To a
+  floating value, the source converts as a signed value where its sign bit is
+  clear. Otherwise it is halved with its last bit kept as a sticky bit, so
+  rounding the half rounds the source, then converted, and `paddq` or `paddd`
+  adds 1 to the result's exponent. From a floating value, the result is the
+  signed conversion's, or, where that is 2^63 (the value is 2^63 or more), 2^63
+  ORed with the truncation of the value less 2^63: the negation of the
+  truncation of 2^63 less the value. A return moves its value into xmm0. Still
+  refused: `F80` (the x87's) and a select of floating values.
+- Call arguments and parameters take their places by the System V classes
+  (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
+  the six general argument registers, the k-th floating value in xmm k of eight,
+  and each one past its class's registers in the stack's next slot. A variadic
+  call's `al` is the number of vector registers its arguments take, an
+  aggregate's xmm parts among them (`AbiCall.vector_registers`).
 - Variadic definitions (#789): the anchors that `va_start`'s lowering reaches,
   the register save area and the overflow area. The save area is a frame object
   (`TIER1_RULE_STACK_ADDRESS`, folded into its users' memory operands like any
@@ -144,8 +186,64 @@ patterns are:
   RSP's reservation, the callee-saved registers the prologue pushed and the
   return address, plus the named arguments' stack bytes
   (`tier1_emit_cfg_incoming`). Every variadic definition that selection
-  accepts goes to the CFG consumer. A function with its own ABI records is
-  still refused whole.
+  accepts goes to the CFG consumer.
+- The dynamic stack (#141): `alloca` (`TIER1_RULE_ALLOCA`) rounds its size up to
+  the alignment rsp keeps, takes it from rsp and gives rsp as its address
+  (`lea d, [size + alignment - 1]`, `and d, -alignment`, `sub rsp, d`,
+  `mov d, rsp`), or with a constant size of up to 1 GB a `sub` of the rounded
+  constant (`TIER1_RULE_ALLOCA_IMMEDIATE`); `stack_save` copies rsp and
+  `stack_restore` sets it. The alignment is 16 bytes, or a realigned frame's,
+  which the CFG consumer sets in the holes' `scale`, so that rsp keeps the
+  alignment at every call after an allocation. An allocation and a restore are
+  memory barriers: no load folds past either. Every function with one is the CFG
+  consumer's, in a dynamic frame (the frame guide's "Frame and prologue rules"):
+  a frame pointer, its places rbp's (or r15's in a realigned frame), and each
+  call with stack arguments takes its outgoing area, its stack bytes rounded up
+  to the alignment, from rsp before its stores and gives it back after it
+  returns (`tier1_emit_cfg_call_area`).
+- By-value aggregates (#789): a call or a function with ABI records takes each
+  argument and parameter where its record says (`tier1_select_argument_place`,
+  `tier1_select_parameter_place`): a scalar in its register or stack slot, and
+  an aggregate, whose IR value is a pointer to its bytes, in registers as parts
+  of up to 8 bytes (`tier1_select_parts`: a general or an xmm register per
+  eightbyte) or on the stack whole (up to 512 bytes). A result in registers comes
+  back as parts in rax and rdx or xmm0 and xmm1, and one of the memory class
+  through the hidden pointer (up to 4,096 bytes for a function's own, which its
+  return copies). An aggregate parameter's value is its copy's address, a frame
+  object past the IR's slots that the entry fills from its registers, or its
+  stack slots in the incoming area, selected as a frame object's address
+  (`TIER1_RULE_STACK_ADDRESS`). Refused: a part LLVM puts in a stack slot
+  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part, the x87's
+  registers and a result LLVM demotes to a hidden pointer. Every function and
+  call with records goes to the CFG consumer. Before a call's moves, it copies
+  the call's aggregates from their addresses into their stack slots, or into the
+  red zone's staging slots, whose registers it loads after the moves. An address
+  in a slot, or recomputed, goes through the scratch register, with rax saved
+  below rsp, so its use needn't be required: a call may pass more aggregates than
+  its first allocation gives its uses registers. The consumer stores an
+  aggregate result's parts into the result object, the call's into operand's
+  frame object, byte for byte, and points rdi at it for a hidden pointer. A
+  return loads the parts staged below rsp (the frame stays out of the red zone),
+  or copies the bytes through the hidden pointer that the entry stored, which
+  rax returns.
+- Arguments and parameters past the registers (#141): a call takes up to
+  sixteen `I32`, `I64` or pointer arguments, and a function up to sixteen such
+  parameters (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`); those past the sixth are in
+  the stack's 8-byte slots. A variadic call's unnamed argument has its value's
+  type (`tier1_select_argument_type`), since `call_types` holds only the fixed
+  parameters' types. The CFG consumer takes every function with one, as follows.
+  - A call's argument past the registers needn't be in a register at the call.
+    The call stores it into its slot of the outgoing area, before its own moves:
+    from its register, from its spill slot through R11, or recomputed into R11
+    (`tier1_emit_cfg_stack_argument`). The frame planner reserves the area for
+    the calls' most stack bytes.
+  - A parameter past the registers is defined at the entry without a register.
+    After the register parameters' moves, the entry loads it from its incoming
+    slot into its first fragment's register, or through R11 into its own slot
+    (`tier1_emit_cfg_entry`). A narrow one is zero-extended as it loads. The
+    incoming slots are 16 bytes past RBP where the frame has a frame pointer, a
+    realigned frame's among them, and otherwise past RSP's reservation and the
+    return address (`tier1_emit_cfg_incoming`).
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and
 four-byte spill slots. Their logical memory widths remain one/two bytes.
@@ -241,9 +339,65 @@ groups ready nodes by depth. All nodes in a depth are ready before the next
 depth begins. Candidate generation checks the bounded C patterns and their
 operand, type, immediate, memory-order and single-use constraints.
 
-The vector path chooses the cheapest candidate for sixteen independent ready
-nodes at a time, with unsigned comparisons over contiguous cost columns. The
-final batch is masked. A reverse node pass then marks what the code computes:
+The vector path covers the integer core by bottom-up rewriting
+(`tier1_select_burs.c`, #141's design: Pelegrí-Llopart and Graham's BURS, as
+iburg and burg build it). Its grammar is a C table of 69 patterns, each
+a nonterminal's derivation from an operator and its children's nonterminals, or
+from another nonterminal, at the structural cost below; a pattern stands for one
+candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
+an immediate, a scaled index, a truth value's link) folding into its root's. Its
+eighteen nonterminals are a statement, a register, the constants' classes (an
+immediate, a lea's scale, a power of two, 3, 5 or 9, a shift's count, zero, a
+disp32), a load a consumer folds, a shift a lea scales, addresses without an
+index and with one, an index, and the comparisons a branch or a truth value
+takes, integer and floating, and their zero extensions.
+
+`tier1_select_initialize` compiles the grammar into state tables once, by burg's
+algorithm: a state is each nonterminal's cheapest rule and its cost, normalized
+to the cheapest and closed under the chain rules; each operator's child position
+projects a child's state onto the nonterminals the operator reads there (its
+representer); and each operator's table gives the state of each pair of
+representers. The grammar isn't finite-state as it stands (a chain of additions
+grows a register's cost against a fold's zero without bound), so normalized
+costs saturate at 8, past which a difference no longer picks another rule in
+these patterns. The tables have 582 states, 172 rules, at most 57
+representers in an operator's position and a pool of 18,705 16-bit entries for
+the operators' maps and tables (as `test-tier1-select` prints them), and are in
+the baked section (`baked.c`), so a compile starts with them built; `--tier1`
+and `test-baked-tables` build them where the executable isn't baked. The bound
+and table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gives 346 states, 23
+representers and 11,418 entries, and 16 gives 1,430 states, past the tables'
+1,024, so that its build's bake fails.
+
+A plan then takes four passes over the function's nodes, each 16 nodes a
+vector with an exact scalar twin (`tier1_burs_*_scalar`):
+
+1. classes: each node's operator, from its IR operation and type and what the
+   candidates' rules read of its operands (a constant's class bits, whether a
+   right operand is a constant, a load or a shift, whether a load folds into its
+   single user past no barrier, whether an address's displacement fits 32 bits);
+   and its visible children, those a pattern may fold (a tree child, a constant,
+   or a frame object's single address in the entry block), any other operand
+   being the register leaf's state. A frame object's address, and an address
+   whose constant index or offset doesn't fit 32 bits, take the scalar rule;
+2. labels: each node's state, a table lookup on its operator and its children's
+   representers, gathered, a depth level at a time;
+3. rules: each node's rule for its goal, a statement's or a register's;
+4. patterns: the node's candidate of its rule's kind, which
+   `tier1_select_candidates`' walks fill (`tier1_burs_pick`). A node of an
+   operator the grammar doesn't cover (calls, phis, floating arithmetic, masks
+   and the rest) takes maximal munch's, made for every such node in the levels'
+   order, as the scalar twin makes every node's, so that a node either path
+   refuses is refused at the same place; the covered nodes' patterns are made
+   as the walk below needs them. A rule whose candidate the walks didn't make (a
+   walk past `BUSTER_TIER1_SELECT_WALK`) takes munch's too.
+
+The cover is the cheapest the grammar has for each tree, and the grammar has
+every candidate the generator makes for the operators it covers, so it is never
+costlier than munch's. On Lua 5.4.8's 1,081 functions as `--tier1` plans them,
+80,411 of 98,565 nodes take their rule's candidate and 42 munch's.
+
+A reverse node pass then marks what the code computes:
 the nodes with an effect (stores, calls, terminators, volatile loads), the
 parameters, the phis and their operands, the nodes nothing uses (an unused load
 or division the optimizer kept for the fault it may raise), and each value a
@@ -273,12 +427,9 @@ division by a constant's reciprocal costs 7, below `div`'s 8, though its records
 (up to 13) may outnumber `div`'s, since `div`'s and `idiv`'s latency, which no
 count of records sees, is the larger.
 
-Candidate generation, depth construction, top-down covering and metadata
-emission still use scalar loops. This is a working bounded bottom-up selector,
-not the full startup-compiled pattern-state automaton proposed by #141. The
-benchmark exposes the difference between a narrow dependency chain and a wide
-ready frontier. No scalar-stage performance exemption is claimed before the
-approved-host evidence and representative source workloads exist.
+Candidate generation for the patterns the walk needs, depth construction and
+metadata emission still use scalar loops. The benchmark exposes the difference
+between a narrow dependency chain and a wide ready frontier.
 
 ## Records and downstream consumers
 
@@ -372,6 +523,7 @@ A division and a shift by a register keep their functions on the CFG consumer, a
 before the helper (`tier1_emit_cfg_chain`).
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
+(sixteen through the CFG consumer, those past the sixth on the stack: #141)
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
 ID in `immediate`; its three ordinary value holes are empty. Its complete
 ordered argument list is the effective-use CSR slice, including duplicates.
@@ -403,10 +555,12 @@ and encoding, publish them through `link_add_code_fixups` with the encoder's
 instruction ends. The references retain instruction indices, not guessed byte
 offsets. The older frameless `tier1_select_emit` API still rejects call plans.
 
-Indirect and variadic calls, stack arguments, and floating-point and aggregate
-arguments/results are outside this bounded path. Calls in general CFGs, loops
-among them, go through the CFG consumer, which saves the registers of values
-live past each call. Neither establishes acceptance of source functions.
+Indirect and variadic calls, arguments and parameters past the registers, and
+floating-point and aggregate arguments/results are outside this bounded path.
+Calls in general CFGs, loops among them, and functions with arguments or
+parameters past the registers or floating ones (#141) go through the CFG
+consumer, which saves the registers of values live past each call. Neither establishes acceptance of
+source functions.
 Unsupported calls and allocation/target/capacity errors publish no partial
 result. Correct execution of these component fixtures does not establish
 atomic-builtin, full-source ABI or corpus acceptance.
@@ -562,6 +716,28 @@ unsupported operations, missing allocation, target exclusion and arena
 exhaustion. Empty functions and guarded, unpadded columns cover lengths around
 16 and 32 lanes; wide frontiers and dependency chains cover distinct groupings.
 
+The bottom-up rewrite has checks of its own (`tier1_select_burs_test.c`, in
+`test-tier1-select`): the tables' invariants (the register leaf's state first,
+every state's rule of a nonterminal one that derives it, every map and table
+entry a state, each constant class deriving exactly its nonterminals); the
+labeling and the rule choice against their scalar twins on 64 rounds of random
+columns, with child states drawn from every state, 16-lane tails and lone
+levels; the IR's text fixtures (`tests/ir`, `tests/ir/optimize`); and addresses
+around a disp32's edges, constant indices and offsets inside and past 32 bits at
+every scale, among them pairs past it whose sum fits. On each function
+(`tier1_burs_check_function`) the vector classifier's classes and visible
+children must be the scalar one's, both kernels' states and rules alike, and
+every node of a class the grammar covers must have a candidate. The same check
+runs on every function `test-tier1-pipeline` plans and every function
+`benchmark-tier1-select-source` selects, outside its time, where a difference
+fails the benchmark. The plan's `costs` column is the scalar path's subtree
+costs, which `test-tier1-select` and `test-tier1-pipeline` check against the
+definition worked out from the function alone (`tier1_select_test_plan_costs`).
+Nothing reads it after the plan, and the bottom-up path, which makes a pattern
+before its tree children's, leaves its children's costs out: working them out
+again children first took selection on the frozen `sqlite3.c` from 222.9 core
+cycles per IR instruction to 241.3 on the 9700X (`Tier1SelectPlan`'s header).
+
 `test-tier1-select --manifest` writes CSV with separate origins for actual
 `plan` emission, direct `expansion` fixtures and test `wrapper` records. Every
 record includes form, mnemonic, all memory/register/immediate fields, model ID
@@ -633,7 +809,7 @@ refuses, or either path's selection refuses, is left out of both and counted;
 any other failure fails the command, which then reports no time. `--only` times
 one path alone, and `--after-scalar MS` runs the scalar path before each of the
 vector path's passes. Of the frozen `sqlite3.c`'s 2,668 functions, both paths
-select the 2,181 that the driver's `--tier1-report` gives Tier 1 (244,036 IR
+select the 2,666 that the driver's `--tier1-report` gives Tier 1 (478,163 IR
 instructions).
 
 Run each build, test and measurement on the approved 9700X under its shared
@@ -669,18 +845,31 @@ heads and at its merge with main, `cc3387f`:
   12.6. In user-space instructions, `--tier1` runs 4,413 M of speedtest1
   against Tier 0's 5,694 M and clang -O2's 2,010 M, and 8,749 M of Lua's
   scripts against 10,763 M and 4,281 M. Each program's hottest function
-  (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
+  (`sqlite3VdbeExec`, `luaV_execute`) was still Tier 0's then; with floating
+  values and blocks' lifetimes (#141) both are Tier 1's, as every function of
+  `sqlite3.c` but the two 128-bit multiplies is.
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
-  the frozen `sqlite3.c`: 243 by the vector path and 253 by the scalar twin,
-  since the plan no longer verifies the optimizer's verified result
-  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01));
-  with that verification they were 338 and 340.
+  the frozen `sqlite3.c`, since the bottom-up rewrite (medians of five processes
+  of both paths interleaved, CPU 2): 225.0 by the vector path and 277.2 by the
+  scalar twin, against 261.7 and 275.2 at `d1e8a5f` before it, on its 2,666
+  functions (478,163 IR instructions); the vector path's instructions per IR
+  instruction 503.2 against 690.0, the twin's 751.6 against 747.3. On #1001's
+  2,181 functions they were 243 and 253 once the plan stopped verifying the
+  optimizer's verified result
+  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01)),
+  and 338 and 340 with that verification. `--tier1 -c` of the frozen
+  `sqlite3.c` took 475.2 ms against 476.6 (`ab` of `time-runs`, 5 rounds of 21
+  runs), 6,345.3 M instructions against 6,438.6 M, and its 2,666 functions'
+  records are 346,741 against 346,753; speedtest1's and Lua's code by `--tier1`
+  ran alike (3,865.1 M instructions in speedtest1 by both)
+  ([record](https://github.com/buster14a/buster-performance/tree/e73dcc345d67ef236098d29757c7218d0aeb86e8/docs/measurements/tier1-burs-lifetimes-141-2026-11-02),
+  with commit 6's blocks' lifetimes and the review's measurements).
 - **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
   `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
   others fail in clang's own steps (links past the small code model, which
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-Full pattern-state generation, the remaining scalar/ABI/spill consumers, and
-whole-C integration (the functions selection refuses whole: switches and
-aggregates by value among them) are outstanding.
+The remaining scalar/ABI/spill consumers and whole-C integration (the
+functions selection refuses whole, as `sqlite3.c`'s `sqlite3Multiply128` and
+`sqlite3Multiply160`, a constant of each) are outstanding.

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // BUSTER_BAKED puts a variable in the executable's buster_baked section (#590): the state the backend's initializers
-// write (x86_encoder_initialize's table for x86_encode, x86_semantics_initialize's, tier0_initialize's and
-// unwind_initialize's), which build.sh has the linked executable write into its own file (bake-tables, baked.c), so
+// write (x86_encoder_initialize's table for x86_encode, x86_semantics_initialize's, tier0_initialize's,
+// unwind_initialize's and tier1_select_initialize's), which build.sh has the linked executable write into its own file (bake-tables, baked.c), so
 // that a compile starts with it built rather than building it. The section is writable data with file bytes: a process
 // reads its pages from the page cache, shared with every other process, as they are touched, and an executable that
 // isn't baked (a PIE, or one linked without build.sh) builds them as before. BUSTER_BAKED is for the state main.c's

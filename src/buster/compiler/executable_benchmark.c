@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The direct path's executable benchmark: what executable_write costs on generated programs, phase by phase, against
 // the file write's floor; and the kernels it rests on: the patch kernel and the variants measured against it, and the
@@ -37,6 +38,7 @@
 // The exit status is 1 if the arguments are invalid, the lanes don't start, a variant's bytes differ, the runtime
 // doesn't import, or a link fails.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -1222,7 +1224,7 @@ int run_executable_benchmark(int argc, char** argv);
 
 int run_executable_benchmark(int argc, char** argv)
 {
-    const char* directory = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* directory = oracle_temporary_directory();
     uint32_t functions[BUSTER_EXECUTABLE_BENCHMARK_MAX_PROGRAMS];
     uint32_t program_count = BUSTER_ARRAY_LENGTH(executable_benchmark_functions);
     memcpy(functions, executable_benchmark_functions, sizeof(executable_benchmark_functions));

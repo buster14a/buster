@@ -155,7 +155,12 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
   - Each position's first record clobbers the general class's scratch
     register: the selector's expansions use it (`BUSTER_TIER1_SELECT_SCRATCH`),
     so no value may stay there between moves.
-  - The phis are the edges' simultaneous renames.
+  - The phis are the edges' simultaneous renames. An undefined operand
+    (`BUSTER_TIER1_CFG_NONE`, the IR's undef that #141's blocks' lifetimes
+    give promotion) is a rename from `BUSTER_CERT_NONE`: any bits are the
+    phi's value along that edge, so its fact needs no proof there, which is
+    what `tier1_cfg_verify` checks of it too. The oracle makes every unit hold
+    such a destination after the edge.
   - A rematerializable value is an integer recipe of its class, with its own
     id as the payload.
 - **The allocation is untrusted.** Its stream is what the consumers run. Each

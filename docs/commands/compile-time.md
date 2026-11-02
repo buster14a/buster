@@ -11,10 +11,12 @@ requirements. [Command index](README.md).
   encoding, the object's build and write, the direct path's runtime, binding and write, with the write's phases on
   `time-write` lines (#778), the release; on several lanes their run is one stage, `lanes`), with its system time,
   page faults and peak resident set added, and the process's resource use, with the lanes its session asked for and
-  ran on (#905: `lanes-asked` and `lanes`) and whether transparent huge pages were off for it (#1109: `huge-pages`,
-  `off` or `system`; `lane.c`'s `arena_page_policy` turns them off on a virtual machine or by `BUSTER_HUGE_PAGES=0`,
-  and `BUSTER_HUGE_PAGES=1` leaves them as the system has them); off by default, its laps test a null pointer.
-  `measure-compile [--runs N] [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with and without the option and
+  ran on (#905: `lanes-asked` and `lanes`), whether transparent huge pages were off for it (#1109: `huge-pages`, `off`
+  or `system`; `lane.c`'s `arena_page_policy` turns them off on a virtual machine or by `BUSTER_HUGE_PAGES=0`, and
+  `BUSTER_HUGE_PAGES=1` leaves them as the system has them), and with `--check-transitions` the memoized transitions'
+  hits, misses, folds and entries (#1050: `time-check transition-*`); off by default, its laps test a null pointer.
+  `measure-compile [--runs N] [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with
+  and without the option and
   against a reference compiler (tcc), in a rotating order, with each stage's medians; the 9700X job runs it on
   `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.

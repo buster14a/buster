@@ -118,30 +118,122 @@ static bool memory_arenas(void)
     valid = valid && arena_push(&measure, UINT64_C(1) << 32, 64) != 0 && measure.length == (UINT64_C(1) << 32);
     arena_release(&measure);
 
+    return valid;
+}
+
+// The thread's pool (#152, #1128): what it hands out again is zero-filled, its committed prefix still writable if it
+// `keeps` commits (unless commit charge is bounded), and a reservation takes the smallest pooled mapping with room and
+// the same page layout, with its own capacity.
+static bool memory_pool(bool keeps)
+{
     ArenaPool pool = { 0 };
     arena_pool = &pool;
-    arena = arena_reserve(4 << 20);
-    bytes = arena_push(&arena, 4096, 1);
-    valid = valid && bytes != 0;
+    Arena arena = arena_reserve(4 << 20);
+    uint8_t* bytes = arena_push(&arena, 4096, 1);
+    bool valid = bytes != 0;
     if (bytes != 0)
     {
         memset(bytes, 0xff, 4096);
     }
     const uint8_t* address = arena.base;
     arena_release(&arena);
-    valid = valid && pool.count == 1 && !memory_writable(address);
-    arena = arena_reserve(4 << 20);
-    valid = valid && arena.base == address && arena.length == 0 && arena.peak == 0 && !memory_writable(address);
+    valid = valid && pool.count == 1 && pool.limits && pool.keeps_commits == keeps && memory_writable(address) == keeps;
+    // Within 64 KB, an arena has no huge pages: the 4 MB mapping, laid out for them, isn't one to take.
+    Arena tiny = arena_reserve(32 << 10);
+    valid = valid && tiny.base != 0 && tiny.base != address && pool.count == 1;
+    arena = arena_reserve(1 << 20);
+    valid = valid && arena.base == address && arena.capacity == (1 << 20) && arena.length == 0 && arena.peak == 0 && pool.count == 0 &&
+            memory_writable(address) == keeps;
     bytes = arena_push(&arena, 4096, 1);
-    valid = valid && bytes != 0;
+    valid = valid && bytes != 0 && arena_push(&arena, 1 << 20, 1) == 0;
     for (uint32_t i = 0; valid && i < 4096; i += 1)
     {
         valid = bytes[i] == 0;
     }
+    arena_release(&tiny);
+    arena_release(&arena);
+    arena = arena_reserve(4 << 20);
+    valid = valid && arena.base == address && arena.capacity == (4 << 20) && pool.count == 1;
+    bytes = arena_push(&arena, 3 << 20, 1);
+    valid = valid && bytes != 0 && bytes[0] == 0 && bytes[(3 << 20) - 1] == 0;
     arena_release(&arena);
     arena_pool = 0;
     arena_pool_release(&pool);
+    return valid && pool.count == 0 && !pool.limits;
+}
+
+// The pool's choice among several arenas (#1128): the smallest mapping with room, though released earlier than a
+// larger one; of equal mappings, the latest released; and only one with the reservation's base pages.
+static bool memory_pool_fit(void)
+{
+    ArenaPool pool = { 0 };
+    arena_pool = &pool;
+    Arena one = arena_reserve(1 << 20);
+    Arena four = arena_reserve(4 << 20);
+    Arena twin = arena_reserve(1 << 20);
+    const uint8_t* addresses[3] = { one.base, four.base, twin.base };
+    bool valid = one.base != 0 && four.base != 0 && twin.base != 0;
+    arena_release(&one);
+    arena_release(&four);
+    // With both in the pool, 512 KB takes the 1 MB mapping, though the 4 MB one was released after it.
+    Arena half = arena_reserve(512 << 10);
+    valid = valid && half.base == addresses[0] && half.capacity == (512 << 10) && pool.count == 1;
+    // With both in the pool again, 2 MB, which the 1 MB mapping hasn't room for, takes the 4 MB one.
+    arena_release(&half);
+    Arena two = arena_reserve(2 << 20);
+    valid = valid && two.base == addresses[1] && two.capacity == (2 << 20) && pool.count == 1;
+    arena_release(&twin);
+    Arena later = arena_reserve(1 << 20);
+    Arena earlier = arena_reserve(1 << 20);
+    valid = valid && later.base == addresses[2] && earlier.base == addresses[0] && pool.count == 0;
+    // A units lane's small unit starts its arenas with 16 MB of base pages (arena_small_floor): such a mapping isn't
+    // one for a reservation that starts with 64 KB, though it has room and huge pages past its head, but is for another
+    // with 16 MB.
+    Arena floored = arena_reserve_small(32 << 20, 16 << 20);
+    const uint8_t* head = floored.base;
+    arena_release(&floored);
+    Arena plain = arena_reserve(1 << 20);
+    valid = valid && head != 0 && plain.base != 0 && plain.base != head && pool.count == 1;
+    Arena again = arena_reserve_small(20 << 20, 16 << 20);
+    valid = valid && again.base == head && again.capacity == (20 << 20) && pool.count == 0;
+    Arena* held[] = { &two, &later, &earlier, &plain, &again };
+    for (uint32_t i = 0; i < sizeof(held) / sizeof(held[0]); i += 1)
+    {
+        arena_release(held[i]);
+    }
+    arena_pool = 0;
+    arena_pool_release(&pool);
     return valid;
+}
+
+// Whether pooled arenas keep their commits, read apart from arena_commit_unbounded, which the pool's test expects
+// against: RLIMIT_DATA infinite, and an overcommit policy other than strict (2).
+static bool memory_commit_unbounded(void)
+{
+    struct rlimit data;
+    int mode = 2;
+    FILE* stream = fopen("/proc/sys/vm/overcommit_memory", "r");
+    const bool parsed = stream != 0 && fscanf(stream, "%d", &mode) == 1;
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    return parsed && mode != 2 && getrlimit(RLIMIT_DATA, &data) == 0 && data.rlim_cur == RLIM_INFINITY;
+}
+
+// The pool where RLIMIT_DATA bounds commit charge, in a child: a pooled arena's prefix is inaccessible again.
+static bool memory_pool_bounded(void)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        struct rlimit data;
+        bool valid = getrlimit(RLIMIT_DATA, &data) == 0;
+        data.rlim_cur = data.rlim_max < (UINT64_C(1) << 40) ? data.rlim_max : (UINT64_C(1) << 40);
+        valid = valid && setrlimit(RLIMIT_DATA, &data) == 0 && !arena_commit_unbounded() && memory_pool(false);
+        _exit(valid ? 0 : 1);
+    }
+    return memory_wait(child, 0);
 }
 
 // The process's data charge (VmData), which RLIMIT_DATA bounds: private anonymous mappings' writable pages.
@@ -199,7 +291,8 @@ static bool memory_partial_commit(void)
             memset(first, 0xa5, 4096);
         }
         // A VMA boundary inside the next commit's span, at 4 MiB of the reservation; the first push's geometric
-        // commit already consumed the reservation's own NOHUGEPAGE head.
+        // commit already reaches the end of the base pages, past which the reservation has no advice of its own until a
+        // commit gets there.
         uint8_t* const tail = arena.base + (UINT64_C(64) << 10);
         const uint64_t boundary = (UINT64_C(4) << 20) - arena.mapping_offset;
         valid = valid && madvise(arena.base + boundary, UINT64_C(64) << 10, MADV_NOHUGEPAGE) == 0;
@@ -411,13 +504,16 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
 
 int main(int argc, char** argv)
 {
+    const bool valgrind = argc > 3 && strcmp(argv[3], "--valgrind") == 0;
+    const bool strict = argc > 3 && strcmp(argv[3], "--strict") == 0;
+    // --strict runs under vm.overcommit_memory 2, where pooled arenas mustn't keep their commits.
+    const bool keeps = memory_commit_unbounded();
     const bool arenas = memory_arenas();
+    const bool pool = !(strict && keeps) && memory_pool(keeps) && memory_pool_fit() && memory_pool_bounded();
     const bool partial = memory_partial_commit();
     const bool limited = memory_many_arenas();
     const bool layout = memory_layout_refusal();
-    const bool valgrind = argc > 3 && strcmp(argv[3], "--valgrind") == 0;
-    const bool strict = argc > 3 && strcmp(argv[3], "--strict") == 0;
     const bool commands = argc == 1 || (argc >= 3 && memory_commands(argv[1], argv[2], valgrind, strict));
-    printf("memory resources: arenas=%s partial=%s limited=%s layout=%s commands=%s\n", arenas ? "pass" : "FAIL", partial ? "pass" : "FAIL", limited ? "pass" : "FAIL", layout ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
-    return arenas && partial && limited && layout && commands ? 0 : 1;
+    printf("memory resources: arenas=%s pool=%s partial=%s limited=%s layout=%s commands=%s\n", arenas ? "pass" : "FAIL", pool ? "pass" : "FAIL", partial ? "pass" : "FAIL", limited ? "pass" : "FAIL", layout ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
+    return arenas && pool && partial && limited && layout && commands ? 0 : 1;
 }
