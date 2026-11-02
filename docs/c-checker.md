@@ -3330,15 +3330,19 @@ assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
 keeps a separate read that is not the target of the same compound assignment or
 increment.
 `-Wformat` checks the four `printf`-family names, a declaration's
-`format(printf, ...)` attribute, exact integer widths for every length modifier
-(`%lld`, `%zd`, `%jd`, `%td`, ...), `%n`'s integer pointer, each `*` field
-width's `int`, extra and insufficient arguments, and wide `%ls`/`%lc` (and
-`%S`/`%C`) arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal
-formats' common conversions and sizes. Its literal-internal diagnostics keep
-Clang's column and the diagnostic collector's source order.
+`format(printf, ...)` attribute, the exact integer type for every length
+modifier (`long` against `long long`, `%zd`, `%jd`, `%td`, ...), `%n`'s exact
+integer pointer (`signed char *`, `short *`, `int *`, `long *`, `long long *`),
+each `*` field width's `int` and `.*` field precision's `int`, extra and
+insufficient arguments, positional `%1$d`/`%2$d`, C23 `%b`/`%B`, and wide
+`%ls`/`%lc` (and `%S`/`%C`) arguments with a signed 32-bit `wchar_t` or
+`wint_t`, and literal formats' common conversions and sizes. Its
+literal-internal diagnostics keep Clang's column and the diagnostic collector's
+source order.
 `-Wunused-value` covers a bare identifier or literal, a parenthesized
-comparison, a cast, a conditional, and a two-operand comma expression as well
-as an unparenthesized comparison.
+comparison, a cast (including a typedef of `void`), a conditional, and a comma
+expression, parenthesized or not; a comma operand with a call, assignment or
+increment has an effect and does not get the left-operand warning.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -3347,10 +3351,11 @@ first declaration; a shadowing local use does not keep a file-scope variable
 used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
 but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
 `else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
-`while` or `?:` condition. The `-Wswitch` definition following the selector's
-tag accepts a fixed underlying type and the nearest shadowing definition. The
-return-flow walk runs for non-aggregate functions only where `-Wreturn-type` is
-enabled.
+`while` or `?:` condition; a write in that condition is a use of the parameter,
+not an unused-but-set statement write. The `-Wswitch` definition is the one its
+selector's tag type names, so a fixed underlying type and a shadowing tag in
+another scope resolve correctly. The return-flow walk runs for non-aggregate
+functions only where `-Wreturn-type` is enabled.
 
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
@@ -3358,9 +3363,11 @@ filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
 uninitialized evaluation contexts, static selections, self-initialization,
 read-modify-writes and VLA bounds, wide and width-mismatched formats, enum
 aliases, fixed-underlying and shadowing definitions, zero sign comparisons,
-array-member/nested/zero-length bounds, declaration chains, bare/parenthesized/
-cast/conditional/comma unused values, `for` conditions and returned stack
-addresses line for line against Clang on both check paths. The semantics are also covered by
+array-member/nested/zero-length bounds, declaration chains, scope-aware enum
+definitions, bare/parenthesized/cast/conditional/comma unused values with
+side-effect operands, `for` conditions and writes, positional/C23/exact/
+precision formats, and returned stack addresses line for line against Clang on
+both check paths. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
 

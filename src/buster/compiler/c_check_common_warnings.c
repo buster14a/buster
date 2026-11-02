@@ -274,6 +274,29 @@ static bool check_common_effect_role(uint8_t role)
 }
 
 // The parent of `token` is the operator whose right operand holds it; a parenthesized operand's parent is a group.
+static uint32_t check_common_opener(const Parser* parser, uint32_t closer);
+
+// Whether `token` writes the condition clause of a for, whose value the loop reads.
+static bool check_common_for_condition(const Parser* parser, uint32_t token, uint32_t parent)
+{
+    const uint32_t close = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR ? parent :
+                           parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
+                           parser->tree.parents[parent] < parser->tokens.count &&
+                           parser->tree.roles[parser->tree.parents[parent]] == PARSE_ROLE_CLOSE_FOR ? parser->tree.parents[parent] : BUSTER_CHECK_NONE;
+    bool result = false;
+    if (close < parser->tokens.count)
+    {
+        const uint32_t opener = check_common_opener(parser, close);
+        uint32_t semicolons = 0;
+        for (uint32_t at = opener != BUSTER_CHECK_NONE ? opener + 1 : 0; at < token; at += 1)
+        {
+            semicolons += parser->tokens.kinds[at] == PARSE_KIND_SEMI;
+        }
+        result = semicolons == 1;
+    }
+    return result;
+}
+
 static uint32_t check_common_parent(const Parser* parser, uint32_t token)
 {
     const uint32_t result = token < parser->tokens.count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
@@ -324,15 +347,38 @@ static uint32_t check_common_opener(const Parser* parser, uint32_t closer)
     return result;
 }
 
-static bool check_common_void_cast(const Parser* parser, Preprocessor* pp, uint32_t token)
+// Whether an expression range calls, assigns, or increments: a comma operand with one has an effect.
+static bool check_common_expression_has_effect(const Parser* parser, uint32_t first, uint32_t end)
 {
-    const bool result = token > 0 && token < parser->tokens.count && parser->tokens.kinds[token - 1] == PARSE_KIND_TYPE &&
-                        intern_length(pp->table, parser->tokens.names[token - 1]) == 4 &&
-                        memcmp(intern_bytes(pp->table, parser->tokens.names[token - 1]), "void", 4) == 0;
-    return result;
+    bool effect = false;
+    for (uint32_t at = first; at < end && at < parser->tokens.count; at += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const uint8_t kind = parser->tokens.kinds[at];
+        effect = role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_CLOSE_CALL ||
+                 kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS || kind == PARSE_KIND_EQUAL;
+        if (effect)
+        {
+            break;
+        }
+    }
+    return effect;
 }
 
-static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
+static bool check_common_void_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                   const TypeTable* types, uint32_t token)
+{
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool typed = node < input->graph.count && input->graph.ops[node] == CHECK_OP_CAST &&
+                       type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
+    const bool spelled = token > 0 && token < parser->tokens.count && parser->tokens.kinds[token - 1] == PARSE_KIND_TYPE &&
+                         intern_length(pp->table, parser->tokens.names[token - 1]) == 4 &&
+                         memcmp(intern_bytes(pp->table, parser->tokens.names[token - 1]), "void", 4) == 0;
+    return typed || spelled;
+}
+
+static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                     Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
     for (uint32_t token = 0; token < count; token += 1)
@@ -340,23 +386,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
         const uint8_t role = parser->tree.roles[token];
         const uint32_t parent = check_common_parent(parser, token);
         const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
-        bool for_condition = false;
-        if (role == PARSE_ROLE_ASSIGN && parser->tokens.kinds[token] == PARSE_KIND_EQUAL)
-        {
-            const uint32_t for_close = parent_role == PARSE_ROLE_CLOSE_FOR ? parent :
-                parent_role == PARSE_ROLE_TERMINATOR && parser->tree.parents[parent] < count &&
-                parser->tree.roles[parser->tree.parents[parent]] == PARSE_ROLE_CLOSE_FOR ? parser->tree.parents[parent] : BUSTER_CHECK_NONE;
-            if (for_close < count)
-            {
-                const uint32_t opener = check_common_opener(parser, for_close);
-                uint32_t semicolons = 0;
-                for (uint32_t at = opener != BUSTER_CHECK_NONE ? opener + 1 : 0; at < token; at += 1)
-                {
-                    semicolons += parser->tokens.kinds[at] == PARSE_KIND_SEMI;
-                }
-                for_condition = semicolons == 1;
-            }
-        }
+        const bool for_condition = role == PARSE_ROLE_ASSIGN && check_common_for_condition(parser, token, parent);
         if (role == PARSE_ROLE_ASSIGN && (parent_role == PARSE_ROLE_CLOSE_CONDITION || for_condition) && parser->tokens.kinds[token] == PARSE_KIND_EQUAL)
         {
             const CheckCommonNote notes[2] = {
@@ -410,7 +440,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 }
             }
         }
-        else if (role == PARSE_ROLE_SEPARATOR && parser->tokens.kinds[token] == PARSE_KIND_COMMA &&
+        else if ((role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_COMMA) && parser->tokens.kinds[token] == PARSE_KIND_COMMA &&
                  check_common_statement_terminator(parser, parent))
         {
             const uint32_t opener = check_common_group_opener(parser, parent);
@@ -423,12 +453,20 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                     break;
                 }
             }
-            if (!nested && opener != BUSTER_CHECK_NONE && opener + 1 < token && token + 1 < parent)
+            const uint32_t left = opener != BUSTER_CHECK_NONE && opener + 1 < token ? opener + 1 : token > 0 ? token - 1 : token;
+            const uint32_t right = token + 1 < parent ? token + 1 : token;
+            if (!nested && left < token && right < parent)
             {
-                check_common_report(parser, pp, input, opener + 1, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                    "left operand of comma operator has no effect", NULL, 0, scratch);
-                check_common_report(parser, pp, input, token + 1, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                    "expression result unused", NULL, 0, scratch);
+                if (!check_common_expression_has_effect(parser, left, token))
+                {
+                    check_common_report(parser, pp, input, left, CHECK_WARNING_ID_UNUSED_VALUE, false,
+                                        "left operand of comma operator has no effect", NULL, 0, scratch);
+                }
+                if (!check_common_expression_has_effect(parser, right, parent))
+                {
+                    check_common_report(parser, pp, input, right, CHECK_WARNING_ID_UNUSED_VALUE, false,
+                                        "expression result unused", NULL, 0, scratch);
+                }
             }
         }
         else if (role == PARSE_ROLE_OPEN_TERNARY && parent_role == PARSE_ROLE_CLOSE_TERNARY &&
@@ -439,7 +477,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
         }
         else if (check_common_statement_terminator(parser, parent) && check_common_effect_role(role) &&
                  role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY && role != PARSE_ROLE_RELATIONAL &&
-                 !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, pp, token)) &&
+                 !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, pp, input, stream, types, token)) &&
                  parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
                  parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS)
         {
@@ -800,19 +838,20 @@ static uint32_t check_common_format_index(String8 name)
     return result;
 }
 
-static bool check_common_format_integer(TypeTable* types, TypeId type, uint32_t required_width)
+static bool check_common_format_integer(TypeTable* types, TypeId type, uint32_t required_width, TypeId exact)
 {
     uint32_t width = 0;
     bool sign = false;
     // A narrower integer argument is promoted to int for the unspecified and h/hh lengths; the wider lengths need
-    // their exact width.
-    const bool result = check_action_integer_type(types, type, &width, &sign) &&
-                        (required_width == 32 ? width <= 32 : width == required_width);
+    // their exact type (long and long long share a width on x86-64).
+    bool result = check_action_integer_type(types, type, &width, &sign);
+    result = result && (exact != 0 ? type_unqualified(type_strip_aligned(types, type)) == exact :
+                        required_width == 32 ? width <= 32 : width == required_width);
     return result;
 }
 
-// A pointer to an integer of `required_width`, for `%n`.
-static bool check_common_format_integer_pointer(TypeTable* types, TypeId type, uint32_t required_width)
+// A pointer to the exact integer type of a `%n` conversion.
+static bool check_common_format_integer_pointer(TypeTable* types, TypeId type, TypeId exact)
 {
     TypeId element = type_unqualified(type_strip_aligned(types, type));
     if (type_kind(types, element) != BUSTER_TYPE_KIND_POINTER)
@@ -820,9 +859,7 @@ static bool check_common_format_integer_pointer(TypeTable* types, TypeId type, u
         return false;
     }
     element = type_unqualified(type_element(types, element));
-    uint32_t width = 0;
-    bool sign = false;
-    return check_action_integer_type(types, element, &width, &sign) && width == required_width;
+    return element == exact;
 }
 
 static bool check_common_format_width(TypeTable* types, TypeId type)
@@ -895,10 +932,11 @@ static const char* check_common_format_integer_expected(uint8_t conversion, char
     {
         return length_modifier == 'l' || conversion == 'C' ? "'wint_t' (aka 'unsigned int')" : "'int'";
     }
-    if (conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X')
+    if (conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X' || conversion == 'b' || conversion == 'B')
     {
-        return length_modifier == 'z' ? "'size_t' (aka 'unsigned long')" : length_modifier == 'l' || length_modifier == 'L' ? "'unsigned long'" :
-               length_modifier == 'j' ? "'uintmax_t' (aka 'unsigned long')" : length_modifier == 't' ? "'unsigned long'" : "'unsigned int'";
+        return length_modifier == 'z' ? "'size_t' (aka 'unsigned long')" : length_modifier == 'l' ? "'unsigned long'" :
+               length_modifier == 'L' ? "'unsigned long long'" : length_modifier == 'j' ? "'uintmax_t' (aka 'unsigned long')" :
+               length_modifier == 't' ? "'unsigned long'" : "'unsigned int'";
     }
     return length_modifier == 'z' ? "'signed size_t' (aka 'long')" : length_modifier == 'l' ? "'long'" : length_modifier == 'L' ? "'long long'" :
            length_modifier == 'j' ? "'intmax_t' (aka 'long')" : length_modifier == 't' ? "'ptrdiff_t' (aka 'long')" : "'int'";
@@ -988,15 +1026,15 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
 
 static void check_common_format_width_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                              TypeTable* types, const CheckGraph* graph, uint32_t offset, uint32_t argument, uint32_t format_token,
-                                             uint64_t literal_offset, Arena* scratch)
+                                             uint64_t literal_offset, bool precision, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
     const String8 actual = check_common_type_text(pp, types, scratch, type);
     if (actual.length != 0)
     {
-        const char* message = check_warning_text(scratch, "field width should have type 'int', but argument has type '%.*s'",
-                                                  (int)actual.length, actual.pointer);
+        const char* message = check_warning_text(scratch, "field %s should have type 'int', but argument has type '%.*s'",
+                                                  precision ? "precision" : "width", (int)actual.length, actual.pointer);
         if (message != NULL)
         {
             check_common_format_report_offset(parser, pp, input, format_token, literal_offset, CHECK_WARNING_ID_FORMAT, message, scratch);
@@ -1048,6 +1086,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 uint64_t length = input->strings[string].byte_count;
                 uint32_t argument = first_argument;
                 bool insufficient = false;
+                bool positional_format = false;
                 uint64_t insufficient_offset = 0;
                 for (uint64_t at = 0; at < length && !pp->fatal; at += 1)
                 {
@@ -1081,13 +1120,18 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
                         if (!check_common_format_width(types, width_type))
                         {
-                            check_common_format_width_report(parser, pp, input, stream, types, graph, offset, argument, format_token, at + 1, scratch);
+                            check_common_format_width_report(parser, pp, input, stream, types, graph, offset, argument, format_token, at + 1, false, scratch);
                         }
                         argument += 1;
                         at += 1;
                     }
                     while (at < length && bytes[at] >= '0' && bytes[at] <= '9')
                     {
+                        at += 1;
+                    }
+                    if (at < length && bytes[at] == '$')
+                    {
+                        positional_format = true;
                         at += 1;
                     }
                     if (at < length && bytes[at] == '.')
@@ -1105,13 +1149,18 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
                             if (!check_common_format_width(types, width_type))
                             {
-                                check_common_format_width_report(parser, pp, input, stream, types, graph, offset, argument, format_token, at + 1, scratch);
+                                check_common_format_width_report(parser, pp, input, stream, types, graph, offset, argument, format_token, at, true, scratch);
                             }
                             argument += 1;
                             at += 1;
                         }
                         while (at < length && bytes[at] >= '0' && bytes[at] <= '9')
                         {
+                            at += 1;
+                        }
+                        if (at < length && bytes[at] == '$')
+                        {
+                            positional_format = true;
                             at += 1;
                         }
                     }
@@ -1132,7 +1181,8 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         break;
                     }
                     const bool conversion_integer = conversion == 'd' || conversion == 'i' || conversion == 'u' || conversion == 'o' ||
-                                                    conversion == 'x' || conversion == 'X' || conversion == 'c' || conversion == 'C';
+                                                    conversion == 'x' || conversion == 'X' || conversion == 'b' || conversion == 'B' ||
+                                                    conversion == 'c' || conversion == 'C';
                     const bool conversion_string = conversion == 's' || conversion == 'S';
                     const bool wide = length_modifier == 'l' || conversion == 'S' || conversion == 'C';
                     const bool conversion_pointer = conversion == 'p';
@@ -1155,8 +1205,17 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         if (conversion_integer)
                         {
                             const bool character = conversion == 'c' || conversion == 'C';
+                            const bool unsigned_conversion = conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X' ||
+                                                             conversion == 'b' || conversion == 'B';
+                            TypeId exact = 0;
+                            if (!character)
+                            {
+                                exact = length_modifier == 'l' || length_modifier == 'z' || length_modifier == 'j' || length_modifier == 't' ?
+                                        (unsigned_conversion ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
+                                        length_modifier == 'L' ? (unsigned_conversion ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) : 0;
+                            }
                             const uint32_t required_width = character || length_modifier == 0 || length_modifier == 'h' || length_modifier == 'H' ? 32u : 64u;
-                            accepted = check_common_format_integer(types, type, required_width);
+                            accepted = check_common_format_integer(types, type, required_width, exact);
                             expected = check_common_format_integer_expected(conversion, length_modifier);
                         }
                         else if (conversion_string)
@@ -1176,9 +1235,12 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         else
                         {
-                            const uint32_t required_width = length_modifier == 0 || length_modifier == 'h' || length_modifier == 'H' ? 32u : 64u;
-                            accepted = check_common_format_integer_pointer(types, type, required_width);
-                            expected = required_width == 64 ? "'long *'" : "'int *'";
+                            const TypeId exact = length_modifier == 'H' ? BUSTER_TYPE_SCHAR : length_modifier == 'h' ? BUSTER_TYPE_SHORT :
+                                                 length_modifier == 'l' || length_modifier == 'z' || length_modifier == 'j' || length_modifier == 't' ? BUSTER_TYPE_LONG :
+                                                 length_modifier == 'L' ? BUSTER_TYPE_LLONG : BUSTER_TYPE_INT;
+                            accepted = check_common_format_integer_pointer(types, type, exact);
+                            expected = exact == BUSTER_TYPE_SCHAR ? "'signed char *'" : exact == BUSTER_TYPE_SHORT ? "'short *'" :
+                                       exact == BUSTER_TYPE_LONG ? "'long *'" : exact == BUSTER_TYPE_LLONG ? "'long long *'" : "'int *'";
                         }
                         if (!accepted)
                         {
@@ -1187,12 +1249,12 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         argument += 1;
                     }
                 }
-                if (insufficient)
+                if (!positional_format && insufficient)
                 {
                     check_common_format_report_offset(parser, pp, input, format_token, insufficient_offset, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
                                                       "more '%' conversions than data arguments", scratch);
                 }
-                else if (argument < count)
+                else if (!positional_format && argument < count)
                 {
                     const uint32_t extra_node = graph->argument_nodes[offset + argument];
                     const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
@@ -1240,33 +1302,6 @@ static bool check_common_enum_value(const CheckInput* input, const Parser* parse
         }
     }
     return found;
-}
-
-// The nearest enum definition of `tag_name` before `before`: its opening brace. Scanning back over the tag's base
-// type, attributes and scope keeps a fixed-underlying enum or a shadowing local definition.
-static bool check_common_enum_definition(const Parser* parser, uint32_t tag_name, uint32_t before, uint32_t* open_out)
-{
-    for (uint32_t open = before; open-- > 0;)
-    {
-        if (parser->tree.roles[open] != PARSE_ROLE_OPEN_ENUM || parser->tokens.kinds[open] != PARSE_KIND_L_BRACE)
-        {
-            continue;
-        }
-        for (uint32_t at = open; at-- > 0;)
-        {
-            if (parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == tag_name)
-            {
-                *open_out = open;
-                return true;
-            }
-            if (parser->tokens.kinds[at] == PARSE_KIND_SEMI || parser->tokens.kinds[at] == PARSE_KIND_R_BRACE ||
-                parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
-            {
-                break;
-            }
-        }
-    }
-    return false;
 }
 
 // -Wswitch: an enum selector and case labels that name every handled enumerator, with no default. A case whose
@@ -1345,15 +1380,21 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         }
         if (!has_default && !unknown_case)
         {
-            const uint32_t tag = type_index(enum_type) < types->types.count ? types->types.index[type_index(enum_type)] : UINT32_MAX;
-            const uint32_t tag_name = tag < types->tags.count ? types->tags.name[tag] : 0;
             uint32_t source_names[64];
             uint32_t source_count = 0;
             uint32_t enum_open = BUSTER_CHECK_NONE;
             uint32_t enum_close = BUSTER_CHECK_NONE;
-            if (tag_name != 0 && check_common_enum_definition(parser, tag_name, token, &enum_open))
+            for (uint32_t i = 0; input->enum_definitions != NULL && i < input->enum_definition_count; i += 1)
             {
-                enum_close = check_common_parent(parser, enum_open);
+                if (type_unqualified(input->enum_definitions[i].type) == enum_type)
+                {
+                    enum_open = input->enum_definitions[i].open;
+                    enum_close = input->enum_definitions[i].close;
+                    break;
+                }
+            }
+            if (enum_open != BUSTER_CHECK_NONE)
+            {
                 for (uint32_t at = enum_open + 1; at < enum_close && at < count && source_count < BUSTER_ARRAY_LENGTH(source_names); at += 1)
                 {
                     const uint8_t previous = parser->tokens.kinds[at - 1];
@@ -1831,7 +1872,9 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 first_write[object] = order < first_write[object] ? order : first_write[object];
                 const uint32_t token = graph->tokens[node];
                 const uint32_t parent = token < parser->tokens.count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
-                if (parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR)
+                const uint8_t parent_role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+                if (parent < parser->tokens.count && (parent_role == PARSE_ROLE_TERMINATOR || parent_role == PARSE_ROLE_SEPARATOR ||
+                                                      parent_role == PARSE_ROLE_COMMA) && !check_common_for_condition(parser, token, parent))
                 {
                     statement_write[object] = 1;
                 }
@@ -1885,9 +1928,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             {
                 const char* message = check_warning_text(scratch, "parameter '%.*s' set but not used",
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                const uint32_t body = input->declaration_bodies[declaration];
-                const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : declaration;
-                check_common_report_at(parser, pp, input, declaration, publication, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true, message, NULL, 0, scratch);
+                check_common_report_at(parser, pp, input, declaration, declaration, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true, message, NULL, 0, scratch);
             }
         }
     }
@@ -1900,7 +1941,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         return;
     }
-    check_common_parentheses(parser, pp, input, scratch);
+    check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, scratch);

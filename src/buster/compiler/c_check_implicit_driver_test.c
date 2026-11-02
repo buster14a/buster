@@ -431,6 +431,37 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char vla_bounds[] =
         "int f(void) { int x; return sizeof(int[x]); }\n"
         "int g(void) { int x; int y[x]; return y[0]; }\n";
+    static const char enum_scope[] =
+        "enum E { A, B };\n"
+        "int f(void) { enum E e = A; { enum E { A, B, C }; } switch (e) { case A: return 1; case B: return 2; } return 0; }\n";
+    static const char comma_effects[] =
+        "int f(void);\n"
+        "int a(void) { int y; (f(), y); return 0; }\n"
+        "int c(int x, int y) { (x++, y); return 0; }\n"
+        "int d(int x, int y) { x, y; return 0; }\n";
+    static const char typedef_void[] =
+        "typedef void V;\n"
+        "int f(int x) { (V)x; return 0; }\n"
+        "int g(int x) { (void)x; return 0; }\n";
+    static const char format_positional[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%1$d\\n\", 1); }\n"
+        "void b(void) { printf(\"%1$d %2$d\\n\", 1, 2); }\n"
+        "void c(void) { printf(\"%b\\n\", 1); }\n"
+        "void d(void) { printf(\"%B\\n\", 1); }\n";
+    static const char format_exact[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%lld\\n\", 1L); }\n"
+        "void b(void) { printf(\"%ld\\n\", 1LL); }\n"
+        "void c(void) { printf(\"%llu\\n\", 1UL); }\n"
+        "void d(void) { printf(\"%hhn\\n\", (signed char*)0); }\n"
+        "void e(void) { printf(\"%hn\\n\", (short*)0); }\n"
+        "void f(void) { printf(\"%ln\\n\", (long long*)0); }\n";
+    static const char format_precision[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%.*f\\n\", \"x\", 1.0); }\n";
+    static const char for_write[] =
+        "int f(int x) { for (; x = 2; ) return 1; return 0; }\n";
     static const struct
     {
         const char* source;
@@ -460,6 +491,13 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_value_statements, { "-Wall", NULL, NULL, NULL } },
         { for_condition, { "-Wall", NULL, NULL, NULL } },
         { vla_bounds, { "-Wall", NULL, NULL, NULL } },
+        { enum_scope, { "-Wall", NULL, NULL, NULL } },
+        { comma_effects, { "-Wall", "-Wextra", NULL, NULL } },
+        { typedef_void, { "-Wall", NULL, NULL, NULL } },
+        { format_positional, { "-Wall", NULL, NULL, NULL } },
+        { format_exact, { "-Wall", NULL, NULL, NULL } },
+        { format_precision, { "-Wall", NULL, NULL, NULL } },
+        { for_write, { "-Wall", "-Wextra", NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
     };
