@@ -39,6 +39,12 @@ struct CheckDriverPart
 
 static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
 
+// Whether the clang this run compares with is the pinned reference release (BUSTER_CLANG_REFERENCE_VERSION), from
+// run_checker_driver_tests, and the release it named: the library builtin comparisons that depend on its table then
+// skip only the names that release is known to classify differently, and report them as a version difference.
+static bool check_driver_clang_reference = true;
+static char check_driver_clang_version[64] = "";
+
 // Whether this part runs the next unit, which it deals.
 static bool check_test_driver_takes(void)
 {
@@ -5645,6 +5651,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     check_test_expect(&test, options, "driver test options are recognized");
+    // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
+    // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
+    check_driver_clang_reference = clang_reference_report(clang, check_driver_clang_version, sizeof(check_driver_clang_version));
+    check_test_expect(&test, pp_test_clang_reference(), "clang reference: version comparison and mismatch reporting");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below and

@@ -101,7 +101,15 @@ borrows the prior declaration's diagnostic fact, not its closed-block type.
 `-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
 for plain library names, but do not disable explicit `__builtin_` spellings.
 `-fbuiltin` reverses the global disabling option; freestanding mode separately
-disables library builtins, matching the pinned Clang 23.1.4 oracle. A recognized
+disables library builtins, matching the pinned Clang 23.1.4 oracle. That
+release's table has `strlcat` and `strlcpy` as GNU library builtins, in GNU
+C89's warning and GNU C99's and later modes' error alike; 23.1.5's table drops
+them, so the oracle compares `clang --version` with 23.1.4, prints both
+releases when they differ, and skips only the plain names the found release is
+known to classify differently (the named list `cbuiltin_library_table_differences`:
+23.1.5's `strlcat` and `strlcpy`), a difference no named release explains still
+failing. Calls of `strlcat` and `strlcpy` are plain calls in every mode, by
+both paths: neither is one of the plain names buster folds. A recognized
 library declaration can still be formed in C23 when its diagnostic is
 suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
 

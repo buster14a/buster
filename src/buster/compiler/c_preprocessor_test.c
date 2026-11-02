@@ -56,6 +56,176 @@
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
 
+// The Clang release the library-builtin table is pinned to (c_builtin_library.c's BUSTER_CLANG_REFERENCE_VERSION), read
+// from `clang --version` by test-preprocessor --clang and test-checker-driver: a different release's table makes some
+// plain names' __has_builtin answers and implicit-declaration diagnostics differ, which those tests report as a version
+// difference and skip where the answer depends on the release, rather than as a buster bug. Clang 23.1.4 has strlcat
+// and strlcpy as GNU library builtins; 23.1.5 does not.
+typedef struct ClangReferenceVersion ClangReferenceVersion;
+struct ClangReferenceVersion
+{
+    bool named;
+    bool matches;
+    char version[64];
+};
+
+// The release `clang --version`'s first line names ("clang version 23.1.4", or a distribution's "Ubuntu clang version
+// 23.1.5 (1ubuntu1)") and whether it is the pinned reference release's.
+static ClangReferenceVersion clang_reference_parse(const char* text)
+{
+    static const char prefix[] = "clang version ";
+    ClangReferenceVersion result = { 0 };
+    const char* found = text != NULL ? strstr(text, prefix) : NULL;
+    if (found != NULL)
+    {
+        found += sizeof(prefix) - 1;
+        size_t length = strcspn(found, " \t\r\n(");
+        length = length < sizeof(result.version) ? length : sizeof(result.version) - 1;
+        memcpy(result.version, found, length);
+        result.version[length] = 0;
+        result.named = length != 0;
+        result.matches = result.named && strcmp(result.version, BUSTER_CLANG_REFERENCE_VERSION) == 0;
+    }
+    return result;
+}
+
+// Whether `text` names the reference release, into `version`, and the message that names both releases when it doesn't
+// ("expected clang 23.1.4, found 23.1.5").
+static bool clang_reference_compare(const char* text, char* version, size_t version_capacity, char* message, size_t message_capacity)
+{
+    const ClangReferenceVersion parsed = clang_reference_parse(text);
+    if (version_capacity != 0)
+    {
+        snprintf(version, version_capacity, "%s", parsed.named ? parsed.version : "unavailable");
+    }
+    if (message_capacity != 0)
+    {
+        if (parsed.named)
+        {
+            snprintf(message, message_capacity, "expected clang %s, found %s", BUSTER_CLANG_REFERENCE_VERSION, parsed.version);
+        }
+        else
+        {
+            snprintf(message, message_capacity, "expected clang %s, found no clang version", BUSTER_CLANG_REFERENCE_VERSION);
+        }
+    }
+    return parsed.matches;
+}
+
+// `clang_path --version`'s output, or NULL when it can't run.
+static char* clang_reference_output(const char* clang_path)
+{
+    char* result = NULL;
+    int descriptors[2] = { -1, -1 };
+    const bool ready = clang_path != NULL && pipe(descriptors) == 0;
+    const pid_t child = ready ? fork() : -1;
+    if (ready && child == 0)
+    {
+        close(descriptors[0]);
+        const bool redirected = dup2(descriptors[1], STDOUT_FILENO) >= 0 && dup2(descriptors[1], STDERR_FILENO) >= 0;
+        close(descriptors[1]);
+        if (redirected)
+        {
+            execlp(clang_path, clang_path, "--version", (char*)NULL);
+        }
+        _exit(127);
+    }
+    if (ready)
+    {
+        close(descriptors[1]);
+        if (child > 0)
+        {
+            char text[4096];
+            size_t length = 0;
+            ssize_t count = 0;
+            while (length + 1 < sizeof(text) && (count = read(descriptors[0], text + length, sizeof(text) - 1 - length)) != 0)
+            {
+                if (count > 0)
+                {
+                    length += (size_t)count;
+                }
+                else if (errno != EINTR)
+                {
+                    break;
+                }
+            }
+            close(descriptors[0]);
+            int status = 0;
+            pid_t waited = -1;
+            do
+            {
+                waited = waitpid(child, &status, 0);
+            }
+            while (waited < 0 && errno == EINTR);
+            if (waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            {
+                text[length] = 0;
+                result = strdup(text);
+            }
+        }
+        else
+        {
+            close(descriptors[0]);
+        }
+    }
+    return result;
+}
+
+// Reports whether `clang_path` is the pinned reference release, into `version`; a mismatch prints both releases. False
+// when it isn't the reference, and the caller then skips only the comparisons that depend on the release's table.
+static bool clang_reference_report(const char* clang_path, char* version, size_t version_capacity)
+{
+    char* output = clang_reference_output(clang_path);
+    char message[192];
+    const bool result = clang_reference_compare(output, version, version_capacity, message, sizeof(message));
+    if (!result)
+    {
+        printf("clang reference: %s\n", message);
+    }
+    free(output);
+    return result;
+}
+
+// The version comparison's fixture: fake `clang --version` lines, so that no second compiler is needed, and the
+// mismatch message naming both releases.
+static bool pp_test_clang_reference(void)
+{
+    static const struct
+    {
+        const char* text;
+        bool named;
+        bool matches;
+        const char* version;
+    } cases[] = {
+        { "clang version 23.1.4\nTarget: x86_64-pc-linux-gnu\n", true, true, "23.1.4" },
+        { "clang version 23.1.4 (https://github.com/llvm/llvm-project.git llvmorg-23.1.4)\n", true, true, "23.1.4" },
+        { "Ubuntu clang version 23.1.5 (1ubuntu1)\nTarget: x86_64-pc-linux-gnu\n", true, false, "23.1.5" },
+        { "Apple clang version 15.0.0 (clang-1500.3.9.4)\n", true, false, "15.0.0" },
+        { "clang version 23.1.40\n", true, false, "23.1.40" },
+        { "not a compiler\n", false, false, "unavailable" },
+    };
+    bool result = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char version[64];
+        char message[192];
+        const bool matches = clang_reference_compare(cases[i].text, version, sizeof(version), message, sizeof(message));
+        result &= matches == cases[i].matches && strcmp(version, cases[i].version) == 0;
+        if (cases[i].named && !cases[i].matches)
+        {
+            result &= strstr(message, BUSTER_CLANG_REFERENCE_VERSION) != NULL && strstr(message, cases[i].version) != NULL;
+        }
+    }
+    printf("clang reference: version comparison and mismatch reporting %s\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// The clang executable the oracle runs: "clang", or a fixture's wrapper that reports another release
+// (pp_test_builtin_release). The release `clang --version` named, which the library-builtin checks read for the
+// comparisons that depend on its table.
+static const char* pp_test_clang_path = "clang";
+static char pp_test_clang_version[64] = "";
+
 // Set while the fuzz runs minimize a difference (c_preprocessor_fuzz.c): the comparisons below then print nothing.
 static bool pp_test_quiet;
 
@@ -749,7 +919,7 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
 // clang's predefines for `arguments` (clang -dM -E of an empty input), written to `predefines_path`.
 static bool pp_test_clang_predefines(char** arguments, int argument_count, const char* predefines_path)
 {
-    PPClangOutput macros = pp_test_clang_process("clang", arguments, argument_count, "/dev/null", true);
+    PPClangOutput macros = pp_test_clang_process(pp_test_clang_path, arguments, argument_count, "/dev/null", true);
     bool result = macros.status == PP_CLANG_ACCEPTED;
     FILE* out = result ? fopen(predefines_path, "w") : 0;
     result = out != 0 && fwrite(macros.text, 1, macros.length, out) == macros.length;
@@ -769,7 +939,7 @@ static char* pp_test_clang(char** arguments, int argument_count, const char* pat
     const bool ready = predefines_path == 0 || pp_test_clang_predefines(arguments, argument_count, predefines_path);
     if (ready)
     {
-        PPClangOutput output = pp_test_clang_process("clang", arguments, argument_count, path, false);
+        PPClangOutput output = pp_test_clang_process(pp_test_clang_path, arguments, argument_count, path, false);
         if (output.diagnostics != 0)
         {
             fputs(output.diagnostics, stderr);
@@ -8121,6 +8291,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 103, pp_test_cases_section(directory, with_clang, keep));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_case_retention(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_no_external_files(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_clang_reference());
     passed &= PP_TEST_SECTION(deal, 1, test_process_test() == 0);
     passed &= PP_TEST_SECTION(deal, 1, pp_test_system_case_levels(directory));
     passed &= PP_TEST_SECTION(deal, 6, pp_test_macro_batches(directory, with_clang));
@@ -8180,6 +8351,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
         passed &= PP_TEST_SECTION(deal, 10, pp_test_features(directory));
         passed &= PP_TEST_SECTION(deal, 49, pp_test_option_features(directory));
         passed &= PP_TEST_SECTION(deal, 1, pp_test_builtin_targets(directory));
+        passed &= PP_TEST_SECTION(deal, 10, pp_test_builtin_release(directory));
     }
     if (fuzz->count != 0)
     {
@@ -8366,6 +8538,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             .parts = parts,
             .collecting = true,
         };
+        // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different release's table is
+        // reported with both versions, and pp_test_builtin_targets then skips only the plain names that release is
+        // known to classify differently.
+        if (with_clang)
+        {
+            clang_reference_report(pp_test_clang_path, pp_test_clang_version, sizeof(pp_test_clang_version));
+        }
         pp_test_sections(&deal, directory, with_clang, keep, &fuzz, id_order, count);
         passed_all = pp_test_deal(&deal);
         if (parts > 1)

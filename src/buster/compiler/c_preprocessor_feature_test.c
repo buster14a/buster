@@ -159,7 +159,12 @@ static bool pp_test_source_feature_matrix(void)
 // library name where -fno-builtin, -fno-builtin-NAME and -ffreestanding leave it one (pp_library_builtin), and 0 for every
 // name buster doesn't implement; __has_constexpr_builtin answers 1 only where clang's does. Each of clang's 3,775 builtin
 // names, in seventeen target, language and -f option configurations, against `clang -E`'s own answers; then the scopes',
-// the catalog's and the library lists' gates against clang's table.
+// the catalog's and the library lists' gates against clang's table. The plain names are pinned to the reference release
+// (BUSTER_CLANG_REFERENCE_VERSION): when the clang found isn't it (pp_test_clang_version), a plain library name whose
+// __has_builtin answer differs is skipped only if the found release's table is known to classify it differently
+// (cbuiltin_library_table_differs: clang 23.1.5 drops 23.1.4's strlcat and strlcpy), and the skip is reported with the
+// names; a difference no named release explains still fails, since the probe can't tell an unlisted release's table
+// from a buster bug.
 static bool pp_test_builtin_targets(const char* directory)
 {
     static const char* const configurations[] = {
@@ -182,6 +187,7 @@ static bool pp_test_builtin_targets(const char* directory)
         "-std=gnu89 -march=x86-64 -fno-builtin -fbuiltin",
         "-std=c99 -march=x86-64",
     };
+    const bool reference = strcmp(pp_test_clang_version, BUSTER_CLANG_REFERENCE_VERSION) == 0;
     char path[4200];
     snprintf(path, sizeof(path), "%s/builtin-targets.c", directory);
     // Each name on a line of its own: `HB name answer constexpr`, as clang -E prints it, the second __has_constexpr_builtin's.
@@ -201,6 +207,12 @@ static bool pp_test_builtin_targets(const char* directory)
     uint64_t compared = 0;
     uint64_t available = 0;
     uint64_t constants = 0;
+    // The plain library names whose answers a found release classifies differently from the reference's table, and the
+    // answers skipped for them, each name once in `skipped_names`.
+    uint8_t* skipped_flags = calloc(count, 1);
+    uint64_t skipped_answers = 0;
+    char skipped_names[192] = { 0 };
+    result = result && skipped_flags != 0;
     for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(configurations); c += 1)
     {
         char text[512];
@@ -235,19 +247,30 @@ static bool pp_test_builtin_targets(const char* directory)
                 result = index < count && (size_t)(end - line) > 3 + info->name_length && memcmp(line + 3, info->name, info->name_length) == 0;
                 const bool clang_yes = result && *answer != '0';
                 const uint8_t* name = (const uint8_t*)info->name;
+                const CBuiltinLibraryPlain* plain = cbuiltin_library_plain(info->name, info->name_length);
                 const bool implemented = cbuiltin_has_capability(name, info->name_length, BUSTER_CBUILTIN_CAP_SOURCE) ||
                                          cbuiltin_source_intrinsic(name, info->name_length) || cbuiltin_fortify_source(name, info->name_length) ||
-                                         cbuiltin_library_source(name, info->name_length) || cbuiltin_library_plain(info->name, info->name_length) != NULL;
+                                         cbuiltin_library_source(name, info->name_length) || plain != NULL;
                 const uint32_t ours = pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, info->name_length);
                 // __has_constexpr_builtin answers 1 only where clang's does: for the folds buster has of clang's (#148).
                 const char* constant = answer + 1 < end ? answer + 1 : end;
                 const bool clang_constant = result && constant < end && *constant == ' ' && constant[1] != '0';
                 const uint32_t ours_constant = pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, info->name_length);
-                const bool right = (implemented ? (ours != 0) == clang_yes : ours == 0) && (ours_constant == 0 || clang_constant);
+                // A plain library name's answer is the found release's table's: against another release's, the names
+                // it is known to classify differently are skipped, not failures (the reference release's table is
+                // buster's).
+                const bool pinned = result && !reference && plain != NULL && (ours != 0) != clang_yes &&
+                                    cbuiltin_library_table_differs(pp_test_clang_version, info->name, info->name_length);
+                const bool right = ((implemented ? (ours != 0) == clang_yes : ours == 0) || pinned) && (ours_constant == 0 || clang_constant);
                 if (result && !right)
                 {
                     printf("builtin targets: %s under %s: %u %u, clang %s %s\n", info->name, configurations[c], ours, ours_constant, clang_yes ? "1" : "0",
                            clang_constant ? "1" : "0");
+                }
+                if (pinned)
+                {
+                    skipped_answers += 1;
+                    skipped_flags[index] = 1;
                 }
                 result &= right;
                 constants += ours_constant != 0;
@@ -294,11 +317,70 @@ static bool pp_test_builtin_targets(const char* directory)
             facts += 1;
         }
     }
+    uint32_t skipped_name_count = 0;
+    for (uint32_t i = 0; skipped_flags != 0 && i < count; i += 1)
+    {
+        if (skipped_flags[i] != 0)
+        {
+            const BuiltinIntrinsicInfo* info = builtin_intrinsic_at(i);
+            const size_t used = strlen(skipped_names);
+            if (used != 0 && used + 2 < sizeof(skipped_names))
+            {
+                memcpy(skipped_names + used, ", ", 2);
+            }
+            const size_t length = strlen(info->name);
+            const size_t at = strlen(skipped_names);
+            if (at + length < sizeof(skipped_names))
+            {
+                memcpy(skipped_names + at, info->name, length + 1);
+            }
+            else
+            {
+                snprintf(skipped_names + at, sizeof(skipped_names) - at, "...");
+            }
+            skipped_name_count += 1;
+        }
+    }
     unlink(path);
     free(source);
+    free(skipped_flags);
     printf("builtin targets: %llu answers in %lu configurations, %llu of implemented builtins (%llu available, %llu constant where clang's are), as "
            "clang's; %u gates' facts as clang's table: %s\n",
            (unsigned long long)compared, (unsigned long)BUSTER_ARRAY_LENGTH(configurations), (unsigned long long)implemented_answers,
            (unsigned long long)available, (unsigned long long)constants, facts, result ? "pass" : "FAIL");
+    if (skipped_answers != 0)
+    {
+        printf("builtin targets: %llu answers skipped, as the found clang's library builtin table differs from the reference %s's (%u plain names%s%s)\n",
+               (unsigned long long)skipped_answers, BUSTER_CLANG_REFERENCE_VERSION, skipped_name_count, skipped_names[0] != 0 ? ": " : "",
+               skipped_names);
+    }
+    return result;
+}
+
+// The non-reference release path under a fake clang (#1131): a wrapper script reports 23.1.5 and answers strlcat's
+// and strlcpy's __has_builtin as that release's table does (none, which -fno-builtin-NAME gives), so the whole
+// builtin-targets run under it must pass while skipping only those two names — every other answer still compares.
+// CI's clang is the reference, whose own run skips nothing and can't reach this path.
+static bool pp_test_builtin_release(const char* directory)
+{
+    char wrapper[4200];
+    snprintf(wrapper, sizeof(wrapper), "%s/clang-23.1.5", directory);
+    static const char script[] = "#!/bin/sh\nfor argument in \"$@\"; do if [ \"$argument\" = \"--version\" ]; then printf 'clang version 23.1.5\\n'; exit 0; fi; done\n"
+                                 "exec clang -fno-builtin-strlcat -fno-builtin-strlcpy \"$@\"\n";
+    bool result = pp_test_write_file(wrapper, script) && chmod(wrapper, 0755) == 0;
+    char version[64] = "";
+    const char* const saved_path = pp_test_clang_path;
+    char saved_version[sizeof(pp_test_clang_version)];
+    memcpy(saved_version, pp_test_clang_version, sizeof(saved_version));
+    pp_test_clang_path = wrapper;
+    // A fake 23.1.5 isn't the reference: the report must say so with both releases, and the run it enables takes
+    // that release's known differences.
+    result &= !clang_reference_report(wrapper, version, sizeof(version)) && strcmp(version, "23.1.5") == 0;
+    snprintf(pp_test_clang_version, sizeof(pp_test_clang_version), "%s", version);
+    result = result && pp_test_builtin_targets(directory);
+    pp_test_clang_path = saved_path;
+    memcpy(pp_test_clang_version, saved_version, sizeof(pp_test_clang_version));
+    unlink(wrapper);
+    printf("builtin targets under a fake clang 23.1.5: %s\n", result ? "pass" : "FAIL");
     return result;
 }
