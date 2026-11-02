@@ -308,6 +308,10 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 depth -= 1;
                 ir_typed_emit(&sink, IR_STACK_RESTORE, IR_VOID, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 break;
+            case BUSTER_TYPED_FENCE:
+                // Its order and scope as they are (#1059): tier0_validate took the value.
+                ir_typed_emit(&sink, IR_FENCE, IR_VOID, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                break;
             case BUSTER_TYPED_COPY:
                 ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
                 depth -= 2;
