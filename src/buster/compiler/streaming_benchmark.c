@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // benchmark-streaming [--units N] [--functions N] [--seed N] [--runs N] [--chunk-bytes N] [--order callees|callers]
 //                     [--lanes N] [--cpus A,B] [--directory PATH] [--keep]: streaming.c's schedules against each other
@@ -15,6 +16,7 @@
 // variants; parallel variants need enough allowed CPUs (--cpus 2,3 and taskset -c 2,3 for two lanes).
 // main.c includes this file after streaming_test.c, whose runner it takes.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_STREAM_BENCHMARK_VARIANTS 5
 
 // A variant's times in ms: the whole, to the last function compiled, then (the direct path) building the Link, then
@@ -176,7 +178,7 @@ static int run_streaming_benchmark(int argc, char** argv)
     StreamOrder order = STREAM_ORDER_CALLEES;
     uint32_t cpu_list[2] = { 0, 0 };
     const uint32_t* cpus = 0;
-    const char* base = getenv("TMPDIR");
+    const char* base = oracle_temporary_directory();
     base = base != 0 && base[0] != 0 ? base : "/tmp";
     bool keep = false;
     bool valid = true;

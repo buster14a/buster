@@ -43,7 +43,16 @@ requirements. [Command index](README.md).
   per-unit leaves (`c_check_program_helpers.c`), their objects aligned as
   clang's code generation aligns their addresses (`check_graph_atomic_alignment`,
   #126); `test-checker` runs them against clang's code and checks that a
-  misaligned one is refused exactly where clang calls libatomic. The x86
+  misaligned one is refused exactly where clang calls libatomic. A helper is a
+  fallback (#1059): each helper family publishes its contract
+  (`check_program_helper_contracts`), its code's effects read by
+  `x86_semantics.c` (`check_program_helper_physical`), which `test-checker`
+  checks against every helper the emitters make; a fence of a constant order is
+  the typed stream's `FENCE` (`check_program_direct_fence`), Tier 0's `mfence`
+  or nothing, the IR's `fence`, with no helper; `--helper-report` prints each
+  family's direct and helper uses, and `test-checker-driver` runs a
+  store-buffering litmus by both tiers (the guide's "Helper contracts and
+  direct forms"). The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
   `xsetbv`, `monitorx`, `mwaitx`, `tzcnt`, `lzcnt_u16`, the fences, `clflush`,
   `ldmxcsr`, `stmxcsr`, Key Locker's, `umwait`, `tpause` and `xbegin`) are

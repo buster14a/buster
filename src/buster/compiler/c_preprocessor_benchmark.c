@@ -2,6 +2,7 @@
 // Original material Copyright (c) 2026 David Gonzalez Martin.
 // Counter/timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
 // Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
+
 //
 // The preprocessor benchmark: preprocesses translation units from scratch, as `-E` does without printing, with the
 // vectorized kernels and with their scalar twins, and reports per token what each costs.
@@ -50,6 +51,7 @@
 //
 // Layout: the clock and the counters, the passes, the directive tables alone, and run_preprocessor_benchmark.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -946,8 +948,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
     // go in a directory of their own under $TMPDIR (or /tmp).
     char ours[PATH_MAX];
     char links[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(links, sizeof(links), "%s/buster-pp-clang-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(links, sizeof(links), "%s/buster-pp-clang-XXXXXX", temporary);
     bool linked = false;
     int clang_count = 0;
     char** clang_arguments = parsed && with_clang ? pp_clang_arguments(&options, clang_passed_count, clang_passed, ours, links, &linked, &clang_count) : 0;

@@ -369,7 +369,8 @@ static bool x86_target_test_gas(const char* directory)
 #undef BUSTER_X86_TARGET_GAS_VL
     };
     // GNU as 2.42 refuses CET's endbr64 and the notrack/bnd prefixes on every -march, so it has no independent
-    // architecture answer for these baseline-safe encodings (#808). The assembler's own tests encode and run them.
+    // architecture answer for these baseline-safe encodings (#808). The assembler's own tests encode and run them. Its
+    // znver5 has no shadow stack either, which the control would refuse.
     static const uint8_t gas_cet[X86_FORM_COUNT] = {
         [X86_FORM_ENDBR64] = 1,
         [X86_FORM_NOTRACK_JMP_R64] = 1,
@@ -385,6 +386,19 @@ static bool x86_target_test_gas(const char* directory)
         [X86_FORM_NOTRACK_BND_JMP_M64] = 1,
         [X86_FORM_NOTRACK_BND_CALL_R64] = 1,
         [X86_FORM_NOTRACK_BND_CALL_M64] = 1,
+        // CET's shadow stack (#1134's rows): GNU as 2.42's znver5 has no SHSTK, as GCC's named znver5 profile hasn't.
+        [X86_FORM_INCSSPD_R32] = 1,
+        [X86_FORM_INCSSPQ_R64] = 1,
+        [X86_FORM_RDSSPD_R32] = 1,
+        [X86_FORM_RDSSPQ_R64] = 1,
+        [X86_FORM_WRSSD_M32_R32] = 1,
+        [X86_FORM_WRSSQ_M64_R64] = 1,
+        [X86_FORM_WRUSSD_M32_R32] = 1,
+        [X86_FORM_WRUSSQ_M64_R64] = 1,
+        [X86_FORM_SETSSBSY] = 1,
+        [X86_FORM_CLRSSBSY_M64] = 1,
+        [X86_FORM_RSTORSSP_M64] = 1,
+        [X86_FORM_SAVEPREVSSP] = 1,
     };
     static const struct
     {
@@ -562,8 +576,8 @@ static bool x86_target_test_gas(const char* directory)
     return passed;
 }
 
-// Compare cached admission with the direct, uncached predicate for every row. This also catches a future
-// syntax predicate gaining an input that was omitted from the cache key, including false-positive admission.
+// Compare the index's admission with the direct predicate for every row, under every profile and each feature removed:
+// exactly the forms the syntax admits (x86_match_supported, from each form's descriptor: #1134) and the target allows.
 static bool x86_target_test_matcher_admission(void)
 {
     Arena arena = arena_reserve(1ull << 20);

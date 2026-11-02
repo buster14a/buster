@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
@@ -48,6 +49,7 @@
 // cleanup (c_testsuite_remove), the run (c_testsuite_execute, c_testsuite_report), the self-test (c_testsuite_self_test)
 // and the command (run_c_testsuite_tests).
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -779,7 +781,7 @@ static bool c_testsuite_execute(CTestsuite* suite, const char* root, const char*
     char work[PATH_MAX];
     struct stat stats;
     snprintf(nested, sizeof(nested), "%s/tests/single-exec", root);
-    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     snprintf(work, sizeof(work), "%s/buster-c-testsuite-XXXXXX", temporary);
     memset(suite->results, 0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult));
     suite->count = 0;
@@ -1002,7 +1004,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
     char base[PATH_MAX];
     char original[PATH_MAX];
     char path[PATH_MAX];
-    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     snprintf(base, sizeof(base), "%s/buster-c-testsuite-self-XXXXXX", temporary);
     char* saved = getenv("TMPDIR") != 0 ? strdup(getenv("TMPDIR")) : 0;
     bool valid = getcwd(original, sizeof(original)) != 0 && mkdtemp(base) != 0 && realpath(base, path) != 0;

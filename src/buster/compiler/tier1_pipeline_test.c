@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Original typed-stream fixtures through the real Tier 1 pipeline. Include after tier0_generate.c, tier0_test.c,
 // ir_lower.c, ssa_ir.c, ir_optimize.c and tier1_emit.c, with their dependencies. No alternate frontend or IR producer
@@ -12,6 +13,7 @@
 // consumer's edge moves. Floating point traverses the upstream stages and must stop explicitly before native
 // execution. These fixtures do not qualify a source corpus. Native calls and external tools run in bounded child processes; all temporary files use TMPDIR.
 
+#include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -1407,8 +1409,7 @@ static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const ch
 
 static void tier1_pipeline_clang(Tier1PipelineTest* test, const char* clang)
 {
-    const char* temporary = getenv("TMPDIR");
-    temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     char directory[4096];
     char source[4096];
     char binary[4096];

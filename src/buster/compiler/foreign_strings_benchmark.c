@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Whole foreign-input pipeline with and without string merging. Include after foreign_link_test.c. The object
 // writer produces frozen original ET_REL inputs before timing. Every sample resolves those files afresh, converts
@@ -15,6 +16,7 @@
 // Fenced TSC ticks cover the same pipeline plus its wall-clock reads; they are elapsed reference ticks, not core cycles.
 // Pin externally to CPU 2 and acquire the approved host's shared lock separately for each invocation.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES 32
 #define BUSTER_FOREIGN_STRINGS_BENCHMARK_UNIT_LITERALS 256
 #define BUSTER_FOREIGN_STRINGS_BENCHMARK_MAX_LITERALS (1u << 20)
@@ -427,7 +429,7 @@ static __attribute__((unused)) int run_foreign_strings_benchmark(int argc, char*
     uint32_t cases = 3;
     bool keep = false;
     bool valid = true;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     for (int i = 0; valid && i < argc; i += 1)
     {
         const bool value = i + 1 < argc;

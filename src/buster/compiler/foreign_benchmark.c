@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The foreign inputs' benchmark: what steps 1 to 5 of linking other compilers' objects cost (foreign.c;
 // docs/object-writer-and-linker.md, "Linking other compilers' objects"), phase by phase and lane by lane, against
@@ -29,6 +30,7 @@
 // exit status is 1 if the arguments are invalid, a program can't be made, or a resolution fails or differs between the
 // paths.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -576,7 +578,7 @@ int run_foreign_benchmark(int argc, char** argv)
     bool kinds[FOREIGN_BENCHMARK_KINDS] = { true, true, true };
     bool linkers = false;
     bool keep = false;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     bool valid = true;
     for (int i = 1; valid && i < argc; i += 1)
     {
