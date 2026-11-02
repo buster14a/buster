@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Self-tests for differential.c. Clang builds our original fixture tool; rm removes passing workspaces.
 // All fake compiler/generator runs are marked as fixtures and count as zero source-to-machine campaign passes.
 // These tests exercise the protocol, process supervision and retained evidence; they cannot qualify Buster codegen.
 
+#include "buster/compiler/test_paths.h"
 typedef struct DifferentialTests DifferentialTests;
 struct DifferentialTests
 {
@@ -538,7 +540,7 @@ static int run_differential_tests(int argc, char** argv)
         }
     }
     char directory[PATH_MAX] = {0};
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     if (!temporary || !*temporary)
     {
         temporary = "/tmp";

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Clang oracle for the original preprocessor fuzz cases. Ordinary cases share a process; process-global counter cases
 // do not. Exact marker lines select each case's slice of a batch's output (preprocessor_fuzz_clang_split). In a
@@ -9,6 +10,7 @@
 // text clang reads, which test-preprocessor --fuzz gives the preprocessor too (one case at a time). The subprocess
 // boundary is deliberately outside the compiler hot path; benchmark_sample measures this harness cost.
 
+#include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
@@ -98,7 +100,7 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
         -1,
         -1,
     };
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     if (temporary == 0 || temporary[0] == 0)
     {
         temporary = "/tmp";

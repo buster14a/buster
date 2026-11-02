@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // benchmark-tier1-pipeline (#140): the run time of the pipeline test's fixtures (tier1_pipeline_test.c), each compiled
 // four ways: by Tier 1 (its typed stream lowered, promoted, optimized, selected and emitted, general control flow
@@ -16,6 +17,7 @@
 // tier1-K.bin and tier0-K.bin, for objdump -D -b binary -m i386:x86-64.
 // Run it under the 9700X's lock, pinned to one CPU (taskset -c 2 ...).
 
+#include "buster/compiler/test_paths.h"
 #include <dlfcn.h>
 #include <math.h>
 
@@ -234,8 +236,7 @@ static __attribute__((unused)) int run_tier1_pipeline_benchmark(int count, char*
     };
     Tier0TestCode* tier0_code = calloc(1, sizeof(Tier0TestCode));
     uint8_t* tier0_bytes = malloc(BUSTER_TIER0_TEST_CODE_BYTES);
-    const char* temporary = getenv("TMPDIR");
-    temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     char directory[4096];
     snprintf(directory, sizeof(directory), "%s/buster-tier1-pipeline-benchmark-XXXXXX", temporary);
     void* handles[2] = { 0, 0 };

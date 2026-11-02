@@ -81,7 +81,7 @@ static bool check_lower_fortify_string(const CheckLowerWriter* writer, uint32_t 
     const bool address = value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 && value->object <= input->token_count &&
                          value->offset >= 0 && value->fault == CHECK_FAULT_NONE &&
                          (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
-    const uint32_t index = address && input->string_ids != NULL ? input->string_ids[value->object - 1] : BUSTER_CHECK_NONE;
+    const uint32_t index = address && check_sparse_present(input->string_ids) ? check_sparse_get(input->string_ids, value->object - 1) : BUSTER_CHECK_NONE;
     bool known = false;
     if (index < input->string_count)
     {

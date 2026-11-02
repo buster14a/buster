@@ -27,7 +27,7 @@
 // locals the program's bodies allocate.
 static bool check_program_lifetime_local(const CheckInput* input, uint32_t token)
 {
-    return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count &&
+    return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count &&
            input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
 }
 
@@ -123,7 +123,7 @@ static void check_program_lifetime_entered(const CheckProgram* program, const Pa
     for (uint32_t token = 0; token < count; token += 1)
     {
         const bool jump = parser->tree.roles[token] == PARSE_ROLE_RETURN && parser->tokens.kinds[token] == PARSE_KIND_GOTO && !check_input_indirect_goto(parser, token);
-        const uint32_t label = jump ? input->label_targets[token] : BUSTER_CHECK_NONE;
+        const uint32_t label = jump ? check_sparse_get(input->label_targets, token) : BUSTER_CHECK_NONE;
         if (label < count)
         {
             epoch += 1;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The lane tests, for the test-lanes command:
 //
@@ -95,6 +96,7 @@
 // lane_test_alone, lane_test_scratch, lane_test_exchange, lane_test_parts, lane_test_shared and lane_test_main, which
 // runs them), their verification (lane_test_check_parts and the others), and run_lane_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -2301,8 +2303,8 @@ static void lane_test_topology_remove(const char* root, uint32_t cpus)
 // A new directory for a test topology, under $TMPDIR (or /tmp), into `root`. Returns whether it could make it.
 static bool lane_test_topology_root(char* root, uint64_t size)
 {
-    const char* temporary = getenv("TMPDIR");
-    snprintf(root, size, "%s/buster-test-lanes-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(root, size, "%s/buster-test-lanes-XXXXXX", temporary);
     return mkdtemp(root) != 0;
 }
 

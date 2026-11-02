@@ -11,6 +11,8 @@ static void check_test_runtime_scan(CheckTest* test)
 {
     static const uint32_t larger[] = { 255, 256, 257, 1023 };
     uint64_t state = UINT64_C(0x877002);
+    // The sparse initializer nodes (c_check_sparse.c) the guarded column's values make, for each case.
+    Arena sparse = arena_reserve(UINT64_C(1) << 20);
     for (uint32_t c = 0; c <= 129 + BUSTER_ARRAY_LENGTH(larger); c += 1)
     {
         const uint32_t count = c <= 129 ? c : larger[c - 130];
@@ -75,9 +77,12 @@ static void check_test_runtime_scan(CheckTest* test)
                     }
                 }
             }
+            const uint64_t mark = sparse.length;
+            const CheckSparseColumn sparse_nodes = ready ? check_sparse_from_values(&sparse, nodes, count) : (CheckSparseColumn){ 0 };
+            ready &= check_sparse_present(sparse_nodes);
             for (uint32_t producer = 0; ready && producer < 2; producer += 1)
             {
-                const uint32_t declared = check_program_declaring(declarations, nodes, 1, count, tokens, producer == 0);
+                const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, count, tokens, producer == 0);
                 uint32_t* compact = (uint32_t*)check_test_program_guarded(&maps[7], &sizes[7], (uint64_t)declared * sizeof(uint32_t));
                 ready &= compact != NULL;
                 if (ready)
@@ -102,6 +107,7 @@ static void check_test_runtime_scan(CheckTest* test)
                     maps[7] = NULL;
                 }
             }
+            arena_pop_to(&sparse, mark);
             check_test_expect(test, ready, "runtime declaration columns and exact-length compact list have protected tails");
             for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(maps); m += 1)
             {
@@ -127,15 +133,17 @@ static void check_test_runtime_scan(CheckTest* test)
     const CheckProgram program = { .input = &input, .parser = &parser, .object_count = 4, .object_symbols = object_symbols };
     const IdentId identifiers[1] = { 77 };
     const uint16_t runtimes[1] = { CHECK_LOWER_RUNTIME_ERRNO + 1 };
-    const uint32_t declared = check_program_declaring(declarations, nodes, 1, 8, tokens, false);
+    const CheckSparseColumn sparse_nodes = check_sparse_from_values(&sparse, nodes, 8);
+    const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, 8, tokens, false);
     for (uint32_t path = 0; path < 2; path += 1)
     {
         SymbolId actual[CHECK_LOWER_RUNTIMES] = { 0 };
         actual[CHECK_LOWER_RUNTIME_ERRNO] = 123;
         check_lower_declared_runtimes(&program, tokens, declared, identifiers, runtimes, 1, actual, path == 0);
-        check_test_expect(test, actual[CHECK_LOWER_RUNTIME_ERRNO + 1] == 51 && actual[CHECK_LOWER_RUNTIME_ERRNO] == 123,
+        check_test_expect(test, check_sparse_present(sparse_nodes) && actual[CHECK_LOWER_RUNTIME_ERRNO + 1] == 51 && actual[CHECK_LOWER_RUNTIME_ERRNO] == 123,
                           "runtime lookup keeps the first nonzero external symbol and does not touch errno");
     }
+    arena_release(&sparse);
 }
 
 #endif
