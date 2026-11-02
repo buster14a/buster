@@ -2257,20 +2257,23 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             // not retain; the declaration's own token range finds it. An expression initializer's reads are the
             // graph's, so only a braced range is scanned, and not through a sizeof operand.
             uint32_t brace_open = BUSTER_CHECK_NONE;
-            for (uint32_t at = declaration + 1; at < parser->tokens.count; at += 1)
+            if (local && !parameter)
             {
-                const uint8_t kind = parser->tokens.kinds[at];
-                if (kind == PARSE_KIND_EQUAL)
+                for (uint32_t at = declaration + 1; at < parser->tokens.count; at += 1)
                 {
-                    if (at + 1 < parser->tokens.count && parser->tokens.kinds[at + 1] == PARSE_KIND_L_BRACE)
+                    const uint8_t kind = parser->tokens.kinds[at];
+                    if (kind == PARSE_KIND_EQUAL)
                     {
-                        brace_open = at + 1;
+                        if (at + 1 < parser->tokens.count && parser->tokens.kinds[at + 1] == PARSE_KIND_L_BRACE)
+                        {
+                            brace_open = at + 1;
+                        }
+                        break;
                     }
-                    break;
-                }
-                if (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE)
-                {
-                    break;
+                    if (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE)
+                    {
+                        break;
+                    }
                 }
             }
             const bool braced = brace_open != BUSTER_CHECK_NONE;
