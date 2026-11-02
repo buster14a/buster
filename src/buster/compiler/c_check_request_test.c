@@ -384,7 +384,7 @@ static void check_test_request_program_options(CheckTest* test)
             .initializer_reference_count = 1,
             .scalar = true,
             .lifetimes = true,
-            .folded_ifs = true,
+            .unselected_operands = true,
             .target = { .features = UINT64_MAX },
             .identifiers = (const InternTable*)&initializers,
         };
@@ -393,7 +393,7 @@ static void check_test_request_program_options(CheckTest* test)
                                 made.target.architecture == X86_ARCH_V3 && made.predefines == &pp->options.predefines,
                           "request: the program's identifiers, target and predefines are the preprocessor's");
         check_test_expect(test, made.initializers == &initializers && made.initializer_references == references && made.initializer_reference_count == 1 &&
-                                made.scalar && made.lifetimes && made.folded_ifs && !made.unselected_operands,
+                                made.scalar && made.lifetimes && made.unselected_operands,
                           "request: the program's options keep the unit's own fields and the client's overrides");
     }
     free(pp);
