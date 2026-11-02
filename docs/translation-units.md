@@ -341,11 +341,14 @@ were killed by the cgroup's OOM killer at 14 GB, without a diagnostic
 
 So the units' lanes share a memory budget (`CheckUnitsMemory`): seven
 eighths of what the process may still take when the run starts
-(`check_units_memory_available`: the least of `MemAvailable` and, for each
-cgroup v2 from the process's own up to its hierarchy's root, `memory.max`
-less `memory.current`, the files' pages on its lists counted as free), the
-eighth left for what the estimates don't count (the links the lanes keep,
-the lanes that take only functions' parts, the link). A unit takes its
+(`check_units_memory_read`: the least of `MemAvailable`, or the free pages
+without it, and, for each cgroup v2 from the process's own up to its
+hierarchy's root, `memory.max` less `memory.current`, the files' pages on
+its lists counted as free; a cgroup v1 limit isn't read, so under one the
+machine's memory is the bound), the eighth left for what the estimates
+don't count (the links the lanes keep, the lanes' thread scratch, the
+lanes that take only functions' parts, the link). Each process budgets
+alone: several compilers at once (`make -j`) still add up. A unit takes its
 estimate once preprocessed, before its parse (`check_units_admit`, from
 `check_driver_unit`), when its tokens are known: the preprocessor's own
 memory is a small part of a unit's peak (208 MB of `main.c`'s 3.5 GB),
@@ -356,11 +359,21 @@ hold makes its lane give back what it holds (its three arenas' pages past
 their first huge page boundary, `arena_discard`) and sleep on a word that
 every lane advances when it gives memory back, until it fits or no other
 lane holds any: a unit alone always runs, however large. A lane gives its
-memory back at its end, and at each unit's end while another lane waits.
-What a unit writes doesn't depend on when it ran, so the outputs are the
-same as without the budget; `test-check-units` runs its programs' units
-with `--units-memory=1`, which serializes every unit's parse and later
-stages, into each unit's object alone.
+memory back at each unit's end while another lane waits, and once it has
+no unit left to take, before it helps the other lanes' emissions on the
+board (#777): the help waits for the lanes still taking units, one of
+which may wait for that memory, and a lane that kept it there deadlocked
+with such a unit (a 16 MiB unit of comments beside a tiny one, by two
+lanes with one unit's memory, found in review). So a lane holds memory
+only while it takes units, and waits for nothing but its own units' work
+then. What a unit writes doesn't depend on when it ran, so the outputs are
+the same as without the budget. `test-check-units` runs its programs'
+units with `--units-memory=1`, which serializes every unit's parse and
+later stages, into each unit's object alone; reads the budget from files
+of its own for each branch of `check_units_memory_read`; requires one of
+two equal units by two lanes to wait for the other's memory; and compiles
+that slow unit beside the tiny one under two budgets, each object its own
+alone, where the deadlock would hang until the children's alarm.
 
 The estimate (`check_units_estimate`) is 600 bytes a preprocessed token and
 48 MB a unit. On the laptop, `-c --lanes 1` of each of build.sh's 41

@@ -1505,22 +1505,26 @@ static uint64_t check_units_text_value(const char* text, const char* key, uint64
     return result;
 }
 
-// What the process may still take of the machine's memory when the units' run starts (#1109): the least of
-// /proc/meminfo's MemAvailable and, for each cgroup v2 from the process's own (/proc/self/cgroup's "0::" line) up to its
-// hierarchy's root, its memory.max less its memory.current, the files' pages on its lists (memory.stat's active_file and
-// inactive_file) counted as free, since the kernel takes them back before it kills. UINT64_MAX if none can be read.
-static uint64_t check_units_memory_available(void)
+// What the process may still take of the machine's memory (#1109), read from `meminfo`, `cgroup` and the cgroup v2
+// hierarchy at `root` (/proc/meminfo, /proc/self/cgroup and /sys/fs/cgroup, which test-check-units replaces with files of
+// its own): the least of MemAvailable (or, without it, the free pages, _SC_AVPHYS_PAGES, which leave out what the kernel
+// could take back) and, for each cgroup from the process's own (`cgroup`'s "0::" line) up to the hierarchy's root, its
+// memory.max less its memory.current, the files' pages on its lists (memory.stat's active_file and inactive_file)
+// counted as free, since the kernel takes them back before it kills. A cgroup v1 limit isn't read: under one, the
+// machine's memory is the bound.
+static uint64_t check_units_memory_read(const char* meminfo, const char* cgroup, const char* root)
 {
     char text[8192];
-    uint64_t result = UINT64_MAX;
-    if (check_units_read_text("/proc/meminfo", text, sizeof(text)) != 0)
+    uint64_t result = check_units_read_text(meminfo, text, sizeof(text)) != 0 ? check_units_text_value(text, "MemAvailable:", 1024, UINT64_MAX) : UINT64_MAX;
+    if (result == UINT64_MAX)
     {
-        result = check_units_text_value(text, "MemAvailable:", 1024, UINT64_MAX);
+        const long free_pages = sysconf(_SC_AVPHYS_PAGES);
+        const long page_bytes = sysconf(_SC_PAGESIZE);
+        result = free_pages > 0 && page_bytes > 0 ? (uint64_t)free_pages * (uint64_t)page_bytes : 0;
     }
-    static const char root[] = "/sys/fs/cgroup";
     char directory[PATH_MAX];
-    const uint64_t prefix = sizeof(root) - 1;
-    const uint64_t length = check_units_read_text("/proc/self/cgroup", text, sizeof(text));
+    const uint64_t prefix = strlen(root);
+    const uint64_t length = check_units_read_text(cgroup, text, sizeof(text));
     const char* line = length != 0 && strncmp(text, "0::/", 4) == 0 ? text : length != 0 ? strstr(text, "\n0::/") : NULL;
     const char* path = line != NULL ? line + (line == text ? 3 : 4) : NULL;
     const uint64_t path_length = path != NULL ? strcspn(path, "\n") : 0;
@@ -1557,6 +1561,12 @@ static uint64_t check_units_memory_available(void)
         end = end > prefix ? parent - 1 : 0;
     }
     return result;
+}
+
+// What the process may still take of the machine's memory when the units' run starts (check_units_memory_read).
+static uint64_t check_units_memory_available(void)
+{
+    return check_units_memory_read("/proc/meminfo", "/proc/self/cgroup", "/sys/fs/cgroup");
 }
 
 // The peak a unit of `tokens` preprocessed tokens adds to the process's resident memory, by estimate (#1109): what its
@@ -1773,7 +1783,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 // A lane of the units' run: takes the units in turn, costliest first, and compiles each as a lane of its own
 // (lane_alone), so that nothing a unit runs takes the group's other lanes for its own. The arenas its units release go
 // to its pool for the next units' reservations; at its end it releases its own memory into the pool too
-// (check_units_lane_release), and the pool's arenas, their pages freed, are unmapped.
+// (check_units_lane_release), and the pool's arenas, their pages freed, are unmapped. A lane holds the units' memory
+// (#1109) only while it takes units, and waits for nothing but its own units' work while it does, so that a unit waiting
+// for memory always has a lane to give it back.
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
@@ -1786,8 +1798,11 @@ static void check_units_lane(void* argument)
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
-    // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
-    // a unit is, until no lane takes units.
+    // No unit left to take: the lane gives back its part of the units' memory (#1109) before it helps, since the help
+    // waits for the lanes still taking units, one of which may wait for that memory; the parts it takes run on their
+    // sharing lane's arenas, not its own. Then it takes the parts of the units' emissions still running (#777), alone in
+    // its group as a unit is, until no lane takes units.
+    check_units_memory_give(lane);
     if (run->board != NULL)
     {
         const Lane group = lane_alone();

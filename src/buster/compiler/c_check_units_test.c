@@ -46,6 +46,11 @@
 //   (its emission pauses after each part it takes itself), each object its own alone, and the six lanes that take no
 //   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
 //   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
+// - The units' memory (#1109, check_units_test_memory): the budget read from files of the test's own for each branch of
+//   check_units_memory_read; two equal units by two lanes with a byte of memory, one of which must wait for the
+//   other's, each object its own alone; and a unit of 16 MiB of comments beside a tiny one, by two lanes with a byte and
+//   with one unit's memory, each object its own alone, where a lane that kept its memory while it helped on the board
+//   deadlocked with the slow unit's waiting for it (the children's alarm fails the run).
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -1141,6 +1146,231 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
     printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's\n", (unsigned long long)taken);
 }
 
+// The units of BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS functions that wait for each other's memory (#1109), and the
+// lines of comment of the unit whose preprocessing outlasts a tiny unit's whole compile: 16 MiB of them.
+#define BUSTER_CHECK_UNITS_TEST_MEMORY_UNITS 2
+#define BUSTER_CHECK_UNITS_TEST_SLOW_LINES ((16u << 20) / 80)
+
+// A case of check_units_memory_read's: its /proc/meminfo and /proc/self/cgroup (null for none), files under its cgroup
+// hierarchy's root (a path and its text, up to a null path), and what it must read: `expected` exactly, or with
+// `bounded`, a value no larger (the free pages' fallback, which depends on the machine).
+typedef struct CheckUnitsTestMemoryCase CheckUnitsTestMemoryCase;
+struct CheckUnitsTestMemoryCase
+{
+    const char* name;
+    const char* meminfo;
+    const char* cgroup;
+    const char* files[8][2];
+    uint64_t expected;
+    bool bounded;
+};
+
+// Writes `text` at `root`/`relative`, making its directories; false if it can't.
+static bool check_units_test_memory_file(const char* root, const char* relative, const char* text)
+{
+    char path[PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s/%s", root, relative);
+    bool written = length > 0 && (uint64_t)length < sizeof(path);
+    for (int i = (int)strlen(root) + 1; written && i < length; i += 1)
+    {
+        if (path[i] == '/')
+        {
+            path[i] = 0;
+            written = mkdir(path, 0755) == 0 || errno == EEXIST;
+            path[i] = '/';
+        }
+    }
+    return written && parse_test_write(path, text, strlen(text));
+}
+
+// The units' memory (#1109): the budget read from files of the test's own, every branch of check_units_memory_read;
+// two equal units by two lanes with a byte of memory, one of which waits for the other's, each object its own alone; and
+// a unit whose preprocessing outlasts a tiny unit's whole compile, beside it, by two lanes with a byte of memory and with
+// one unit's estimate: the tiny unit's lane, with no unit left to take, gives its memory back before it helps on the
+// board, where it would wait for the slow unit's lane while that lane waits for its memory (a deadlock, which the
+// children's alarm turns into a failure).
+static void check_units_test_memory(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    char memory_directory[PATH_MAX];
+    char path[PATH_MAX];
+    char errors_path[PATH_MAX];
+    snprintf(memory_directory, sizeof(memory_directory), "%s/memory", directory);
+    snprintf(errors_path, sizeof(errors_path), "%s/errors.txt", memory_directory);
+    bool written = mkdir(memory_directory, 0755) == 0;
+    check_units_test_expect(tally, written, "make the units' memory test's directory", memory_directory);
+    static const char meminfo[] = "MemTotal:       16000000 kB\nMemFree:         1000000 kB\nMemAvailable:    8000000 kB\n";
+    static const CheckUnitsTestMemoryCase cases[] = {
+        {
+            .name = "a limit up the hierarchy, the files' pages counted as free",
+            .meminfo = meminfo,
+            .cgroup = "12:memory:/x\n0::/a/b\n",
+            .files = {
+                { "a/b/memory.max", "max\n" },
+                { "a/memory.max", "4000000000\n" },
+                { "a/memory.current", "1000000000\n" },
+                { "a/memory.stat", "anon 500000000\nactive_file 200000000\ninactive_file 300000000\n" },
+            },
+            .expected = 3500000000u,
+        },
+        {
+            .name = "a cgroup past its limit",
+            .meminfo = meminfo,
+            .cgroup = "0::/a/b\n",
+            .files = {
+                { "a/b/memory.max", "2000000000\n" },
+                { "a/b/memory.current", "2500000000\n" },
+            },
+            .expected = 0,
+        },
+        {
+            .name = "the hierarchy's root",
+            .meminfo = meminfo,
+            .cgroup = "0::/\n",
+            .files = {
+                { "memory.max", "6000000000\n" },
+                { "memory.current", "1000000000\n" },
+            },
+            .expected = 5000000000u,
+        },
+        {
+            .name = "the limit three levels up",
+            .meminfo = meminfo,
+            .cgroup = "0::/a/b/c\n",
+            .files = {
+                { "a/b/c/memory.max", "max\n" },
+                { "a/b/memory.max", "max\n" },
+                { "a/memory.max", "max\n" },
+                { "memory.max", "3000000000\n" },
+                { "memory.current", "1000000000\n" },
+                { "memory.stat", "active_file 500000000\ninactive_file 0\n" },
+            },
+            .expected = 2500000000u,
+        },
+        {
+            .name = "cgroup v1 alone: MemAvailable",
+            .meminfo = meminfo,
+            .cgroup = "3:memory:/x\n1:name=systemd:/y\n",
+            .expected = 8192000000u,
+        },
+        {
+            .name = "no MemAvailable: the free pages, under the cgroup's limit",
+            .meminfo = NULL,
+            .cgroup = "0::/\n",
+            .files = {
+                { "memory.max", "1000000000\n" },
+                { "memory.current", "0\n" },
+            },
+            .expected = 1000000000u,
+            .bounded = true,
+        },
+    };
+    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char case_directory[PATH_MAX];
+        char meminfo_path[PATH_MAX];
+        char cgroup_path[PATH_MAX];
+        char root[PATH_MAX];
+        snprintf(case_directory, sizeof(case_directory), "%s/case_%u", memory_directory, c);
+        snprintf(meminfo_path, sizeof(meminfo_path), "%s/meminfo", case_directory);
+        snprintf(cgroup_path, sizeof(cgroup_path), "%s/cgroup", case_directory);
+        snprintf(root, sizeof(root), "%s/root", case_directory);
+        bool made = mkdir(case_directory, 0755) == 0 && mkdir(root, 0755) == 0 &&
+                    (cases[c].meminfo == NULL || parse_test_write(meminfo_path, cases[c].meminfo, strlen(cases[c].meminfo))) &&
+                    parse_test_write(cgroup_path, cases[c].cgroup, strlen(cases[c].cgroup));
+        for (uint32_t f = 0; made && f < BUSTER_ARRAY_LENGTH(cases[c].files) && cases[c].files[f][0] != NULL; f += 1)
+        {
+            made = check_units_test_memory_file(root, cases[c].files[f][0], cases[c].files[f][1]);
+        }
+        const uint64_t read = made ? check_units_memory_read(meminfo_path, cgroup_path, root) : UINT64_MAX;
+        const bool right = cases[c].bounded ? read <= cases[c].expected : read == cases[c].expected;
+        check_units_test_expect(tally, made && right, "the units' memory read from the machine's files", cases[c].name);
+    }
+    // Two equal units, each with its object alone.
+    for (uint32_t u = 0; written && u < BUSTER_CHECK_UNITS_TEST_MEMORY_UNITS; u += 1)
+    {
+        snprintf(path, sizeof(path), "%s/equal_%u.c", memory_directory, u);
+        FILE* file = fopen(path, "w");
+        written = file != NULL;
+        for (uint32_t f = 0; written && f < BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS; f += 1)
+        {
+            fprintf(file, "int equal_%u_%u(int x)\n{\n    int s = x + %u;\n    for (int i = 0; i < 4; i += 1)\n    {\n        s = (s * 3 + i) & 0xffff;\n    }\n    return s;\n}\n", u, f, f);
+        }
+        written = file != NULL && fclose(file) == 0 && written;
+        char source[32];
+        char object[32];
+        snprintf(source, sizeof(source), "equal_%u.c", u);
+        snprintf(object, sizeof(object), "alone_%u.o", u);
+        char* alone[] = { (char*)executable, "-c", "-o", object, source, NULL };
+        written = written && check_units_test_run(memory_directory, alone, "/dev/null", errors_path, false) == 0;
+    }
+    check_units_test_expect(tally, written, "write the equal units and their objects alone", memory_directory);
+    char* equal[] = { (char*)executable, "--units-memory=1", "--lanes", "2", "-c", "equal_0.c", "equal_1.c", NULL };
+    const int equal_status = written ? check_units_test_run(memory_directory, equal, "/dev/null", errors_path, false) : -1;
+    uint64_t length = 0;
+    char* text = check_units_test_read(errors_path, &length);
+    static const char prefix[] = "units memory: ";
+    static const char suffix[] = " units waited, at most 1 lane held memory at once\n";
+    char* end = NULL;
+    const unsigned long long waits = text != NULL && strncmp(text, prefix, strlen(prefix)) == 0 ? strtoull(text + strlen(prefix), &end, 10) : 0;
+    const bool reported = end != NULL && strcmp(end, suffix) == 0;
+    free(text);
+    check_units_test_expect(tally, equal_status == 0 && reported && waits != 0, "two equal units by two lanes with a byte of memory: one waits for the other's",
+                            memory_directory);
+    for (uint32_t u = 0; equal_status == 0 && u < BUSTER_CHECK_UNITS_TEST_MEMORY_UNITS; u += 1)
+    {
+        char together[PATH_MAX];
+        char apart[PATH_MAX];
+        snprintf(together, sizeof(together), "%s/equal_%u.o", memory_directory, u);
+        snprintf(apart, sizeof(apart), "%s/alone_%u.o", memory_directory, u);
+        check_units_test_expect(tally, check_test_driver_same_files(together, apart), "two equal units with a byte of memory: each object its own alone",
+                                together);
+    }
+    // A slow unit beside a tiny one, each with its object alone.
+    snprintf(path, sizeof(path), "%s/slow.c", memory_directory);
+    FILE* slow = written ? fopen(path, "w") : NULL;
+    written = slow != NULL;
+    for (uint32_t l = 0; written && l < BUSTER_CHECK_UNITS_TEST_SLOW_LINES; l += 1)
+    {
+        written = fputs("// a line of comment, which only the preprocessing reads, to make the unit slow\n", slow) >= 0;
+    }
+    written = slow != NULL && fprintf(slow, "int slow(void)\n{\n    return 1;\n}\n") > 0 && fclose(slow) == 0 && written;
+    snprintf(path, sizeof(path), "%s/fast.c", memory_directory);
+    static const char fast[] = "int fast(void)\n{\n    return 2;\n}\n";
+    written = written && parse_test_write(path, fast, strlen(fast));
+    char* alone_slow[] = { (char*)executable, "-c", "-o", "alone_slow.o", "slow.c", NULL };
+    char* alone_fast[] = { (char*)executable, "-c", "-o", "alone_fast.o", "fast.c", NULL };
+    written = written && check_units_test_run(memory_directory, alone_slow, "/dev/null", errors_path, false) == 0 &&
+              check_units_test_run(memory_directory, alone_fast, "/dev/null", errors_path, false) == 0;
+    check_units_test_expect(tally, written, "write the slow and the tiny unit and their objects alone", memory_directory);
+    // A byte of memory, and about one unit's estimate (BUSTER_CHECK_UNITS_UNIT_BYTES and a few tokens), which no two
+    // units fit.
+    static const char* const budgets[] = { "--units-memory=1", "--units-memory=60000000" };
+    static const char* const names[] = { "slow", "fast" };
+    for (uint32_t b = 0; written && b < BUSTER_ARRAY_LENGTH(budgets); b += 1)
+    {
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+        {
+            snprintf(path, sizeof(path), "%s/%s.o", memory_directory, names[n]);
+            unlink(path);
+        }
+        char* together[] = { (char*)executable, (char*)budgets[b], "--lanes", "2", "-c", "slow.c", "fast.c", NULL };
+        const int status = check_units_test_run(memory_directory, together, "/dev/null", errors_path, false);
+        check_units_test_expect(tally, status == 0, "a slow unit beside a tiny one by two lanes: neither lane waits for the other's memory forever", budgets[b]);
+        for (uint32_t n = 0; status == 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+        {
+            char together_path[PATH_MAX];
+            char apart_path[PATH_MAX];
+            snprintf(together_path, sizeof(together_path), "%s/%s.o", memory_directory, names[n]);
+            snprintf(apart_path, sizeof(apart_path), "%s/alone_%s.o", memory_directory, names[n]);
+            check_units_test_expect(tally, check_test_driver_same_files(together_path, apart_path),
+                                    "a slow unit beside a tiny one with little memory: each object its own alone", together_path);
+        }
+    }
+    printf("  memory: %u budgets read from the machine's files; %llu of two equal units waited for a byte of memory; a slow unit beside a "
+           "tiny one by %u budgets, each object its own alone\n",
+           (uint32_t)BUSTER_ARRAY_LENGTH(cases), waits, (uint32_t)BUSTER_ARRAY_LENGTH(budgets));
+}
+
 // The most runs check_units_test_limits makes, past which its sweep has gone wrong.
 #define BUSTER_CHECK_UNITS_TEST_LIMIT_RUNS 10000
 
@@ -1921,6 +2151,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_merge(&tally, executable, directory);
         check_units_test_merge_lease(&tally);
         check_units_test_shared(&tally, executable, directory);
+        check_units_test_memory(&tally, executable, directory);
 #if BUSTER_SANITIZER_RESOURCES
         // The detectors map shadow of their own, whose high-water mark the parent's VmPeak keeps above its VmSize: a
         // probe inherits that peak, which hides the growth a limit would fail at, and a limit below the shadow stops
