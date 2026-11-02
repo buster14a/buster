@@ -16,8 +16,10 @@
 //   another unit's global). Each program compiled:
 //   - by clang -O0, whose program's output and exit status are the expected ones (the oracle of what the C means);
 //   - each unit alone with -c, linked by cc: a program that must print and exit as clang's does;
-//   - all units at once with -c, by --lanes 1, 2, 3 and 8, by default, and by 8 with --poison-arenas (the lanes' arenas
-//     overwritten with a pattern between units): each unit's object the same bytes as alone;
+//   - all units at once with -c, by --lanes 1, 2, 3 and 8, by default, by 8 with --poison-arenas (the lanes' arenas
+//     overwritten with a pattern between units), and by 8 with --units-memory=1 (#1109: a byte of memory for the units'
+//     estimates, so that no two lanes hold memory at once, which its report must say): each unit's object the same bytes
+//     as alone;
 //   - all units at once into an executable, by --lanes 1, 2, 3 and 8, by default and by 8 with --poison-arenas, by each
 //     path: the same bytes, a program that prints and exits as clang's does, and that defines the same symbols as cc's
 //     link of the units' objects (nm: each named symbol the objects define, but the compiler's .L labels, with its

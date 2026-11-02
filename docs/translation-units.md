@@ -274,7 +274,7 @@ musl's 1,006 (`-c`, CPUs 0 to 7):
   `sqlite3.c` reach 2.9 times one's, at 268.73 bytes of DRAM traffic per
   source byte).
 
-So a units lane does four things:
+So a units lane does five things:
 
 - **It keeps its three big arenas** (the driver's arena, scratch and output,
   which the checker and the emission fill) from one unit to the next, emptied
@@ -320,6 +320,100 @@ So a units lane does four things:
   for reading, where the calling thread released every lane's after them,
   alone: on synth's link by 8 lanes, that release took 7.5 to 8.2 ms, and the
   calling thread's release after the lanes now takes 0.6 to 0.7 ms.
+- **It holds its units to the memory** (#1109): each unit, once preprocessed,
+  takes an estimate of its peak from what the lanes may hold at once, and
+  waits for another lane to give memory back when it doesn't fit (below).
+
+### The units' memory
+
+A lane took one unit after another whatever their sizes, so the process's
+peak was about the sum of the lanes' largest units: each lane's three arenas
+keep the pages of its largest unit so far. A `main.c`-sized unit adds about
+3.5 GB, and build.sh's sources hold ten of them (`main.c` and the
+`main_unit_*.c` files that include it), which a run takes last, their
+sources being the smallest. On a 4-core VM of 16 GB, the 41 sources at once
+were killed by the cgroup's OOM killer at 14 GB, without a diagnostic
+(#1109).
+
+So the units' lanes share a memory budget (`CheckUnitsMemory`): seven
+eighths of what the process may still take when the run starts
+(`check_units_memory_available`: the least of `MemAvailable` and, for each
+cgroup v2 from the process's own up to its hierarchy's root, `memory.max`
+less `memory.current`, the files' pages on its lists counted as free), the
+eighth left for what the estimates don't count (the links the lanes keep,
+the lanes that take only functions' parts, the link). A unit takes its
+estimate once preprocessed, before its parse (`check_units_admit`, from
+`check_driver_unit`), when its tokens are known: the preprocessor's own
+memory is a small part of a unit's peak (208 MB of `main.c`'s 3.5 GB),
+and its source file's size says nothing of what it includes. A lane holds
+its largest unit's estimate since it last gave memory back, as its arenas
+hold that unit's pages; a unit that doesn't fit beside what the other lanes
+hold makes its lane give back what it holds (its three arenas' pages past
+their first huge page boundary, `arena_discard`) and sleep on a word that
+every lane advances when it gives memory back, until it fits or no other
+lane holds any: a unit alone always runs, however large. A lane gives its
+memory back at its end, and at each unit's end while another lane waits.
+What a unit writes doesn't depend on when it ran, so the outputs are the
+same as without the budget; `test-check-units` runs its programs' units
+with `--units-memory=1`, which serializes every unit's parse and later
+stages, into each unit's object alone.
+
+The estimate (`check_units_estimate`) is 600 bytes a preprocessed token and
+48 MB a unit. On the laptop, `-c --lanes 1` of each of build.sh's 41
+sources, of `sqlite3.c`, of Lua 5.4.8's 33 files and of an empty file and
+one of 45 headers (78 units, whose peaks huge pages round up) added from
+16.9 MB (the empty file) to 3,899 MB (`main_unit_frontend.c`, 8,087,159
+tokens) to the process's resident set. The units of 300,000 tokens or more
+took 446 to 644 bytes a token (`main.c` 534, `sqlite3.c` 460), and the
+estimate is 1.02 to 1.46 times their peaks (1.14 for `main.c`, 1.20 for
+`main_unit_frontend.c`), and 1.17 to 2.85 times the smaller units'.
+
+On the 9700X (64 GB), build.sh's 41 sources at once with `-c` on its 8
+lanes (`-march=native` and build.sh's flags; two interleaved rounds, each
+run its own hold of the lock; the process's peak resident set):
+
+| run | wall | peak | units that waited |
+|---|---|---|---|
+| main (`3ce71ec3`) | 8.89, 8.69 s | 27.8, 27.9 GiB | |
+| this budget, by default | 8.66, 8.65 s | 27.8, 28.0 GiB | 0 |
+| `--units-memory`, 12 GiB | 10.73, 10.77 s | 10.8, 10.9 GiB | 9 |
+| `--units-memory`, 6 GiB | 22.11, 22.15 s | 5.6, 5.6 GiB | 21 |
+
+By default no unit waited, and the run took main's time and memory: its
+28 GiB peak would not fit the 16 GB VM. Under a 16 GB VM's budget (12 GiB)
+the `main.c`-sized units (4.2 GB each by estimate, 4.9 GB for
+`main_unit_frontend.c`) ran at most three at a time beside the small ones,
+and the run took 24% longer and stayed under the budget; under 6 GiB they
+ran one at a time.
+
+### Huge pages on a virtual machine
+
+On #1109's VM, a huge page's first touch took about 1 ms of system time
+(the guest clears all 2 MB, and the host backs them, whatever the arena
+uses of them; `compact_stall` stayed 0). With transparent huge pages off
+for the process (`PR_SET_THP_DISABLE` before `exec`), the checking of
+`main.c` ran 2 to 4 times as fast (its `check-input` 14.2 and 8.3 s against 3.3 and 4.3 s), and
+Lua's `lvm.c` with huge pages took about 30% longer at the median and up to
+7 times as long at the tail. On the 9700X it goes the other way for large
+units (`--lanes 1` on CPU 2, the medians of interleaved runs, base pages by
+`BUSTER_HUGE_PAGES=0`; the process's peak resident set):
+
+| unit | huge pages | base pages | peak, huge | peak, base |
+|---|---|---|---|---|
+| `lvm.c`, `-c` (10 runs each) | 12.6 ms | 12.8 ms | 82 MB | 36 MB |
+| `sqlite3.c`, `-c` (6) | 117.4 ms | 144.6 ms | 315 MB | 248 MB |
+| `main.c`, `-fsyntax-only` (3) | 1,710 ms | 2,106 ms | 3,484 MB | 3,251 MB |
+
+So `main_driver` decides the process's pages before any arena is reserved
+(`arena_page_policy`, `lane.c`): on a virtual machine, by CPUID's
+hypervisor bit, transparent huge pages are off for the whole process
+(`PR_SET_THP_DISABLE`, which `MADV_HUGEPAGE` doesn't override, and which the
+processes it starts inherit); elsewhere the process keeps what it was
+started with. `BUSTER_HUGE_PAGES=0` turns them off anywhere, and `=1`
+leaves them as the system has them, even on a VM whose huge pages are
+backed ahead and cheap. `--time-stages` reports which (`huge-pages`).
+GitHub's hosted runners are virtual machines, so the hosted correctness
+jobs run with base pages.
 
 ## The link
 

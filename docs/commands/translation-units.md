@@ -29,7 +29,16 @@ unit of less than 1 MB of source start with 16 MB of base pages
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
-write would show. Each lane releases what its units shared, into its pool and
+write would show. The lanes' units are held to the memory (#1109,
+`CheckUnitsMemory`): once preprocessed, a unit takes an estimate of its peak
+(`check_units_estimate`: 600 bytes a token and 48 MB) from seven eighths of
+what the process may take when the run starts (`MemAvailable`, and each cgroup
+v2 `memory.max` up its cgroup less what it uses, `check_units_memory_available`)
+before it parses (`check_units_admit`); a unit that doesn't fit beside what the
+other lanes hold waits until a lane gives its memory back (at its end, or at
+its unit's end while one waits), and a unit alone always runs.
+`--units-memory=BYTES`, a test option, sets that budget and reports how many
+units waited and the most lanes that held memory at once. Each lane releases what its units shared, into its pool and
 then the pool itself, on the lane once it takes no more units, and the
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
@@ -54,7 +63,10 @@ generated programs of 2 to 7 units and one of synth's shape (12 units of 30
 functions), each of whose executables, by `--lanes` 1, 2, 3 and 8, by default
 and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 `clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
-objects defines, and each of whose units' `-c` objects is the unit's alone;
+objects defines, and each of whose units' `-c` objects is the unit's alone
+(by `--lanes` 1, 2, 3 and 8, by default, by 8 poisoned, and by 8 with
+`--units-memory=1`, whose report must say that at most one lane held memory at
+once);
 diagnostics, each unit's alone in the command line's order; refusals, one
 of them over a poisoned stack; the merge on lanes against its twin, by
 `--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
