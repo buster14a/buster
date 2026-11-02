@@ -667,7 +667,8 @@ static bool check_stream_value_rest(const CheckValue* value)
 // the value has more than the columns (check_stream_value_rest), which takes the next row. A node keeps the row a write
 // gave it (check_graph_run clears `payload_rows` first), so that it has at most one, and `payloads` needs no more rows
 // than the stream has nodes, whatever its writes.
-static void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
+// Always inlined (#880), as profile-guided builds do: called from check_graph_leaf, once per leaf.
+static inline __attribute__((always_inline)) void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
 {
     if (stream->dense_values != NULL)
     {
@@ -760,7 +761,8 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
     return result;
 }
 
-static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2)
+// Always inlined (#880), as profile-guided builds do: called from check_input_add_node, once per node.
+static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2)
 {
     uint32_t result = BUSTER_CHECK_NONE;
     const uint32_t node = graph->count;
@@ -922,7 +924,8 @@ static bool check_graph_typed(CheckOp op)
 // Only regions known to use builtin arithmetic types can be reordered. An address, decay, composite, or another
 // action that can intern a type is a source-order barrier. This preserves identical TypeIds in fresh tables, not
 // merely in a table already populated by the scalar oracle. A non-builtin value conservatively ends a region.
-static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8_t* pure)
+// Always inlined (#880), as profile-guided builds do: called from check_graph_record_nodes, once per node.
+static inline __attribute__((always_inline)) bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8_t* pure)
 {
     const CheckOp op = graph->ops[node];
     const TypeId requested = graph->types != 0 ? graph->types[node] : 0;
@@ -1455,7 +1458,8 @@ static CheckContext check_graph_context(const CheckGraph* graph, uint32_t node, 
     return context;
 }
 
-static void check_graph_action(const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckValue* arguments, CheckAction* action)
+// Always inlined (#880), as profile-guided builds do: called from check_graph_scalar_node, once per action.
+static inline __attribute__((always_inline)) void check_graph_action(const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckValue* arguments, CheckAction* action)
 {
     *action = (CheckAction){
         .op = graph->ops[node],
@@ -1557,7 +1561,8 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
     return value;
 }
 
-static void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do: called from check_graph_run, once per node.
+static inline __attribute__((always_inline)) void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
     CheckValue value = result->value;
     value.flags = check_value_source_flags((CheckOp)stream->graph->ops[node], value.flags);
@@ -1587,7 +1592,8 @@ static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 // invalid type, that type's diagnostic and a zero value (check_action_compute skips the operator then); its diagnostic
 // operand is the run's zero. The vector path writes it in node order, beside its neighbours' records, whose cache lines a
 // separate pass of leaves would write a second time (on sqlite3.c, a sixth of the graph's time).
-static void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+// Always inlined (#880), as profile-guided builds do: called from check_graph_run, once per leaf.
+static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
 {
     const CheckValue* leaf = check_graph_leaf_of(graph, node);
     const bool valid = type_is_valid(types, leaf->type);
@@ -2265,7 +2271,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
 #include "c_check_overload_graph.c"
 #include "c_check_region_graph.c"
 
-static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
+// Always inlined (#880), as profile-guided builds do: called from check_graph_run, once per impure node.
+static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
 {
     (void)scalar;
 
@@ -2377,7 +2384,8 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     }
     else
     {
-        check_action_scalar(types, &action, &result);
+        // check_action_scalar's own call, which its 15 other callers share, would keep the action out of line (#880).
+        check_action_compute(types, &action, &result, 0, NULL);
         // A call of a plain library builtin's declaration that clang folds (#148, the reader's mark in its member).
         if (action.op == CHECK_OP_CALL && (action.member & BUSTER_CHECK_LIBRARY_CALL) != 0)
         {

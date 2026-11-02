@@ -243,7 +243,8 @@ static void check_init_history_enter(CheckInitWalker* walker, CheckInitHistoryNo
     }
 }
 
-static void check_init_history_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node, bool string, uint32_t flags)
+// Always inlined (#880), as profile-guided builds do: called from check_init_value.
+static inline __attribute__((always_inline)) void check_init_history_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node, bool string, uint32_t flags)
 {
     CheckInitHistoryNode* history = selected->history;
     if (history != NULL)

@@ -91,7 +91,8 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
 
 // An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, and a
 // static initializer's context.
-static uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+// Always inlined (#880), as profile-guided builds do: called from the expression reader, once per operator.
+static inline __attribute__((always_inline)) uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
     const uint32_t node = check_input_add_node(reader, op, token, a, b, c);
     if (node != BUSTER_CHECK_NONE)
@@ -241,7 +242,9 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
 }
 
 // A binary operator, or a comma operator: two values, but an initializer's assignment.
-static bool check_input_expression_binary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+// Always inlined (#880), as profile-guided builds do: called from check_input_expression_coded, once per binary
+// operator.
+static inline __attribute__((always_inline)) bool check_input_expression_binary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const CheckOp op = check_input_binary(reader->parser->tokens.kinds[token]);
     const bool acted = op != CHECK_OP_COUNT && values.count == 2 && reader->initializers[token] == 0 && reader->builtins[token] == 0;

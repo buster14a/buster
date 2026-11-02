@@ -580,7 +580,8 @@ static void check_vector_conditional(TypeTable* table, const CheckAction* action
     }
 }
 
-static bool check_vector_action(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do: called from check_action_compute, once per action.
+static inline __attribute__((always_inline)) bool check_vector_action(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool left = check_vector_type(table, action->operands[0].type);
     const bool right = check_vector_type(table, action->operands[1].type);

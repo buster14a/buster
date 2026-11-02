@@ -1273,10 +1273,12 @@ static uint8_t type_arithmetic_code(const TypeTable* table, TypeId type)
     return table->types.code[type_resolved_index(table, type)];
 }
 
+// Inlined everywhere: without the hint, clang put the rare aligned case on the path and jumped around it, 6% of the
+// taken branches of sqlite3.c's -fsyntax-only (#880).
 static TypeId type_strip_aligned(const TypeTable* table, TypeId type)
 {
     TypeId result = type;
-    if (type_kind(table, type) == BUSTER_TYPE_KIND_ALIGNED)
+    if (__builtin_expect(type_kind(table, type) == BUSTER_TYPE_KIND_ALIGNED, 0))
     {
         result = table->types.base[type >> BUSTER_TYPE_INDEX_SHIFT] | type_qualifiers(type);
     }
@@ -2431,7 +2433,8 @@ static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* 
     return type_function_abi(table, result_type, parameters, count, flags, TYPE_FUNCTION_ABI_SYSV);
 }
 
-static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
+// Always inlined (#880), as profile-guided builds do: called from check_input_declarator_step, once per parameter.
+static inline __attribute__((always_inline)) TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 {
     TypeId result = type_strip_aligned(table, type);
     const uint8_t kind = type_kind(table, result);
@@ -3114,7 +3117,8 @@ static inline __attribute__((always_inline)) uint32_t type_lookup_member_with(co
     return result;
 }
 
-static uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
+// Always inlined (#880), as profile-guided builds do: called from check_action_member.
+static inline __attribute__((always_inline)) uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
 {
     return type_lookup_member_with(table, record, name, offset, qualifiers, BUSTER_SCALAR_PATH(false));
 }

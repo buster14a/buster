@@ -44,7 +44,8 @@ static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser*
 // `lvalue` is the token naming the conversion's destination — an INITIALIZE's `=` (whose graph type carries
 // the declared type, so `declared` passes it), an ASSIGN's left operand's root, or 0 where no declaration is
 // reachable (#992).
-static void check_warning_graph_null(CheckInputReader* reader, const CheckStream* stream, uint32_t source, TypeId destination,
+// Always inlined (#880), as profile-guided builds do: called from check_input_warning_graph.
+static inline __attribute__((always_inline)) void check_warning_graph_null(CheckInputReader* reader, const CheckStream* stream, uint32_t source, TypeId destination,
                                      uint32_t lvalue, TypeId declared, uint32_t completion)
 {
     const CheckGraph* graph = &reader->output->graph;
