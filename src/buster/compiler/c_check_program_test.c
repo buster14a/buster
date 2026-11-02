@@ -4905,8 +4905,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                     "vla-bound-reference", true, true, 1, 0);
         check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
                                     "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
-        check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                           "typed-asm-goto-target", true, false, 0, 0, "asm goto");
+        check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                    "typed-asm-goto-target", true, true, 0, 0);
     }
     // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
     if (check_test_takes())
