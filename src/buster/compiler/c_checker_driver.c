@@ -3266,9 +3266,40 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
+// A coverage list whose every entry is a feature clang knows is resolved after all options: a later -fno-... may
+// cancel one, and the diagnostic must name the remaining feature. Empty, numeric and unknown lists stay with the
+// by-name hardening refusal below.
+static bool check_driver_coverage_list(const char* list)
+{
+    bool any = false;
+    const char* name = list;
+    bool more = true;
+    while (more)
+    {
+        const char* end = strchr(name, ',');
+        const size_t length = end != NULL ? (size_t)(end - name) : strlen(name);
+        bool found = false;
+        for (uint32_t i = 0; !found && length != 0 && i < BUSTER_ARRAY_LENGTH(predefines_coverage_names); i += 1)
+        {
+            found = strlen(predefines_coverage_names[i]) == length && memcmp(predefines_coverage_names[i], name, length) == 0;
+        }
+        const bool known = found;
+        any |= known;
+        more = known && end != NULL;
+        name = end != NULL ? end + 1 : name;
+        if (!known)
+        {
+            return false;
+        }
+    }
+    return any;
+}
+
 // These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
 // still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
-// differently instrumented object. Negative/default forms that do not request those behaviors are left alone.
+// differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values
+// and their auxiliary options; only the exact inactive/default requests below are admitted. This does not yet audit
+// every -f/-m option. Negative options outside these families retain their existing handling.
 static bool check_driver_unsupported_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
@@ -3276,10 +3307,18 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
         "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
         "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+        "-fsanitize-coverage", "-fsanitize-coverage=",
     };
+    const bool coverage_list = strncmp(argument, "-fsanitize-coverage=", 20) == 0 && check_driver_coverage_list(argument + 20);
     static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
                                             "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
-                                            "-fprofile-generate-cold-function-coverage=" };
+                                            "-fprofile-generate-cold-function-coverage=",
+                                            "-ftrivial-auto-var-init",
+                                            "-ftrapv",
+                                            "-fzero-call-used-regs",
+                                            "-fsanitize-coverage",
+                                            "-fsplit-stack",
+                                            "-mcmodel" };
     bool unsupported = false;
     for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
     {
@@ -3288,6 +3327,21 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
     for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
     {
         unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
+    }
+    unsupported = unsupported && !coverage_list;
+    // These complete spellings request the behavior already emitted. Do not use prefix matches for exemptions:
+    // e.g. -mcmodel=small-bogus and -fzero-call-used-regs=skip,all must still be refused by name. Within these
+    // families, an earlier unsupported request is not cancelled by a later inactive spelling; the stack-protector
+    // and CET families are resolved separately and do honor a later disabling spelling.
+    static const char* const inactive[] = {
+        "-ftrivial-auto-var-init=uninitialized",
+        "-fzero-call-used-regs=skip",
+        "-fsanitize-coverage=0",
+        "-mcmodel=small",
+    };
+    for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
+    {
+        unsupported = strcmp(argument, inactive[i]) != 0;
     }
     return unsupported;
 }
@@ -3698,6 +3752,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
     unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
+    // Syntax-only takes precedence over -c, whichever came first.
+    emit_object = emit_object && !syntax_only;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Non-linking actions consume the transport but do not invoke a linker, as -c and -E do in a system driver.
@@ -3844,6 +3900,32 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+    }
+    // Predefines model these options even without code generation. Decide from their resolved state, not from
+    // seeing an enabling argument: a later -fno-sanitize= or -fno-openmp may have canceled it. Refuse before any
+    // source, worker session or output is opened. libgomp still requests OpenMP even though it defines no _OPENMP.
+    else if ((emit_object || link) && (options.predefines.sanitizers != 0 || options.predefines.sanitize_coverage || options.predefines.openmp_enabled))
+    {
+        if (options.predefines.sanitizers != 0)
+        {
+            char spelling[1024];
+            const char* option = predefines_sanitizer_last(&options.predefines, options.predefines.sanitizers, spelling, sizeof(spelling));
+            fprintf(stderr, "error: unsupported code generation option '%s' (sanitizer instrumentation is not implemented)\n",
+                    option[0] != 0 ? option : "-fsanitize");
+        }
+        else if (options.predefines.sanitize_coverage)
+        {
+            char spelling[1024];
+            const char* option = predefines_coverage_last(&options.predefines, options.predefines.coverage_features, spelling, sizeof(spelling));
+            fprintf(stderr, "error: unsupported code generation option '%s' (coverage instrumentation is not implemented)\n",
+                    option[0] != 0 ? option : "-fsanitize-coverage");
+        }
+        else
+        {
+            const char* runtime = options.predefines.openmp_runtime;
+            fprintf(stderr, "error: unsupported code generation option '-fopenmp%s%s' (OpenMP code generation is not implemented)\n",
+                    runtime != NULL ? "=" : "", runtime != NULL ? runtime : "");
+        }
     }
     else if (unsupported_pic != NULL)
     {
