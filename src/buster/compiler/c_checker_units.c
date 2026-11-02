@@ -1589,9 +1589,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 // pool too (check_units_lane_release) and unmaps the pool's arenas, their pages freed, before it helps the others
 // (#777): a lane that compiled a small unit beside a large one frees its memory while the large one compiles, rather
 // than after it, when the command waits for every lane. The lane that stops taking units last has no other unit's work
-// to overlap its release with: in a -c command that doesn't release its memory (main's, whose process exits after the
-// lanes: run_check_command_mode), the process's exit frees that lane's with the rest of the address space. Before a
-// link it releases it, as every lane does, so that the link's peak stays the units'.
+// to overlap its release with: in a command without a link that doesn't release its memory (main's, whose process exits
+// after the lanes: run_check_command_mode), the process's exit frees that lane's with the rest of the address space.
+// Before a link it releases it, as every lane does, so that the link's peak stays the units'.
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
@@ -1605,13 +1605,13 @@ static void check_units_lane(void* argument)
         lane_restore(group);
     }
     // The lanes that still take units after this one, which help the units' emissions (#777) from now on.
-    const uint32_t taking = run->board != NULL ? __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_ACQ_REL) : 0;
-    arena_pool = 0;
+    const uint32_t taking = run->board != NULL ? __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE) : 0;
     if (run->release || taking != 0)
     {
         check_units_lane_release(lane);
         arena_pool_release(&lane->pool);
     }
+    arena_pool = 0;
     // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
     // a unit is, until no lane takes units.
     if (run->board != NULL)
@@ -1723,8 +1723,8 @@ static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* leas
 // (check_driver_executable), with -g their DWARF units, one each. -o with -c, a dump and --id-order are refused: their
 // outputs are one unit's.
 // With `stage_clock`, the setup, the lanes' run, the link and the release are its stages. Without `release` (a command
-// whose process exits after it), the last lane to stop taking units leaves its memory to the exit with -c. Returns the
-// command's exit status: 0 when every unit compiled without errors and every output was written.
+// whose process exits after it) and without a link, the last lane to stop taking units leaves its memory to the exit.
+// Returns the command's exit status: 0 when every unit compiled without errors and every output was written.
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release)
 {
     int result = 1;
@@ -1846,12 +1846,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                     check_units_compile(&run, states, units + order[i]);
                 }
             }
-            arena_pool = 0;
             if (run.release)
             {
                 check_units_lane_release(states);
                 arena_pool_release(&states->pool);
             }
+            arena_pool = 0;
             lane_restore(caller);
             lanes->active = active;
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);

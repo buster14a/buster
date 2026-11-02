@@ -156,8 +156,8 @@ unit's alone and every executable main's:
   `sqlite3.c`'s unit, 110.7 ms into it: lane 0 released its memory (1.0 to
   1.4 ms), and `shell.c`'s lane, done 45 ms in, released its own (0.9 to
   1.7 ms) only then, last in 6 of the 7 runs. A lane now releases its memory as
-  soon as it has no unit left to take, and with `-c` the last lane leaves its
-  memory to the exit ("Memory" below): the one command is 0.3% to 1.0% faster
+  soon as it has no unit left to take, and without a link the last lane leaves
+  its memory to the exit ("Memory" below): the one command is 0.3% to 1.0% faster
   than main's in each round, from 0.7% faster to 0.3% slower than its
   processes, and its peak is 421 MB rather than 471 (426 linked, rather than
   480). The two processes peak at 368 MB, the larger one's.
