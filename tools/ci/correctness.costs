@@ -7,7 +7,8 @@
 # heading's time, times its CPUs up to 4) when the shards' times drift apart.
 #
 # From run 41519216885's plain rows, its shards' reports (the mean of its x86-64 and native times), 2026-11-02. The
-# sanitizer rows take these too, so their shards balance only roughly.
+# sanitizer rows take these too, so their shards balance only roughly. The last two lines are from run 41543634134,
+# for commands main added since.
 76.8 Test the foreign inputs [8 CPUs]
 154.4 Check the no-recursion rule on the call graph [8 CPUs]
 71.2 Test the calling convention [8 CPUs]
@@ -123,3 +124,5 @@
 0.0 Test the emission metadata protocol
 0.2 Test scoped name-resolution kernels
 0.1 Test the partial Zen 5 model and instruction harness
+12.2 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
+0.1 Test fences through the IR's lowerings, promotion, text and interpreter against clang
