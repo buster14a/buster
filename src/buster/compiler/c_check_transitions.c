@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Memoized type transitions (#1050): the vector path of check_graph_run checks most nodes by an earlier node's answer.
+// Memoized type transitions (#1050): with CheckOptions.transitions (the driver's --check-transitions, opt-in since they
+// saved 4% of sqlite3.c's graph run on the 9700X: docs/c-checker.md, "Memoized transitions"), the vector path of
+// check_graph_run checks most nodes by an earlier node's answer rather than by its regions.
 // When no operand of a node holds a payload (check_stream_value_rest), its action is a function of a small key: its
 // operator, member, requested type, extensions and floating environment, and each operand's (and a call's arguments') type,
 // flags, category and constant kind, with which of them have an object and which share one. The key holds no object and no
@@ -33,7 +35,8 @@
 // A node's shape (check_transition_shape) when its value holds a payload row, and while it waits in a batch of check_actions.
 #define BUSTER_CHECK_TRANSITION_PAYLOAD UINT32_MAX
 #define BUSTER_CHECK_TRANSITION_PENDING (UINT32_MAX - 1)
-#define BUSTER_CHECK_TRANSITION_INITIAL 1024u
+#define BUSTER_CHECK_TRANSITION_SMALLEST 16u
+#define BUSTER_CHECK_TRANSITION_FALLBACK 1024u
 
 // The key's words: the header (the operator, extensions << 8, the floating environment << 11, the objects' pattern << 12
 // and the arguments' count << 18), the member, the requested type, the operands' types and flags, their shapes (operand
@@ -321,16 +324,18 @@ static bool check_transitions_fit(const CheckTransitions* table, uint64_t bytes)
     return table->arena->length <= table->limit && bytes + 128 <= table->limit - table->arena->length;
 }
 
-// The table, with room for an entry per 16 of the graph's `nodes` (sqlite3.c's bodies took one per 19), so that it seldom
-// grows, whose copies would take as much memory again: an array's pages are only touched as its entries fill them. Where
-// that much doesn't fit within the limit, room for BUSTER_CHECK_TRANSITION_INITIAL; false where even that doesn't.
+// The table, with room for an entry per 16 of the graph's `nodes` (sqlite3.c's bodies took one per 19), and for at least
+// BUSTER_CHECK_TRANSITION_SMALLEST, so that it seldom grows, whose copies would take as much memory again: an array's
+// pages are only touched as its entries fill them, and a small graph's table is small (16 entries take 2 KB, and their
+// slots 256 bytes to clear). Where that much doesn't fit within the limit, room for at most
+// BUSTER_CHECK_TRANSITION_FALLBACK; false where even that doesn't.
 static bool check_transitions_initialize(CheckTransitions* table, Arena* arena, uint32_t nodes)
 {
     *table = (CheckTransitions){
         .arena = arena,
         .limit = arena->length + (arena->capacity > arena->length ? (arena->capacity - arena->length) / 4 : 0),
     };
-    uint32_t capacity = BUSTER_CHECK_TRANSITION_INITIAL;
+    uint32_t capacity = BUSTER_CHECK_TRANSITION_SMALLEST;
     while (capacity < nodes / 16 && capacity < (1u << 22))
     {
         capacity *= 2;
@@ -338,7 +343,7 @@ static bool check_transitions_initialize(CheckTransitions* table, Arena* arena, 
     bool result = false;
     for (uint32_t attempt = 0; !result && attempt < 2; attempt += 1)
     {
-        capacity = attempt == 0 ? capacity : BUSTER_CHECK_TRANSITION_INITIAL;
+        capacity = attempt == 0 || capacity < BUSTER_CHECK_TRANSITION_FALLBACK ? capacity : BUSTER_CHECK_TRANSITION_FALLBACK;
         const uint64_t slots = (uint64_t)capacity * 2;
         const uint64_t bytes = slots * sizeof(uint64_t) + (uint64_t)capacity * (sizeof(CheckTransitionEntry) + sizeof(uint32_t)) + 256;
         result = check_transitions_fit(table, bytes);
@@ -430,7 +435,9 @@ static uint32_t check_transitions_find(const CheckTransitions* table, const uint
         {
             const uint32_t index = (uint32_t)(entry >> 32);
             const CheckTransitionEntry* candidate = table->entries + index;
-            bool equal = _mm512_cmpneq_epi32_mask(_mm512_load_si512(candidate->key), wanted) == 0;
+            // A key holds its call's argument count (its header's), and an entry of arguments has their extra
+            // (check_transitions_insert): a key equal with arguments and no extra is no entry's.
+            bool equal = _mm512_cmpneq_epi32_mask(_mm512_load_si512(candidate->key), wanted) == 0 && (argument_count == 0 || candidate->extra != 0);
             const CheckTransitionArgument* arguments = equal && argument_count != 0 ? table->arguments + table->extras[candidate->extra - 1].arguments : NULL;
             for (uint32_t i = 0; equal && i < argument_count; i += 1)
             {
@@ -503,6 +510,9 @@ static void check_transition_write(CheckStream* stream, const CheckGraph* graph,
     }
     else
     {
+        // check_stream_set_value's stores for a value without a payload row, but its row's: check_graph_run's stream has its
+        // columns (never a hand-built stream's dense values), clears `payload_rows` before the run and writes each node
+        // once, so that the node's row is still zero, as the setter would leave it.
         value_types[node] = type;
         value_flags[node] = flags;
         value_objects[node] = object;
@@ -751,8 +761,12 @@ static bool check_graph_transitions(TypeTable* types, const CheckGraph* graph, C
         }
         else
         {
+            // The node's vector member (CheckGraph.vector_members, in node order), which the table doesn't take.
+            while (vector_member < graph->vector_member_count && graph->vector_members[vector_member].node < node)
+            {
+                vector_member += 1;
+            }
             const bool member = vector_member < graph->vector_member_count && graph->vector_members[vector_member].node == node;
-            vector_member += member;
             const bool eligible = check_transition_node(graph, stream, node, member);
             CheckTransitionMiss miss;
             CheckTransitionClass class = check_transition_key(graph, stream, batch, node, eligible, miss.key, miss.objects, words);

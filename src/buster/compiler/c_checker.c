@@ -583,10 +583,12 @@ struct CheckOptions
     // (check_graph_region_postorder), its default since the benchmark measured the two on the same actions and
     // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
     bool level_order;
-    // The vector path without its memoized transitions (#1050, c_check_transitions.c): its regions in postorder batches and
-    // every other node's action, as it ran before them, which the benchmark compares. Level order takes none either.
-    bool no_transitions;
-    // The memoized transitions' alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
+    // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than its regions in postorder
+    // batches: opt in (the driver's --check-transitions), since on the 9700X they saved 4% of sqlite3.c's graph run, about
+    // 0.5% of its compile, and the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes
+    // none.
+    bool transitions;
+    // With transitions, their alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
     // (check_graph_transition_windows), rather than node by node, which the benchmark compares.
     bool transition_windows;
     // Each transition hit's action run as well, its result stored and compared with the transition's
@@ -3078,13 +3080,13 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
-        // The vector path's memoized transitions (#1050, c_check_transitions.c), unless the options ask for its regions,
+        // The vector path's memoized transitions (#1050, c_check_transitions.c) where the options ask for them, unless
         // overload sets make operands contextual, a column its keys read is absent (as check_graph_validate_vector's blocks
         // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's impure
         // leaves without their actions, its other impure nodes one at a time, and each run of pure nodes as a region; the scalar
         // path's nodes one at a time.
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
-        const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && !options->no_transitions &&
+        const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
                                  (options->transition_windows ?
                                   check_graph_transition_windows(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions) :

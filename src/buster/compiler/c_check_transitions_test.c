@@ -50,7 +50,8 @@ static void check_test_transition_keys(CheckTest* test, const char* name, const 
         uint64_t eligible = 0;
         while (vector_member < graph->vector_member_count && graph->vector_members[vector_member].node < first + span)
         {
-            members |= UINT64_C(1) << (graph->vector_members[vector_member].node - first);
+            const uint32_t node = graph->vector_members[vector_member].node;
+            members |= node >= first ? UINT64_C(1) << (node - first) : 0;
             vector_member += 1;
         }
         for (uint32_t position = 0; position < span; position += 1)
@@ -136,10 +137,10 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
     // Node order first, on a fresh table, so that its misses intern the types the oracle's did; then the others.
     const CheckOptions variants[4] =
     {
-        { .verify = true, .verify_transitions = true },
-        { .verify = true, .verify_transitions = true, .transition_windows = true },
-        { .verify = true, .no_transitions = true },
-        { .transition_windows = true, .batch_size = 3 },
+        { .verify = true, .transitions = true, .verify_transitions = true },
+        { .verify = true, .transitions = true, .verify_transitions = true, .transition_windows = true },
+        { .verify = true },
+        { .transitions = true, .transition_windows = true, .batch_size = 3 },
     };
     const char* const names[4] = { "node order", "windows", "regions", "windows of 3-node batches" };
     for (uint32_t v = 0; ready && v < 4; v += 1)
@@ -183,7 +184,8 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
 }
 
 // A generated source of `count` structs, each read through a pointer twice and its first member's address compared with
-// a static object's: `count` distinct member keys, which pass the table's first 1,024 entries, and their repeats.
+// a static object's: `count` distinct member keys, more than the table's first entries and its fallback's 1,024, and
+// their repeats.
 static bool check_test_transition_wide_source(Arena* text, uint32_t count)
 {
     bool fits = true;
@@ -239,12 +241,12 @@ static void check_test_transition_limit(CheckTest* test)
     const CheckOptions scalar = { .scalar = true };
     ready = ready && check_graph_run(&types.table, &input.graph, &output, &scratch, &scalar, &oracle) && oracle.report_count == 0;
     check_test_expect(test, ready, "the table's limit: the wide source checks");
-    const CheckOptions full = { .verify_transitions = true };
+    const CheckOptions full = { .transitions = true, .verify_transitions = true };
     CheckStream whole;
     const uint64_t output_mark = output.length;
     ready = ready && check_graph_run(&types.table, &input.graph, &output, &scratch, &full, &whole);
     const uint32_t entries = ready ? whole.statistics.transition_entries : 0;
-    check_test_expect(test, ready && (entries > BUSTER_CHECK_TRANSITION_INITIAL || !BUSTER_HOST_VECTOR) &&
+    check_test_expect(test, ready && (entries > BUSTER_CHECK_TRANSITION_FALLBACK || !BUSTER_HOST_VECTOR) &&
                             check_test_stream_equal(&oracle, &whole, input.graph.argument_count),
                       "the table's limit: with room, the table passes its first entries");
     arena_pop_to(&output, output_mark);
@@ -397,6 +399,19 @@ static void check_test_transitions(CheckTest* test)
             .folds = 2,
             .entries = 1,
             .reported = true,
+        },
+        {
+            // Vector members (CheckGraph.vector_members): swizzles the table doesn't take, around the sums it does, and in
+            // windows past the first, past members before them.
+            .name = "vector members",
+            .source = "typedef float float4 __attribute__((ext_vector_type(4)));\n"
+                      "float f(float4 v) { return v.x + v.y + v.x * v.w; }\n"
+                      "float g(float4 v, float4 u) { float4 s = v.xyzw + u.wzyx; return s.x + s.y + s.z + s.w + v.x + u.y; }\n"
+                      "float h(float4 v, float4 u) { float4 s = v.xyzw + u.wzyx; return s.x + s.y + s.z + s.w + v.x + u.y; }\n",
+            .hits = 13,
+            .misses = 7,
+            .folds = 0,
+            .entries = 7,
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)

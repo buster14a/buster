@@ -2519,6 +2519,8 @@ struct CheckDriverCommand
     // --scalar, --verify, --dump-typed, --dump-static, -w, -flazy-system-headers and --lower-all.
     bool scalar;
     bool verify;
+    // --check-transitions: the checker's vector path by its memoized transitions (CheckOptions.transitions, #1050).
+    bool check_transitions;
     bool dump;
     bool dump_static;
     bool quiet;
@@ -2726,7 +2728,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // reports share source order with declaration reports, but this fragment can never be emitted.
             if (input_valid || input.diagnostic_graph)
             {
-                const CheckOptions check_options = { .scalar = scalar, .verify = verify, .verify_transitions = verify };
+                const CheckOptions check_options = {
+                    .scalar = scalar,
+                    .verify = verify,
+                    .transitions = command->check_transitions,
+                    .verify_transitions = verify,
+                };
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
                 if (stage_clock != NULL)
@@ -3284,6 +3291,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool scalar = false;
     // --verify checks every function's records with x86_validate (the c-testsuite harness passes it).
     bool verify = false;
+    // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
+    bool check_transitions = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -3444,6 +3453,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             verify = true;
         }
+        else if (strcmp(arguments[i], "--check-transitions") == 0)
+        {
+            check_transitions = true;
+        }
         else if (strcmp(arguments[i], "--tier1") == 0)
         {
             lanes.tier1 = true;
@@ -3587,6 +3600,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .options = options,
         .scalar = scalar,
         .verify = verify,
+        .check_transitions = check_transitions,
         .dump = dump,
         .dump_static = dump_static,
         .quiet = quiet,
@@ -3631,7 +3645,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
