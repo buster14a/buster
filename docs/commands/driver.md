@@ -28,7 +28,8 @@ requirements. [Command index](README.md).
   and `--tier1-no-rematerialize` compiles them without rematerialization and
   `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure
-  outcomes](../../docs/tier1-outcomes.md)), `--id-order N` handing the unit's identifiers their
+  outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
+  optimization macros, not the tier; Tier 0 is the default), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
