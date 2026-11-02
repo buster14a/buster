@@ -163,8 +163,8 @@ recipes and resource wrappers. Median whole-cohort wall times were:
 
 The saturated large cohort uses 4.58% less wall time than unrestricted teams.
 The uneven cohort costs 4.80% more wall time, alongside fewer cycles, switches
-and migrations; its fixed leases expose the tail limitation above. Tiny-file
-ranges overlap. These are one-placement workload results with retained major
+and migrations: its leases were fixed as each team started, the tail that a
+team that grows now closes (below). Tiny-file ranges overlap. These are one-placement workload results with retained major
 faults, not a universal throughput or neutrality guarantee.
 
 A same-head one-file control with spare tokens uses eight lanes in both cases:
@@ -174,6 +174,26 @@ had added 1,549 faults and 1.28% wall time in its matched control. Clean spawnin
 removes that measured copy-on-write amplification without reserving credits
 during the front end. Exact method, counters, identities and rejected controls
 are retained with #673's performance evidence.
+
+### Growing teams' qualification
+
+The [growing teams' record](https://github.com/buster14a/buster-performance/tree/908be6e2a36247da0226cc7f5b5e2f86f1d84c2b/docs/measurements/tail-growth-673-2026-11-02)
+reruns the same harness on the 9700X, main `3ce71ec3` against `e7416f30` (#1161), in two rounds of
+12 cohorts per policy. Medians of whole-cohort wall time:
+
+| Eight-file workload | Main's jobserver (ms) | Jobserver (ms) | Cap one (ms) | Unrestricted (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Two SQLite and six tiny | 147.099, 146.914 | 137.855, 137.309 | 144.940, 144.687 | 140.783, 140.460 |
+| Eight SQLite units | 301.304, 301.201 | 299.902, 300.995 | 302.465, 302.687 | 319.443, 320.413 |
+| Eight tiny units | 7.225 | 7.175 | 7.156 | 7.192 |
+
+- **Uneven.** The jobserver's cohort takes 6.3–6.5% less wall time than main's and is the fastest of the
+  three. In every cohort, the SQLite file it started on one lane grew to seven.
+- **Eight SQLite.** It moves −0.5% and −0.1%, with a few files growing at the tail.
+- **Objects.** They are one lane's in every cohort.
+- **Controls.** `time-runs` on `sqlite3.c`'s `-c`, against main: wall time +0.17% for a team that
+  never grows, −0.08% for one granted 4 of 8 lanes, +0.20% with every lane granted and −0.38%
+  without a jobserver.
 
 ## The phase
 
