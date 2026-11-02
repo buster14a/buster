@@ -99,18 +99,18 @@ jobs:
           set -euo pipefail
           artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$artifacts"
+          host_compiler=clang
+          command -v clang >/dev/null 2>&1 || host_compiler=cc
           {
               printf 'revision=%s\n' "$GITHUB_SHA"
               printf 'event=%s\n' "$GITHUB_EVENT_NAME"
               printf 'host_arch=%s\n' "$BUSTER_HOST_ARCH"
+              printf 'host_check_compiler=%s\n' "$host_compiler"
               uname -a
-              clang --version
+              "$host_compiler" --version
               grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
               printf 'available_cpus=%s\n' "$(nproc)"
           } > "$artifacts/metadata.txt"
-          host_compiler=clang
-          command -v clang >/dev/null 2>&1 || host_compiler=cc
-          printf 'host_check_compiler=%s\n' "$host_compiler" >> "$artifacts/metadata.txt"
           defines=$("$host_compiler" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
           if grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
               printf 'host_path=vector\n' >> "$artifacts/metadata.txt"
