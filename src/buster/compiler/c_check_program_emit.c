@@ -336,6 +336,61 @@ struct CheckTier1Report
     uint64_t red_zones;
 };
 
+// #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
+// family's uses the lowering takes directly and those that call their helper (CheckProgramHelpers.direct and .helper, an
+// asm statement's helper a use of its own), the helpers planned, the units the lowering planned, and those it refused
+// an operation of by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a statement no form takes, which -c and the direct
+// path then refuse whole).
+typedef struct CheckHelperReport CheckHelperReport;
+struct CheckHelperReport
+{
+    uint32_t units;
+    uint32_t refused;
+    uint32_t direct[CHECK_PROGRAM_HELPER_FAMILIES];
+    uint32_t helper[CHECK_PROGRAM_HELPER_FAMILIES];
+    uint32_t planned[CHECK_PROGRAM_HELPER_FAMILIES];
+};
+
+// A unit's plan into `report` (check_program_emit's, after the lowering's preparation): its counts where it planned,
+// `planned`, and otherwise a refusal where the lowering refused an operation by name.
+static void check_helper_report_add(CheckHelperReport* report, const CheckProgramLowered* lowered, bool planned)
+{
+    report->units += 1;
+    report->refused += !planned && lowered->status == CHECK_PROGRAM_UNSUPPORTED ? 1 : 0;
+    for (uint32_t f = 0; planned && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        report->direct[f] += lowered->helpers.direct[f];
+        report->helper[f] += lowered->helpers.helper[f];
+    }
+    for (uint32_t h = 0; planned && h < lowered->helpers.count; h += 1)
+    {
+        const CheckProgramHelperFamily family = check_program_helper_family(&lowered->helpers.items[h]);
+        report->planned[family] += 1;
+        report->helper[family] += family == CHECK_PROGRAM_HELPER_ASM ? 1 : 0;
+    }
+}
+
+// --helper-report's lines on `stream`: the totals, then a line per family.
+static void check_helper_print_report(FILE* stream, const CheckHelperReport* report)
+{
+    uint32_t direct = 0;
+    uint32_t helper = 0;
+    uint32_t planned = 0;
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        direct += report->direct[f];
+        helper += report->helper[f];
+        planned += report->planned[f];
+    }
+    fprintf(stream, "helpers\tunits=%" PRIu32 "\trefused=%" PRIu32 "\tdirect=%" PRIu32 "\thelper=%" PRIu32 "\tplanned=%" PRIu32 "\n", report->units, report->refused, direct,
+            helper, planned);
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        fprintf(stream, "helpers.%s\tdirect=%" PRIu32 "\thelper=%" PRIu32 "\tplanned=%" PRIu32 "\n", check_program_helper_contracts[f].name, report->direct[f],
+                report->helper[f], report->planned[f]);
+    }
+}
+
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
 // functions' bytes (`bytes`); and with --tier1, every lane's (the first's too) for Tier 1's pipeline.
@@ -413,6 +468,8 @@ struct CheckProgramLanes
     bool tier1_no_lifetimes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
+    // Every emission's plan of its helpers' operations, summed (#1059, --helper-report).
+    CheckHelperReport helper_report;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
@@ -1702,6 +1759,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
+    }
+    if (lanes != NULL && lowering)
+    {
+        check_helper_report_add(&lanes->helper_report, &result->lowered, valid);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as

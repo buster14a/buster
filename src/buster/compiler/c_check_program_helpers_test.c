@@ -171,6 +171,259 @@ static void check_test_program_math_helpers(CheckTest* test)
     arena_release(&output);
 }
 
+// A helper's published contract (#1059) against its code: what its records do, read by x86_semantics.c
+// (check_program_helper_physical), must be within its effects (check_program_helper_effects), and its effects' claims
+// must be its code's. The callee-saved registers its code may write are those its frame saves and restores (its code's
+// frame_saved, Tier0Frame.saved's bits, and with frame_pointer rbp: an x86 leaf's frame); every other must stay as the
+// call's convention leaves it. Returns whether it holds, and
+// says why not into `reason`.
+static bool check_test_helper_contract(const CheckProgramHelper* helper, const Tier0Code* code, Arena* scratch, const char** reason)
+{
+    const CheckProgramHelperFamily family = check_program_helper_family(helper);
+    const uint32_t effects = check_program_helper_effects(helper);
+    const CheckProgramHelperPhysical physical = check_program_helper_physical(code, scratch);
+    const uint64_t callee_saved = BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBX) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R12) |
+                                  BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R13) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R14) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R15);
+    uint64_t restored = code->frame_pointer ? BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP) : 0;
+    for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    {
+        restored |= (code->frame_saved & 1u << c) != 0 ? BUSTER_X86_RESOURCE_GPR(tier0_callee_saved[c]) : 0;
+    }
+    const bool unmodeled = (effects & BUSTER_CHECK_HELPER_UNMODELED) != 0;
+    const bool orders = (physical.memory & (BUSTER_X86_MEMORY_EFFECT_FENCE | BUSTER_X86_MEMORY_EFFECT_ATOMIC)) != 0;
+    const bool environment = (physical.reads & (BUSTER_X86_RESOURCE_MXCSR | BUSTER_X86_RESOURCE_X87_CONTROL)) != 0;
+    const bool raises = (physical.properties & BUSTER_X86_EFFECT_FP_EXCEPTION) != 0;
+    // The forms the semantics' tables don't cover yet where a family's contract leaves nothing unmodeled: the IEEE
+    // maximum's and minimum's sign (c_builtin_atomic_rmw_helpers.c's btr and bts of an immediate), which the test names.
+    const uint16_t gap = physical.uncovered_form;
+    const bool known_gap = gap == X86_FORM_BTR_RM32_IMM8 || gap == X86_FORM_BTR_RM64_IMM8 || gap == X86_FORM_BTS_RM32_IMM8 || gap == X86_FORM_BTS_RM64_IMM8;
+    *reason = NULL;
+    if (!physical.valid || code->error != TIER0_OK)
+    {
+        *reason = "its code doesn't resolve";
+    }
+    else if (physical.uncovered != 0 && !unmodeled && !known_gap)
+    {
+        *reason = "its code has a form x86_semantics.c doesn't cover, where its contract models every effect";
+    }
+    else if ((physical.writes & callee_saved & ~restored) != 0)
+    {
+        *reason = "its code writes a callee-saved register";
+    }
+    else if (physical.writes_object && (effects & (BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ERRNO)) == 0)
+    {
+        *reason = "its code writes memory its contract doesn't";
+    }
+    else if (physical.reads_object && (effects & BUSTER_CHECK_HELPER_READS) == 0 && !unmodeled)
+    {
+        *reason = "its code reads memory its contract doesn't";
+    }
+    else if (orders && (effects & BUSTER_CHECK_HELPER_ORDERS) == 0)
+    {
+        *reason = "its code fences or locks where its contract orders nothing";
+    }
+    else if (environment && (effects & BUSTER_CHECK_HELPER_FP_ENVIRONMENT) == 0)
+    {
+        *reason = "its code reads the floating environment where its contract doesn't";
+    }
+    else if (raises && (effects & BUSTER_CHECK_HELPER_FP_EXCEPTIONS) == 0 && !unmodeled)
+    {
+        *reason = "its code may raise floating exceptions its contract doesn't";
+    }
+    else if (((effects & BUSTER_CHECK_HELPER_TERMINATES) != 0) != (physical.traps && !physical.returns))
+    {
+        *reason = "its code returns or traps otherwise than its contract says";
+    }
+    else if (family == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS && (physical.reads_object != ((effects & BUSTER_CHECK_HELPER_READS) != 0) ||
+                                                               physical.writes_object != ((effects & BUSTER_CHECK_HELPER_WRITES) != 0) ||
+                                                               ((effects & BUSTER_CHECK_HELPER_WRITES) != 0 && (physical.memory & BUSTER_X86_MEMORY_EFFECT_FENCE) == 0)))
+    {
+        // A load reads its object, and a store writes it and fences: the helpers' seq_cst.
+        *reason = "an atomic load's or store's code doesn't access its object as its contract says, or a store doesn't fence";
+    }
+    else if (family == CHECK_PROGRAM_HELPER_ATOMIC_RMW && !physical.writes_object)
+    {
+        *reason = "an atomic read/modify/write's code doesn't write its object";
+    }
+    else if (family == CHECK_PROGRAM_HELPER_ATOMIC_RMW && (effects & BUSTER_CHECK_HELPER_READS) != 0 && (physical.memory & BUSTER_X86_MEMORY_EFFECT_ATOMIC) == 0)
+    {
+        *reason = "an atomic read/modify/write's code has no locked access";
+    }
+    else if (family == CHECK_PROGRAM_HELPER_FENCE && helper->id != CBUILTIN_ATOMIC_SIGNAL_FENCE && (physical.memory & BUSTER_X86_MEMORY_EFFECT_FENCE) == 0)
+    {
+        *reason = "a thread fence's code doesn't fence";
+    }
+    else if (family == CHECK_PROGRAM_HELPER_FENCE && helper->id == CBUILTIN_ATOMIC_SIGNAL_FENCE && (orders || physical.reads_object || physical.writes_object))
+    {
+        *reason = "a signal fence's code does more than return: its order is the caller's barrier alone";
+    }
+    else if ((effects & BUSTER_CHECK_HELPER_FP_ENVIRONMENT) != 0 && family != CHECK_PROGRAM_HELPER_X86 && family != CHECK_PROGRAM_HELPER_ASM && !environment)
+    {
+        *reason = "its contract reads the floating environment where its code doesn't";
+    }
+    else if ((effects & BUSTER_CHECK_HELPER_ERRNO) != 0 && !physical.writes_object)
+    {
+        *reason = "its contract sets errno where its code writes no memory";
+    }
+    return *reason == NULL;
+}
+
+// #1059's inventory, against the helpers' code: every family has its contract, only the fences a direct form, and every
+// helper each emitter makes (the atomic loads and stores of every width, the fences, every read/modify/write of every
+// width and format, the terminal builtins, FLT_ROUNDS, every math builtin and every x86 leaf) keeps its family's
+// contract (check_test_helper_contract). An asm statement's helper is its template's, which UNMODELED covers whole.
+static void check_test_program_helper_contracts(CheckTest* test)
+{
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        const CheckProgramHelperContract* contract = &check_program_helper_contracts[f];
+        check_test_expect(test, contract->name != NULL && contract->helper != NULL && contract->effects != 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE),
+                          "every helper family publishes its contract, and only the fences a direct form");
+    }
+    Arena output = arena_reserve(UINT64_C(1) << 22);
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    const bool ready = output.base != NULL && scratch.base != NULL && x86_encoder_initialize() && (x86_semantics_initialized || x86_semantics_initialize());
+    check_test_expect(test, ready, "helper contracts: resources and the semantics' tables");
+    uint32_t checked[CHECK_PROGRAM_HELPER_FAMILIES] = { 0 };
+    char description[256];
+    // The atomic loads and stores, and the fences.
+    static const CBuiltinId accesses[] = { CBUILTIN_ATOMIC_LOAD_N, CBUILTIN_ATOMIC_STORE_N, CBUILTIN_ATOMIC_THREAD_FENCE, CBUILTIN_ATOMIC_SIGNAL_FENCE, CBUILTIN_SYNC_SYNCHRONIZE };
+    for (uint32_t a = 0; ready && a < BUSTER_ARRAY_LENGTH(accesses); a += 1)
+    {
+        const bool memory = accesses[a] == CBUILTIN_ATOMIC_LOAD_N || accesses[a] == CBUILTIN_ATOMIC_STORE_N;
+        for (uint32_t w = 0; w < (memory ? 4u : 1u); w += 1)
+        {
+            const uint32_t bytes = memory ? 1u << w : 0;
+            const CBuiltinAtomicHelper native = cbuiltin_atomic_helper_emit(accesses[a], bytes, &output);
+            const CheckProgramHelper helper = {
+                .id = accesses[a],
+                .bytes = bytes,
+                .result_type = accesses[a] == CBUILTIN_ATOMIC_LOAD_N ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID,
+                .compiler_barrier = true,
+                .required_alignment = bytes,
+            };
+            const char* reason = NULL;
+            const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
+            checked[check_program_helper_family(&helper)] += kept;
+            snprintf(description, sizeof(description), "helper contracts: atomic builtin %u of %u bytes: %s", (uint32_t)accesses[a], bytes, reason != NULL ? reason : "");
+            check_test_expect(test, kept, description);
+        }
+    }
+    // Every read/modify/write of every width, in its integer format, and in each other format its rule takes.
+    static const CBuiltinAtomicRmwFormat formats[] = { CBUILTIN_ATOMIC_RMW_INTEGER_BITS, CBUILTIN_ATOMIC_RMW_BOOL_BITS, CBUILTIN_ATOMIC_RMW_SIGNED_BITS,
+                                                       CBUILTIN_ATOMIC_RMW_F32_BITS, CBUILTIN_ATOMIC_RMW_F64_BITS };
+    for (uint32_t r = 0; ready && r < BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules); r += 1)
+    {
+        const CheckBuiltinAtomicRmwRule* rule = &check_builtin_atomic_rmw_rules[r];
+        const bool release = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_RELEASE || rule->operation == CHECK_BUILTIN_ATOMIC_RMW_CLEAR;
+        for (uint32_t w = 0; w < 4; w += 1)
+        {
+            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(formats); f += 1)
+            {
+                const uint64_t mark = output.length;
+                const CBuiltinAtomicRmwHelper native = cbuiltin_atomic_rmw_helper_emit(rule->id, 1u << w, formats[f], &output);
+                if (native.code.error == TIER0_OK)
+                {
+                    const CheckProgramHelper helper = {
+                        .id = rule->id,
+                        .bytes = 1u << w,
+                        .result_type = release ? BUSTER_TYPE_VOID : BUSTER_TYPE_ULONG,
+                        .rmw_format = formats[f],
+                        .rmw = true,
+                        .compiler_barrier = true,
+                        .required_alignment = 1u << w,
+                    };
+                    const char* reason = NULL;
+                    const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
+                    checked[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kept;
+                    snprintf(description, sizeof(description), "helper contracts: read/modify/write %u of %u bytes, format %u: %s", (uint32_t)rule->id, 1u << w,
+                             (uint32_t)formats[f], reason != NULL ? reason : "");
+                    check_test_expect(test, kept, description);
+                }
+                arena_pop_to(&output, mark);
+            }
+        }
+    }
+    // The terminal builtins and FLT_ROUNDS.
+    static const CBuiltinId terminals[] = { CBUILTIN_TRAP, CBUILTIN_UNREACHABLE };
+    for (uint32_t t = 0; ready && t < BUSTER_ARRAY_LENGTH(terminals); t += 1)
+    {
+        const CBuiltinTerminalHelper native = cbuiltin_terminal_helper(terminals[t], &output);
+        const CheckProgramHelper helper = { .id = terminals[t], .result_type = BUSTER_TYPE_VOID, .terminates = native.terminates };
+        const char* reason = NULL;
+        const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
+        checked[CHECK_PROGRAM_HELPER_TERMINAL] += kept;
+        snprintf(description, sizeof(description), "helper contracts: terminal builtin %u: %s", (uint32_t)terminals[t], reason != NULL ? reason : "");
+        check_test_expect(test, kept && native.terminates, description);
+    }
+    if (ready)
+    {
+        const CBuiltinRoundsHelper native = cbuiltin_rounds_helper(CBUILTIN_FLT_ROUNDS, &output);
+        const CheckProgramHelper helper = {
+            .id = CBUILTIN_FLT_ROUNDS,
+            .result_type = BUSTER_TYPE_INT,
+            .compiler_barrier = native.compiler_barrier,
+            .reads_fp_environment = native.reads_fp_environment,
+        };
+        const char* reason = NULL;
+        const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
+        checked[CHECK_PROGRAM_HELPER_ROUNDS] += kept;
+        snprintf(description, sizeof(description), "helper contracts: FLT_ROUNDS: %s", reason != NULL ? reason : "");
+        check_test_expect(test, kept, description);
+    }
+    // Every math builtin, with the facts its emitter publishes, which the planner merges into its helper.
+    for (uint32_t id = CBUILTIN_SQRT; ready && id <= CBUILTIN_RINTF; id += 1)
+    {
+        const CheckBuiltinMathKind kind = check_builtin_math_kind((CBuiltinId)id);
+        const CBuiltinMathHelper native = kind != CHECK_BUILTIN_MATH_NONE ? cbuiltin_math_helper((CBuiltinId)id, &output) : (CBuiltinMathHelper){ 0 };
+        if (kind != CHECK_BUILTIN_MATH_NONE)
+        {
+            const CheckProgramHelper helper = {
+                .id = (CBuiltinId)id,
+                .result_type = BUSTER_TYPE_ULONG,
+                .math_kind = kind,
+                .floating_type = check_builtin_math_parameter((CBuiltinId)id),
+                .compiler_barrier = native.compiler_barrier,
+                .reads_fp_environment = native.reads_fp_environment,
+                .may_raise_fp_exceptions = native.may_raise_fp_exceptions,
+                .may_raise_inexact = native.may_raise_inexact,
+                .requires_errno_address = native.requires_errno_address,
+            };
+            const char* reason = NULL;
+            const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
+            checked[CHECK_PROGRAM_HELPER_MATH] += kept;
+            snprintf(description, sizeof(description), "helper contracts: math builtin %u: %s", id, reason != NULL ? reason : "");
+            check_test_expect(test, kept, description);
+        }
+    }
+    // Every x86 leaf (the AMX ones too), with the frame it publishes.
+    for (uint32_t k = CBUILTIN_X86_HELPER_NONE + 1; ready && k < CBUILTIN_X86_HELPER_COUNT; k += 1)
+    {
+        const uint64_t mark = output.length;
+        const CBuiltinX86Helper native = cbuiltin_x86_helper((CBuiltinX86HelperKind)k, &output);
+        const CheckProgramHelper helper = { .id = CBUILTIN_NONE, .result_type = BUSTER_TYPE_ULONG, .compiler_barrier = true, .x86 = (CBuiltinX86HelperKind)k };
+        const char* reason = NULL;
+        const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
+        checked[CHECK_PROGRAM_HELPER_X86] += kept;
+        snprintf(description, sizeof(description), "helper contracts: x86 leaf %s: %s", cbuiltin_x86_helper_infos[k].name, reason != NULL ? reason : "");
+        check_test_expect(test, kept, description);
+        arena_pop_to(&output, mark);
+    }
+    uint32_t total = 0;
+    for (uint32_t f = 0; ready && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        snprintf(description, sizeof(description), "helper contracts: the %s family has helpers checked against its contract", check_program_helper_contracts[f].name);
+        check_test_expect(test, checked[f] != 0 || f == CHECK_PROGRAM_HELPER_ASM, description);
+        total += checked[f];
+    }
+    printf("  helper contracts: %u helpers' code kept their families' contracts (%u atomic accesses, %u read/modify/writes, %u fences, %u terminal, %u FLT_ROUNDS, "
+           "%u math, %u x86 leaves)\n",
+           total, checked[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS], checked[CHECK_PROGRAM_HELPER_ATOMIC_RMW], checked[CHECK_PROGRAM_HELPER_FENCE], checked[CHECK_PROGRAM_HELPER_TERMINAL],
+           checked[CHECK_PROGRAM_HELPER_ROUNDS], checked[CHECK_PROGRAM_HELPER_MATH], checked[CHECK_PROGRAM_HELPER_X86]);
+    arena_release(&scratch);
+    arena_release(&output);
+}
+
 static void check_test_program_helpers(CheckTest* test)
 {
     static const CheckProgramHelperExpected expected[] = {
@@ -664,6 +917,7 @@ static void check_test_program_helpers(CheckTest* test)
     arena_release(&scratch);
     arena_release(&output);
     check_test_program_math_helpers(test);
+    check_test_program_helper_contracts(test);
 }
 
 #endif

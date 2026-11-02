@@ -1111,6 +1111,7 @@ static const uint8_t ir_optimize_roots[64] = {
         [IR_STACK_SAVE] = 1,
         [IR_STACK_RESTORE] = 1,
         [IR_LIFETIME] = 1,
+        [IR_FENCE] = 1,
         [IR_BR] = 1,
         [IR_CBR] = 1,
         [IR_SWITCH] = 1,

@@ -2560,6 +2560,8 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
+    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report).
+    CheckHelperReport* helper_report;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
@@ -3322,6 +3324,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // 1's functions spilling the values it would recompute (#178's comparison: the report's spills and frames).
     bool tier1_report = false;
     bool tier1_gvn = false;
+    // --helper-report prints, on standard error, how many uses of each helper family the lowering took directly and how
+    // many call their helper, the helpers planned and the units refused (#1059, CheckHelperReport).
+    bool helper_report = false;
     // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
     // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
     const char* short_enums = NULL;
@@ -3452,6 +3457,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--tier1-refusals") == 0)
         {
             lanes.tier1_refusals = stderr;
+        }
+        else if (strcmp(arguments[i], "--helper-report") == 0)
+        {
+            helper_report = true;
         }
         else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
         {
@@ -3605,6 +3614,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
+        .helper_report = &lanes.helper_report,
     };
     if (worker_budget.dry_run)
     {
@@ -3625,7 +3635,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
     {
@@ -3676,6 +3686,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         if (tier1_report)
         {
             check_tier1_print_report(stderr, &lanes.tier1_report);
+        }
+        if (helper_report)
+        {
+            check_helper_print_report(stderr, &lanes.helper_report);
         }
     }
     if (release)

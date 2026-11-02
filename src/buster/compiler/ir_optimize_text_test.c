@@ -42,6 +42,8 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "licm-hoist", .pass = IR_OPTIMIZE_TEXT_LICM, .effects = true },
     { .name = "sroa-private-fields", .pass = IR_OPTIMIZE_TEXT_SROA, .effects = false },
     { .name = "sroa-lifetimes", .pass = IR_OPTIMIZE_TEXT_SROA, .effects = false },
+    { .name = "fence-dce", .pass = IR_OPTIMIZE_TEXT_DCE, .effects = true },
+    { .name = "fence-licm", .pass = IR_OPTIMIZE_TEXT_LICM, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
