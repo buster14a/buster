@@ -7878,30 +7878,17 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
                      (string ? BUSTER_CHECK_SYNTAX_STRING : 0));
 }
 
-// Whether `token` is inside an attribute list: an ancestor of it closes one (PARSE_ROLE_CLOSE_ATTRIBUTE_LIST), as every
-// GNU and standard attribute's name has (check_input_attribute_read_item reads them from such lists alone), or there is
-// no tree to say otherwise. A name of the overloadable attribute's counts only so (#1038): a member or a variable named
-// overloadable, which main.c has, gave its unit overload tables, which made every function declaration a candidate and
-// left the expressions' walk to its scalar path. An attribute's argument is inside the list too, a superset that costs a
-// unit at most the tables.
-static bool check_input_attribute_inside(const Parser* parser, uint32_t token)
-{
-    const uint8_t* roles = parser->tree.roles;
-    const uint32_t* parents = parser->tree.parents;
-    const uint32_t count = parser->tokens.count;
-    bool inside = roles == 0 || parents == 0;
-    uint32_t ancestor = !inside && token < count ? parents[token] : count;
-    for (uint32_t steps = 0; !inside && ancestor < count && steps < count; steps += 1)
-    {
-        inside = roles[ancestor] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
-        ancestor = parents[ancestor];
-    }
-    return inside;
-}
-
 // One pass over the tokens' kinds, roles and names for every count check_input_run needs before it reads (#529), where
 // it made one pass for each, and for the walk's syntax bits of each token, which `syntax` (count + 1 bytes, or null for
 // none) receives, and its marks (check_input_visit_of), which `visits` (count + 1 bytes, or null for none) receives.
+// A name of the overloadable attribute's counts only inside an attribute list (#1038): with more of the lists'
+// openings (PARSE_ROLE_OPEN_ATTRIBUTE_LIST) up to it than closings before it, which, a subtree being a run of tokens,
+// is in a list's closing's subtree, where every GNU and standard attribute's name is (check_input_attribute_read_item
+// reads them from such lists alone). A member or a variable named overloadable, which main.c has, gave its unit
+// overload tables, which made every function declaration a candidate. An attribute's argument is inside the list too,
+// a superset that costs a unit at most the tables. Without roles, every name counts. The vector path keeps the depth
+// of the lists a 64-token block at a time, from the counts of its openings and closings, and the scalar path a token
+// at a time, so that each name's test is one count however deep the tree.
 // The vector path tests 64 tokens' kinds and roles and 16 tokens' names at once, and looks up 64 roles' and kinds'
 // tests in tables (check_input_role_tests); the scalar path, its twin, tests a token at a time. A name of 0 counts no
 // token: tokens without a name have 0. Without roles, every token is marked.
@@ -7939,12 +7926,16 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
     uint32_t token = 0;
+    // The attribute lists open at the token, signed: a unit whose roles don't pair can't go below zero unseen.
+    int64_t attribute_depth = 0;
     for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + token);
         const __m512i role = roles != 0 ? _mm512_maskz_loadu_epi8(lanes, roles + token) : _mm512_setzero_si512();
+        const uint64_t list_opens = roles != 0 ? _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_ATTRIBUTE_LIST)) : 0;
+        const uint64_t list_closes = roles != 0 ? _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_CLOSE_ATTRIBUTE_LIST)) : 0;
         result.subscripts += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)));
         result.asms += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_ASM)));
         result.asm_groups += roles != NULL ? (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_ASM))) : 0;
@@ -7983,11 +7974,13 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             {
                 result.groups[group] += group != CHECK_INPUT_COUNT_OVERLOADABLE ? (uint32_t)__builtin_popcount(matched[group]) : 0;
             }
-            // overloadable's names count where they are inside an attribute list, a test of each name's ancestors: names
-            // so spelled are few.
+            // overloadable's names count where they are inside an attribute list: the lists opened up to the name, in
+            // this block and before it, less those closed before it.
             for (uint32_t bits = matched[CHECK_INPUT_COUNT_OVERLOADABLE]; bits != 0; bits &= bits - 1)
             {
-                result.groups[CHECK_INPUT_COUNT_OVERLOADABLE] += check_input_attribute_inside(parser, token + part + (uint32_t)__builtin_ctz(bits));
+                const uint32_t lane = part + (uint32_t)__builtin_ctz(bits);
+                const int64_t depth = attribute_depth + __builtin_popcountll(_bzhi_u64(list_opens, lane + 1)) - __builtin_popcountll(_bzhi_u64(list_closes, lane));
+                result.groups[CHECK_INPUT_COUNT_OVERLOADABLE] += roles == 0 || depth > 0;
             }
             __mmask16 syntax_matched[3] = { 0 };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
@@ -8031,9 +8024,11 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             }
             _mm512_mask_storeu_epi8(visits + token, lanes, _mm512_maskz_mov_epi8(visit, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX)));
         }
+        attribute_depth += __builtin_popcountll(list_opens) - __builtin_popcountll(list_closes);
     }
     for (; token < count; token += 1)
     {
+        attribute_depth += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
         result.subscripts += kinds[token] == PARSE_KIND_L_SQUARE;
         result.asms += kinds[token] == PARSE_KIND_ASM;
         result.asm_groups += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ASM;
@@ -8049,8 +8044,9 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         }
         for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
         {
-            result.groups[group] += matched[group] && (group != CHECK_INPUT_COUNT_OVERLOADABLE || check_input_attribute_inside(parser, token));
+            result.groups[group] += matched[group] && (group != CHECK_INPUT_COUNT_OVERLOADABLE || roles == NULL || attribute_depth > 0);
         }
+        attribute_depth -= roles != NULL && roles[token] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
         const uint8_t bits = check_input_syntax_of(parser, token);
         if (syntax != 0)
         {

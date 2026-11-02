@@ -559,6 +559,95 @@ static __attribute__((noinline)) void check_test_overload_sources(CheckTest* tes
     rmdir(directory);
 }
 
+// Which names of the overloadable attribute's count_tokens counts (#1038): those inside an attribute list, by both of its
+// paths, against the test's own reading of real C's tree, each name's ancestors walked up to the root for an attribute
+// list's closing. The first source's names are inside GNU's lists (alone, after another attribute, with empty
+// arguments), a standard one's, an attribute's argument, a list in a type in an argument, and a sibling list's (beside
+// one without); and outside: a member, a variable and their uses. The second's are all outside, so that a unit with
+// them alone has no tables.
+static __attribute__((noinline)) void check_test_overloadable_counts(CheckTest* test)
+{
+    static const char inside[] =
+        "struct s { int overloadable; };\n"
+        "int __overloadable__;\n"
+        "__attribute__((overloadable)) int f(int);\n"
+        "int g(int) __attribute__((unused, __overloadable__));\n"
+        "__attribute__((overloadable())) int f(double);\n"
+        "[[clang::overloadable]] long h(long);\n"
+        "__attribute__((aligned(sizeof(__overloadable__)))) int k;\n"
+        "__attribute__((aligned(sizeof(struct { int overloadable __attribute__((packed)); })))) int q;\n"
+        "__attribute__((unused)) int m; __attribute__((overloadable)) int n(int);\n"
+        "int use(struct s* p) { return p->overloadable + __overloadable__ + (((((overloadable))))); }\n";
+    static const char outside[] =
+        "struct s { int overloadable; };\n"
+        "int __overloadable__;\n"
+        "int use(struct s* p) { int overloadable = p->overloadable; return overloadable + __overloadable__; }\n";
+    const struct
+    {
+        const char* source;
+        uint32_t length;
+        uint32_t counted;
+    } sources[] = {
+        { inside, sizeof(inside) - 1, 7 },
+        { outside, sizeof(outside) - 1, 0 },
+    };
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        const PPOptions pp_options = {
+            .language = {
+                .standard = 2023,
+                .gnu = true,
+            },
+            .no_standard_includes = true,
+        };
+        const ParseOptions parser_options = { 0 };
+        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                     parse_initialize(&parser, &parser_options, pp_options.language) &&
+                     pp_run_source(&pp, "overloadable-counts.c", (const uint8_t*)sources[s].source, sources[s].length) && parse_translation_unit(&parser, &pp);
+        check_test_expect(test, ready && parser.tree.parents != NULL && parser.tree.roles != NULL, "overloadable counts' source parses");
+        if (ready && parser.tree.parents != NULL && parser.tree.roles != NULL)
+        {
+            const uint32_t names[] = {
+                intern_find(pp.table, (const uint8_t*)"overloadable", 12),
+                intern_find(pp.table, (const uint8_t*)"__overloadable__", 16),
+            };
+            const uint8_t groups[] = {
+                CHECK_INPUT_COUNT_OVERLOADABLE,
+                CHECK_INPUT_COUNT_OVERLOADABLE,
+            };
+            const uint32_t count = parser.tokens.count;
+            uint32_t expected = 0;
+            uint32_t spelled = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t name = parser.tokens.names[token];
+                bool listed = false;
+                for (uint32_t ancestor = parser.tree.parents[token]; ancestor < count; ancestor = parser.tree.parents[ancestor])
+                {
+                    listed |= parser.tree.roles[ancestor] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+                }
+                const bool named = name != 0 && (name == names[0] || name == names[1]);
+                spelled += named;
+                expected += named && listed;
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL, scalar != 0);
+                char description[200];
+                snprintf(description, sizeof(description), "source %u's names of overloadable by the %s path: %u of %u counted, the tree's %u, expected %u", s,
+                         scalar != 0 ? "scalar" : "vector", counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE], spelled, expected, sources[s].counted);
+                check_test_expect(test, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] == expected && expected == sources[s].counted && spelled > expected, description);
+            }
+        }
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
 #include "c_check_overload_index_test.c"
 
 static __attribute__((noinline)) void check_test_overloads(CheckTest* test, const char* clang)
@@ -576,6 +665,7 @@ static __attribute__((noinline)) void check_test_overloads(CheckTest* test, cons
         check_test_overload_ranks(test);
     }
     check_test_types_close(&types);
+    check_test_overloadable_counts(test);
 }
 
 #endif

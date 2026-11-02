@@ -22,7 +22,7 @@ static uint32_t check_input_overload_flags(const CheckInputAttributes* attribute
 }
 
 // The unit's tables of overloads, where `present`, a token named overloadable or __overloadable__ inside an attribute
-// list (check_input_attribute_inside), says it may have some: room for `capacity` candidates, its operands, and `calls`
+// list (check_input_count_tokens), says it may have some: room for `capacity` candidates, its operands, and `calls`
 // calls, its calls' and function declarators' closing parentheses. check_input_run counts them in its pass over the
 // tokens (check_input_count_tokens).
 static bool check_input_overload_initialize(CheckInputReader* reader, bool present, uint32_t capacity, uint32_t calls)

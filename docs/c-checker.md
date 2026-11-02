@@ -3815,9 +3815,16 @@ the oracle.
     overload_heads`), which the class actions didn't carry yet. So this
     column was the classes the coded walk would take.
   - **The trigger, narrowed (#1144).** A name of the attribute's now counts
-    only inside an attribute list (`check_input_attribute_inside`): an ancestor
-    of it closes one, as every GNU and standard attribute's name has. An
-    attribute's argument counts too, a superset that costs at most the tables.
+    only inside an attribute list (`check_input_count_tokens`). That is: more
+    of the lists' openings up to it than closings before it, which, a subtree
+    being a run of tokens, puts it in a list's closing's subtree, where every
+    GNU and standard attribute's name is. An attribute's argument counts too,
+    a superset that costs at most the tables. Each path keeps the lists'
+    depth as it goes: the vector path a 64-token block at a time, from the
+    block's openings' and closings' counts. So a name's test costs the same
+    however deep the tree. A first version walked each name's ancestors,
+    which made the count quadratic in names times depth: 100,000 names
+    100,000 levels deep took 20 s (#1144's review).
     The class actions carry the heads (above), so a unit that does declare
     overloadable functions is coded as well.
     - Tables nobody used were dear. In a 4-CPU VM, appending

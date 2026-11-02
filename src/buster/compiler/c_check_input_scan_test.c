@@ -320,7 +320,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                                     PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_RETURN, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE,
                                     PARSE_ROLE_TERMINATOR, PARSE_ROLE_OPEN_ASM, PARSE_ROLE_PREFIX, PARSE_ROLE_ADDITIVE, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA,
                                     PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CAST, PARSE_ROLE_OPEN_TERNARY, PARSE_ROLE_CLOSE_INITIALIZER,
-                                    PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_POSTFIX, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_BITFIELD };
+                                    PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_POSTFIX, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_BITFIELD,
+                                    PARSE_ROLE_OPEN_ATTRIBUTE_LIST, PARSE_ROLE_CLOSE_ATTRIBUTE_LIST };
     uint32_t mismatches = 0;
     uint32_t mark_differences = 0;
     uint32_t class_differences = 0;
@@ -441,8 +442,12 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         parser.tokens.names = names;
         parser.tree.roles = roles;
         CheckInputTokenCounts expected = { 0 };
+        // The attribute lists open at each token, as the test reads the roles (which needn't pair here): a name of group 3,
+        // the overloadable attribute's, counts only where it is above zero (#1038).
+        int64_t attribute_depth = 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
+            attribute_depth += roles[i] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
             expected.subscripts += kinds[i] == PARSE_KIND_L_SQUARE;
             expected.asms += kinds[i] == PARSE_KIND_ASM;
             expected.asm_groups += roles[i] == PARSE_ROLE_OPEN_ASM;
@@ -455,10 +460,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                 case 7: case 9: expected.groups[0] += 1; break;
                 case 12: expected.groups[1] += 1; break;
                 case 15: expected.groups[2] += 1; break;
-                case 21: expected.groups[3] += 1; break;
+                case 21: expected.groups[3] += attribute_depth > 0; break;
                 case 22: case 30: expected.groups[4] += 1; break;
                 default: break;
             }
+            attribute_depth -= roles[i] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
         }
         uint32_t syntax_differences = 0;
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
@@ -467,9 +473,9 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             memset(visits, 0xa5, (uint64_t)count + 1);
             const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits, scalar != 0);
             char description[200];
-            snprintf(description, sizeof(description), "token counts of %u tokens by the %s path: subscripts %u (%u), operands %u (%u), group 0 %u (%u)", count,
-                     scalar != 0 ? "scalar" : "vector", counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
-                     expected.groups[0]);
+            snprintf(description, sizeof(description), "token counts of %u tokens by the %s path: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
+                     count, scalar != 0 ? "scalar" : "vector", counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
+                     expected.groups[0], counts.groups[3], expected.groups[3]);
             check_test_expect(test, memcmp(&counts, &expected, sizeof(counts)) == 0, description);
             // Each token's syntax bits, as the test reads its kind, its successor's and its name, and its mark.
             for (uint32_t i = 0; i < count; i += 1)
@@ -800,7 +806,7 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
             // A leaf without a node is never written: only its status counts.
             differences += x->status[at] != y->status[at] ||
                            (node && (x->types[at] != y->types[at] || x->flags[at] != y->flags[at] || x->objects[at] != y->objects[at] ||
-                                     ((y->status[at] & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 && x->declarations[at] != y->declarations[at])));
+                                     x->declarations[at] != y->declarations[at]));
             entries += 1;
         }
     }
