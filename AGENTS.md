@@ -63,20 +63,19 @@ sign-off. An explicit instruction not to sign, or an effective opt-out, takes
 precedence; do not undo it or add the trailer manually instead.
 
 - **Local Git:** before the first commit of an authorized session, run
-  `sh .githooks/enable-sign-off.sh --maintainer-session`. It remembers the
-  opt-in in the checkout and installs `.githooks` without replacing existing
-  hooks. A present `BUSTER_DCO_SIGN_OFF` overrides the checkout setting: only
-  `davidgmbb` enables signing; `off`, empty or any other value disables it, so
-  a checkout opt-out applies only when no enabling environment value is
-  present. The setting covers every commit in the checkout, by any author;
-  disable it before another contributor uses the checkout. See CONTRIBUTING.md
-  for revocation and provenance.
+  `sh .githooks/enable-sign-off.sh --maintainer-session`. It enables this
+  worktree alone, for every commit made in it by any author (`--revoke`
+  before another contributor uses it), and installs `.githooks` without
+  replacing hooks. A present `BUSTER_DCO_SIGN_OFF` decides alone: only
+  `davidgmbb` enables. Git configuration only opts out. If setup reports
+  other hooks, compose them as it says, or append the trailer yourself, last.
+  Before handoff, `build/dco audit` checks the PR's trailers. CONTRIBUTING.md
+  has the details.
 - **Commit messages:** `.githooks/commit-msg` adds the trailer once, after
   existing trailers. Do not duplicate it, use `git commit -s` with an agent's
-  committer identity, or bypass hooks with `--no-verify`. If setup reports a
-  custom-hook conflict, append the trailer yourself, last, without replacing
-  those hooks. With `core.commentChar` or `core.commentString` set to `auto`,
-  select an explicit comment prefix; the hook refuses to guess.
+  committer identity, or bypass hooks with `--no-verify`. With
+  `core.commentChar` or `core.commentString` set to `auto`, select an explicit
+  comment prefix; the hook refuses to guess.
 - **GitHub connector/API:** local hooks do not run. Include the exact trailer
   in every new commit message yourself, once and last, preserving true
   author/committer attribution, and read it back. A PR-body statement alone is
@@ -429,6 +428,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `correctness.tests / CI selection` — `tools/ci/correctness.tests` — [guide](docs/commands/ci.md).
 - `measure-compile, --time-stages` — `c_check_clock.c` — [guide](docs/commands/compile-time.md).
 - `test-c-testsuite` — `c_testsuite.c` — [guide](docs/commands/c-testsuite.md).
+- `dco status, audit, compose` — `tools/dco/dco.c` — [guide](docs/commands/dco.md).
 - `test-dataflow, benchmark-dataflow` — `dataflow.c` — [guide](docs/commands/dataflow.md).
 - `test-debug, benchmark-debug` — `debug.c` — [guide](docs/commands/debug.md).
 - `test-checker-deferred, benchmark-checker-deferred` — `c_check_deferred_test.c` — [guide](docs/commands/deferred.md).
