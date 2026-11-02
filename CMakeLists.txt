@@ -1,0 +1,313 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+#
+# The build of build/cmake/VARIANT/CONFIG/compiler: Ninja Multi-Config, Debug and Release in one tree per toolchain
+# and variant (CMakePresets.json, build.sh). docs/commands/build.md has the configurations, the settings, the targets
+# and the outputs. cmake/BusterSettings.cmake holds the sources and the flags; this file applies them.
+
+cmake_minimum_required(VERSION 3.25)
+
+# Debug and Release, and Release when a build names no configuration, as ./build.sh builds.
+if(NOT DEFINED CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "The configurations: Debug, Release or both")
+endif()
+if(NOT DEFINED CMAKE_DEFAULT_BUILD_TYPE)
+    set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
+endif()
+
+project(buster LANGUAGES C)
+
+if(NOT CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
+    message(FATAL_ERROR "buster: configure with -G \"Ninja Multi-Config\" (CMakePresets.json and build.sh do)")
+endif()
+if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "buster: the compiler builds with Clang, not ${CMAKE_C_COMPILER_ID} (${CMAKE_C_COMPILER})")
+endif()
+foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+    if(NOT config MATCHES "^(Debug|Release)$")
+        message(FATAL_ERROR "buster: CMAKE_CONFIGURATION_TYPES may hold Debug and Release, not ${config}")
+    endif()
+endforeach()
+
+# The settings, which build.sh takes from its environment variables of the same names (docs/commands/build.md). An
+# empty value is the default, but for BUSTER_DEBUG_INFO and BUSTER_LINKER.
+set(BUSTER_HOST_ARCH native CACHE STRING "The host ISA: clang's -march (native, x86-64, znver5, ...)")
+set(BUSTER_HOST_RUNTIME "" CACHE PATH "A baseline runtime's root to link against (BUSTER_HOST_ARCH=x86-64 alone)")
+set(BUSTER_DEBUG_INFO 1 CACHE STRING "1: Release has -g; 0: Release has no debug information")
+set(BUSTER_LINKER auto CACHE STRING "auto, system, wild, mold, lld, bfd or an absolute path")
+set(BUSTER_BUILD_DEFINES "" CACHE STRING "Arguments every unit's compile adds, split on whitespace")
+set(BUSTER_SANITIZER "" CACHE STRING "none, address, undefined, thread or memory; empty: address when fuzzing, else none")
+set(BUSTER_SANITIZER_OPTIMIZATION 3 CACHE STRING "A sanitizer build's Release optimization level: 1, 2 or 3")
+set(BUSTER_FUZZ_AVAILABLE 0 CACHE STRING "1 builds in libFuzzer and the --fuzz driver")
+set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/compiler/fuzz.c when empty)")
+set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
+set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
+set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
+set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
+
+include(cmake/BusterSettings.cmake)
+buster_settings_normalize()
+buster_settings_tools("${CMAKE_C_COMPILER}")
+buster_settings_linker()
+message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}")
+
+find_program(BUSTER_NM NAMES nm llvm-nm NO_CACHE REQUIRED)
+
+# The flags are the description's alone: CMake's defaults (Release's -DNDEBUG among them), CFLAGS and LDFLAGS, which
+# CMake would read once and keep, take no part. The flags' only differences from a direct clang command are the
+# build's mechanics: CMake's depfile options and CMAKE_INTDIR, a definition no source reads, the include directory's
+# absolute path, and -fmacro-prefix-map, which keeps __FILE__ relative to the source directory, as it is when clang
+# runs from there (assert's messages).
+foreach(suffix "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set(CMAKE_C_FLAGS${suffix} "")
+    set(CMAKE_EXE_LINKER_FLAGS${suffix} "")
+endforeach()
+# Nor does the link take CMake's additions: no RPATH for the baseline runtime's libraries, which the executable has
+# never had, and no linker depfile (--dependency-file), which CMake probes on the default linker rather than the one
+# BUSTER_LINKER selects. The link's inputs are the objects and the files given by path, which CMake tracks itself.
+set(CMAKE_SKIP_RPATH ON)
+set(CMAKE_LINK_DEPENDS_USE_LINKER OFF)
+
+# Arguments in one SHELL: group, which keeps them in their order and as many times as they come; CMake would otherwise
+# merge repeated options.
+function(buster_shell_group output)
+    set(group "")
+    foreach(argument IN LISTS ARGN)
+        string(REPLACE "\\" "\\\\" argument "${argument}")
+        string(REPLACE "\"" "\\\"" argument "${argument}")
+        string(APPEND group " \"${argument}\"")
+    endforeach()
+    if(group STREQUAL "")
+        set(${output} "" PARENT_SCOPE)
+    else()
+        set(${output} "SHELL:${group}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+set(flags ${buster_flags})
+list(TRANSFORM flags REPLACE "^-Isrc$" "-I${CMAKE_SOURCE_DIR}/src")
+buster_shell_group(flags_group ${flags})
+
+# A lexer-variant build replaces BUSTER_BUILD_DEFINES with the list of the variants it compiles in.
+set(lexer_variants "")
+set(lexer_names "")
+foreach(variant IN LISTS BUSTER_LEXER_VARIANTS)
+    if(NOT variant MATCHES "^([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
+        message(FATAL_ERROR "buster: BUSTER_LEXER_VARIANTS' ${variant} isn't NAME=SOURCE")
+    endif()
+    set(name "${CMAKE_MATCH_1}")
+    get_filename_component(path "${CMAKE_MATCH_2}" REALPATH)
+    buster_settings_plain("${path}" plain)
+    if(NOT EXISTS "${path}" OR IS_DIRECTORY "${path}" OR NOT plain OR name IN_LIST lexer_names)
+        message(FATAL_ERROR "buster: BUSTER_LEXER_VARIANTS' ${variant} isn't NAME=SOURCE of a file, each NAME once")
+    endif()
+    list(APPEND lexer_names "${name}")
+    list(APPEND lexer_variants "${name}=${path}")
+endforeach()
+if(lexer_variants)
+    set(variant_list "")
+    foreach(name IN LISTS lexer_names)
+        string(APPEND variant_list " BUSTER_LEXER_VARIANT(${name})")
+    endforeach()
+    buster_shell_group(defines_group "-DBUSTER_LEXER_VARIANTS=${variant_list}")
+else()
+    buster_shell_group(defines_group ${buster_defines})
+endif()
+
+# The compile options of a unit of the executable: the Release configuration's debug information and optimization
+# (BusterSettings.cmake) or the Debug configuration's, around the flags, then the definitions, as print-compile-flags
+# prints them.
+function(buster_unit_options target definitions)
+    target_compile_options(${target} PRIVATE
+        "$<$<CONFIG:Release>:${buster_debug}>"
+        "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
+        "${flags_group}"
+        "$<IF:$<CONFIG:Debug>,${BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION},${buster_optimization}>"
+        ${definitions}
+        "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=")
+endfunction()
+
+# Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
+# them in; the executable links their objects in the sources' order.
+buster_compile_order(order)
+foreach(index IN LISTS order)
+    list(GET BUSTER_SOURCES ${index} source)
+    get_filename_component(name "${source}" NAME_WE)
+    add_library(buster_${name} OBJECT "${source}")
+    buster_unit_options(buster_${name} "${defines_group}")
+endforeach()
+set(unit_names "")
+foreach(source IN LISTS BUSTER_SOURCES)
+    get_filename_component(name "${source}" NAME_WE)
+    list(APPEND unit_names ${name})
+endforeach()
+
+# Each lexer variant, after the units: a copy of c_lexer.c compiled through c_lexer_variant.c into
+# c_lexer_variant_NAME, or that function's assembly (build.sh lexer-variant-assembly), assembled as it is.
+set(lexer_objects "")
+foreach(variant IN LISTS lexer_variants)
+    string(REGEX MATCH "^([^=]+)=(.*)$" variant "${variant}")
+    set(name "${CMAKE_MATCH_1}")
+    set(path "${CMAKE_MATCH_2}")
+    if(path MATCHES "\\.s$")
+        set(object "${CMAKE_BINARY_DIR}/lexer-variants/${name}.o")
+        add_custom_command(OUTPUT "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -c "${path}" -o "${object}"
+            DEPENDS "${path}"
+            COMMENT "Assembling the lexer variant ${name}"
+            VERBATIM)
+        list(APPEND lexer_objects "${object}")
+    else()
+        add_library(buster_lexer_variant_${name} OBJECT src/buster/compiler/c_lexer_variant.c)
+        buster_shell_group(variant_group "-DBUSTER_LEXER_VARIANT_SOURCE=\"${path}\"" "-DBUSTER_LEXER_VARIANT_NAME=c_lexer_variant_${name}")
+        buster_unit_options(buster_lexer_variant_${name} "${variant_group}")
+        list(APPEND lexer_objects "$<TARGET_OBJECTS:buster_lexer_variant_${name}>")
+    endif()
+endforeach()
+
+# The link of `target`, an executable of objects: fixed-address (-no-pie) but for the sanitizers' PIEs, by the
+# selected linker. As a PIE, its 10.6 MB of pointer tables (.data.rel.ro) took 366,684 relative relocations at every
+# start, whose 2,800 page faults made a run that does nothing take 8 to 13 ms, where linked at its address it takes
+# 1.5 ms with 113 (#86: link-foreign and the tests run it as a process of its own, and a small link's work is 0.8 ms).
+# With BUSTER_HOST_RUNTIME, CI's emulated old CPU's runtime, linked explicitly: the host's startup objects and loader
+# can require a newer ISA even with -march=x86-64.
+function(buster_link target)
+    set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)
+    if(NOT BUSTER_HOST_RUNTIME STREQUAL "")
+        if(NOT buster_arch STREQUAL "x86-64")
+            message(FATAL_ERROR "buster: BUSTER_HOST_RUNTIME requires BUSTER_HOST_ARCH=x86-64")
+        endif()
+        set(library "${BUSTER_HOST_RUNTIME}/usr/lib/x86_64-linux-gnu")
+        set(support "${BUSTER_HOST_RUNTIME}/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a")
+        target_link_options(${target} PRIVATE ${buster_link_mode} -nostdlib ${buster_linker_flags}
+            "${library}/crt1.o" "${library}/crti.o")
+        target_link_libraries(${target} PRIVATE "${library}/libm.so.6" "${library}/libc.so.6" "${support}"
+            "${library}/crtn.o")
+    else()
+        target_link_options(${target} PRIVATE ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags})
+        target_link_libraries(${target} PRIVATE ${buster_fuzz_libraries} -lm -ldl)
+    endif()
+endfunction()
+
+# The post-link step (cmake/BusterPostLink.cmake) of `target`'s linked file into `output`: the backend's tables baked
+# in, and the stack canary's absence checked. ARGUMENTS go to the step, which also depends on DEPENDS.
+function(buster_post_link target output)
+    cmake_parse_arguments(PARSE_ARGV 2 post "" "" "ARGUMENTS;DEPENDS")
+    add_custom_command(OUTPUT "${output}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_FILE:${target}>" "-DOUTPUT=${output}" "-DBAKE=${buster_bake}"
+            "-DNM=${BUSTER_NM}" ${post_ARGUMENTS} -P "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake"
+        DEPENDS ${target} "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake" ${post_DEPENDS}
+        COMMENT "Baking and checking ${target}'s executable"
+        VERBATIM)
+endfunction()
+
+set(objects "")
+foreach(name IN LISTS unit_names)
+    list(APPEND objects "$<TARGET_OBJECTS:buster_${name}>")
+endforeach()
+set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
+add_executable(compiler_link ${objects} ${lexer_objects})
+set_target_properties(compiler_link PROPERTIES OUTPUT_NAME compiler.link)
+buster_link(compiler_link)
+buster_post_link(compiler_link "${compiler}")
+add_custom_target(compiler ALL DEPENDS "${compiler}")
+
+# build.sh shifts: the same objects linked again with BUSTER_SHIFTS' bytes of padding in .text before
+# BUSTER_SHIFT_SOURCE's (cmake/BusterShiftPadding.cmake), into CONFIG/shifts/compiler-SHIFT, for time-runs to compare
+# builds over their code's placements: the same code ran up to 2% faster or slower so on the 9700X (#509).
+set(shifted "")
+if(NOT BUSTER_SHIFTS STREQUAL "")
+    get_filename_component(shift_name "${BUSTER_SHIFT_SOURCE}" NAME_WE)
+    list(FIND unit_names "${shift_name}" shift_index)
+    if(shift_index EQUAL -1 OR NOT BUSTER_SHIFT_SOURCE STREQUAL "${shift_name}.c")
+        message(FATAL_ERROR "build.sh shifts: ${BUSTER_SHIFT_SOURCE} isn't a source's file name")
+    endif()
+    find_program(BUSTER_READELF NAMES readelf llvm-readelf NO_CACHE REQUIRED)
+    set(shift_object "$<TARGET_OBJECTS:buster_${shift_name}>")
+    foreach(bytes IN LISTS BUSTER_SHIFTS)
+        if(NOT bytes MATCHES "^(0|[1-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?)$")
+            message(FATAL_ERROR "build.sh shifts: ${bytes} isn't a shift of 0 to 9,999,999 bytes")
+        endif()
+        set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/shifts")
+        set(padding "${directory}/padding-${bytes}.o")
+        add_custom_command(OUTPUT "${padding}"
+            COMMAND "${CMAKE_COMMAND}" "-DOBJECT=${shift_object}" "-DSOURCE=${BUSTER_SHIFT_SOURCE}" "-DSHIFT=${bytes}"
+                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
+            DEPENDS "${shift_object}" "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
+            VERBATIM)
+        set(shift_objects ${objects})
+        list(INSERT shift_objects ${shift_index} "${padding}")
+        add_executable(compiler_shift_${bytes} EXCLUDE_FROM_ALL ${shift_objects})
+        set_target_properties(compiler_shift_${bytes} PROPERTIES OUTPUT_NAME compiler-${bytes}.link
+            RUNTIME_OUTPUT_DIRECTORY "${directory}")
+        buster_link(compiler_shift_${bytes})
+        set(output "${directory}/compiler-${bytes}")
+        if(bytes EQUAL 0)
+            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1)
+        else()
+            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
+                DEPENDS "${compiler}")
+        endif()
+        list(APPEND shifted "${output}")
+    endforeach()
+    add_custom_target(shifts DEPENDS ${shifted})
+    add_dependencies(shifts compiler)
+endif()
+
+# check-call-graph: each unit's LLVM IR, before any LLVM pass, at the Release configuration's optimization, with the
+# flags but debug information and BUSTER_BUILD_DEFINES, and without sanitizer instrumentation, whose generated globals
+# and runtime calls are not compiler state or source recursion (cmake/BusterCallGraph.cmake). The IR is the same for
+# both configurations; the check runs the configuration's executable on it.
+set(call_graph "${CMAKE_BINARY_DIR}/call-graph")
+set(captures "")
+function(buster_capture source output)
+    add_custom_command(OUTPUT "${output}"
+        COMMAND "${CMAKE_C_COMPILER}" -S -emit-llvm ${buster_optimization} -Xclang -disable-llvm-passes ${flags}
+            "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=" -fno-sanitize=all "${CMAKE_SOURCE_DIR}/${source}" -o "${output}"
+            -MD -MF "${output}.d"
+        DEPFILE "${output}.d"
+        COMMENT "Capturing ${source}'s call graph"
+        VERBATIM)
+    set(captures ${captures} "${output}" PARENT_SCOPE)
+endfunction()
+buster_capture(src/buster/compiler/call_graph_capture/inline.c "${call_graph}/capture/inline.ll")
+buster_capture(src/buster/compiler/call_graph_capture/strong.c "${call_graph}/capture/strong.ll")
+foreach(index IN LISTS order)
+    list(GET BUSTER_SOURCES ${index} source)
+    get_filename_component(name "${source}" NAME_WE)
+    buster_capture("${source}" "${call_graph}/${name}.ll")
+endforeach()
+add_custom_target(call-graph-ir DEPENDS ${captures})
+add_custom_target(check-call-graph
+    COMMAND "${CMAKE_COMMAND}" "-DCOMPILER=${compiler}" "-DIR=${call_graph}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/BusterCallGraph.cmake"
+    DEPENDS ${captures} "${compiler}"
+    COMMENT "Checking the no-recursion rule on the call graph"
+    VERBATIM USES_TERMINAL)
+add_dependencies(check-call-graph compiler)
+
+# Tests (CTest): `build` checks what the build made and needs nothing else; `correctness` runs the whole correctness
+# inventory, tools/ci/correctness.tests, through the configuration's executable's parallel runner, which gives each
+# command that executable as BUSTER_COMPILER. The inventory needs CI's tools and frozen inputs (docs/ci.md), and its
+# commands take every core, so it runs alone. Its commands' own ./build.sh calls (print-*, check-call-graph) get this
+# tree's settings.
+enable_testing()
+set(settings_environment
+    "BUSTER_HOST_ARCH=${BUSTER_HOST_ARCH}"
+    "BUSTER_HOST_RUNTIME=${BUSTER_HOST_RUNTIME}"
+    "BUSTER_DEBUG_INFO=${BUSTER_DEBUG_INFO}"
+    "BUSTER_LINKER=${BUSTER_LINKER}"
+    "BUSTER_BUILD_DEFINES=${BUSTER_BUILD_DEFINES}"
+    "BUSTER_SANITIZER=${BUSTER_SANITIZER}"
+    "BUSTER_SANITIZER_OPTIMIZATION=${BUSTER_SANITIZER_OPTIMIZATION}"
+    "BUSTER_FUZZ_AVAILABLE=${BUSTER_FUZZ_AVAILABLE}"
+    "BUSTER_FUZZ_ENTRY=${BUSTER_FUZZ_ENTRY}"
+    "BUSTER_BAKE=${BUSTER_BAKE}")
+add_test(NAME baked-tables COMMAND "${compiler}" test-baked-tables)
+add_test(NAME parallel-runner COMMAND "${compiler}" test-parallel)
+set_tests_properties(baked-tables parallel-runner PROPERTIES LABELS build)
+add_test(NAME correctness COMMAND "${compiler}" parallel --timeout 600 "${CMAKE_SOURCE_DIR}/tools/ci/correctness.tests"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(correctness PROPERTIES LABELS correctness RUN_SERIAL TRUE TIMEOUT 21600
+    ENVIRONMENT "${settings_environment}")

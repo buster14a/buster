@@ -2,3 +2,5 @@ build/
 # Raw evidence belongs in https://github.com/buster14a/buster-performance.
 /docs/measurements
 /.claude/worktrees/
+# Developer-local CMake presets; CMakePresets.json holds the shared ones.
+/CMakeUserPresets.json

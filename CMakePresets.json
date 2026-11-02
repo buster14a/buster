@@ -1,0 +1,198 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "CMAKE_DEFAULT_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUSTER_HOST_RUNTIME": "",
+        "BUSTER_DEBUG_INFO": "1",
+        "BUSTER_LINKER": "auto",
+        "BUSTER_BUILD_DEFINES": "",
+        "BUSTER_SANITIZER": "",
+        "BUSTER_SANITIZER_OPTIMIZATION": "3",
+        "BUSTER_FUZZ_AVAILABLE": "0",
+        "BUSTER_FUZZ_ENTRY": "",
+        "BUSTER_BAKE": "1",
+        "BUSTER_LEXER_VARIANTS": "",
+        "BUSTER_SHIFT_SOURCE": "",
+        "BUSTER_SHIFTS": ""
+      }
+    },
+    {
+      "name": "native",
+      "displayName": "This machine's ISA (-march=native)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/cmake/native",
+      "cacheVariables": {
+        "BUSTER_HOST_ARCH": "native"
+      }
+    },
+    {
+      "name": "x86-64",
+      "displayName": "The baseline x86-64 ISA, scalar host paths",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/cmake/x86-64",
+      "cacheVariables": {
+        "BUSTER_HOST_ARCH": "x86-64"
+      }
+    },
+    {
+      "name": "znver5",
+      "displayName": "Zen 5, the benchmark builds' ISA",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/cmake/znver5",
+      "cacheVariables": {
+        "BUSTER_HOST_ARCH": "znver5"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "native",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "native",
+      "configuration": "Release"
+    },
+    {
+      "name": "x86-64-debug",
+      "configurePreset": "x86-64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "x86-64-release",
+      "configurePreset": "x86-64",
+      "configuration": "Release"
+    },
+    {
+      "name": "znver5-debug",
+      "configurePreset": "znver5",
+      "configuration": "Debug"
+    },
+    {
+      "name": "znver5-release",
+      "configurePreset": "znver5",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "build-base",
+      "hidden": true,
+      "inherits": "test-base",
+      "filter": {
+        "include": {
+          "label": "^build$"
+        }
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "test-base",
+      "configurePreset": "native",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "inherits": "test-base",
+      "configurePreset": "native",
+      "configuration": "Release"
+    },
+    {
+      "name": "x86-64-debug",
+      "inherits": "test-base",
+      "configurePreset": "x86-64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "x86-64-release",
+      "inherits": "test-base",
+      "configurePreset": "x86-64",
+      "configuration": "Release"
+    },
+    {
+      "name": "znver5-debug",
+      "inherits": "test-base",
+      "configurePreset": "znver5",
+      "configuration": "Debug"
+    },
+    {
+      "name": "znver5-release",
+      "inherits": "test-base",
+      "configurePreset": "znver5",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug-build",
+      "inherits": "build-base",
+      "configurePreset": "native",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release-build",
+      "inherits": "build-base",
+      "configurePreset": "native",
+      "configuration": "Release"
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "native"
+        },
+        {
+          "type": "build",
+          "name": "debug"
+        },
+        {
+          "type": "test",
+          "name": "debug-build"
+        }
+      ]
+    },
+    {
+      "name": "release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "native"
+        },
+        {
+          "type": "build",
+          "name": "release"
+        },
+        {
+          "type": "test",
+          "name": "release-build"
+        }
+      ]
+    }
+  ]
+}

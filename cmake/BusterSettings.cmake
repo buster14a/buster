@@ -1,0 +1,412 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+#
+# The build's description, which CMakeLists.txt builds and cmake/BusterPrint.cmake prints (build.sh's print-sources,
+# print-compile-flags and print-sanitizer-flags): the sources, in the order they are linked, and the flags that the
+# BUSTER_* settings select. Nothing else lists them. A setting unset or empty takes its default, but for
+# BUSTER_DEBUG_INFO and BUSTER_LINKER, for which an empty value is an error, as build.sh's environment interface has
+# always had them (docs/commands/build.md).
+
+include_guard(GLOBAL)
+
+get_filename_component(BUSTER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+
+# Whether `text` can be one argument of the units' compiles: no quote, backslash or newline, which a string literal
+# or the shell would read apart, no semicolon, which separates CMake's list elements, and no $<, which starts a
+# generator expression. Into `output`, TRUE or FALSE.
+function(buster_settings_plain text output)
+    set(plain TRUE)
+    foreach(character "\"" "\\" "\n" ";" "$<")
+        string(FIND "${text}" "${character}" found)
+        if(NOT found EQUAL -1)
+            set(plain FALSE)
+        endif()
+    endforeach()
+    set(${output} ${plain} PARENT_SCOPE)
+endfunction()
+
+# The translation units, in the order the executable links their objects: main.c's units (each main.c again with
+# another BUSTER_UNIT) and the benchmarks and measurements that are units of their own.
+set(BUSTER_SOURCES
+    src/buster/compiler/main.c
+    src/buster/compiler/main_unit_x86.c
+    src/buster/compiler/main_unit_frontend.c
+    src/buster/compiler/main_unit_assembler.c
+    src/buster/compiler/main_unit_link.c
+    src/buster/compiler/main_unit_executable.c
+    src/buster/compiler/main_unit_dynamic.c
+    src/buster/compiler/main_unit_types.c
+    src/buster/compiler/main_unit_checker.c
+    src/buster/compiler/main_unit_check_builtins.c
+    src/buster/compiler/main_unit_backend.c
+    src/buster/compiler/c_lexer_benchmark.c
+    src/buster/compiler/x86_64_encoder_benchmark.c
+    src/buster/compiler/lane_benchmark.c
+    src/buster/compiler/dataflow_benchmark.c
+    src/buster/compiler/dominators_benchmark.c
+    src/buster/compiler/tier1_allocate_benchmark.c
+    src/buster/compiler/object_writer_benchmark.c
+    src/buster/compiler/executable_benchmark.c
+    src/buster/compiler/import_benchmark.c
+    src/buster/compiler/branch_sizing_benchmark.c
+    src/buster/compiler/bind_benchmark.c
+    src/buster/compiler/c_refine_benchmark.c
+    src/buster/compiler/c_preprocessor_benchmark.c
+    src/buster/compiler/c_files_benchmark.c
+    src/buster/compiler/c_parser_benchmark.c
+    src/buster/compiler/c_types_benchmark.c
+    src/buster/compiler/c_builtin_benchmark.c
+    src/buster/compiler/c_checker_benchmark.c
+    src/buster/compiler/calling_convention_benchmark.c
+    src/buster/compiler/tier1_frame_benchmark.c
+    src/buster/compiler/snapshot_benchmark.c
+    src/buster/compiler/link_benchmark.c
+    src/buster/compiler/foreign_benchmark.c
+    src/buster/compiler/floors_benchmark.c
+    src/buster/compiler/x86_64_disassembler_benchmark.c
+    src/buster/compiler/x86_semantics_benchmark.c
+    src/buster/compiler/tier0_benchmark.c
+    src/buster/compiler/tier1_schedule_benchmark.c
+    src/buster/compiler/tier1_select_benchmark.c
+    src/buster/compiler/tier1_model_measure.c
+    src/buster/compiler/emission_metadata_test.c)
+
+# The order a clean build starts the compiles in, each source's file name once, the longest first by their times on
+# the 9700X (#270): one compile per core at a time (build.sh's --jobs), so a long one that started late would make the
+# link wait for it. CMakeLists.txt defines the units' targets in this order, which is the order Ninja starts them in when
+# its log has no times for them yet; with times (Ninja 1.12 and later), it starts the longest path first itself. A new
+# source goes where its time puts it.
+set(BUSTER_COMPILE_ORDER
+    main_unit_checker.c main_unit_backend.c main_unit_frontend.c main_unit_executable.c main_unit_dynamic.c
+    main_unit_link.c c_parser_benchmark.c main.c main_unit_x86.c main_unit_types.c main_unit_check_builtins.c
+    c_files_benchmark.c c_preprocessor_benchmark.c link_benchmark.c executable_benchmark.c
+    main_unit_assembler.c foreign_benchmark.c tier0_benchmark.c snapshot_benchmark.c x86_64_encoder_benchmark.c
+    bind_benchmark.c c_refine_benchmark.c c_checker_benchmark.c import_benchmark.c tier1_select_benchmark.c
+    c_lexer_benchmark.c branch_sizing_benchmark.c object_writer_benchmark.c x86_64_disassembler_benchmark.c
+    calling_convention_benchmark.c tier1_schedule_benchmark.c x86_semantics_benchmark.c tier1_model_measure.c
+    c_types_benchmark.c dominators_benchmark.c tier1_frame_benchmark.c tier1_allocate_benchmark.c lane_benchmark.c
+    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c emission_metadata_test.c)
+
+# The sources' indices in BUSTER_SOURCES, in BUSTER_COMPILE_ORDER's order, into `output`. Fails, naming it, for two
+# sources of one file name, which the order couldn't tell apart, for a file that the order names twice or that isn't a
+# source, and for a source that it doesn't name.
+function(buster_compile_order output)
+    set(names "")
+    foreach(source IN LISTS BUSTER_SOURCES)
+        get_filename_component(name "${source}" NAME)
+        if(name IN_LIST names)
+            message(FATAL_ERROR "buster: two sources are named ${name}, which the compile order names by file name")
+        endif()
+        list(APPEND names "${name}")
+    endforeach()
+    set(indices "")
+    set(remaining ${names})
+    foreach(name IN LISTS BUSTER_COMPILE_ORDER)
+        list(FIND remaining "${name}" found)
+        if(found EQUAL -1)
+            message(FATAL_ERROR "buster: the compile order names ${name}, which isn't a source or is named twice")
+        endif()
+        list(FIND names "${name}" index)
+        list(APPEND indices ${index})
+        list(REMOVE_AT remaining ${found})
+    endforeach()
+    if(remaining)
+        string(REPLACE ";" " " remaining "${remaining}")
+        message(FATAL_ERROR "buster: the compile order doesn't name ${remaining}")
+    endif()
+    set(${output} ${indices} PARENT_SCOPE)
+endfunction()
+
+# The settings, normalized, into buster_<setting> in the caller's scope, and the name of the build tree that keeps
+# them apart from the others (buster_variant): the host ISA, the baseline runtime, the sanitizer and its optimization,
+# fuzzing, and debug information, each of which changes every unit's flags. Runs nothing. Fails for a value no build
+# takes, with the message the settings' checks have always given.
+function(buster_settings_normalize)
+    set(fuzz "${BUSTER_FUZZ_AVAILABLE}")
+    if(fuzz STREQUAL "")
+        set(fuzz 0)
+    endif()
+    if(fuzz STREQUAL "0")
+        if(NOT "${BUSTER_FUZZ_ENTRY}" STREQUAL "")
+            message(FATAL_ERROR "buster: BUSTER_FUZZ_ENTRY requires BUSTER_FUZZ_AVAILABLE=1")
+        endif()
+    elseif(NOT fuzz STREQUAL "1")
+        message(FATAL_ERROR "buster: BUSTER_FUZZ_AVAILABLE must be 0 or 1")
+    endif()
+
+    # Fuzzing is instrumented with AddressSanitizer unless the sanitizer is given.
+    set(sanitizer "${BUSTER_SANITIZER}")
+    if(sanitizer STREQUAL "")
+        if(fuzz)
+            set(sanitizer address)
+        else()
+            set(sanitizer none)
+        endif()
+    endif()
+    if(NOT sanitizer MATCHES "^(none|address|undefined|thread|memory)$")
+        message(FATAL_ERROR "buster: BUSTER_SANITIZER must be none, address, undefined, thread or memory")
+    endif()
+
+    set(arch "${BUSTER_HOST_ARCH}")
+    if(arch STREQUAL "")
+        set(arch native)
+    endif()
+    # The name is clang's -march value and part of the build tree's directory name.
+    if(NOT arch MATCHES "^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
+        message(FATAL_ERROR "buster: BUSTER_HOST_ARCH must be a -march name, such as native, x86-64 or znver5")
+    endif()
+
+    set(optimization "")
+    if(NOT sanitizer STREQUAL "none")
+        if(NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "")
+            message(FATAL_ERROR "buster: sanitizers require the host runtime, not BUSTER_HOST_RUNTIME")
+        endif()
+        set(optimization "${BUSTER_SANITIZER_OPTIMIZATION}")
+        if(optimization STREQUAL "")
+            set(optimization 3)
+        endif()
+        if(NOT optimization MATCHES "^[123]$")
+            message(FATAL_ERROR "buster: BUSTER_SANITIZER_OPTIMIZATION must be 1, 2 or 3")
+        endif()
+    endif()
+
+    if(NOT DEFINED BUSTER_DEBUG_INFO)
+        set(debug_info 1)
+    else()
+        set(debug_info "${BUSTER_DEBUG_INFO}")
+    endif()
+    if(NOT debug_info MATCHES "^[01]$")
+        message(FATAL_ERROR "buster: BUSTER_DEBUG_INFO must be 0 or 1")
+    endif()
+
+    set(entry "")
+    if(fuzz)
+        if(sanitizer STREQUAL "thread")
+            message(FATAL_ERROR "buster: libFuzzer cannot be combined with ThreadSanitizer")
+        endif()
+        set(entry "${BUSTER_FUZZ_ENTRY}")
+        if(entry STREQUAL "")
+            set(entry "${BUSTER_SOURCE_DIR}/src/buster/compiler/fuzz.c")
+        endif()
+        get_filename_component(entry "${entry}" REALPATH BASE_DIR "${BUSTER_SOURCE_DIR}")
+        # The path is a string literal in every unit, and a list element here.
+        buster_settings_plain("${entry}" plain)
+        if(NOT EXISTS "${entry}" OR IS_DIRECTORY "${entry}" OR NOT plain)
+            message(FATAL_ERROR "buster: BUSTER_FUZZ_ENTRY must name a C file without quotes, backslashes, newlines or semicolons")
+        endif()
+    endif()
+
+    # Split on whitespace, as the shell split it; each is one argument of every unit's compile.
+    string(REGEX MATCHALL "[^ \t\r\n]+" defines "${BUSTER_BUILD_DEFINES}")
+    string(FIND "${BUSTER_BUILD_DEFINES}" ";" semicolon)
+    string(FIND "${BUSTER_BUILD_DEFINES}" "$<" expression)
+    if(NOT semicolon EQUAL -1 OR NOT expression EQUAL -1)
+        message(FATAL_ERROR "buster: BUSTER_BUILD_DEFINES can't hold a semicolon or \$<")
+    endif()
+
+    set(bake 1)
+    if("${BUSTER_BAKE}" STREQUAL "0")
+        set(bake 0)
+    endif()
+
+    set(variant "${arch}")
+    if(NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "")
+        string(APPEND variant "-runtime")
+    endif()
+    if(NOT sanitizer STREQUAL "none")
+        string(APPEND variant "-${sanitizer}-O${optimization}")
+    endif()
+    if(fuzz)
+        string(APPEND variant "-fuzz")
+    endif()
+    if(debug_info STREQUAL "0")
+        string(APPEND variant "-g0")
+    endif()
+
+    set(buster_fuzz ${fuzz} PARENT_SCOPE)
+    set(buster_fuzz_entry "${entry}" PARENT_SCOPE)
+    set(buster_sanitizer ${sanitizer} PARENT_SCOPE)
+    set(buster_sanitizer_optimization "${optimization}" PARENT_SCOPE)
+    set(buster_arch "${arch}" PARENT_SCOPE)
+    set(buster_debug_info ${debug_info} PARENT_SCOPE)
+    set(buster_defines ${defines} PARENT_SCOPE)
+    set(buster_bake ${bake} PARENT_SCOPE)
+    set(buster_variant "${variant}" PARENT_SCOPE)
+endfunction()
+
+# Runs clang (`clang`, a path) for what the flags record of it, into the caller's scope:
+#   buster_flags            every unit's flags, but debug information, optimization and BUSTER_BUILD_DEFINES, with
+#                           the include directory as -Isrc, relative to the source directory
+#   buster_debug            the Release configuration's debug information (-g, none, or -gline-tables-only)
+#   buster_optimization     the Release configuration's optimization (-O3, or the sanitizers' level)
+#   buster_sanitizer_flags  what a sanitizer build adds to every unit and to the link
+#   buster_link_mode        -no-pie, or -pie for the sanitizers
+#   buster_fuzz_libraries   what a fuzzing build links after the objects
+#   buster_host_vector      1 when the host has the complete vector feature set, else 0
+# buster_settings_normalize must have run.
+function(buster_settings_tools clang)
+    # The stack-protector policy is pinned (#916): a distribution's Clang may default to -fstack-protector-strong
+    # while the official release CI stages does not, so the host's configured default would otherwise decide the
+    # compiler's code and its measurement. The owner chose no stack protection for now, which matches the official
+    # release's default and keeps host and CI builds identical. The post-link step fails a build whose link still
+    # references the canary. The compiler's predefined macros still follow the host driver's configured default
+    # (c_predefines.c), which -fno-stack-protector would hide, so record that default before adding the flag.
+    execute_process(COMMAND "${clang}" -dM -E -x c /dev/null
+        OUTPUT_VARIABLE defaults RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "buster: ${clang} -dM -E failed")
+    endif()
+    if(defaults MATCHES "#define __SSP_ALL__ ")
+        set(ssp BUSTER_PREDEFINES_SSP_ALL)
+    elseif(defaults MATCHES "#define __SSP_STRONG__ ")
+        set(ssp BUSTER_PREDEFINES_SSP_STRONG)
+    elseif(defaults MATCHES "#define __SSP__ ")
+        set(ssp BUSTER_PREDEFINES_SSP_ON)
+    else()
+        set(ssp BUSTER_PREDEFINES_SSP_OFF)
+    endif()
+    set(flags -march=${buster_arch} -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -fno-stack-protector
+        -DBUSTER_HOST_SSP_DEFAULT=${ssp})
+
+    # The target-query defaults follow the Clang driver used to build this compiler. Keep the triple as a single
+    # argument and reject text that cannot be a triple.
+    execute_process(COMMAND "${clang}" -dumpmachine
+        OUTPUT_VARIABLE triple OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE status)
+    if(NOT status EQUAL 0 OR NOT triple MATCHES "^[A-Za-z0-9_.-]+$")
+        message(FATAL_ERROR "buster: invalid clang default target")
+    endif()
+    list(APPEND flags "-DBUSTER_CLANG_DEFAULT_TARGET=\"${triple}\"")
+
+    # The scalar host build retains the vector kernels in source but does not emit them. Their unused helpers are
+    # expected in that build alone.
+    execute_process(COMMAND "${clang}" ${flags} -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null
+        WORKING_DIRECTORY "${BUSTER_SOURCE_DIR}"
+        OUTPUT_VARIABLE host_defines ERROR_VARIABLE error RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "buster: ${clang} -march=${buster_arch} can't preprocess host_isa.h:\n${error}")
+    endif()
+    if(host_defines MATCHES "(^|\n)#define BUSTER_HOST_VECTOR 1\n")
+        set(host_vector 1)
+    else()
+        set(host_vector 0)
+        list(APPEND flags -Wno-unused-function -Wno-psabi)
+        message(NOTICE "buster: host execution: scalar (${buster_arch})")
+    endif()
+
+    set(optimization -O3)
+    # The executable's debug information: -g, unless BUSTER_DEBUG_INFO is 0, which leaves it out of the sources'
+    # objects and takes a fifth of the build's time (the 9700X job builds so, since nothing there reads it). Clang's
+    # code with -g is its code without it but for a few functions' stack slots.
+    if(buster_debug_info)
+        set(debug -g)
+    else()
+        set(debug "")
+    endif()
+
+    # Sanitizer builds keep the production semantics (-fwrapv, unsigned char and aliasing) and instrument every unit
+    # and the final link with the same flags. TSan requires PIE; use it for all diagnostic builds. Keep the ordinary
+    # fixed address executable and its benchmark layout unchanged.
+    set(sanitizer_flags "")
+    set(link_mode -no-pie)
+    if(buster_sanitizer STREQUAL "address")
+        set(sanitizer_flags -fsanitize=address,undefined,bounds -fsanitize-address-use-after-scope
+            -fsanitize-address-use-after-return=always)
+    elseif(buster_sanitizer STREQUAL "undefined")
+        set(sanitizer_flags -fsanitize=undefined,bounds)
+    elseif(buster_sanitizer STREQUAL "thread")
+        set(sanitizer_flags -fsanitize=thread)
+    elseif(buster_sanitizer STREQUAL "memory")
+        set(sanitizer_flags -fsanitize=memory -fsanitize-memory-track-origins=2)
+    endif()
+    if(NOT buster_sanitizer STREQUAL "none")
+        list(APPEND sanitizer_flags -fno-sanitize-recover=all -fno-sanitize-trap=all -fno-omit-frame-pointer
+            -fno-optimize-sibling-calls -fPIE)
+        list(APPEND flags ${sanitizer_flags})
+        set(optimization -O${buster_sanitizer_optimization})
+        set(debug -gline-tables-only)
+        set(link_mode -pie)
+    endif()
+
+    # Fuzzing is opt-in. Its entry source defines buster_fuzz_test_input and is included where the compiler's normal
+    # entry point has access to its modules.
+    set(fuzz_libraries "")
+    if(buster_fuzz)
+        # Clang's per-target runtime directory holds it (the official releases' only layout); older layouts name the
+        # architecture in the file.
+        execute_process(COMMAND "${clang}" -print-runtime-dir OUTPUT_VARIABLE runtime_dir OUTPUT_STRIP_TRAILING_WHITESPACE)
+        set(runtime "${runtime_dir}/libclang_rt.fuzzer_no_main.a")
+        if(NOT EXISTS "${runtime}")
+            execute_process(COMMAND "${clang}" -print-file-name=libclang_rt.fuzzer_no_main-x86_64.a
+                OUTPUT_VARIABLE runtime OUTPUT_STRIP_TRAILING_WHITESPACE)
+        endif()
+        if(NOT IS_ABSOLUTE "${runtime}" OR NOT EXISTS "${runtime}")
+            message(FATAL_ERROR "buster: Clang libFuzzer no-main runtime is missing")
+        endif()
+        list(APPEND flags -fsanitize=fuzzer-no-link -DBUSTER_FUZZ_AVAILABLE=1 "-DBUSTER_FUZZ_ENTRY=\"${buster_fuzz_entry}\"")
+        set(fuzz_libraries "${runtime}" -lstdc++ -pthread)
+    endif()
+
+    set(buster_flags ${flags} PARENT_SCOPE)
+    set(buster_debug ${debug} PARENT_SCOPE)
+    set(buster_optimization ${optimization} PARENT_SCOPE)
+    set(buster_sanitizer_flags ${sanitizer_flags} PARENT_SCOPE)
+    set(buster_link_mode ${link_mode} PARENT_SCOPE)
+    set(buster_fuzz_libraries ${fuzz_libraries} PARENT_SCOPE)
+    set(buster_host_vector ${host_vector} PARENT_SCOPE)
+endfunction()
+
+# The Debug configuration's debug information and optimization, in place of the Release configuration's. Debug keeps
+# every other flag, so it has the same language and aliasing contracts (-fwrapv, -funsigned-char,
+# -fno-strict-aliasing), host ISA, sanitizers and definitions; the code is clang's -O0, whose variables a debugger reads
+# everywhere, with full debug information whatever BUSTER_DEBUG_INFO says.
+set(BUSTER_DEBUG_CONFIGURATION_DEBUG -g)
+set(BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION -O0)
+
+# The linker for the executable's link alone (compilation and IR capture keep their flags), from BUSTER_LINKER, into
+# buster_linker_flags (--ld-path=PATH, or none for clang's default) and buster_linker (its description).
+function(buster_settings_linker)
+    if(NOT DEFINED BUSTER_LINKER)
+        set(linker auto)
+    else()
+        set(linker "${BUSTER_LINKER}")
+    endif()
+    set(names "")
+    if(linker STREQUAL "auto")
+        set(names wild mold)
+    elseif(linker STREQUAL "system")
+    elseif(linker STREQUAL "lld" OR linker STREQUAL "bfd")
+        set(names ld.${linker})
+    elseif(linker STREQUAL "wild" OR linker STREQUAL "mold")
+        set(names ${linker})
+    elseif(NOT linker MATCHES "^/")
+        message(FATAL_ERROR "buster: BUSTER_LINKER must be auto, system, wild, mold, lld, bfd or an absolute path")
+    endif()
+    set(path "")
+    if(linker MATCHES "^/")
+        set(path "${linker}")
+    else()
+        foreach(name IN LISTS names)
+            # PATH's programs alone, as the shell finds them.
+            find_program(found NAMES ${name} NO_CACHE NO_DEFAULT_PATH PATHS ENV PATH)
+            if(found)
+                set(path "${found}")
+                break()
+            endif()
+        endforeach()
+        if(names AND path STREQUAL "" AND NOT linker STREQUAL "auto")
+            message(FATAL_ERROR "buster: requested linker is not an executable file on PATH or at the specified path")
+        endif()
+    endif()
+    set(flags "")
+    if(NOT path STREQUAL "")
+        execute_process(COMMAND test -f "${path}" -a -x "${path}" RESULT_VARIABLE status)
+        if(NOT status EQUAL 0)
+            message(FATAL_ERROR "buster: requested linker is not an executable file on PATH or at the specified path")
+        endif()
+        set(flags "--ld-path=${path}")
+    else()
+        set(path "system default")
+    endif()
+    set(buster_linker_flags ${flags} PARENT_SCOPE)
+    set(buster_linker "${path}" PARENT_SCOPE)
+endfunction()
