@@ -64,7 +64,7 @@ static void check_test_library_difference(const char* a, const char* b, char* di
 }
 
 // Every plain library name called once, undeclared, in each configuration, then non-call uses of names before their
-// calls: clang creates the builtin's declaration where its name is looked up, call or not, and its diagnostic says
+// calls, then the names of FILE, jmp_buf and ucontext_t after their typedefs: clang creates the builtin's declaration where its name is looked up, call or not, and its diagnostic says
 // "call" either way. Each configuration's lines must be clang's, and its status, by both paths: some lines, but none
 // where -Wno-implicit-function-declaration turns the diagnostics off (`quiet`).
 static void check_test_library_implicit(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -99,17 +99,32 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
         length += (uint64_t)snprintf(calls + length, capacity - length, "    %s();\n", cbuiltin_library_plains[p].name);
     }
     length += calls != NULL ? (uint64_t)snprintf(calls + length, capacity - length, "}\n") : 0;
-    char paths[2][512];
+    // And the names whose prototypes take the unit's FILE, jmp_buf, sigjmp_buf or ucontext_t, after typedefs of them, which
+    // the diagnostics spell (CBuiltinLibraryNamed).
+    char* typed = malloc(capacity);
+    uint64_t typed_length = typed != NULL ? (uint64_t)snprintf(typed, capacity, "typedef struct F FILE;\ntypedef long jmp_buf[8];\ntypedef int* sigjmp_buf[3];\n"
+                                                                              "typedef struct U { int x; } ucontext_t;\nvoid f(void)\n{\n") : 0;
+    for (uint32_t p = 0; typed != NULL && p < BUSTER_CBUILTIN_LIBRARY_PLAIN_COUNT; p += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(cbuiltin_library_plains[p].name, cbuiltin_library_plains[p].length);
+        const bool named = info != NULL && (memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
+                                            memchr(info->encoding, 'K', info->encoding_length) != NULL);
+        typed_length += named ? (uint64_t)snprintf(typed + typed_length, capacity - typed_length, "    %s();\n", cbuiltin_library_plains[p].name) : 0;
+    }
+    typed_length += typed != NULL ? (uint64_t)snprintf(typed + typed_length, capacity - typed_length, "}\n") : 0;
+    char paths[3][512];
     snprintf(paths[0], sizeof(paths[0]), "%s/library-calls.c", directory);
     snprintf(paths[1], sizeof(paths[1]), "%s/library-uses.c", directory);
-    const bool written = calls != NULL && length < capacity && parse_test_write(paths[0], calls, length) && parse_test_write(paths[1], uses, sizeof(uses) - 1);
+    snprintf(paths[2], sizeof(paths[2]), "%s/library-typed.c", directory);
+    const bool written = calls != NULL && length < capacity && parse_test_write(paths[0], calls, length) && parse_test_write(paths[1], uses, sizeof(uses) - 1) &&
+                         typed != NULL && typed_length < capacity && parse_test_write(paths[2], typed, typed_length);
     check_test_expect(test, written, "library implicit declarations: fixtures written");
     enum { LINES = 1 << 20 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
     for (uint32_t c = 0; written && expected_lines != NULL && actual_lines != NULL && c < BUSTER_ARRAY_LENGTH(configurations); c += 1)
     {
-        for (uint32_t f = 0; f < 2; f += 1)
+        for (uint32_t f = 0; f < 3; f += 1)
         {
             char* arguments[12] = { (char*)clang, (char*)configurations[c].standard, "-fno-caret-diagnostics", "-ferror-limit=0", "-fsyntax-only", paths[f] };
             uint32_t count = 6;
@@ -141,7 +156,7 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
                 char description[768];
                 snprintf(description, sizeof(description), "library implicit declarations %s %s %s %s, %s: status %d (clang %d), %s",
                          configurations[c].standard, configurations[c].first != NULL ? configurations[c].first : "",
-                         configurations[c].second != NULL ? configurations[c].second : "", f == 0 ? "calls" : "uses", scalar != 0 ? "scalar" : "vector",
+                         configurations[c].second != NULL ? configurations[c].second : "", f == 0 ? "calls" : f == 1 ? "uses" : "typed", scalar != 0 ? "scalar" : "vector",
                          status, oracle, difference);
                 check_test_expect(test, oracle >= 0 && status == oracle && same, description);
                 free(actual);
@@ -152,8 +167,10 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
     free(actual_lines);
     free(expected_lines);
     free(calls);
+    free(typed);
     unlink(paths[0]);
     unlink(paths[1]);
+    unlink(paths[2]);
 }
 
 // Programs built by clang and by this executable, by both paths, that must print the same and exit alike: C89's calls

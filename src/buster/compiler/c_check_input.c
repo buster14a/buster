@@ -388,6 +388,9 @@ struct CheckInput
     TypeId* declared_types;
     uint8_t* declaration_kinds;
     uint8_t* function_flags;
+    // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
+    // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
+    TypeId implicit_library_types[4];
     // Named K&R parameters bound the extra entry conversions without inflating ordinary units' reservations.
     uint32_t kr_parameter_count;
     CheckInputKrDiagnostic* kr_diagnostics;

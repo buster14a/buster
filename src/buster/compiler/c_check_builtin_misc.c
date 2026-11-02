@@ -1190,7 +1190,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                 case CBUILTIN_FUNCTION_START: check_builtin_misc_more(table, input, output, values); break;
                 case CBUILTIN_COMPLEX: check_builtin_misc_complex(table, input, output, values); break;
                 default:
-                    if (input->id >= CBUILTIN_ARITHMETIC_FENCE && input->id <= CBUILTIN_PTRAUTH_STRIP)
+                    if (cbuiltin_misc_last(input->id))
                     {
                         check_builtin_misc_last(table, input, output, values);
                     }

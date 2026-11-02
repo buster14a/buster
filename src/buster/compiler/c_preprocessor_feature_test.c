@@ -238,8 +238,13 @@ static bool pp_test_builtin_targets(const char* directory)
                                          cbuiltin_source_intrinsic(name, info->name_length) || cbuiltin_fortify_source(name, info->name_length) ||
                                          cbuiltin_library_source(name, info->name_length) || cbuiltin_library_plain(info->name, info->name_length) != NULL;
                 const uint32_t ours = pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, info->name_length);
-                // __has_constexpr_builtin answers 1 only where clang's does: for the folds buster has of clang's (#148).
-                const char* constant = answer + 1 < end ? answer + 1 : end;
+                // __has_constexpr_builtin answers 1 only where clang's does: for the folds buster has of clang's (#148). Its
+                // answer follows __has_builtin's, which can be a version (201802L, __builtin_operator_new's).
+                const char* constant = answer;
+                while (constant < end && *constant != ' ')
+                {
+                    constant += 1;
+                }
                 const bool clang_constant = result && constant < end && *constant == ' ' && constant[1] != '0';
                 const uint32_t ours_constant = pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, info->name_length);
                 const bool right = (implemented ? (ours != 0) == clang_yes : ours == 0) && (ours_constant == 0 || clang_constant);

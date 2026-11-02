@@ -72,8 +72,12 @@ struct BuiltinIntrinsicTypeInput
     bool half_prototypes;
     // The unit's FILE, which clang's prototype code P names (the FILE builtins: fprintf and its kin, #148): the type of
     // the last file-scope typedef named FILE before the call, as clang's ASTContext keeps it (setFILEDecl), or 0 where
-    // the unit has none, which leaves P unsupported, as clang refuses the builtin ("use of unknown builtin").
+    // the unit has none, which leaves P unsupported, as clang refuses the builtin ("use of unknown builtin"). jmp_buf,
+    // sigjmp_buf and ucontext_t, which J, SJ and K name (setjmp and its kin, getcontext), are the unit's alike.
     TypeId file_type;
+    TypeId jmp_buf_type;
+    TypeId sigjmp_buf_type;
+    TypeId ucontext_type;
 };
 
 typedef struct BuiltinIntrinsicTypeResult BuiltinIntrinsicTypeResult;
@@ -296,7 +300,20 @@ static TypeId builtin_intrinsic_type_scalar(BuiltinIntrinsicTypeReader* reader, 
         modifiers = plain;
         type = reader->input->file_type;
     }
-    else if (code == 'F' || code == 'G' || code == 'H' || code == 'M' || code == 'P' || code == 'J' || code == 'K' || code == 'p')
+    else if ((code == 'J' && (prefix.sign == 'S' ? reader->input->sigjmp_buf_type : reader->input->jmp_buf_type) != 0) ||
+             (code == 'K' && reader->input->ucontext_type != 0))
+    {
+        // SJ is sigjmp_buf, as clang's signed prefix on J reads.
+        modifiers = prefix.longs == 0 && prefix.special == 0 && (prefix.sign == 0 || (code == 'J' && prefix.sign == 'S'));
+        type = code == 'K' ? reader->input->ucontext_type : prefix.sign == 'S' ? reader->input->sigjmp_buf_type : reader->input->jmp_buf_type;
+    }
+    else if (code == 'p')
+    {
+        // pid_t, clang's process ID type, which x86-64 Linux's is int.
+        modifiers = plain;
+        type = BUSTER_TYPE_INT;
+    }
+    else if (code == 'F' || code == 'G' || code == 'H' || code == 'M' || code == 'P' || code == 'J' || code == 'K')
     {
         builtin_intrinsic_type_fail(reader, BUILTIN_INTRINSIC_TYPES_UNSUPPORTED, BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT, offset);
     }

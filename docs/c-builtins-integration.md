@@ -1808,11 +1808,9 @@ folding, for which its `-pedantic` warns; this doesn't). Pointer results
 (`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
-**Plain names.** `c_builtin_library_plain.inc` lists the 361 `f` rows of C's
-modes but those whose prototypes need the unit's `jmp_buf` or `ucontext_t`, or
-that have none to check (`setjmp` and its kin, `vfork`,
-`umask`, `pthread_create`), and `<stdarg.h>`'s `va_start`, `va_end` and
-`va_copy`. Each is a builtin of the unit unless `-fno-builtin`,
+**Plain names.** `c_builtin_library_plain.inc` lists the 373 `f` rows of C's
+modes but `<stdarg.h>`'s `va_start`, `va_end` and `va_copy`, whose prototypes
+take a `va_list` by reference. Each is a builtin of the unit unless `-fno-builtin`,
 `-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
 `ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
@@ -1833,6 +1831,19 @@ for 'sin'`, both under `-Wimplicit-function-declaration`, and a prototype with
 `size_t` spelled as clang's (`'__size_t (const char *)' (aka 'unsigned long
 (const char *)')`). The call then converts its arguments to the prototype's
 parameters (`sin(1)` passes 1.0), in C89 as clang's does.
+
+A prototype that names the unit's types takes them from its file-scope
+typedefs at the call, as clang's `ASTContext` keeps them (`check_input_file_type`):
+`FILE` (`P`), `jmp_buf` and `sigjmp_buf` (`J` and `SJ`, decayed as parameters)
+and `ucontext_t` (`K`); `pid_t` (`p`) is clang's `int`. The diagnostics spell
+them as clang does (`CheckInput.implicit_library_types`, `CBuiltinLibraryNamed`:
+`'int (ucontext_t *)' (aka 'int (struct U *)')`, `'int (long *)'`). Without the
+type, the use declares the function as any undeclared one, with clang's
+warning that it needs its header, but for the rows clang declares without
+checking their prototypes (attribute `T`: `setjmp` and its kin, `getcontext`,
+`savectx`, `vfork`, Sema's `allowTypeMismatch`), which warn of nothing. `umask`
+and `pthread_create` have no prototype: their uses are any undeclared
+function's, as clang's are.
 
 **Refused.** The classification builtins of custom checking
 (`__builtin_isnormal` and its kin) and `__builtin_signbitf` and `signbitl`,

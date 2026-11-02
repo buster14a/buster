@@ -27,7 +27,7 @@ static void check_test_library_note(char* list, size_t capacity, uint32_t* count
 // page too. Then every row of C's languages: an F row of all languages without features is one __has_builtin advertises
 // (the catalog's, the fortified builtins', the list's, powi's), or one whose prototype the checker doesn't decode
 // (custom checking's);
-// and an f row is listed, or has no prototype to check (attribute T, or none), or needs va_list's reference.
+// and an f row is listed, or needs va_list's reference (stdarg.h's va_start, va_end and va_copy).
 static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
 {
     bool ordered = true;
@@ -49,8 +49,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
     {
         const CBuiltinLibraryPlain* plain = cbuiltin_library_plains + p;
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(plain->name, plain->length);
-        plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && memchr(info->attributes, 'T', info->attributes_length) == NULL &&
-                  !info->custom_typechecking && info->encoding_length != 0 && memchr(info->encoding, 'J', info->encoding_length) == NULL && memchr(info->encoding, 'K', info->encoding_length) == NULL &&
+        plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && !info->custom_typechecking &&
                   memchr(info->encoding, 'A', info->encoding_length) == NULL && info->features_length == 0 &&
                   strcmp(info->language_token, plain->gnu ? "ALL_GNU_LANGUAGES" : "ALL_LANGUAGES") == 0;
         plains &= plain->length == strlen(plain->name) && plain->length <= BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME &&
@@ -110,10 +109,9 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         }
         if (c && memchr(info->attributes, 'f', info->attributes_length) != NULL && cbuiltin_library_plain(info->name, info->name_length) == NULL)
         {
-            const bool unchecked = memchr(info->attributes, 'T', info->attributes_length) != NULL || info->encoding_length == 0;
             const bool reference = memchr(info->encoding, 'A', info->encoding_length) != NULL;
             unlisted += 1;
-            if (!unchecked && !reference)
+            if (!reference)
             {
                 check_test_library_note(missing_plain, sizeof(missing_plain), &plain_unaccounted, info->name);
             }
@@ -196,12 +194,12 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         bool unsized = false;
         bool small = false;
         spelled &= info != NULL &&
-                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, spellings[i].c99, sugared,
+                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, spellings[i].c99, NULL, sugared,
                                           sizeof(sugared), &sized) &&
-                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, spellings[i].c99, plain,
+                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, spellings[i].c99, NULL, plain,
                                           sizeof(plain), &unsized) &&
                    strcmp(sugared, spellings[i].sugared) == 0 && strcmp(plain, spellings[i].plain) == 0 && sized == (strstr(sugared, "__size_t") != NULL);
-        small = info != NULL && !cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, true, tiny,
+        small = info != NULL && !cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, true, NULL, tiny,
                                                         sizeof(tiny), &sized);
         spelled &= small;
     }

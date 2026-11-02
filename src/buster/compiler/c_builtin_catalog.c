@@ -680,6 +680,13 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 
 // Whether an identity is one of clang's alignment builtins, which c_check_builtin_misc.c checks (align_up, align_down
 // and is_aligned).
+// The miscellaneous builtins past complex (c_check_builtin_misc.c's check_builtin_misc_last), in two blocks of codes
+// around the scoped atomics' (0x400 to 0x43c), which a range of ids from the first to the last would take in.
+static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
+{
+    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_PTRAUTH_STRIP);
+}
+
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 {
     const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_IS_ALIGNED;

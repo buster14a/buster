@@ -278,8 +278,20 @@ static __attribute__((unused)) const CBuiltinLibraryPlain* cbuiltin_library_plai
     return result;
 }
 
-// A bounded text that a spelling appends to: its bytes so far, `length` of `capacity`, whether it ran out of room, and
-// restrict's spelling (C89's __restrict, where restrict is no keyword).
+// The unit's types that a prototype names by its typedefs, as clang's TypePrinter spells them (#148): FILE's (P) and
+// ucontext_t's (K), their typedefs' types, which a sugared spelling names by the typedef instead, and jmp_buf's (J) and
+// sigjmp_buf's (SJ) as a parameter decays them ("long *"), which keeps no typedef; NULL where the unit has none.
+typedef struct CBuiltinLibraryNamed CBuiltinLibraryNamed;
+struct CBuiltinLibraryNamed
+{
+    const char* file;
+    const char* jmp_buf;
+    const char* sigjmp_buf;
+    const char* ucontext;
+};
+
+// A bounded text that a spelling appends to: its bytes so far, `length` of `capacity`, whether it ran out of room,
+// restrict's spelling (C89's __restrict, where restrict is no keyword), and the unit's named types.
 typedef struct CBuiltinLibraryText CBuiltinLibraryText;
 struct CBuiltinLibraryText
 {
@@ -288,6 +300,7 @@ struct CBuiltinLibraryText
     uint32_t capacity;
     bool full;
     const char* restrict_spelling;
+    const CBuiltinLibraryNamed* named;
 };
 
 static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes)
@@ -304,28 +317,33 @@ static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes
 
 // One type of a plain library builtin's encoding, from *position, as clang's TypePrinter spells it in a function type:
 // "const char *restrict", "_Complex double", a va_list parameter's "struct __va_list_tag *", wchar_t's int, size_t's
-// __size_t where `sugared` says (clang's builtins' sugar for it, *sized set) and otherwise unsigned long. False for a
-// code the plain rows don't use.
+// __size_t where `sugared` says (clang's builtins' sugar for it, *sized set) and otherwise unsigned long, FILE and
+// ucontext_t likewise by their typedefs or their types (CBuiltinLibraryNamed), jmp_buf and sigjmp_buf decayed, and
+// pid_t as int, clang's process ID type on x86-64 Linux. False for a code the plain rows don't use, or a named type the
+// unit hasn't.
 static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, uint32_t* position, bool sugared, bool* sized, CBuiltinLibraryText* text)
 {
     uint32_t at = *position;
     uint32_t longs = 0;
     bool is_unsigned = false;
     bool complex = false;
-    while (at < length && (encoding[at] == 'L' || encoding[at] == 'U' || encoding[at] == 'X'))
+    bool is_signed = false;
+    while (at < length && (encoding[at] == 'L' || encoding[at] == 'U' || encoding[at] == 'X' || encoding[at] == 'S'))
     {
         longs += encoding[at] == 'L';
         is_unsigned |= encoding[at] == 'U';
         complex |= encoding[at] == 'X';
+        is_signed |= encoding[at] == 'S';
         at += 1;
     }
+    const CBuiltinLibraryNamed* named = text->named;
     const char code = at < length ? encoding[at] : 0;
     at += at < length;
     const char* base = NULL;
     switch (code)
     {
         case 'v': base = "void"; break;
-        case 'c': base = is_unsigned ? "unsigned char" : "char"; break;
+        case 'c': base = is_unsigned ? "unsigned char" : is_signed ? "signed char" : "char"; break;
         case 'i': base = longs == 2 ? (is_unsigned ? "unsigned long long" : "long long") : longs == 1 ? (is_unsigned ? "unsigned long" : "long") :
                          (is_unsigned ? "unsigned int" : "int"); break;
         case 'f': base = "float"; break;
@@ -333,9 +351,13 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
         case 'z': base = sugared ? "__size_t" : "unsigned long"; break;
         case 'w': base = "int"; break;
         case 'a': base = "struct __va_list_tag *"; break;
+        case 'P': base = named == NULL || named->file == NULL ? NULL : sugared ? "FILE" : named->file; break;
+        case 'K': base = named == NULL || named->ucontext == NULL ? NULL : sugared ? "ucontext_t" : named->ucontext; break;
+        case 'J': base = named == NULL ? NULL : is_signed ? named->sigjmp_buf : named->jmp_buf; break;
+        case 'p': base = "int"; break;
         default: break;
     }
-    *sized |= code == 'z';
+    *sized |= code == 'z' || code == 'P' || code == 'K';
     // The base's qualifiers come first ("const char"), then each pointer's star and its own ("char *const *").
     const bool constant = at < length && encoding[at] == 'C';
     at += constant;
@@ -363,11 +385,19 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
 // spell it: "double (double)", "void *(__size_t)", "int (const char *, ...)", "void (void) __attribute__((noreturn))",
 // with __size_t for size_t where `sugared` says and restrict as `c99` says (C89 spells it __restrict), into `buffer` of
 // `capacity` bytes, NUL-terminated; *sized says whether it has one (and clang adds the spelling without the sugar:
-// "(aka '...')"). False where it doesn't fit, or the encoding has a code the plain rows don't use.
+// "(aka '...')", as it does for FILE and ucontext_t, of the unit's types `named`, which may be NULL). False where it
+// doesn't fit, or the encoding has a code the plain rows don't use.
 static __attribute__((unused)) bool cbuiltin_library_spell(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length,
-                                                           bool sugared, bool c99, char* buffer, uint32_t capacity, bool* sized)
+                                                           bool sugared, bool c99, const CBuiltinLibraryNamed* named, char* buffer, uint32_t capacity,
+                                                           bool* sized)
 {
-    CBuiltinLibraryText text = { .bytes = buffer, .capacity = capacity, .full = capacity == 0, .restrict_spelling = c99 ? "restrict" : "__restrict" };
+    CBuiltinLibraryText text = {
+        .bytes = buffer,
+        .capacity = capacity,
+        .full = capacity == 0,
+        .restrict_spelling = c99 ? "restrict" : "__restrict",
+        .named = named,
+    };
     uint32_t position = 0;
     *sized = false;
     bool valid = cbuiltin_library_spell_type(encoding, length, &position, sugared, sized, &text);
@@ -404,6 +434,7 @@ static __attribute__((unused)) const char* cbuiltin_library_header(const char* t
         { "CTYPE_H", "ctype.h" },
         { "MALLOC_H", "malloc.h" },
         { "MATH_H", "math.h" },
+        { "SETJMP_H", "setjmp.h" },
         { "STDIO_H", "stdio.h" },
         { "STDLIB_H", "stdlib.h" },
         { "STRINGS_H", "strings.h" },

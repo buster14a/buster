@@ -631,21 +631,66 @@ static void check_driver_kr_definition(const Parser* parser, const Parser* origi
     }
 }
 
+// A type of the unit as clang's TypePrinter spells it, NUL-terminated in `scratch`, with " *" after it where `decay` says
+// (an array's element's, as a parameter decays the array), or NULL.
+static const char* check_driver_library_type(const Preprocessor* pp, const TypeTable* types, const TypeNames* names, TypeId type, bool decay, Arena* scratch)
+{
+    const TypeId base = type_strip_aligned(types, type);
+    const bool array = decay && type_kind_is_array(type_kind(types, base));
+    const String8 printed = type_is_valid(types, type) ? type_print(types, scratch, array ? type_element(types, base) : type, (String8){ 0 }, names,
+                                                                    pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0) :
+                                                         (String8){ 0 };
+    const bool star = printed.length != 0 && printed.pointer[printed.length - 1] == '*';
+    char* text = printed.length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, printed.length + 3) : NULL;
+    if (text != NULL)
+    {
+        memcpy(text, printed.pointer, printed.length);
+        memcpy(text + printed.length, array ? (star ? "*" : " *") : "", array ? (star ? 2 : 3) : 1);
+    }
+    return text;
+}
+
 // An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
 // C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
-// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t, and then its spelling without it), and
-// a note naming the header that declares it, where its row has one.
-static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity, uint32_t source, uint32_t publication, const uint8_t* name, uint32_t length,
-                                          bool c99)
+// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
+// and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
+// note naming the header that declares it, where its row has one.
+static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
+                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
+    const uint64_t mark = scratch->length;
+    CBuiltinLibraryNamed named = { 0 };
+    const bool needs = info != NULL && (memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
+                                        memchr(info->encoding, 'K', info->encoding_length) != NULL);
+    if (needs && types != NULL && input != NULL)
+    {
+        // The names' spellings, as the warnings' renderer builds them (check_driver_spelling_build), for these few types.
+        const uint32_t count = pp->table->count;
+        const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, count);
+        uint32_t* lengths = bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+        for (uint32_t i = 0; lengths != NULL && i < count; i += 1)
+        {
+            bytes[i] = intern_bytes(pp->table, i);
+            lengths[i] = intern_length(pp->table, i);
+        }
+        const TypeNames names = { .bytes = bytes, .lengths = lengths, .count = lengths != NULL ? count : 0 };
+        const TypeId* taken = input->implicit_library_types;
+        named = (CBuiltinLibraryNamed){
+            .file = taken[0] != 0 ? check_driver_library_type(pp, types, &names, taken[0], false, scratch) : NULL,
+            .jmp_buf = taken[1] != 0 ? check_driver_library_type(pp, types, &names, taken[1], true, scratch) : NULL,
+            .sigjmp_buf = taken[2] != 0 ? check_driver_library_type(pp, types, &names, taken[2], true, scratch) : NULL,
+            .ucontext = taken[3] != 0 ? check_driver_library_type(pp, types, &names, taken[3], false, scratch) : NULL,
+        };
+    }
     char sugared[256];
     char plain[256];
     bool sized = false;
     const bool spelled = info != NULL && cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, c99,
-                                                                 sugared, sizeof(sugared), &sized) &&
-                         cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, plain,
-                                                sizeof(plain), &sized);
+                                                                 &named, sugared, sizeof(sugared), &sized) &&
+                         cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, &named,
+                                                plain, sizeof(plain), &sized);
+    scratch->length = mark;
     char type[560];
     snprintf(type, sizeof(type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "int ()", plain);
     const char* header = info != NULL ? cbuiltin_library_header(info->header_token) : NULL;
@@ -678,7 +723,7 @@ static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity,
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
 static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
-                                  const CheckInput* input, const CheckStream* stream,
+                                  const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
@@ -981,8 +1026,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
-                        check_driver_implicit_library(pp, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
-                                                      intern_length(pp->table, name), input->implicit_function_c99);
+                        check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
+                                                      intern_length(pp->table, name), input->implicit_function_c99, scratch);
                     }
                     else if (input->implicit_function_c99)
                     {
@@ -2737,7 +2782,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                     }
                     if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, scratch) ||
-                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, repairing ? &repair : NULL,
+                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
@@ -2880,7 +2925,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
-                if (!check_driver_reports(checking, parser, pp, publication_end, &input, NULL, repairing ? &repair : NULL,
+                if (!check_driver_reports(checking, parser, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
                                           original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, scratch) ||
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {

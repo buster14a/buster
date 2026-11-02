@@ -247,14 +247,15 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
     return valid;
 }
 
-// The unit's FILE for clang's prototype code P (BuiltinIntrinsicTypeInput.file_type): the type of the file-scope typedef
-// named FILE that the call sees, past any block-scope declaration of the name that hides it (clang's ASTContext keeps
-// the last file-scope typedef of the name, which a local `int FILE` doesn't change, and no block-scope one), or 0. A
-// deferred body's lane, whose bindings hold only the names the body spells, leaves it to source order.
-static TypeId check_input_file_type(CheckInputReader* reader)
+// The unit's FILE for clang's prototype code P (BuiltinIntrinsicTypeInput.file_type), and its jmp_buf, sigjmp_buf and
+// ucontext_t for J, SJ and K: the type of the file-scope typedef of `spelling` that the call sees, past any block-scope
+// declaration of the name that hides it (clang's ASTContext keeps the last file-scope typedef of the name, which a local
+// `int FILE` doesn't change, and no block-scope one), or 0. A deferred body's lane, whose bindings hold only the names
+// the body spells, leaves it to source order.
+static TypeId check_input_file_type(CheckInputReader* reader, const char* spelling)
 {
-    check_input_lane_refuse(reader, reader->lane, "a FILE builtin's prototype reads the unit's FILE");
-    const uint32_t name = intern_find(reader->pp->table, (const uint8_t*)"FILE", 4);
+    check_input_lane_refuse(reader, reader->lane, "a library builtin's prototype reads the unit's FILE, jmp_buf or ucontext_t");
+    const uint32_t name = intern_find(reader->pp->table, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
     uint32_t handle = name != 0 && !reader->lane ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
     while (handle != 0 && reader->bindings.depth[handle - 1] != 0)
     {
@@ -284,7 +285,17 @@ static CheckInputIntrinsicDeclaration check_input_intrinsic_decode(CheckInputRea
     }
     if (memchr(info->encoding, 'P', info->encoding_length) != 0 && !info->custom_typechecking)
     {
-        input.file_type = check_input_file_type(reader);
+        input.file_type = check_input_file_type(reader, "FILE");
+    }
+    const char* jump = memchr(info->encoding, 'J', info->encoding_length);
+    if (jump != 0 && !info->custom_typechecking)
+    {
+        const bool signal = jump != info->encoding && jump[-1] == 'S';
+        *(signal ? &input.sigjmp_buf_type : &input.jmp_buf_type) = check_input_file_type(reader, signal ? "sigjmp_buf" : "jmp_buf");
+    }
+    if (memchr(info->encoding, 'K', info->encoding_length) != 0 && !info->custom_typechecking)
+    {
+        input.ucontext_type = check_input_file_type(reader, "ucontext_t");
     }
     builtin_intrinsic_types_decode(reader->types, &input, &declaration.types);
     return declaration;

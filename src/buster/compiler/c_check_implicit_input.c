@@ -62,11 +62,16 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
                 decoded = check_input_intrinsic_decode(reader, info);
                 reader->output->resource |= decoded.types.status == BUILTIN_INTRINSIC_TYPES_CAPACITY;
             }
-            const bool library = eligible && decoded.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && !decoded.types.signature_ignored;
-            const bool header = eligible && ordinary && decoded.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
+            // A row whose declarations clang doesn't check against its prototype (attribute T: setjmp and its kin, vfork) is
+            // declared with it all the same where it decodes, and where it doesn't (no jmp_buf) declared as any undeclared
+            // function, without the header's warning (Sema's allowTypeMismatch).
+            const bool mismatch = eligible && memchr(info->attributes, 'T', info->attributes_length) != NULL;
+            const bool library = eligible && decoded.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS;
+            const bool header = eligible && ordinary && !mismatch && decoded.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
                                 (decoded.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
                                 decoded.types.error_offset < info->encoding_length &&
-                                (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J');
+                                (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J' ||
+                                 info->encoding[decoded.types.error_offset] == 'K');
             if (header && !reader->output->resource)
             {
                 const CheckWarningEvent event =
@@ -82,6 +87,19 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
                 check_input_warning_event(reader, &event, NULL, 0);
             }
             const TypeId type = library ? decoded.types.function_type : ordinary ? check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0)) : 0;
+            if (library)
+            {
+                // The named types its prototype took, for its diagnostic's spelling (CheckInput.implicit_library_types).
+                static const char* const spellings[4] = { "FILE", "jmp_buf", "sigjmp_buf", "ucontext_t" };
+                const char* jump = memchr(info->encoding, 'J', info->encoding_length);
+                const bool signal = jump != NULL && jump != info->encoding && jump[-1] == 'S';
+                const bool taken[4] = { memchr(info->encoding, 'P', info->encoding_length) != NULL, jump != NULL && !signal, signal,
+                                        memchr(info->encoding, 'K', info->encoding_length) != NULL };
+                for (uint32_t i = 0; i < 4; i += 1)
+                {
+                    reader->output->implicit_library_types[i] = taken[i] ? check_input_file_type(reader, spellings[i]) : reader->output->implicit_library_types[i];
+                }
+            }
             CheckInput* input = reader->output;
             const uint32_t linked = reader->linked_declarations[name];
             // An explicit declaration of a library function has already caused clang to create its translation-unit
