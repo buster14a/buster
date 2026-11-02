@@ -699,7 +699,9 @@ with the directory ending at a `PROT_NONE` page. The tests that build a
 On the 9700X, CPU 2 under the host's lock, main `dac5b770` against the change
 merged with it (`67f7bf51`), with every object the same bytes, by both paths, on
 8 lanes and with `-g`: 8 interleaved rounds of `perf stat -r 3`, and
-`measure-compile --runs 11` of each with the other as its reference:
+`measure-compile --runs 11` of each with the other as its reference ([the
+record](https://github.com/buster14a/buster-performance/tree/9b1d6a069f1c8d366f8d273e4da71acb25f9c19e/docs/measurements/sparse-columns-628-2026-11-02)
+has the raw outputs, the receipts and the scripts):
 
 | measure | main | sparse columns |
 | --- | ---: | ---: |
