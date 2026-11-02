@@ -604,6 +604,40 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "long double x=n*0.5L;clear_exceptions();long double y=through_long_double(x);unsigned short after_long_double=status_word();"
         "return (int)(out>>8)+(int)(wide_out>>40)*3+(after_float&1)*5+(after_double&1)*7+(after_long_double&1)*11+(int)(y*4)*13;}",
         "asm-x87-empty-signaling", clang);
+    // Templates that take directives besides the syntax switches: alignment and fill, data bytes, section switches, and
+    // symbol bindings and absolute assignments (asm_assemble's, #812). Data and hand-encoded bytes are a helper's code;
+    // alignment and section-only templates publish atoms and call nothing. The bytes are jumped over, the sections'
+    // records are read, and the absolute value is an immediate. clang's build of the same source must print the same.
+    check_test_program_source(test,
+        "static __attribute__((naked,noinline)) int directivenaked(int n){__asm__(\"leal 3(%rdi), %eax\\n.p2align 4\\n.byte 0x90\\nret\");}"
+        "int tested(int n){long a,b,c,d,f;"
+        "__asm__ volatile(\".p2align 4\");__asm__ volatile(\".balign 8\");__asm__ volatile(\".align 4\");"
+        "__asm__ volatile(\".nops 5\");__asm__ volatile(\".nops 4, 1\");"
+        "__asm__ volatile(\"jmp 1f\\n.skip 3\\n1:\");"
+        "__asm__ volatile(\"jmp 1f\\n.byte 0x90, 0x91\\n1:\");"
+        "__asm__ volatile(\"jmp 1f\\n.byte 0x0f, 0x1f, 0x00\\n1:\");"
+        "__asm__ volatile(\"jmp 1f\\n.long 0\\n1:\");"
+        "__asm__ volatile(\".pushsection .data\\n.Ldir_data%=:\\n.byte 41\\n.popsection\\nleaq .Ldir_data%=(%%rip), %0\" : \"=r\"(a));"
+        "__asm__ volatile(\".section .rodata\\n.Ldir_ro%=:\\n.byte 43\\n.previous\\nleaq .Ldir_ro%=(%%rip), %0\" : \"=r\"(b));"
+        "__asm__ volatile(\".pushsection .data\\n.weak dir_weak%=\\ndir_weak%=:\\n.byte 45\\n.popsection\" : : : \"memory\");"
+        "__asm__ volatile(\".pushsection .data\\n.globl dir_global%=\\ndir_global%=:\\n.byte 47\\n.popsection\" : : : \"memory\");"
+        "__asm__ volatile(\".globl declared_only\");"
+        "__asm__ volatile(\".pushsection .data\\n.type dir_typed%=,@object\\n.size dir_typed%=,1\\n.hidden dir_typed%=\\ndir_typed%=:\\n.byte 49\\n.popsection\\n"
+        "leaq dir_typed%=(%%rip), %0\" : \"=r\"(c));"
+        "__asm__ volatile(\".pushsection .data\\n.Ldir_more%=:\\n.byte 1\\n.word 2\\n.long 3\\n.quad 4\\n.ascii \\\"A\\\"\\n.asciz \\\"B\\\"\\n.string \\\"C\\\"\\n.zero 2\\n.space 3, 5\\n"
+        ".popsection\\nleaq .Ldir_more%=(%%rip), %0\" : \"=r\"(d));"
+        "__asm__ volatile(\".pushsection .bss\\n.Ldir_bss%=:\\n.zero 8\\n.popsection\\nleaq .Ldir_bss%=(%%rip), %0\" : \"=r\"(f));"
+        "int e,g;g=0;__asm__(\".set dir_set, 7\\n.equ dir_equ, 9\\nmovl $dir_set, %0\\naddl $dir_equ, %0\" : \"=r\"(e));"
+        "__asm__ volatile(\".set dir_repeat, 7\\naddl $dir_repeat, %0\" : \"+r\"(g));"
+        "__asm__ volatile(\".set dir_repeat, 8\\naddl $dir_repeat, %0\" : \"+r\"(g));"
+        "return (*(unsigned char*)a*10000+*(unsigned char*)b*1000+*(unsigned char*)c*100+*(unsigned char*)d*10+*(unsigned char*)f+e+g+n)%1000+directivenaked(n);}",
+        "asm-directives", clang);
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".cfi_startproc\\n\\t.cfi_endproc\");return n;}",
+                                       "asm-cfi", true, false, 0, 0, "inline assembly's CFI directives");
+    check_test_program_boundary_reason(test, "int tested(int n){int e;__asm__ volatile(\".set crossset, 7\");__asm__(\"movl $crossset, %0\" : \"=r\"(e));return e+n;}",
+                                       "asm-cross-set", true, false, 0, 0, "inline assembly absolute symbols are per-template");
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\".p2align 4\\nret\");return n;}", "asm-directive-return", true, false, 0, 0,
+                                       "inline assembly templates that return from their helper");
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
@@ -629,8 +663,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-named", true, false, 0, 1, "x87 registers named in inline assembly templates");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",
-                                       "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
     // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
     // past XMM15; an input of a memory constraint, which clang's code refuses too; and an integer in an XMM register.
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\"\" : : \"r\"(r));return n;}",

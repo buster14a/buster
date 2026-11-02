@@ -139,6 +139,18 @@ struct AsmOptions
     bool intel;
 };
 
+typedef struct AsmAbsolute AsmAbsolute;
+struct AsmAbsolute
+{
+    String8 name;
+    int64_t value;
+};
+
+// Per Link symbol, the directives the source gave it: a binding directive (`.globl`, `.local`, `.weak`) and a `.size`.
+// The C checker applies them to a program symbol a template's name maps to, as clang's assembled module does.
+#define BUSTER_ASM_DIRECTIVE_BINDING 0x01
+#define BUSTER_ASM_DIRECTIVE_SIZE 0x02
+
 typedef struct AsmResult AsmResult;
 struct AsmResult
 {
@@ -149,6 +161,21 @@ struct AsmResult
     uint32_t location;
     uint32_t rounds;
     uint32_t instructions;
+    // The source's absolute (`.set`) symbols with names, as GNU as and clang keep them locally: another template of the
+    // same C unit doesn't see them (the checker refuses such a reference by name), and -c's object has none.
+    AsmAbsolute* absolutes;
+    uint32_t absolute_count;
+    // Indexed by SymbolId: BUSTER_ASM_DIRECTIVE_BINDING and _SIZE for the symbols whose directives gave them.
+    uint8_t* directives;
+    // The atom the source's first fragment is in: the code other function's records hold starts there (asm_assemble_code
+    // callers that assemble a whole unit, C's inline assembly helpers).
+    AtomId entry_atom;
+    // Whether the default text section has a fragment that emits bytes or a value (anything but a label or alignment):
+    // a template of alignment and section directives alone has no code to run.
+    bool entry_code;
+    // Whether the source's first control flow, before any branch, is a return: a C helper whose frame would still be
+    // reserved, which the checker refuses as it does the record path's.
+    bool ret_first;
     uint64_t lex_ns;
     uint64_t parse_ns;
     uint64_t match_ns;
@@ -231,6 +258,10 @@ struct AsmParser
     uint32_t section_count;
     uint32_t section_capacity;
     uint32_t section;
+    // .pushsection/.popsection's stack, and the section .previous returns to.
+    uint32_t* section_stack;
+    uint32_t section_depth;
+    uint32_t previous_section;
     AsmCfiEvent* cfi;
     AsmCfiProcedure* procedures;
     AsmCfiState* cfi_stack;
@@ -242,6 +273,8 @@ struct AsmParser
     bool prefix;
     // asm_assemble_code's source: code another function's records hold, which takes no directive but the syntax's.
     bool code;
+    // The source used a directive the record path can't hold (asm_assemble_code), so that its caller assembles it whole.
+    bool directive;
 };
 
 static uint64_t asm_clock(void)
@@ -2083,7 +2116,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
     const uint32_t location = parser->tokens[token].start;
     if (parser->code && !asm_is(parser, token, ".intel_syntax") && !asm_is(parser, token, ".att_syntax"))
     {
-        // Code that another function's records hold (asm_assemble_code) has no sections, data or symbols of its own.
+        // Code that another function's records hold (asm_assemble_code) has no sections, data or symbols of its own: the
+        // caller assembles the unit whole (asm_assemble) when this says a template has such a directive.
+        parser->directive = true;
         asm_fail(parser, location, "inline assembly takes no directive but .intel_syntax and .att_syntax");
     }
     else if (asm_is(parser, token, ".intel_syntax") || asm_is(parser, token, ".att_syntax"))
@@ -2165,9 +2200,20 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             }
         }
     }
-    else if (asm_is(parser, token, ".section") && asm_note_section(parser, end))
+    else if ((asm_is(parser, token, ".section") || asm_is(parser, token, ".pushsection")) && asm_note_section(parser, end))
     {
         // The shared writer already supplies the empty non-executable-stack marker.
+        if (asm_is(parser, token, ".pushsection"))
+        {
+            if (parser->section_stack == 0 || parser->section_depth >= parser->section_capacity)
+            {
+                asm_fail(parser, location, "section stack exhausted");
+            }
+            else
+            {
+                parser->section_stack[parser->section_depth++] = parser->section;
+            }
+        }
         parser->section = BUSTER_LINK_CLASS_NONE;
         parser->at += asm_note_section(parser, end);
         if (asm_take(parser, ','))
@@ -2185,6 +2231,36 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 }
             }
         }
+    }
+    else if (asm_is(parser, token, ".pushsection"))
+    {
+        if (parser->section_stack == 0 || parser->section_depth >= parser->section_capacity)
+        {
+            asm_fail(parser, location, "section stack exhausted");
+        }
+        else
+        {
+            parser->section_stack[parser->section_depth++] = parser->section;
+            asm_section_directive(parser, token, end);
+        }
+    }
+    else if (asm_is(parser, token, ".popsection"))
+    {
+        if (parser->section_depth == 0)
+        {
+            asm_fail(parser, location, "section stack is empty");
+        }
+        else
+        {
+            parser->previous_section = parser->section;
+            parser->section = parser->section_stack[--parser->section_depth];
+        }
+    }
+    else if (asm_is(parser, token, ".previous"))
+    {
+        const uint32_t current = parser->section;
+        parser->section = parser->previous_section;
+        parser->previous_section = current;
     }
     else if (asm_is(parser, token, ".text") || asm_is(parser, token, ".data") || asm_is(parser, token, ".bss") || asm_is(parser, token, ".section"))
     {
@@ -2297,9 +2373,12 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         asm_string(parser, end, !asm_is(parser, token, ".ascii"));
         parser->sections[parser->section].data = true;
     }
-    else if (asm_is(parser, token, ".zero") || asm_is(parser, token, ".align") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
+    else if (asm_is(parser, token, ".zero") || asm_is(parser, token, ".skip") || asm_is(parser, token, ".space") || asm_is(parser, token, ".nops") ||
+             asm_is(parser, token, ".align") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
     {
-        const bool align = !asm_is(parser, token, ".zero");
+        const bool nops = asm_is(parser, token, ".nops");
+        const bool skip = asm_is(parser, token, ".skip") || asm_is(parser, token, ".space");
+        const bool align = !asm_is(parser, token, ".zero") && !skip && !nops;
         __int128 value = asm_absolute(parser, end);
         if (asm_is(parser, token, ".p2align"))
         {
@@ -2320,10 +2399,26 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         output->alignment = align ? (uint32_t)value : 0;
         output->maximum = BUSTER_ASM_MAX_SECTION;
         output->fill = 0;
-        output->padding = !align || (parser->sections[parser->section].object.flags & SHF_EXECINSTR) == 0 ? ASM_PADDING_FILL : parser->sections[parser->section].data ? ASM_PADDING_NOPS_AFTER_DATA : ASM_PADDING_NOPS;
-        if (asm_take(parser, ','))
+        output->padding = nops ? ASM_PADDING_NOPS :
+                          skip || !align || (parser->sections[parser->section].object.flags & SHF_EXECINSTR) == 0 ? ASM_PADDING_FILL :
+                          parser->sections[parser->section].data ? ASM_PADDING_NOPS_AFTER_DATA :
+                                                                   ASM_PADDING_NOPS;
+        if ((align || skip || nops) && asm_take(parser, ','))
         {
-            if (parser->tokens[parser->at].kind != ',')
+            if (nops)
+            {
+                // .nops's optional second argument bounds the length of each NOP it writes, which this writer's table
+                // doesn't need; it takes the value as GNU as does, without changing the bytes' padding rule.
+                if (parser->tokens[parser->at].kind != ',')
+                {
+                    const __int128 control = asm_absolute(parser, end);
+                    if (control < 0 || control > 255)
+                    {
+                        asm_fail(parser, location, "NOP control must fit in a byte");
+                    }
+                }
+            }
+            else if (parser->tokens[parser->at].kind != ',')
             {
                 const __int128 fill = asm_absolute(parser, end);
                 if (fill < -128 || fill > 255)
@@ -2331,8 +2426,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                     asm_fail(parser, location, "fill must fit in a byte");
                 }
                 output->fill = (uint8_t)fill;
-                // As in GNU as, code is padded with NOPs for a fill of 0x90 too, and with any other fill byte as given.
-                output->padding = output->fill == 0x90 ? output->padding : ASM_PADDING_FILL;
+                // As in GNU as, an alignment's code is padded with NOPs for a fill of 0x90 too, and with any other fill
+                // byte as given; .skip and .space write the fill byte itself.
+                output->padding = align && output->fill != 0x90 ? ASM_PADDING_FILL : output->padding;
             }
             if (align && asm_take(parser, ','))
             {
@@ -2345,7 +2441,7 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 output->maximum = maximum == 0 ? BUSTER_ASM_MAX_SECTION : (uint32_t)maximum;
             }
         }
-        parser->sections[parser->section].data |= !align;
+        parser->sections[parser->section].data |= !align && !nops;
         if (align && value > 0)
         {
             const uint32_t log = __builtin_ctzll((uint64_t)value);
@@ -3282,6 +3378,47 @@ static void asm_emit(AsmParser* parser)
             }
         }
     }
+    // The source's entry is its default text section's start: the function's or helper's first byte, before any switch.
+    parser->result.entry_atom = parser->sections[BUSTER_LINK_CLASS_TEXT].atom;
+    for (uint32_t f = 0; f < parser->fragment_count; f += 1)
+    {
+        const AsmFragment* fragment = &parser->fragments[f];
+        parser->result.entry_code |= fragment->section == BUSTER_LINK_CLASS_TEXT && fragment->kind != ASM_LABEL && fragment->kind != ASM_ALIGN &&
+                                      !(fragment->kind == ASM_FILL && fragment->padding == ASM_PADDING_NOPS);
+    }
+    // Whether the first control flow is a return: a branch first makes a later return a snippet's, as the record path takes
+    // a call's for no branch (only jmp and jcc are branch sizing's columns).
+    for (uint32_t i = 0; i < parser->instruction_count && !parser->result.ret_first; i += 1)
+    {
+        const AsmInstruction* instruction = &parser->instructions[i];
+        const X86FormDescription* form = x86_form_description(instruction->record.form);
+        const uint16_t row = instruction->record.form & BUSTER_X86_FORM_NUMBER;
+        const bool ret = row == X86_FORM_RET || row == X86_FORM_RET_IMM16 || row == X86_FORM_RETW || row == X86_FORM_RETW_IMM16 ||
+                         row == X86_FORM_RETD || row == X86_FORM_RETD_IMM16 || row == X86_FORM_REP_RET || row == X86_FORM_REPNE_RET;
+        if (ret)
+        {
+            parser->result.ret_first = true;
+        }
+        else if (instruction->branch && strcmp(form->mnemonic, "call") != 0)
+        {
+            break;
+        }
+    }
+    // The source's absolute symbols, which its Link doesn't hold: the checker records them for the one template and
+    // refuses another template's reference to one.
+    uint32_t absolute_count = 0;
+    for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+    {
+        const AsmSymbol* symbol = &parser->symbols[i];
+        absolute_count += symbol->absolute && !symbol->explicit_binding && !symbol->has_size && !symbol->internal && symbol->name.length != 0;
+    }
+    parser->result.absolute_count = absolute_count;
+    parser->result.absolutes = absolute_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, AsmAbsolute, absolute_count) : 0;
+    if (absolute_count != 0 && parser->result.absolutes == 0)
+    {
+        asm_fail(parser, 0, "arena exhausted recording absolute symbols");
+    }
+    uint32_t absolute_at = 0;
     for (uint32_t i = 1; i < parser->symbol_count && parser->result.error == 0; i += 1)
     {
         AsmSymbol* symbol = &parser->symbols[i];
@@ -3290,6 +3427,27 @@ static void asm_emit(AsmParser* parser)
             if (symbol->explicit_binding || symbol->has_size)
             {
                 asm_fail(parser, symbol->location, "exported absolute symbols are not supported by the shared object writer");
+            }
+            else if (!symbol->internal && symbol->name.length != 0)
+            {
+                if (symbol->constant < INT64_MIN || symbol->constant > UINT64_MAX)
+                {
+                    asm_fail(parser, symbol->location, "absolute symbol value doesn't fit 64 bits");
+                }
+                else
+                {
+                    char* name = arena_push(parser->arena, symbol->name.length, 1);
+                    if (name == 0)
+                    {
+                        asm_fail(parser, 0, "arena exhausted recording absolute symbols");
+                    }
+                    else
+                    {
+                        memcpy(name, symbol->name.pointer, symbol->name.length);
+                        parser->result.absolutes[absolute_at++] = (AsmAbsolute){ .name = { .pointer = name, .length = symbol->name.length },
+                                                                                .value = (int64_t)symbol->constant };
+                    }
+                }
             }
             continue;
         }
@@ -3321,6 +3479,24 @@ static void asm_emit(AsmParser* parser)
         }
         const NameId name = !symbol->internal && symbol->name.length != 0 ? link_add_name(link, (const uint8_t*)symbol->name.pointer, symbol->name.length) : 0;
         symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, symbol->defined ? definition->offset : 0, size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+    }
+    parser->result.directives = link->symbols.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint8_t, link->symbols.count) : 0;
+    if (link->symbols.count != 0 && parser->result.directives == 0)
+    {
+        asm_fail(parser, 0, "arena exhausted recording symbol directives");
+    }
+    else if (parser->result.directives != 0)
+    {
+        memset(parser->result.directives, 0, link->symbols.count);
+        for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+        {
+            const AsmSymbol* symbol = &parser->symbols[i];
+            if (symbol->link != 0)
+            {
+                parser->result.directives[symbol->link] |=
+                    (uint8_t)((symbol->explicit_binding ? BUSTER_ASM_DIRECTIVE_BINDING : 0) | (symbol->has_size ? BUSTER_ASM_DIRECTIVE_SIZE : 0));
+            }
+        }
     }
     for (uint32_t section = 1; section < parser->section_count && parser->result.error == 0; section += 1)
     {
@@ -3499,7 +3675,9 @@ static void asm_parse_source(AsmParser* parser)
         parser->section_capacity = parser->instruction_capacity + BUSTER_LINK_CLASS_COUNT;
         parser->section_capacity = parser->section_capacity < BUSTER_ASM_MAX_SECTIONS ? parser->section_capacity : BUSTER_ASM_MAX_SECTIONS;
         parser->sections = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSection, parser->section_capacity);
-        if (parser->symbol_slots == 0 || parser->symbols == 0 || parser->fragments == 0 || parser->instructions == 0 || parser->sections == 0)
+        parser->section_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, parser->section_capacity);
+        if (parser->symbol_slots == 0 || parser->symbols == 0 || parser->fragments == 0 || parser->instructions == 0 || parser->sections == 0 ||
+            parser->section_stack == 0)
         {
             asm_fail(parser, 0, "arena exhausted allocating parser tables");
         }
@@ -3523,6 +3701,7 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
             .index = index,
             .options = options,
             .section = BUSTER_LINK_CLASS_TEXT,
+            .previous_section = BUSTER_LINK_CLASS_TEXT,
             .prefix = !options.intel,
             .symbol_count = 1,
     };
@@ -3564,6 +3743,9 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
         arena->length = saved;
         parser.result.link = (Link){0};
         parser.result.object_options = (ObjectOptions){0};
+        parser.result.absolutes = 0;
+        parser.result.absolute_count = 0;
+        parser.result.directives = 0;
     }
     return parser.result;
 }
@@ -3610,6 +3792,8 @@ struct AsmCode
     uint32_t reference_count;
     uint32_t label_count;
     uint32_t location;
+    // The source used a directive besides the syntax switches, which needs a whole assembled unit (asm_assemble).
+    bool directive;
 };
 
 // Assembles a source whose instructions another function's records hold (#147: a C asm statement's template, after its
@@ -3630,6 +3814,7 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
             .index = index,
             .options = options,
             .section = BUSTER_LINK_CLASS_TEXT,
+            .previous_section = BUSTER_LINK_CLASS_TEXT,
             .prefix = !options.intel,
             .symbol_count = 1,
             .code = true,
@@ -3791,7 +3976,7 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
     if (parser.result.error != 0)
     {
         output->length = saved;
-        result = (AsmCode){ .error = parser.result.error, .location = parser.result.location };
+        result = (AsmCode){ .error = parser.result.error, .location = parser.result.location, .directive = parser.directive };
     }
     else
     {
