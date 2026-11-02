@@ -2274,33 +2274,49 @@ buffer, written with `fwrite` as it fills, in three steps:
    token. Each range costs compares of all 64 locations: on the Xeon
    below, a chunk in 8 ranges took 180 ns against 220–250 ns for the general
    loop's lookups, one in 16 330–360 ns against 245–265, and one in 64
-   1,200–1,320 ns against 270–290.
+   1,200–1,320 ns against 270–290. Step 2 reads only the classes of each
+   token's first and last characters, which mostly follow from its kind
+   (`pp_print_kind_firsts`, `pp_print_kind_lasts`, two `vpermi2b` lookups of
+   the chunk's kinds): an identifier's are a word character's, a punctuator's
+   its own characters', a literal's its prefix's or quote's and its quote's.
+   The bytes are read, in a loop over their bits, only for an unknown token,
+   a pp-number (a digit or `.` first), a string literal without a prefix (a
+   quote, or a raw one's `R`), a bracket or a brace longer than a byte (a
+   digraph) and, where `$` is punctuation, every identifier. Both classes'
+   characters go out as two whole 64-byte stores, which step 2's loads
+   forward from.
 2. The spaces of all 64 tokens at once. A token at the start of a line gets
    none. Any other token gets one if whitespace was before it, or if its first
    character would lex together with the previous token's last. That is a
    lookup in a 5 × 8 table of character classes, with the classes from
    `vpermi2b` lookups and the previous token's class moved up a lane by one
    `vpermb`.
-3. The copies, in batches: each token's gap (a space, or a line start's
-   breaks) and one masked 64-byte store per token, at offsets from prefix sums
-   (`pp_print_offsets`), so that no store waits for the one before. With line
-   markers, a batch runs up to the first line start that needs a marker (below);
-   that token, and every token of a chunk with a pragma end, an `#embed`, a
-   spelling longer than 64 bytes or, with markers, what `pp_print_moves`, an
-   include exit or an unknown token's line breaks need, goes token by token.
+3. The copies, in batches at offsets from prefix sums (`pp_print_offsets`),
+   so that no store waits for the one before: spaces over the batch's bytes,
+   each line start's breaks, then one masked 64-byte load and store per
+   spelling. A batch runs up to the first spelling longer than 64 bytes and,
+   with line markers, up to the first line start that needs a marker (below);
+   that token goes token by token, and the next batch starts after it. Every
+   token of a chunk with a pragma end or an `#embed`, and with markers what
+   `pp_print_moves`, an include exit or an unknown token's line breaks need,
+   goes token by token.
 
 A fast spelling is its bytes as written unless a line splice or, with
 trigraphs, a trigraph is in it. A splice is a backslash, blanks and a line
 break, so only a backslash followed by a blank (any byte up to `' '`), or at a
 token's end, can start one; with trigraphs, so can any `?`. A backslash in an
 escape sequence (`"\n"`) can't, so literals with escapes stay on the fast
-path. A batch checks this on the bytes its copies load anyway; the zeros past
-a spelling of less than 64 bytes count as blanks. The tokens that go token by
-token are checked before their copies (`pp_print_unspliced`, 64 bytes at a
-time, a backslash in a block's last lane counting too). A chunk that may hold a
-splice is made again by the general loop: its spellings and spaces, and the
-copies of the tokens not printed yet, over the batch's bytes, which aren't
-counted yet. With `-P`, 376 of `main.c`'s
+path. A batch looks for a backslash, or with trigraphs a `?`, in the bytes its
+copies load anyway: one `vpermb` gives each byte back for those two and
+something else for any other, and a running byte minimum of the differences
+is zero once one was found. Only then does it check the rule, on its tokens
+other than identifiers (`pp_print_unspliced`, 64 bytes at a time; the zeros
+past a spelling of less than 64 bytes count as blanks, and so does a backslash
+in a block's last lane). The tokens that go token by token are checked before
+their copies the same way. A chunk that may hold a splice is made again by
+the general loop: its spellings and spaces, and the copies of the tokens not
+printed yet, over the batch's bytes, which aren't counted yet. With `-P`,
+before the batches ended at a spelling past 64 bytes, 376 of `main.c`'s
 103,935 chunks were made again (11 after the batch's copies, 365 of the 5,219
 with a spelling past 64 bytes after `pp_print_unspliced`, most of them for a
 backslash in a block's last lane), and 76 went to the general loop at once for
@@ -2309,13 +2325,22 @@ a pragma line or an integer; 4 of `sqlite3.c`'s 11,035 were made again.
 A batch whose spellings each have 1–64 bytes computes all output offsets
 first (#649). Two 32-word SIMD prefix sums include each spelling and its gap:
 a byte for a space or `-P`'s break (a bit each), and with line markers a line
-start's breaks, 1 to 8 (`BUSTER_PP_PRINT_GAP`, a byte each). The resulting copy
-addresses are independent; a batch needs at most 4,672 bytes and is flushed as
-a whole when necessary. Loads and stores remain masked to each spelling's
-logical length, including a final partial batch; a gap is written as one byte,
-or with markers as 8 breaks or spaces, which the spelling and the next token's
-output write over. No new output metadata is retained by the preprocessor, and
-the spelling and separation rules are unchanged.
+start's breaks, 1 to 8 (`BUSTER_PP_PRINT_GAP`, a byte each); each offset is
+where its spelling starts, after its gap. The resulting copy addresses are
+independent; a batch needs at most 4,672 bytes and is flushed as a whole when
+necessary. Its gaps are spaces, stored over the whole batch by stores masked
+to it (which also keeps clang from making them a call to `memset`), and a
+line start's breaks are written over its gap; loads and stores remain masked
+to each spelling's logical length, including a final partial batch. No new
+output metadata is retained by the preprocessor, and the spelling and
+separation rules are unchanged.
+
+With `-P`, `pp_print_spellings` also prefetches the spellings of the tokens
+that aren't identifiers. Their bytes are in the source, which nothing may have
+read since its file was prepared: the copies would be the first to load them
+and wait for them. With line markers, `pp_print_place_lines` has read them
+already, counting the lines up to each line start, and the prefetches only
+cost instructions.
 
 **The line markers' batches.** With line markers (`-E` without `-P`), a line
 start's place is its own location, or a macro's token's expansion start, or a
@@ -2476,11 +2501,22 @@ trigraphs, UCNs, generated numbers and embeds cover the exceptional handoffs.
 `pp_print_spellings` is checked against a reference of its own (a linear
 search of the ranges, the span of each identifier) on a preprocessor of four
 ranges with gaps between some, every chunk size from 0 to 64 and 24 patterns
-each: file runs, mixed ranges in any order, identifiers, spellings past 64
-bytes, and a location in a gap, past every range, an empty spelling or an
-empty identifier, which must refuse the chunk. The columns, the ranges' bytes
-and the interned records end at `PROT_NONE` pages, and the lanes past the
-count keep their canaries. `pp_print_unspliced` is checked against its rule on
+each: file runs, mixed ranges in any order, identifiers (of kinds below and
+past the kind tables' 128), spellings past 64 bytes, and a location in a gap,
+past every range, an empty spelling or an empty identifier, which must refuse
+the chunk. The columns, the ranges' bytes and the interned records end at
+`PROT_NONE` pages, and the spellings' and lengths' lanes past the count keep
+their canaries. Each token's first and last characters must have its
+spelling's classes: a one-byte token that is a punctuator has its kind, whose
+classes come from the tables, and the others kinds whose bytes are read (an
+unknown token, a pp-number, a string literal, a bracket or a brace longer than
+a byte), whose characters must be those bytes. The kind tables themselves are
+checked against every punctuator's spelling, `%:` and `%:%:`, each literal
+kind's plain and raw spellings, an identifier's (one of UTF-8 too) and the
+keywords' below 128; the kinds they leave to the bytes must be exactly an
+unknown token, a pp-number and a plain string literal. A wrong table entry, a
+digraph or a byte left unread, or a keyword past 128 taken by the table make
+these checks fail. `pp_print_unspliced` is checked against its rule on
 4,000 groups of random spellings of up to 200 bytes, each ending at a
 `PROT_NONE` page, with and without trigraphs. Every spelling it passes must be
 what `pp_remove_splices` leaves as it is, for each kind that function treats

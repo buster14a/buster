@@ -31,10 +31,12 @@ static bool pp_test_print_offsets(void)
             }
             offsets[-1] = 0x19cd;
             const uint32_t total = pp_print_offsets(lengths, count, ones, counted ? breaks : 0, offsets);
+            // Each offset is where its spelling starts, after its gap.
             for (uint32_t i = 0; result && i < count; i += 1)
             {
+                expected += (uint32_t)((ones >> i) & 1) + (counted ? breaks[i] : 0);
                 result = offsets[i] == expected;
-                expected += lengths[i] + (uint32_t)((ones >> i) & 1) + (counted ? breaks[i] : 0);
+                expected += lengths[i];
             }
             result = result && total == expected && offsets[-1] == 0x19cd;
             const uint32_t invalid[] =
@@ -260,23 +262,133 @@ static bool pp_test_print_lines(const char* directory)
     return result;
 }
 
+// The class pp_print_vector's spaces give a character as a token's first (pp_after_classes) or last
+// (pp_before_classes): every byte past 0x7F is a word character.
+static uint8_t pp_print_test_class(const uint8_t* classes, uint8_t c)
+{
+    return c >= 0x80 ? 1 : classes[c];
+}
+
+// Whether pp_print_spellings' characters for a token give the classes of its spelling's first and last.
+static bool pp_print_test_classes(uint8_t first, uint8_t last, const uint8_t* spelling, uint32_t length)
+{
+    return pp_print_test_class(pp_after_classes, first) == pp_print_test_class(pp_after_classes, spelling[0]) &&
+           pp_print_test_class(pp_before_classes, last) == pp_print_test_class(pp_before_classes, spelling[length - 1]);
+}
+
+// pp_print_kind_firsts and pp_print_kind_lasts against spellings of each kind: every punctuator's
+// (pp_punctuator_spellings), '#' and "##" as digraphs too, each prefixed literal kind's, plain and raw, an
+// identifier's and the keywords' below 128. The kinds they leave to the bytes are exactly an unknown token, a pp-number
+// and a string literal without a prefix.
+static bool pp_test_print_kind_tables(void)
+{
+    typedef struct PPKindSpelling PPKindSpelling;
+    struct PPKindSpelling
+    {
+        uint8_t kind;
+        const char* spelling;
+    };
+    static const PPKindSpelling samples[] = {
+        { C_TOKEN_RAW_IDENTIFIER, "name_9" },
+        { C_TOKEN_RAW_IDENTIFIER, "\xc3\xa9t\xc3\xa9" },
+        { C_TOKEN_CHAR_CONSTANT, "'a'" },
+        { C_TOKEN_WIDE_CHAR_CONSTANT, "L'a'" },
+        { C_TOKEN_UTF8_CHAR_CONSTANT, "u8'a'" },
+        { C_TOKEN_UTF16_CHAR_CONSTANT, "u'a'" },
+        { C_TOKEN_UTF32_CHAR_CONSTANT, "U'a'" },
+        { C_TOKEN_WIDE_STRING_LITERAL, "L\"a\"" },
+        { C_TOKEN_WIDE_STRING_LITERAL, "LR\"x(a)x\"" },
+        { C_TOKEN_UTF8_STRING_LITERAL, "u8\"a\"" },
+        { C_TOKEN_UTF8_STRING_LITERAL, "u8R\"(a)\"" },
+        { C_TOKEN_UTF16_STRING_LITERAL, "u\"a\"" },
+        { C_TOKEN_UTF16_STRING_LITERAL, "uR\"(a)\"" },
+        { C_TOKEN_UTF32_STRING_LITERAL, "U\"a\"" },
+        { C_TOKEN_UTF32_STRING_LITERAL, "UR\"(a)\"" },
+        { C_TOKEN_HASH, "%:" },
+        { C_TOKEN_HASHHASH, "%:%:" },
+    };
+    bool result = true;
+    uint32_t checked = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(samples); s += 1)
+    {
+        const uint8_t kind = samples[s].kind;
+        const uint8_t* spelling = (const uint8_t*)samples[s].spelling;
+        const bool same = pp_print_test_classes(pp_print_kind_firsts[kind], pp_print_kind_lasts[kind], spelling, (uint32_t)strlen(samples[s].spelling));
+        if (!same)
+        {
+            printf("printer kind tables: kind %u (%s) for `%s`\n", kind, c_token_kind_name(kind), samples[s].spelling);
+        }
+        result = result && same;
+        checked += 1;
+    }
+    for (uint32_t kind = C_TOKEN_L_SQUARE; kind < C_TOKEN_KIND_COUNT; kind += 1)
+    {
+        const char* spelling = pp_punctuator_spellings[kind - C_TOKEN_L_SQUARE];
+        const bool same = pp_print_test_classes(pp_print_kind_firsts[kind], pp_print_kind_lasts[kind], (const uint8_t*)spelling, (uint32_t)strlen(spelling));
+        if (!same)
+        {
+            printf("printer kind tables: punctuator %s `%s`\n", c_token_kind_name((uint8_t)kind), spelling);
+        }
+        result = result && same;
+        checked += 1;
+    }
+    for (uint32_t kind = BUSTER_PP_KIND_KEYWORD; kind < 128; kind += 1)
+    {
+        result = result && pp_print_test_classes(pp_print_kind_firsts[kind], pp_print_kind_lasts[kind], (const uint8_t*)"a", 1);
+        checked += 1;
+    }
+    for (uint32_t kind = 0; kind < C_TOKEN_KIND_COUNT; kind += 1)
+    {
+        const bool unfixed = kind == C_TOKEN_UNKNOWN || kind == C_TOKEN_NUMERIC_CONSTANT || kind == C_TOKEN_STRING_LITERAL;
+        const bool zero = pp_print_kind_firsts[kind] == 0;
+        if (zero != unfixed)
+        {
+            printf("printer kind tables: kind %s is %s, expected %s\n", c_token_kind_name((uint8_t)kind), zero ? "unfixed" : "fixed", unfixed ? "unfixed" : "fixed");
+        }
+        result = result && zero == unfixed && (unfixed || pp_print_kind_lasts[kind] != 0);
+    }
+    printf("printer kind tables: %u spellings, %s\n", checked, result ? "pass" : "FAIL");
+    return result;
+}
+
 // pp_print_spellings against a reference of its own: a linear search of the ranges for each other token's location
 // (not the printer's directory) and the intern table's span for each identifier. A preprocessor of four ranges, two of
 // them adjacent, with gaps between the others, whose bytes end at a PROT_NONE page, as the interned records do; the
-// chunk's columns end at PROT_NONE pages too, for every count from 0 to 64, and the lanes past the count must keep
-// their canaries. Tokens are file runs of one range, mixed ranges in any order, identifiers among them, spellings past
-// 64 bytes and ending at their range's end; and failures, which must return false: a location in a gap or past every
-// range, an empty spelling, an identifier whose span is empty. Then chunks whose tokens are in 1 to 64 ranges.
+// chunk's columns end at PROT_NONE pages too, for every count from 0 to 64, and the spellings' and lengths' lanes past
+// the count must keep their canaries. Tokens are file runs of one range, mixed ranges in any order, identifiers among
+// them (of kinds below and past the kind tables' 128), spellings past 64 bytes and ending at their range's end; and
+// failures, which must return false: a location in a gap or past every range, an empty spelling, an identifier whose
+// span is empty. The other tokens' kinds: a punctuator's where a one-byte spelling is one, so its classes come from
+// the kind tables, else a kind whose bytes are read (an unknown token, a pp-number, a string literal, or a bracket or
+// a brace longer than a byte, a digraph's length), whose characters must be the bytes. Then chunks whose tokens are in
+// 1 to 64 ranges. Before them, the kind tables (pp_test_print_kind_tables).
 static bool pp_test_print_spellings(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t source_pages = 3;
     const uint64_t record_pages = 2;
-    uint8_t* columns = mmap(0, 4 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // The one-byte punctuators' kinds, by their byte.
+    uint8_t punctuators[128] = { 0 };
+    for (uint32_t kind = C_TOKEN_L_SQUARE; kind < C_TOKEN_KIND_COUNT; kind += 1)
+    {
+        const char* spelling = pp_punctuator_spellings[kind - C_TOKEN_L_SQUARE];
+        punctuators[(uint8_t)spelling[0]] = spelling[1] == 0 ? (uint8_t)kind : punctuators[(uint8_t)spelling[0]];
+    }
+    static const uint8_t read_kinds[] = {
+        C_TOKEN_UNKNOWN,
+        C_TOKEN_NUMERIC_CONSTANT,
+        C_TOKEN_STRING_LITERAL,
+        C_TOKEN_L_SQUARE,
+        C_TOKEN_R_SQUARE,
+        C_TOKEN_L_BRACE,
+        C_TOKEN_R_BRACE,
+    };
+    uint8_t* columns = mmap(0, 6 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* source = mmap(0, (source_pages + 1) * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* records = mmap(0, (record_pages + 1) * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    bool result = columns != MAP_FAILED && source != MAP_FAILED && records != MAP_FAILED && mprotect(columns, page, PROT_READ | PROT_WRITE) == 0 &&
-                  mprotect(columns + 2 * page, page, PROT_READ | PROT_WRITE) == 0 && mprotect(source, source_pages * page, PROT_READ | PROT_WRITE) == 0 &&
+    bool result = pp_test_print_kind_tables() && columns != MAP_FAILED && source != MAP_FAILED && records != MAP_FAILED &&
+                  mprotect(columns, page, PROT_READ | PROT_WRITE) == 0 && mprotect(columns + 2 * page, page, PROT_READ | PROT_WRITE) == 0 &&
+                  mprotect(columns + 4 * page, page, PROT_READ | PROT_WRITE) == 0 && mprotect(source, source_pages * page, PROT_READ | PROT_WRITE) == 0 &&
                   mprotect(records, record_pages * page, PROT_READ | PROT_WRITE) == 0;
     uint64_t state = 649;
     for (uint64_t b = 0; result && b < source_pages * page; b += 1)
@@ -344,6 +456,7 @@ static bool pp_test_print_spellings(void)
     {
         uint32_t* values = (uint32_t*)(columns + page) - count;
         uint32_t* locations = (uint32_t*)(columns + 3 * page) - count;
+        uint8_t* kinds = columns + 5 * page - count;
         for (uint32_t pattern = 0; result && pattern < 24; pattern += 1)
         {
             // Patterns 0-5: one range, ascending, no identifiers to all identifiers; 6-17: mixed ranges in any order;
@@ -360,6 +473,7 @@ static bool pp_test_print_spellings(void)
                     identifiers |= 1ull << k;
                     values[k] = 1 + (uint32_t)((random >> 16) % 63);
                     locations[k] = bases[random % 4] + (uint32_t)((random >> 24) % 30);
+                    kinds[k] = (random >> 60) % 2 == 0 ? C_TOKEN_RAW_IDENTIFIER : (uint8_t)(BUSTER_PP_KIND_KEYWORD + (random >> 32) % C_NAME_KEYWORD_COUNT);
                 }
                 else
                 {
@@ -372,6 +486,11 @@ static bool pp_test_print_spellings(void)
                     cursor = start + length + (uint32_t)((random >> 56) % 4);
                     locations[k] = bases[r] + start;
                     values[k] = locations[k] + length;
+                    const uint8_t byte = ranges[r].bytes[start];
+                    const uint8_t read_kind = read_kinds[(random >> 12) % BUSTER_ARRAY_LENGTH(read_kinds)];
+                    kinds[k] = length == 1 && punctuators[byte] != 0 ? punctuators[byte] : read_kind;
+                    // A bracket's kind is read only when it is longer than a byte.
+                    kinds[k] = length == 1 && punctuators[byte] == 0 && read_kind >= C_TOKEN_L_SQUARE ? C_TOKEN_UNKNOWN : kinds[k];
                 }
             }
             // The failures, at a lane the pattern picks among the others (or the identifiers).
@@ -416,27 +535,30 @@ static bool pp_test_print_spellings(void)
             }
             const uint8_t* spellings[64];
             uint32_t lengths[64];
-            uint8_t firsts[64];
-            uint8_t lasts[64];
+            uint8_t firsts[64] __attribute__((aligned(64)));
+            uint8_t lasts[64] __attribute__((aligned(64)));
             for (uint32_t k = 0; k < 64; k += 1)
             {
                 spellings[k] = (const uint8_t*)"canary";
                 lengths[k] = 0xc0ffee;
-                firsts[k] = 0xa5;
-                lasts[k] = 0x5a;
             }
             // Identifier bits past the count must be ignored.
             const uint64_t stray = count < 64 ? ~valid & pp_print_test_random(&state) : 0;
-            const bool got = pp_print_spellings(&fake, directory, values, locations, identifiers | stray, valid, records, spans, spellings, lengths, firsts, lasts);
+            const bool got = pp_print_spellings(&fake, directory, kinds, values, locations, identifiers | stray, valid, pattern % 2 == 0, records, spans, spellings, lengths,
+                                                firsts, lasts);
             result = got == expected;
             for (uint32_t k = 0; result && expected && k < count; k += 1)
             {
-                result = spellings[k] == expected_spellings[k] && lengths[k] == expected_lengths[k] && firsts[k] == expected_spellings[k][0] &&
-                         lasts[k] == expected_spellings[k][expected_lengths[k] - 1];
+                const uint8_t* spelling = expected_spellings[k];
+                const uint32_t length = expected_lengths[k];
+                const bool read = ((identifiers >> k) & 1) == 0 && pp_print_kind_firsts[kinds[k]] == 0;
+                const bool bracket = ((identifiers >> k) & 1) == 0 && kinds[k] >= C_TOKEN_L_SQUARE && kinds[k] <= C_TOKEN_R_BRACE && length > 1;
+                result = spellings[k] == spelling && lengths[k] == length && pp_print_test_classes(firsts[k], lasts[k], spelling, length) &&
+                         (!(read || bracket) || (firsts[k] == spelling[0] && lasts[k] == spelling[length - 1]));
             }
             for (uint32_t k = count; result && k < 64; k += 1)
             {
-                result = strcmp((const char*)spellings[k], "canary") == 0 && lengths[k] == 0xc0ffee && firsts[k] == 0xa5 && lasts[k] == 0x5a;
+                result = strcmp((const char*)spellings[k], "canary") == 0 && lengths[k] == 0xc0ffee;
             }
             if (!result)
             {
@@ -470,6 +592,7 @@ static bool pp_test_print_spellings(void)
     {
         uint32_t* values = (uint32_t*)(columns + page) - 64;
         uint32_t* locations = (uint32_t*)(columns + 3 * page) - 64;
+        uint8_t* kinds = columns + 5 * page - 64;
         const uint8_t* expected_spellings[64];
         uint32_t expected_lengths[64];
         uint64_t identifiers = 0;
@@ -481,6 +604,7 @@ static bool pp_test_print_spellings(void)
             const uint32_t start = (uint32_t)((random >> 16) % 140);
             const uint32_t length = 1 + (uint32_t)((random >> 32) % 10);
             identifiers |= (uint64_t)identifier << k;
+            kinds[k] = identifier ? C_TOKEN_RAW_IDENTIFIER : C_TOKEN_UNKNOWN;
             values[k] = identifier ? 1 + (uint32_t)((random >> 40) % 63) : many[r].base + start + length;
             locations[k] = many[r].base + start;
             expected_spellings[k] = identifier ? records + spans[values[k]].offset : many[r].bytes + start;
@@ -488,15 +612,17 @@ static bool pp_test_print_spellings(void)
         }
         const uint8_t* spellings[64];
         uint32_t lengths[64];
-        uint8_t firsts[64];
-        uint8_t lasts[64];
+        uint8_t firsts[64] __attribute__((aligned(64)));
+        uint8_t lasts[64] __attribute__((aligned(64)));
         const bool expected = spread <= BUSTER_PP_PRINT_RANGES;
-        const bool got = pp_print_spellings(&wide, spread_directory, values, locations, identifiers, ~0ull, records, spans, spellings, lengths, firsts, lasts);
+        const bool got = pp_print_spellings(&wide, spread_directory, kinds, values, locations, identifiers, ~0ull, spread % 2 == 0, records, spans, spellings, lengths,
+                                            firsts, lasts);
         result = got == expected;
         for (uint32_t k = 0; result && expected && k < 64; k += 1)
         {
-            result = spellings[k] == expected_spellings[k] && lengths[k] == expected_lengths[k] && firsts[k] == expected_spellings[k][0] &&
-                     lasts[k] == expected_spellings[k][expected_lengths[k] - 1];
+            result = spellings[k] == expected_spellings[k] && lengths[k] == expected_lengths[k] &&
+                     pp_print_test_classes(firsts[k], lasts[k], expected_spellings[k], expected_lengths[k]) &&
+                     (((identifiers >> k) & 1) != 0 || (firsts[k] == expected_spellings[k][0] && lasts[k] == expected_spellings[k][expected_lengths[k] - 1]));
         }
         if (!result)
         {
@@ -505,7 +631,7 @@ static bool pp_test_print_spellings(void)
         spreads += 1;
     }
     arena_release(&arena);
-    munmap(columns, 4 * page);
+    munmap(columns, 6 * page);
     munmap(source, (source_pages + 1) * page);
     munmap(records, (record_pages + 1) * page);
     printf("printer spellings: %u chunks, %u refused, and chunks in 1 to %u of 64 ranges, %s (guarded columns, bytes and records; runs, mixed ranges, gaps, "
