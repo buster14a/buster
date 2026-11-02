@@ -305,7 +305,7 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
     const uint32_t status = identifiers->status[at];
     if ((status & BUSTER_CHECK_IDENTIFIER_NODE) != 0)
     {
-        const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_add_leaf(reader, token);
         if (node != BUSTER_CHECK_NONE)
         {
             const unsigned __int128 integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0;
@@ -347,7 +347,7 @@ static bool check_input_expression_literal(CheckInputReader* reader, uint32_t to
         }
         else
         {
-            const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            const uint32_t node = check_input_add_leaf(reader, token);
             if (node != BUSTER_CHECK_NONE)
             {
                 CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
@@ -457,7 +457,7 @@ static bool check_input_expression_string(CheckInputReader* reader, uint32_t tok
     const CheckInitString* string = check_input_string(reader, token);
     if (string != 0)
     {
-        const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_add_leaf(reader, token);
         if (node != BUSTER_CHECK_NONE)
         {
             CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
@@ -712,11 +712,11 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
                 break;
         }
     }
-    // Counted in units the coded walk takes alone: in another, the walk's visit takes every token.
-    reader->output->expression_acted[code] += acted;
-    reader->output->expression_left[code] += coded && !acted;
+    // Left tokens are counted in units the coded walk takes alone: in another, the walk's visit takes every token. The
+    // tokens acted at by class are each class's tokens less those it left (check_input_expressions_coded's count).
     if (!acted)
     {
+        reader->output->expression_left[code] += coded;
         check_input_expression_visit(reader, token, classes);
     }
 }
@@ -737,9 +737,12 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
-    // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk.
+    // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk. And the tokens of each class the
+    // actions reached, in four histograms that a chunk's run of one class doesn't make a chain of: those the classes'
+    // actions acted at are the rest of the ones their actions left (CheckInput.expression_acted).
     uint64_t prepared = 0;
     uint64_t acted = 0;
+    uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint64_t start = __rdtsc();
@@ -751,9 +754,14 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         }
         const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
-        for (uint32_t i = 0; i < acting && !reader->output->resource; i += 1)
+        uint32_t i = 0;
+        for (; i < acting && !reader->output->resource; i += 1)
         {
             check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier);
+        }
+        for (uint32_t k = 0; coded && k < i; k += 1)
+        {
+            reached[k & 3][(classes[k] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += 1;
         }
         const uint64_t done = __rdtsc();
         prepared += ready - start;
@@ -761,6 +769,11 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     }
     reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE] = prepared;
     reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = acted;
+    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+    {
+        const uint32_t tokens_reached = reached[0][code] + reached[1][code] + reached[2][code] + reached[3][code];
+        reader->output->expression_acted[code] = tokens_reached - reader->output->expression_left[code];
+    }
 }
 
 // The tokens the coded walk acted at by their classes' own actions: CheckInput.expression_acted's sum over the classes.

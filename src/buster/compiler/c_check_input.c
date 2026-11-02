@@ -6387,9 +6387,9 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
 // floating-point environment. A full graph is a resource failure. It doesn't record the nodes before it, which
 // check_input_add does first; the coded walk leaves that to the next check_input_add or check_graph_record_finish, which
 // record them in node order from their final columns.
-static uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+static inline uint32_t check_input_add_columns(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c, bool clear)
 {
-    const uint32_t node = check_graph_add(&reader->output->graph, op, token, a, b, c);
+    const uint32_t node = check_graph_add_node(&reader->output->graph, op, token, a, b, c, clear);
     if (node == BUSTER_CHECK_NONE)
     {
         reader->output->resource = true;
@@ -6408,6 +6408,18 @@ static uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint3
         }
     }
     return node;
+}
+
+static uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+{
+    return check_input_add_columns(reader, op, token, a, b, c, true);
+}
+
+// A VALUE node at `token` whose leaf its maker writes whole (check_graph_add_node without `clear`): the coded walk's
+// identifiers', literals' and strings' (#1038).
+static uint32_t check_input_add_leaf(CheckInputReader* reader, uint32_t token)
+{
+    return check_input_add_columns(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
 }
 
 static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
