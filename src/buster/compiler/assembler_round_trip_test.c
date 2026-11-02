@@ -540,9 +540,25 @@ static String8 asm_round_trip_gnu(AsmTest* test, const char* directory, const ch
     return bytes;
 }
 
+// Whether GNU as encodes the record's instruction with another form (x86_assembler_prefers_another_form), or gives a VEX
+// move between two vector registers its other direction's form to make the prefix VEX's two bytes: a register 8 to 15
+// in ModRM.rm needs VEX.B, which only the three bytes have, and in ModRM.reg VEX.R, which the two have (`vmovss xmm6,
+// xmm5, xmm14` is C5 52 11 F6, the store's form). Map 0F's pairs: 10 and 11, 28 and 29, 6F and 7F, and vmovq's 7E and
+// D6. The encoder tests never meet it: their sources force the form with {load} and {store}, which this syntax hasn't.
+static bool asm_round_trip_gnu_prefers(const X86Instruction* record)
+{
+    const X86FormDescription* form = x86_form_description(record->form);
+    const uint32_t last = form->opcode & 0xff;
+    const uint32_t rm = form->rm & BUSTER_X86_OPERAND_CLASS;
+    const bool swapped = form->family == BUSTER_X86_FAMILY_VEX && (record->mode & BUSTER_X86_MODE_MEMORY) == 0 && x86_opcode_map(form) == 1 && record->rm >= 8 &&
+                         record->rm < 16 && record->reg < 8 && (rm == BUSTER_X86_CLASS_XMM || rm == BUSTER_X86_CLASS_YMM) && rm == (form->reg & BUSTER_X86_OPERAND_CLASS) &&
+                         (last == 0x10 || last == 0x11 || last == 0x28 || last == 0x29 || last == 0x6f || last == 0x7f || last == 0x7e || last == 0xd6);
+    return swapped || x86_assembler_prefers_another_form(record);
+}
+
 // --cross-check: GNU as's bytes of each line, in its 16-byte slot, against the matcher's record's; a line where GNU as
-// would choose another encoding of the same instruction (x86_assembler_prefers_another_form, the encoder tests' list)
-// is counted instead.
+// would choose another encoding of the same instruction (asm_round_trip_gnu_prefers: the encoder tests' list and VEX's
+// moves between registers) is counted instead.
 static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uint64_t* random)
 {
     const uint32_t capacity = 32768;
@@ -578,7 +594,7 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
                 {
                     same = theirs[k] == 0xcc;
                 }
-                if (!same && x86_assembler_prefers_another_form(&copies[i].matched))
+                if (!same && asm_round_trip_gnu_prefers(&copies[i].matched))
                 {
                     preferred += 1;
                 }
