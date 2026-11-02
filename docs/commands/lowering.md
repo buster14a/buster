@@ -14,7 +14,12 @@ lock and pin timings to CPU 2.
 
 On the source path, `check_program_select` (`c_check_program_select.c`) gives
 the planner the checked program's definitions, roots and evaluated references,
-and `-c` and the direct path lower what it selects. `c_lowering_symbols.c`
+and `-c` and the direct path lower what it selects. A constant `if`'s dead arm
+is never written, as clang -O0 doesn't emit it (#1108, the lowering guide's
+"Constant `if`s"): what only it reaches, a block-scope static it declares
+among them, is neither selected nor checked for target features, so
+`main.c`'s units emit no other unit's commands and a baseline build no
+`BUSTER_VECTOR_PATH` kernel. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
 on fixtures of each kind of definition (functions, objects and string literals),
 `test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
