@@ -360,8 +360,9 @@ static bool pp_test_print_kind_tables(void)
 // failures, which must return false: a location in a gap or past every range, an empty spelling, an identifier whose
 // span is empty. The other tokens' kinds: a punctuator's where a one-byte spelling is one, so its classes come from
 // the kind tables, else a kind whose bytes are read (an unknown token, a pp-number, a string literal, or a bracket or
-// a brace longer than a byte, a digraph's length), whose characters must be the bytes. Then chunks whose tokens are in
-// 1 to 64 ranges. Before them, the kind tables (pp_test_print_kind_tables).
+// a brace longer than a byte, a digraph's length), whose characters must be the bytes. Some identifiers start or end
+// with '$', and for a third of the patterns '$' is punctuation, where every identifier's characters must be its bytes.
+// Then chunks whose tokens are in 1 to 64 ranges. Before them, the kind tables (pp_test_print_kind_tables).
 static bool pp_test_print_spellings(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -442,6 +443,12 @@ static bool pp_test_print_spellings(void)
         .offset = 0,
         .length = 0,
     };
+    // Some identifiers start or end with '$', a word character unless it is punctuation (pp_dollar_punctuation).
+    for (uint32_t n = 1; n < 63; n += 4)
+    {
+        records[spans[n].offset] = '$';
+        records[spans[n + 1].offset + spans[n + 1].length - 1] = '$';
+    }
     static Preprocessor fake;
     fake.ranges = ranges;
     fake.range_count = 4;
@@ -460,8 +467,11 @@ static bool pp_test_print_spellings(void)
         for (uint32_t pattern = 0; result && pattern < 24; pattern += 1)
         {
             // Patterns 0-5: one range, ascending, no identifiers to all identifiers; 6-17: mixed ranges in any order;
-            // 18-23: one failure each (a gap, past every range, an empty spelling, an empty span), or none.
+            // 18-23: one failure each (a gap, past every range, an empty spelling, an empty span), or none. Every
+            // third, '$' is punctuation.
             const uint32_t one = pattern % 4;
+            const bool punctuation = pattern % 3 == 2;
+            fake.options.dollars = punctuation ? PP_DOLLARS_PUNCTUATION : PP_DOLLARS_MODE;
             uint64_t identifiers = 0;
             uint32_t cursor = 0;
             for (uint32_t k = 0; k < count; k += 1)
@@ -553,8 +563,9 @@ static bool pp_test_print_spellings(void)
                 const uint32_t length = expected_lengths[k];
                 const bool read = ((identifiers >> k) & 1) == 0 && pp_print_kind_firsts[kinds[k]] == 0;
                 const bool bracket = ((identifiers >> k) & 1) == 0 && kinds[k] >= C_TOKEN_L_SQUARE && kinds[k] <= C_TOKEN_R_BRACE && length > 1;
+                const bool dollar = ((identifiers >> k) & 1) != 0 && punctuation;
                 result = spellings[k] == spelling && lengths[k] == length && pp_print_test_classes(firsts[k], lasts[k], spelling, length) &&
-                         (!(read || bracket) || (firsts[k] == spelling[0] && lasts[k] == spelling[length - 1]));
+                         (!(read || bracket || dollar) || (firsts[k] == spelling[0] && lasts[k] == spelling[length - 1]));
             }
             for (uint32_t k = count; result && k < 64; k += 1)
             {

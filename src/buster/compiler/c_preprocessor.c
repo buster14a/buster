@@ -19733,10 +19733,10 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
 // those bytes, and the prefetches cost 2-3%. Then, into all 64 lanes of `firsts` and `lasts` (64-byte aligned), a character
 // of the class of each token's first and last: by its kind (pp_print_kind_firsts, pp_print_kind_lasts), and the bytes
 // themselves of the kinds the table doesn't fix, of a bracket or a brace longer than one byte (a digraph) and, where
-// '$' is punctuation, of every identifier (#649: reading every token's two bytes, and step 2's load of the 128 byte
-// stores, were a third of -P's printing on the 9700X). Returns false, for the general loop to give the chunk's
-// spellings, when a token's location is in no range, the other tokens (identifiers take no range) are in more ranges
-// than that or a spelling is empty.
+// '$' is punctuation, of every identifier, which pp_split_dollars leaves without a '$' there, but the classes don't
+// count on that (#649: reading every token's two bytes, and step 2's load of the 128 byte stores, were a third of -P's
+// printing on the 9700X). Returns false, for the general loop to give the chunk's spellings, when a token's location
+// is in no range, the other tokens (identifiers take no range) are in more ranges than that or a spelling is empty.
 static bool pp_print_spellings(const Preprocessor* pp, const uint32_t* directory, const uint8_t* kinds, const uint32_t* values, const uint32_t* locations,
                                uint64_t identifiers, uint64_t valid, bool prefetch, const uint8_t* records, const InternSpan* spans, const uint8_t** spellings,
                                uint32_t* lengths, uint8_t* firsts, uint8_t* lasts)

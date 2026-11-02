@@ -2557,13 +2557,18 @@ their canaries. Each token's first and last characters must have its
 spelling's classes: a one-byte token that is a punctuator has its kind, whose
 classes come from the tables, and the others kinds whose bytes are read (an
 unknown token, a pp-number, a string literal, a bracket or a brace longer than
-a byte), whose characters must be those bytes. The kind tables themselves are
+a byte), whose characters must be those bytes. Some identifiers start or end
+with `$`, and in a third of the patterns `$` is punctuation, where every
+identifier's characters must be its bytes. The kind tables themselves are
 checked against every punctuator's spelling, `%:` and `%:%:`, each literal
 kind's plain and raw spellings, an identifier's (one of UTF-8 too) and the
 keywords' below 128; the kinds they leave to the bytes must be exactly an
 unknown token, a pp-number and a plain string literal. A wrong table entry, a
-digraph or a byte left unread, or a keyword past 128 taken by the table make
-these checks fail. `pp_print_unspliced` is checked against its rule on
+digraph or a byte left unread, an identifier's bytes left unread where `$` is
+punctuation, or a keyword past 128 given its table entry make these checks
+fail. That entry is its kind's less 128: for kinds 128 to 192 a token's or a
+punctuator's, whose classes the checks catch, and past 192 a keyword's, whose
+class is right anyway. `pp_print_unspliced` is checked against its rule on
 4,000 groups of random spellings of up to 200 bytes, each ending at a
 `PROT_NONE` page, with and without trigraphs. Every spelling it passes must be
 what `pp_remove_splices` leaves as it is, for each kind that function treats
