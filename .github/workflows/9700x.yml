@@ -122,13 +122,13 @@ jobs:
           fi
 
   test:
-    name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
+    name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }}, shard ${{ matrix.shard }} of 4)
     needs: changes
     if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
     runs-on: ubuntu-26.04
-    # The sanitizer rows run the whole inventory on runners whose detectors make it several times slower; the driver's
-    # in-process commands take tens of minutes each there. The plain rows took about 80 minutes, so they keep a
-    # 120-minute bound rather than the sanitizer rows' 360.
+    # The sanitizer rows run their shard of the inventory on runners whose detectors make it several times slower; the
+    # driver's in-process commands take tens of minutes each there. Unsharded, the plain rows took up to 80 minutes and the
+    # MSan rows 98, so the plain rows keep a 120-minute bound and the sanitizer rows 360.
     timeout-minutes: ${{ matrix.sanitizer == 'none' && 120 || 360 }}
     strategy:
       fail-fast: false
@@ -138,8 +138,12 @@ jobs:
         # to main, the daily run and dispatched runs the whole matrix.
         sanitizer: ${{ fromJSON(github.event_name == 'pull_request' && '["none"]' || '["none", "address", "undefined", "thread", "memory"]') }}
         optimization: [3]
+        # Each row's inventory runs as 4 shards, a runner each (`parallel --shard K/4`, dealt by
+        # tools/ci/correctness.costs): a plain row's test step took about 14.5 minutes on one 4-CPU runner, and its
+        # shards take about 4 to 5. The run step's `/4` and the O1 rows' shards below must match this list.
+        shard: [1, 2, 3, 4]
         include: >-
-          ${{ fromJSON(github.event_name == 'pull_request' && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1}]') }}
+          ${{ fromJSON(github.event_name == 'pull_request' && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 4}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 4}]') }}
     defaults:
       run:
         shell: bash
@@ -166,7 +170,7 @@ jobs:
           bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
 
       - name: Fetch generic baseline startup objects and runtime for emulation
-        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none'
+        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
         run: bash tools/ci/setup-baseline-runtime.sh
 
       - name: Fetch and verify frozen corpus inputs
@@ -205,6 +209,8 @@ jobs:
           fi
 
       - name: Check baseline fallback memory and arithmetic boundaries
+        # Once per row, as the steps below that its shard 1 alone runs.
+        if: matrix.shard == 1
         run: |
           mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
           clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-psabi \
@@ -224,7 +230,7 @@ jobs:
           llvm-config --version
 
       - name: Compile and run baseline code on an emulated x86-64 CPU
-        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none'
+        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
         run: |
           smoke="$RUNNER_TEMP/baseline-smoke"
           mkdir "$smoke"
@@ -247,7 +253,7 @@ jobs:
         # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers
         # (tools/performance, docs/performance, web/perf), this pin or these steps: about 11 s of building and checking that
         # every other pull request's job spent on code it doesn't change.
-        if: needs.changes.outputs.performance != 'false'
+        if: needs.changes.outputs.performance != 'false' && matrix.shard == 1
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: buster14a/buster-performance
@@ -261,7 +267,7 @@ jobs:
           persist-credentials: false
 
       - name: Test first-party performance readers and frozen imports on Ubuntu 26.04
-        if: needs.changes.outputs.performance != 'false'
+        if: needs.changes.outputs.performance != 'false' && matrix.shard == 1
         run: |
           set -euo pipefail
           reader_root=build/performance-reader-evidence
@@ -307,6 +313,7 @@ jobs:
       - name: Parse the compiler source
         # Preserve this parser smoke test explicitly now that the default C command performs semantic checking.
         # Default C checking and object emission have their own external-oracle tests below.
+        if: matrix.shard == 1
         run: ./build/compiler parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Fetch c-testsuite at its pinned commit
@@ -318,7 +325,7 @@ jobs:
           git -C build/c-testsuite checkout -q FETCH_HEAD
 
       - name: Check constrained arenas, command diagnostics, and Callgrind
-        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none'
+        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
         run: |
           clang -std=c17 -march=x86-64 -O2 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function tests/arena/resources.c -o "$RUNNER_TEMP/memory-resources" -pthread
           mkdir -p "$RUNNER_TEMP/memory-limited" "$RUNNER_TEMP/memory-valgrind" "$RUNNER_TEMP/memory-strict"
@@ -336,7 +343,7 @@ jobs:
           "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-strict" --strict
 
       - name: Preserve memory admission diagnostics
-        if: ${{ always() && matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' }}
+        if: ${{ always() && matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1 }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: memory-admission-${{ github.run_attempt }}
@@ -350,7 +357,10 @@ jobs:
           # The driver's in-process checks run the whole compiler per fixture; with a detector they take tens of
           # minutes each, so the command limit leaves room for one on a loaded runner (the job's limit is longer still).
           if [ "$BUSTER_SANITIZER" != none ]; then timeout=7200; fi
-          ./build/compiler parallel --github --jobs "$(nproc)" --timeout "$timeout" < tools/ci/correctness.tests
+          # This row's shard of the inventory: the runner deals the commands to the 4 shards by their costs, the same
+          # deal on every shard's runner, so that the row's shards run each command once.
+          ./build/compiler parallel --github --jobs "$(nproc)" --timeout "$timeout" \
+            --shard "${{ matrix.shard }}/4" --costs tools/ci/correctness.costs < tools/ci/correctness.tests
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
               find "$oracle" -type f -mtime +2 -delete
@@ -361,7 +371,7 @@ jobs:
         # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
         # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the
         # measurements and the coverage boundary.
-        if: ${{ success() && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') }}
+        if: ${{ success() && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && matrix.shard == 1 }}
         run: |
           set -euo pipefail
           unset CPATH C_INCLUDE_PATH
@@ -383,7 +393,7 @@ jobs:
         if: ${{ always() && matrix.sanitizer != 'none' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sanitizers-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-O${{ matrix.optimization }}-${{ github.run_attempt }}
+          name: sanitizers-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-O${{ matrix.optimization }}-shard${{ matrix.shard }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/sanitizer-reports
             ${{ runner.temp }}/sanitizer-probes
@@ -569,11 +579,15 @@ jobs:
           # to it, avoiding llvm-config's Ubuntu-specific static system-library paths.
           flags=$(llvm-config --cxxflags --ldflags)
           read -r -a flags_array <<< "${flags//$'\n'/ }"
-          clang++ -O2 -Wall -Werror tools/preprocessor_pragma_oracle.cpp \
-            "${flags_array[@]}" -lclang-cpp -o "$oracle"
+          # The oracle builds beside the compiler, whose build ends with its longest unit alone (main_unit_checker.c,
+          # 35 s of 35.3) while the other CPUs idle: built first, the oracle's 2.3 s came before it.
+          taskset -c 0-7 clang++ -O2 -Wall -Werror tools/preprocessor_pragma_oracle.cpp \
+            "${flags_array[@]}" -lclang-cpp -o "$oracle" &
+          oracle_build=$!
+          BUSTER_DEBUG_INFO=0 taskset -c 0-7 ./build.sh
+          wait "$oracle_build"
           "$oracle" --version
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
-          BUSTER_DEBUG_INFO=0 taskset -c 0-7 ./build.sh
           clang -dM -E -march="$BUSTER_HOST_ARCH" -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 
       - name: Fetch and verify frozen corpus inputs for native correctness

@@ -26,6 +26,19 @@ The baseline leg must report `scalar`; the native leg uses vector kernels when
 the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
 CPU without AVX-512 therefore still runs the complete correctness suite.
 
+Each matrix row runs its inventory as 4 shards (`matrix.shard`), a runner each,
+dealt by `parallel --shard K/4 --costs tools/ci/correctness.costs`: the runner
+deals the commands to the shards by their costs on a hosted runner, the
+costliest first, the same deal on every shard's runner, so that a row's shards
+run every command once (docs/commands/parallel.md). Unsharded, a plain row's
+test step took 14.6 minutes of its 18-minute job on one 4-CPU runner, and the
+MSan rows took up to 98 minutes. Each shard builds the compiler itself, since a
+native build must run on the CPU model it was built for, which hosted runners
+don't share. A row's once-only steps (the baseline fallback checks, the QEMU
+smoke test, the constrained arenas, the parser smoke test, the performance
+readers and the TSan/MSan `main.c` compiles) run in its shard 1, and each
+shard's sanitizer reports are an artifact of its own.
+
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
 feature set. Required vector coverage comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
@@ -38,7 +51,8 @@ The hosted matrix additionally builds the entire compiler with each of
 `BUSTER_SANITIZER=address|undefined|thread|memory`, for both host architectures.
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
-are full suites; the TSan and MSan rows are not reduced module lists.
+are full suites, a row's 4 shards together; the TSan and MSan rows are not
+reduced module lists.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
 executes their results on that same emulated CPU.

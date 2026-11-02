@@ -9,6 +9,15 @@ requirements. [Command index](README.md).
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
+Each row's inventory runs as 4 shards, a runner each that builds the compiler
+itself (a native build must run on the CPU it was built for): `parallel --shard
+K/4 --costs tools/ci/correctness.costs` deals the commands by their hosted
+costs, the same deal on every shard's runner, so the shards run each command
+once. A plain row's test step took 14.6 minutes on one 4-CPU runner; its shards
+take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
+arena checks, the parser smoke test, the performance readers and the TSan/MSan
+`main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
+report when the shards' times drift apart ([the runner guide](parallel.md)).
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the

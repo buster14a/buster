@@ -96,12 +96,6 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # #134: programs whose functions have gotos into and out of loops, switches whose cases fall through and breaks and
 # continues at depth, each built by clang -O0 and run for its output, then checked as c-testsuite's programs are.
 ./build/compiler test-ssa-source --generate 48 --clang clang
-== Test the preprocessor's cases against clang [2 CPUs]
-# --clang also preprocesses each case with clang -E and compares the tokens. A worker per CPU of the
-# heading's shares the fuzz batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of threads
-# in all at the qualification runs' 3 ms per case; the cases and header sets run in parts, a process per CPU
-# of the heading's (#465).
-./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS"
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
 # tokens. -target and its triple (clang's default) go to both.
@@ -114,10 +108,25 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 ./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 ./build/compiler test-unwind --cross-check
+== Test the preprocessor's cases against clang (part 1 of 4)
+# --clang also preprocesses each case with clang -E and compares the tokens. --part deals the checks (the cases,
+# the header sets, the predefines' option sets in four slices, the fuzz batch's own checks and each of its modes)
+# to 4 parts by their weights (pp_test_sections), one CPU each, which the runner packs beside the other commands:
+# whole, on 2 CPUs, the command took 295 s on a hosted runner and 44 s on the 9700X, the list's longest. The four
+# parts together run each check once. A part's fuzz workers and clang processes run on its CPU (--jobs, and
+# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs.
+./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4
+== Test the preprocessor's cases against clang (part 2 of 4)
+./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 2/4
+== Test the preprocessor's cases against clang (part 3 of 4)
+./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 3/4
+== Test the preprocessor's cases against clang (part 4 of 4)
+./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 4/4
 == Test the parser's snippets against clang
-# The snippets, each also checked against clang, the generated inputs and the driver's checks.
+# The snippets, each also checked against clang, the generated inputs and the driver's checks. The second command
+# checks the file alone (--files-only): the checks without input are the first's, with the same language and seed.
 ./build/compiler test-parser --clang
-./build/compiler test-parser --clang tests/parser-handoff/pragma-heavy.c
+./build/compiler test-parser --clang --files-only tests/parser-handoff/pragma-heavy.c
 == Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
 # --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 4 parts, one CPU
 # each, which the runner packs beside the other commands: alone, the command took 197 s on a hosted runner and 48 s
@@ -144,8 +153,9 @@ musl="$corpus/libc/musl"
 == Test the parser on the repository's translation units
 # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles, but main_unit_*.c,
 # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
-# so asking clang -fsyntax-only again (--clang) only repeats that.
-./build/compiler test-parser -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+# so asking clang -fsyntax-only again (--clang) only repeats that. The checks without input are the snippets' command's
+# (--files-only), with the same language and seed.
+./build/compiler test-parser --files-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
 == Test Tier 0
 # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
 # --cross-check also runs them beside clang -O0's builds of the same programs as C, and links those that pass
