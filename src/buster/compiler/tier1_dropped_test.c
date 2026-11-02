@@ -106,7 +106,7 @@ static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool remater
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the dropped definition's fixture selects");
-    const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = rematerialize };
+    const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = rematerialize, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "the dropped definition's fixture emits through the CFG consumer");

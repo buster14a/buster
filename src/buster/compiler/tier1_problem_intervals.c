@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Include after lane.c, tier1_allocate.c and tier1_problem.c.
+// Include after lane.c, tier1_allocate.c, tier1_problem.c, tier1_certificate.c and tier1_certificate_interval.c.
 // This bounded bridge targets the EXISTING interval API, not a replacement IR.
 // It refuses CFGs, phis, boundary values, implicit/fixed operands, subregisters,
 // ties, early clobbers and alternative forms until their production consumers
@@ -361,6 +361,27 @@ static Tier1ProblemReason tier1_problem_intervals(const Tier1Problem* source, Ar
     if (result != TIER1_PROBLEM_OK && allocated)
     {
         arena_pop_to(arena, entry);
+    }
+    return result;
+}
+
+// #939's gate for an allocation of an imported problem: its fragments checked by tier1_allocation_certificate_check,
+// whose scratch goes on `arena` and is popped. The adapter imports one block without edges, phis, ties or implicit
+// operands, so the fragment certificate is the whole proof the allocation has. TIER1_PROBLEM_OK where the checker
+// proves it, TIER1_PROBLEM_CERTIFICATE_REJECTED where it refuses, TIER1_PROBLEM_CAPACITY where its scratch doesn't fit
+// and TIER1_PROBLEM_ARGUMENT for a missing argument. A quality publisher reports an allocation only past this gate.
+static Tier1ProblemReason tier1_problem_certify(const Tier1AllocationInput* input, const Tier1Allocation* allocation, Arena* arena, Tier1IntervalReport* report)
+{
+    Tier1ProblemReason result = input != 0 && allocation != 0 && arena != 0 && report != 0 ? TIER1_PROBLEM_OK : TIER1_PROBLEM_ARGUMENT;
+    if (result == TIER1_PROBLEM_OK)
+    {
+        const uint64_t mark = arena->length;
+        const size_t size = tier1_interval_scratch_size(input, allocation);
+        void* scratch = size != 0 ? arena_push(arena, size, 64) : 0;
+        *report = (Tier1IntervalReport){ .error = TIER1_CERT_CAPACITY };
+        const Tier1CertError checked = scratch != 0 ? tier1_allocation_certificate_check(input, allocation, scratch, size, report) : TIER1_CERT_CAPACITY;
+        result = checked == TIER1_CERT_OK ? TIER1_PROBLEM_OK : checked == TIER1_CERT_CAPACITY ? TIER1_PROBLEM_CAPACITY : TIER1_PROBLEM_CERTIFICATE_REJECTED;
+        arena_pop_to(arena, mark);
     }
     return result;
 }

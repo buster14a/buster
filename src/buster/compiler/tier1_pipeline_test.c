@@ -82,6 +82,9 @@ struct Tier1PipelineTest
     uint32_t general;
     uint64_t edge_moves;
     uint64_t edge_stubs;
+    // #939: emissions whose allocation passed its certificate, and the CFG consumer's certificates' facts.
+    uint64_t certified;
+    uint64_t certificate_facts;
     uint32_t fixture;
     bool vector;
     bool rematerialize;
@@ -1194,6 +1197,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                 test->rematerialize = remat != 0;
                 tier1_pipeline_reset(test);
                 const Tier1EmitOptions options = {
+                    .certify = true,
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
                     .frame_flags = remat != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER | BUSTER_TIER1_FRAME_NO_RED_ZONE : 0,
                     .vector = test->vector,
@@ -1233,6 +1237,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     {
                         const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->arenas[TIER1_PIPELINE_EMITTED], &test->arenas[TIER1_PIPELINE_SCRATCH], emitted, &node);
                         ok = tier1_pipeline_expect(test, error == TIER1_EMIT_OK, "real liveness, fragment allocation and frame emission succeed");
+                        // #939: the emitter certified the allocation it emitted from, of either consumer.
+                        ok = ok && tier1_pipeline_expect(test, emitted->certified, "the emitter's allocation passed its certificate");
+                        test->certified += ok;
+                        test->certificate_facts += ok ? emitted->certificate_facts : 0;
                         if (!ok)
                         {
                             fprintf(stderr, "  emission error=%u node=%u function=%u\n", error, node, f);
@@ -1554,12 +1562,13 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
             tier1_pipeline_expect(&test, test.refused == 2, "every remaining unsupported shape is refused on both paths");
             tier1_pipeline_expect(&test, test.general == 7 * 4 && test.edge_moves != 0 && test.edge_stubs != 0, "every control-flow fixture goes through the CFG consumer, whose edges move values, critical ones through stubs");
+            tier1_pipeline_expect(&test, test.certified != 0 && test.certificate_facts != 0, "the emitter certified its allocations, CFG ones with block-entry facts");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, seed);
+        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {
             arena_release(&test.arenas[a]);

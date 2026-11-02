@@ -79,6 +79,8 @@ typedef enum Tier1ProblemReason
     TIER1_PROBLEM_SSA,
     TIER1_PROBLEM_MASK_CHANGE,
     TIER1_PROBLEM_CERTIFICATE_UNAVAILABLE,
+    // #939: an allocation of the problem whose certificate the checker refused (tier1_problem_certify).
+    TIER1_PROBLEM_CERTIFICATE_REJECTED,
     TIER1_PROBLEM_REASON_COUNT,
 } Tier1ProblemReason;
 
@@ -664,6 +666,7 @@ static const char* tier1_problem_reason_name(Tier1ProblemReason reason)
         "ssa",
         "mask-change",
         "certificate-unavailable",
+        "certificate-rejected",
     };
     return (unsigned)reason < TIER1_PROBLEM_REASON_COUNT ? names[reason] : "invalid-reason";
 }

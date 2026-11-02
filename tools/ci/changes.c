@@ -605,6 +605,18 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
+        // #939's certificates of tier1_cfg.c's allocations of real C's functions: the corpus's preparation, as
+        // benchmark-tier1-cfg-source's (benchmark-backend-source's, then the IR's lowering and promotion and the
+        // allocation problem's model), the allocation, its certificate's publication and check, and tier1_cfg_verify.
+        .name = "tier1-certificate",
+        .sources = "tier1_certificate[a-z0-9_]*|tier1_cfg[a-z0-9_]*|tier1_allocate|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|"
+                   "ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
+                   "bind|import|runtime",
+    },
+    {
         .name = "types",
         .unit = "c_types_benchmark.c",
     },

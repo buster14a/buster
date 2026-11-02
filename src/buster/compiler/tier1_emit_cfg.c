@@ -1887,6 +1887,17 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     {
         error = tier1_emit_cfg_callee(plan, options, output, scratch, emitted);
     }
+    if (error == TIER1_EMIT_OK && options->certify)
+    {
+        // The final allocation's certificate (#939): the problem as the callee-saved step left it, and its result.
+        Tier1CertReport report = { 0 };
+        Tier1CertCfgStats stats = { 0 };
+        const Tier1CertError certified = tier1_certificate_cfg_check(&emitted->cfg_input, &emitted->cfg, output, scratch, &report, &stats);
+        error = certified == TIER1_CERT_OK ? TIER1_EMIT_OK : certified == TIER1_CERT_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
+        emitted->certified = error == TIER1_EMIT_OK;
+        emitted->certificate_facts = stats.facts;
+        emitted->certificate_edits = stats.transitions + stats.split_moves + stats.edge_moves;
+    }
     if (error == TIER1_EMIT_OK)
     {
         error = tier1_emit_cfg_mask_saves(plan, scratch, emitted);

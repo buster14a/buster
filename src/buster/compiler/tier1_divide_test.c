@@ -191,6 +191,7 @@ static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase*
     const uint32_t second = loop ? 13 : 7;
     tier1_emit_test_expect(test, !planned || (plan.patterns[first].rule == TIER1_RULE_DIVIDE_RECIPROCAL && plan.patterns[second].rule == TIER1_RULE_DIVIDE_RECIPROCAL), "both divisions take their reciprocals");
     const Tier1EmitOptions options = {
+        .certify = true,
         .register_mask = register_mask,
         .vector = vector,
         .rematerialize = rematerialize,

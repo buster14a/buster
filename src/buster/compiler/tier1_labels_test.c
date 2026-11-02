@@ -75,6 +75,7 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the labels' fixture selects");
     const Tier1EmitOptions options = {
+        .certify = true,
         .register_mask = register_mask,
         .vector = vector,
         .rematerialize = rematerialize,
@@ -152,6 +153,7 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the review's indirect jumps' fixtures select");
     const Tier1EmitOptions options = {
+        .certify = true,
         .register_mask = register_mask,
         .vector = vector,
         .rematerialize = rematerialize,

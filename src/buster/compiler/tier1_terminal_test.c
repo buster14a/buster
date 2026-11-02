@@ -456,6 +456,7 @@ static void tier1_terminal_supported(Tier1EmitTest* test)
                 if (selected == TIER1_SELECT_OK)
                 {
                     const Tier1EmitOptions options = {
+                        .certify = true,
                         .register_mask = tier1_liveness_register_mask(),
                         .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                         .vector = vector != 0,
@@ -569,6 +570,7 @@ static void tier1_terminal_general(Tier1EmitTest* test)
                 // The CFG consumer takes them: a self-loop keeps its jump back and its call, a conditional its branch, and
                 // none becomes a trap.
                 const Tier1EmitOptions options = {
+                    .certify = true,
                     .register_mask = tier1_liveness_register_mask(),
                     .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                     .vector = vector != 0,

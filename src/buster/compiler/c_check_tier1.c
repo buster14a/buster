@@ -119,7 +119,7 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
+                                           bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
 {
     *operation = 0;
     *counts = (CheckTier1Counts){ 0 };
@@ -202,11 +202,12 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
+            .certify = certify,
         };
         uint32_t node = BUSTER_IR_NONE;
         const Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
         *operation = (uint32_t)error;
-        stage = error == TIER1_EMIT_OK ? stage : CHECK_TIER1_EMISSION;
+        stage = error == TIER1_EMIT_OK ? stage : error == TIER1_EMIT_CERTIFICATE ? CHECK_TIER1_CERTIFICATE : CHECK_TIER1_EMISSION;
     }
     // The code in `output`, as Tier 0's is: its records, branch columns and references.
     const uint64_t mark = output->length;
@@ -290,7 +291,7 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     return stage;
 }
 
-static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource" };
+static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "certificate" };
 
 static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome)
 {

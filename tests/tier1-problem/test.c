@@ -13,6 +13,8 @@
 #ifdef BUSTER_TP_INTEGRATION
 #include "../../src/buster/compiler/lane.c"
 #include "../../src/buster/compiler/tier1_allocate.c"
+#include "../../src/buster/compiler/tier1_certificate.c"
+#include "../../src/buster/compiler/tier1_certificate_interval.c"
 #include "../../src/buster/compiler/tier1_problem_intervals.c"
 #endif
 
@@ -325,6 +327,41 @@ static void integration_tests(void)
         expect(tier1_allocate_scalar(&input, &arena, &scalar) == TIER1_ALLOCATION_OK, "real scalar twin accepts imported input");
         expect(tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar), "occupancy smoke only, NOT a #939 certificate");
         expect(vector.spill_count == 0 && scalar.spill_count == 0, "fixture fits identical register bank");
+        // #939's gate: both paths' allocations proved by the fragment certificate, a forged one refused, its scratch
+        // popped either way, and a scratch that doesn't fit a capacity outcome rather than a pass.
+        Tier1ProblemTally gate = { 0 };
+        Tier1IntervalReport report = { 0 };
+        const uint64_t before = arena.length;
+        Tier1ProblemReason certified = tier1_problem_certify(&input, &vector, &arena, &report);
+        tier1_problem_tally(&gate, certified);
+        expect(certified == TIER1_PROBLEM_OK && report.error == TIER1_CERT_OK && report.fragments == vector.fragment_count && arena.length == before, "the vector allocation passes #939's certificate");
+        certified = tier1_problem_certify(&input, &scalar, &arena, &report);
+        tier1_problem_tally(&gate, certified);
+        expect(certified == TIER1_PROBLEM_OK && arena.length == before, "the scalar allocation passes #939's certificate");
+        // Intervals 0 and 1 overlap at [7, 9): one register for both is two live values in it.
+        uint32_t forged = UINT32_MAX;
+        for (uint32_t f = vector.fragment_offsets[1]; forged == UINT32_MAX && f < vector.fragment_offsets[2]; f += 1)
+        {
+            forged = vector.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && vector.kinds[vector.fragment_offsets[0]] == BUSTER_TIER1_ALLOCATE_REGISTER ? f : forged;
+        }
+        expect(forged != UINT32_MAX, "the fixture's overlapping intervals both have register fragments");
+        if (forged != UINT32_MAX)
+        {
+            const uint8_t kept = vector.registers[forged];
+            vector.registers[forged] = vector.registers[vector.fragment_offsets[0]];
+            certified = tier1_problem_certify(&input, &vector, &arena, &report);
+            tier1_problem_tally(&gate, certified);
+            expect(certified == TIER1_PROBLEM_CERTIFICATE_REJECTED && report.error != TIER1_CERT_OK && arena.length == before, "a forged register shared by overlapping intervals fails #939's certificate");
+            vector.registers[forged] = kept;
+        }
+        Arena small = arena;
+        small.capacity = small.length + 1;
+        certified = tier1_problem_certify(&input, &vector, &small, &report);
+        tier1_problem_tally(&gate, certified);
+        expect(certified == TIER1_PROBLEM_CAPACITY && small.length == before, "a certificate without room for its scratch is a capacity outcome, not a pass");
+        expect(tier1_problem_certify(&input, 0, &arena, &report) == TIER1_PROBLEM_ARGUMENT, "the gate refuses a missing allocation");
+        expect(gate.functions == 4 && gate.accepted == 2 && gate.reasons[TIER1_PROBLEM_CERTIFICATE_REJECTED] == 1 && gate.reasons[TIER1_PROBLEM_CAPACITY] == 1, "the gate's outcomes reconcile in the tally");
+        expect(strcmp(tier1_problem_reason_name(TIER1_PROBLEM_CERTIFICATE_REJECTED), "certificate-rejected") == 0, "the rejection is named");
     }
     uint8_t wire[8192];
     size_t length = 0;

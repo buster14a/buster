@@ -327,9 +327,20 @@ designs and the compilers already built this way.
   `tier1_certificate_oracle.c`'s dense CFG fixpoint as the independent oracle
   and `tier1_certificate_interval.c` as the current interval allocator's
   fragment adapter. `test-tier1-allocation` runs the stream/mutation suites
-  and certificate-checks every successful allocation its fixtures make. [The
-  certificate guide](docs/tier1-certificate.md) records the trust boundary,
-  supported forms and the native-emitter bridge still pending for #939.
+  and certificate-checks every successful allocation its fixtures make.
+  `tier1_certificate_cfg.c` publishes the certificate of `tier1_cfg.c`'s CFG
+  allocations: source from the input, the stream, entry facts and edges from the
+  allocation. `test-tier1-cfg` proves every allocation (the oracle every 16th,
+  `--oracle-every N`), mutants included, and `test-tier1-cfg-source` every one
+  of real C. The emitter checks its allocations under
+  `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set (a
+  refusal fails `--tier1 --verify`'s compile). #938's harness gates on
+  `tier1_problem_certify`. `benchmark-tier1-certificate [--only VARIANT]
+  [-E's options] file...` times allocation, publication, check and
+  `tier1_cfg_verify` per IR instruction with the certificates' sizes, under the
+  9700X's lock on CPU 2. [The certificate guide](docs/tier1-certificate.md)
+  records the trust boundary, the CFG producer and the bridge from the native
+  emitter's records that is still pending.
 
 - `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
   liveness with phi operands on their edges, hinted (`hint_values`) to keep one

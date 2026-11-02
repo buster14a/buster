@@ -479,6 +479,7 @@ static void tier1_narrow_compile(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
             if (selected == TIER1_SELECT_OK)
             {
                 const Tier1EmitOptions options = {
+                    .certify = true,
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),
                     .frame_flags = remat ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                     .vector = vector != 0,
@@ -562,6 +563,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             const uint64_t output_mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
             const Tier1EmitOptions options = {
+                .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
                 .vector = true,
             };

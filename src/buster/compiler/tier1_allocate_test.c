@@ -10,9 +10,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <inttypes.h>
-#include "buster/compiler/tier1_certificate.c"
+// tier1_certificate.c and tier1_certificate_interval.c are production modules, which main.c includes before this file.
 #include "buster/compiler/tier1_certificate_oracle.c"
-#include "buster/compiler/tier1_certificate_interval.c"
 #include "buster/compiler/tier1_certificate_test.c"
 #include "buster/compiler/tier1_certificate_interval_test.c"
 

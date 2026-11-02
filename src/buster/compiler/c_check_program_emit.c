@@ -294,6 +294,9 @@ typedef enum CheckTier1Stage
     CHECK_TIER1_SELECTION,
     CHECK_TIER1_EMISSION,
     CHECK_TIER1_RESOURCE,
+    // With --verify, an allocation whose certificate the checker refused (#939, Tier1EmitOptions.certify): the compile
+    // fails (check_program_emit_code).
+    CHECK_TIER1_CERTIFICATE,
     CHECK_TIER1_STAGE_COUNT,
 } CheckTier1Stage;
 
@@ -433,7 +436,7 @@ static bool check_tier1_ready = false;
 // CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
 // `output` as it was.
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
+                                           bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
@@ -633,6 +636,15 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         body->token = program->bodies[b].declaration;
         valid = false;
     }
+    // With --verify and --tier1, Tier 1's allocation of the body must pass its certificate (#939): a refusal fails the
+    // compile rather than leave the body to Tier 0, which would hide it.
+    if (valid && run->verify && run->tier1_outcomes != 0 && (run->tier1_outcomes[b] & 0xff) == CHECK_TIER1_CERTIFICATE)
+    {
+        body->status = CHECK_PROGRAM_BACKEND;
+        body->reason = "internal compiler error: Tier 1's allocation of a function fails its certificate";
+        body->token = program->bodies[b].declaration;
+        valid = false;
+    }
     if (valid)
     {
         // The branch columns alone, which sizing reads and writes by: Tier 0's records are valid by construction, which
@@ -716,7 +728,7 @@ static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run
     uint32_t operation = 0;
     const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
                                           check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                              !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
+                                                              !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
     run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
     return stage == CHECK_TIER1_COMPILED;
 }

@@ -8,6 +8,8 @@
 // registers), and a generator gives random SSA over random CFGs (loops, irreducible regions, several latches) of the
 // three classes, every value defined in a block that dominates its uses. Both entry points must give results that tier1_cfg_verify accepts, and tier1_allocation_verify where the
 // case is small enough for its quadratic check. Mutants of the published moves and fragments must fail the checker.
+// Every allocation's certificate (#939, tier1_certificate_cfg.c) must pass tier1_certificate_check, and the slow oracle
+// must give the same answer wherever its bounds take the program, for the allocations and for every mutant.
 
 #define BUSTER_TIER1_CFG_TEST_BLOCKS 32
 #define BUSTER_TIER1_CFG_TEST_EDGES 96
@@ -85,6 +87,27 @@ struct Tier1CfgTestTally
     uint64_t destination_killed;
     uint64_t k0_mutants;
     uint64_t k0_killed;
+    // #939: allocations whose certificate the checker proved, those the oracle checked too, and the certificates' sizes;
+    // the mutants each certificate checker refused, by kind, and where the two checkers judged a mutant apart from
+    // tier1_cfg_verify, which checks the allocation's constraints as well as its values.
+    uint64_t certificates;
+    uint64_t oracle_certificates;
+    uint64_t certificate_facts;
+    uint64_t certificate_edits;
+    uint64_t certificate_operands;
+    uint64_t certificate_renames;
+    uint64_t interference_refused;
+    uint64_t order_refused;
+    uint64_t definition_refused;
+    uint64_t destination_refused;
+    uint64_t k0_refused;
+    uint64_t certificate_only;
+    uint64_t verifier_only;
+    // Whether the current case's certificates go to the slow oracle too: every fixture's, and every --oracle-every'th
+    // generated case's (16 by default: the dense oracle costs about twenty times the rest of the test), and its
+    // mutants' on every fourth of those.
+    bool oracle;
+    bool oracle_mutants;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -311,6 +334,69 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     return built;
 }
 
+// The allocation's certificate (#939): published from the input and the allocation, checked by tier1_certificate_check
+// and, where its bounds take the program, by the slow oracle, which must agree. Whether the checker proves it.
+static bool tier1_cfg_test_certify(Tier1CfgTestTally* tally, const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* output, Arena* scratch, bool count)
+{
+    const bool oracle = count ? tally->oracle : tally->oracle_mutants;
+    const uint64_t output_saved = output->length;
+    const uint64_t scratch_saved = scratch->length;
+    Tier1CertProgram program = { 0 };
+    Tier1CertCfgStats stats = { 0 };
+    Tier1CertReport fast = { 0 };
+    Tier1CertError error = tier1_certificate_cfg(input, result, output, scratch, &program, &stats);
+    if (error == TIER1_CERT_OK)
+    {
+        const size_t size = tier1_certificate_scratch_size(&program);
+        void* buffer = arena_push(scratch, size, 64);
+        error = buffer != 0 ? tier1_certificate_check(&program, buffer, size, &fast) : TIER1_CERT_CAPACITY;
+        tier1_cfg_test_expect(tally, error != TIER1_CERT_CAPACITY && error != TIER1_CERT_INVALID, "a published certificate is well formed and fits its scratch");
+        const size_t oracle_size = oracle ? tier1_certificate_oracle_scratch_size(&program) : 0;
+        void* oracle_buffer = oracle_size != 0 ? arena_push(scratch, oracle_size, 64) : 0;
+        if (oracle_buffer != 0)
+        {
+            Tier1CertReport slow = { 0 };
+            const Tier1CertError judged = tier1_certificate_oracle(&program, oracle_buffer, oracle_size, &slow);
+            tier1_cfg_test_expect(tally, judged != TIER1_CERT_CAPACITY, "the oracle fits the scratch its size gives");
+            tier1_cfg_test_expect(tally, (judged == TIER1_CERT_OK) == (error == TIER1_CERT_OK), "the oracle and the certificate checker agree");
+            if ((judged == TIER1_CERT_OK) != (error == TIER1_CERT_OK) && tally->failures < 20)
+            {
+                printf("test-tier1-cfg: certificate checker %u (block %u edge %u instruction %u), oracle %u (block %u edge %u instruction %u)\n", (unsigned)error, fast.block, fast.edge, fast.instruction, (unsigned)judged, slow.block, slow.edge, slow.instruction);
+            }
+            tally->oracle_certificates += count && judged == TIER1_CERT_OK;
+        }
+    }
+    if (count && error == TIER1_CERT_OK)
+    {
+        tally->certificates += 1;
+        tally->certificate_facts += stats.facts;
+        tally->certificate_edits += stats.transitions + stats.split_moves + stats.edge_moves;
+        tally->certificate_operands += stats.operands;
+        tally->certificate_renames += stats.renames;
+    }
+    else if (count && tally->failures < 20)
+    {
+        printf("test-tier1-cfg: certificate error %u (block %u edge %u instruction %u; publication block %u value %u position %u)\n", (unsigned)error, fast.block, fast.edge, fast.instruction, stats.block, stats.value, stats.position);
+    }
+    arena_pop_to(scratch, scratch_saved);
+    arena_pop_to(output, output_saved);
+    return error == TIER1_CERT_OK;
+}
+
+// One mutant judged by tier1_cfg_verify and by the certificate: whether the verifier rejects it. Their disagreements
+// are tallied apart: the verifier also checks constraints (registers outside a value's mask, a fixed range over a
+// value the allocation keeps but never reads again) that don't change what any use reads.
+static bool tier1_cfg_test_mutant(Tier1CfgTestTally* tally, const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* output, Arena* scratch, uint64_t* refused)
+{
+    Tier1CfgCheck mutated;
+    const bool rejected = !tier1_cfg_verify(input, result, scratch, &mutated);
+    const bool certified = tier1_cfg_test_certify(tally, input, result, output, scratch, false);
+    *refused += !certified;
+    tally->certificate_only += rejected == false && certified == false;
+    tally->verifier_only += rejected && certified;
+    return rejected;
+}
+
 // Allocates one case by both entry points and checks each result. Mutants of the first result with moves: every
 // edge move's destination redirected to an unused register, and one interval fragment's register swapped.
 // `temp_slots` are the classes whose temporary slot the case must use, `split_moves` the fewest moves at splits it must
@@ -343,6 +429,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                 printf("test-tier1-cfg: %s, %s path: %s (block %u value %u position %u)\n", name, path == 0 ? "vector" : "scalar", check.reason, check.block, check.value, check.position);
             }
             tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
+            tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
             if (result.intervals.count <= 600)
             {
                 tier1_cfg_test_expect(tally, tier1_allocation_verify(&result.intervals, &result.allocation), "the interval verifier accepts the allocation");
@@ -393,8 +480,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                         {
                             const uint8_t saved = allocation->registers[f];
                             allocation->registers[f] = allocation->registers[other];
-                            Tier1CfgCheck mutated;
-                            const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->interference_refused);
                             allocation->registers[f] = saved;
                             tally->interference_mutants += 1;
                             tally->interference_killed += rejected;
@@ -428,8 +514,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                                 result.move_sources[n] = source;
                                 result.move_destinations[n] = destination;
                                 result.move_values[n] = value;
-                                Tier1CfgCheck mutated;
-                                const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                                const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->order_refused);
                                 result.move_sources[n] = result.move_sources[m];
                                 result.move_destinations[n] = result.move_destinations[m];
                                 result.move_values[n] = result.move_values[m];
@@ -455,8 +540,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     if (required && result.intervals.starts[i] == input->definitions[v] && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->spill_ids[v] < allocation->spill_count)
                     {
                         allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_SPILL;
-                        Tier1CfgCheck mutated;
-                        const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->definition_refused);
                         allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_REGISTER;
                         tally->definition_mutants += 1;
                         tally->definition_killed += rejected;
@@ -473,8 +557,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     if (others != 0)
                     {
                         result.move_destinations[m] = class * 32 + (uint32_t)__builtin_ctz(others);
-                        Tier1CfgCheck mutated;
-                        const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->destination_refused);
                         result.move_destinations[m] = destination;
                         tally->destination_mutants += 1;
                         tally->destination_killed += rejected;
@@ -496,8 +579,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                         {
                             const uint8_t kept = allocation->registers[f];
                             allocation->registers[f] = 0;
-                            Tier1CfgCheck mutated;
-                            const bool rejected = !tier1_cfg_verify(input, &result, scratch, &mutated);
+                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->k0_refused);
                             allocation->registers[f] = kept;
                             tally->k0_mutants += 1;
                             tally->k0_killed += rejected;
@@ -507,6 +589,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                 }
                 Tier1CfgCheck again;
                 tier1_cfg_test_expect(tally, tier1_cfg_verify(input, &result, scratch, &again), "the checker accepts the restored allocation");
+                tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, false), "the certificate checker proves the restored allocation");
             }
         }
         else
@@ -1155,6 +1238,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
 {
     uint64_t seed = 140;
     uint64_t count = 2000;
+    uint64_t oracle_every = 16;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
     {
@@ -1168,6 +1252,11 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             i += 1;
             valid = dominator_test_parse(argv[i], &count) && count <= 1000000;
         }
+        else if (strcmp(argv[i], "--oracle-every") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            valid = dominator_test_parse(argv[i], &oracle_every) && oracle_every != 0;
+        }
         else
         {
             valid = false;
@@ -1176,7 +1265,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-tier1-cfg [--seed N] [--count N]\n");
+        fprintf(stderr, "usage: test-tier1-cfg [--seed N] [--count N] [--oracle-every N]\n");
     }
     else
     {
@@ -1187,6 +1276,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, output.base != 0 && scratch.base != 0 && work.base != 0, "test arenas");
         if (output.base != 0 && scratch.base != 0 && work.base != 0)
         {
+            tally.oracle = true;
+            tally.oracle_mutants = true;
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             Tier1CfgTestBuilder* builder = arena_push(&work, sizeof(Tier1CfgTestBuilder), _Alignof(Tier1CfgTestBuilder));
             tier1_cfg_test_expect(&tally, builder != 0, "builder memory");
@@ -1201,6 +1292,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
                 tier1_cfg_test_expect(&tally, !generated || built, "generated case input");
                 if (built)
                 {
+                    tally.oracle = sample % oracle_every == 0;
+                    tally.oracle_mutants = sample % (oracle_every * 4) == 0;
                     tier1_cfg_test_case(&tally, &input, &output, &scratch, "generated case", sample % 8 == 0, 0, 0, false);
                 }
                 arena_pop_to(&output, output_saved);
@@ -1214,7 +1307,16 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.definition_mutants != 0, "the random programs' required definitions reach the definition mutant");
         tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.destination_mutants != 0 && tally.k0_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
+        // #939: every allocation's certificate proved, and the oracle reached some of them.
+        tier1_cfg_test_expect(&tally, tally.certificates == tally.allocations && tally.oracle_certificates != 0, "every allocation's certificate is proved, the oracle's share among them");
+        // A mutant that moves a value wrongly must fail the certificate too: every order, definition and split
+        // destination mutant. An interference or k0 mutant may only break a constraint the verifier checks (two SSA
+        // names of equal contents in one register at a block's start, a mask in k0 for a fragment nothing reads), and
+        // the certificate never refuses what the verifier accepts.
+        tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
+        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused), "the certificate refuses no mutant the verifier accepts");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0 (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, seed, count);
+        printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.certificate_only, tally.verifier_only);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);

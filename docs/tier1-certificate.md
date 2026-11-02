@@ -1,8 +1,11 @@
 # Tier 1 allocation certificates
 
-This is the checker core for [#939](https://github.com/buster14a/buster/issues/939),
-not a claim that the current native emitter has a complete machine-code
-certificate producer. There are two deliberately different entry points:
+This is [#939](https://github.com/buster14a/buster/issues/939)'s certificate
+checker and the producers that feed it. It certifies **allocations**: the
+source program, the allocation's stream of stores, reloads, moves and
+recomputations, and its block-entry assertions. It does not decode the native
+emitter's records (see "What the certificate proves"). There are three entry
+points:
 
 - `tier1_allocation_certificate_check` checks the interval allocator's existing
   fragment assignment. It cannot prove source uses, CFG edges or actual emitted
@@ -11,6 +14,10 @@ certificate producer. There are two deliberately different entry points:
   correspondence using block-entry assertions and actual sequential edge edits.
   `tier1_certificate_oracle` independently infers byte/value facts to a CFG
   fixpoint and cross-checks small cases.
+- `tier1_certificate_cfg` publishes that program for an allocation
+  `tier1_cfg.c` made over a CFG: the source from the preallocation
+  `Tier1CfgInput`, the stream, entry assertions and edges from the untrusted
+  `Tier1CfgAllocation`. `tier1_certificate_cfg_check` publishes and checks.
 
 All implementation and fixtures in this change are original project material
 under Apache-2.0 WITH LLVM-exception. No external checker code or corpus is
@@ -97,6 +104,18 @@ registers 16–31, arbitrary XOR networks, symbol/TLS recipes or cross-class
 register transfers. The decoder must refuse a target form whose full effects
 cannot be represented; it must not silently approximate it by a supported edit.
 
+Integer recipes belong to the value's own register class. A general register's
+constant is its payload. A vector or opmask constant is materialized within its
+class, the payload identifying the producer's justified constant. A
+`CONSTANT` edit writes a register of that class, never a slot or another class.
+
+An operand the source marks `BUSTER_CERT_RECIPE` may be its value's integer
+recipe itself rather than a location: location `BUSTER_CERT_NONE` in the
+rewritten instruction. A use is then an immediate, which reads no storage. A
+definition is then kept nowhere, and its value is left to its recipe. Such an
+operand can't be tied, tied to, or a copy's, and only a value with an integer
+recipe may have one. A frame recipe needs its base, so it is never an operand.
+
 A fact with location `BUSTER_CERT_NONE` says only that a source-certified recipe
 is available. It never gives a register contents. A register-required use
 needs a checked materializing instruction first. Frame-address recipes also
@@ -116,6 +135,81 @@ definitions of the base. The oracle erases a value globally on redefinition,
 so it accepts only while the recorded base is still the base's current
 incarnation, a strict subset of the fast checker's surviving-base cases.
 
+## CFG allocations
+
+`tier1_certificate_cfg.c` publishes the certificate of an allocation
+`tier1_cfg.c` made over a CFG (#140). Include it after `tier1_cfg.c` and
+`tier1_certificate.c`. Its two inputs stay apart:
+
+- **The source is `Tier1CfgInput` alone.** At each position it holds the uses
+  (a non-phi value's use at its own definition position is the definition's
+  requirement, not an operand), the registers of the fixed ranges that start
+  there (clobbered after the uses), and the non-phi definitions. These become
+  source records of at most `BUSTER_CERT_MAX_OPERANDS` operands or clobbers
+  each, in that order.
+  - Each operand's allowed registers are its value's (a definition's
+    `definition_registers` where given).
+  - A use or definition that isn't required may be in a slot
+    (`BUSTER_CERT_MEMORY`), or, for a rematerializable value, its recipe
+    itself (`BUSTER_CERT_RECIPE`).
+  - Each position's first record clobbers the general class's scratch
+    register: the selector's expansions use it (`BUSTER_TIER1_SELECT_SCRATCH`),
+    so no value may stay there between moves.
+  - The phis are the edges' simultaneous renames.
+  - A rematerializable value is an integer recipe of its class, with its own
+    id as the payload.
+- **The allocation is untrusted.** Its stream is what the consumers run. Each
+  position runs:
+  1. the stores of the fragments that leave a register for their value's slot;
+  2. the moves of a split at that position;
+  3. the reloads, register moves and recomputations of the fragments that
+     enter a register;
+  4. the position's records, at their fragments' locations.
+
+  The other parts:
+  - **Edges.** Each edge carries its resolved moves in order. A slot-to-slot
+    move, or a recomputation into a slot (a phi's home), goes through the
+    class's scratch register, as a consumer makes it.
+  - **Block entries.** Each block's certificate is where the allocation keeps
+    each value its intervals carry into the block, at
+    `tier1_cfg_entry_location`. A value recomputed there gets a recipe fact.
+  - **Shape.** Every column is in range, intervals and fragments are in order,
+    and each edge's placement agrees with its moves and degrees. Publication
+    validates only this shape; whether the values arrive is the checker's to
+    prove.
+
+Storage is what the source declares, for each class that has values: its
+allocatable, scratch and fixed-range registers, at the class's width (8 bytes
+for a general register, 16 for a vector one, or 64 where one past xmm15 is
+declared, 8 for an opmask register). Then come a slot per spilled value and
+each class's temporary slot. A class without values holds none, so its
+registers and the fixed ranges' clobbers of them are left out. On c-testsuite's
+subset this cut the checker's storage units from 199,184 to 67,624. An
+allocation naming other storage, or a transition the stream can't express (a
+store of a recomputed value, which has no register to store from), is refused
+as `TIER1_CERT_TRANSITION`. A use or definition outside its value's intervals
+is `TIER1_CERT_VALUE`. Blocks that block 0 doesn't reach never run, so the
+program leaves them out and counts them (`Tier1CertCfgStats.unreachable_blocks`).
+
+`Tier1CertCfgStats` reports the source's positions, records and operands, the
+stream's transitions, split moves and edge moves (each after expansion), the
+certificate's facts (and recipe facts), renames, reachable and unreachable
+blocks, edges, locations, units and the published program's bytes. On a
+refusal it names the block, value and position. Publication is linear in the
+input's uses, definitions and fixed registers, the allocation's intervals,
+fragments and moves, and the blocks each interval spans, with a binary search
+per operand and fact. It runs on the caller's output arena (restored on
+failure) and scratch arena (always restored).
+
+`tier1_cfg_verify` remains the independent structural checker. It also
+enforces the allocator's own constraints, which the certificate judges only
+by their effect on values. Two kinds of mutant show the difference. A value
+moved into k0 for a fragment no instruction reads is harmless, since no
+instruction reads it there. Two SSA names in one register at a block's start
+are harmless where they hold the same contents on every incoming edge, as a
+phi and its own operand can. Every other mutant `test-tier1-cfg` makes fails
+both checkers.
+
 ## Slow oracle
 
 `tier1_certificate_oracle.c` uses a different representation: dense sets of
@@ -130,7 +224,11 @@ an oracle could infer a useful register omitted from the certificate and
 incorrectly accept a certificate the fast checker rightly rejects.
 
 The oracle is deliberately limited to 64 values, 512 byte units and 64 blocks.
-Exceeding those bounds returns `TIER1_CERT_CAPACITY`, not success. General
+Exceeding those bounds returns `TIER1_CERT_CAPACITY`, not success.
+`tier1_certificate_oracle_scratch_size` gives a program's exact scratch need,
+or 0 past the bounds. A move saves only its two locations' rows before writing,
+and a source instruction saves the whole state only for a semantic copy: the
+other instructions read nothing they write. General
 structural and target-form validation is shared; symbolic transfer, storage,
 loop inference and XOR evaluation are independent.
 
@@ -188,6 +286,49 @@ throughput result is claimed. The contiguous byte updates and bounded record
 validation are candidates for measurement-driven vectorization; target-host
 evidence is still required before selecting a production fast-path policy.
 
+## Where the checker runs
+
+- **`test-tier1-allocation`** wraps every successful `tier1_allocate` and
+  `tier1_allocate_scalar` call of its fixtures with the fragment checker
+  (below), and runs the stream fixtures.
+- **`test-tier1-cfg`** checks every allocation both paths make with
+  `tier1_certificate_cfg` and `tier1_certificate_check`:
+  - the eleven fixtures (loops, a critical edge, phi swaps, slot cycles through
+    the temporary slot, values and masks across calls) and the random programs
+    (2,000 by default: loops, irreducible regions, rematerialization, fixed
+    ranges, all three classes);
+  - the slow oracle on every fixture and every 16th program
+    (`--oracle-every N`), which must give the same answer;
+  - the mutants of every 8th program (and, on every fourth oracle case, the
+    oracle's answer on each). Every order, definition and split-destination
+    mutant must fail the certificate, and the certificate must refuse no mutant
+    `tier1_cfg_verify` accepts.
+
+  On the default seed: 3,632 certificates, 281,318 facts, 201,918 edits. The
+  certificate refused 1,681 of 1,701 interference mutants and 1,537 of 1,551 k0
+  mutants; every other refusal of the 34 is one of the structural constraints
+  above.
+- **`test-tier1-cfg-source`** certifies every allocation both paths make of
+  real C (c-testsuite's subset, the frozen `sqlite3.c`, musl's units and the
+  SIMD fixtures in the correctness list) and reports the certificates' sizes. A
+  refused certificate fails the run.
+- **The emitter** checks each allocation before emitting from it when
+  `Tier1EmitOptions.certify` asks: the CFG consumer's final allocation by
+  `tier1_certificate_cfg_check`, the straight-line consumer's fragments by the
+  fragment checker. A refusal is `TIER1_EMIT_CERTIFICATE`, and
+  `Tier1EmitResult.certified` says it passed.
+  - Every emitter test sets the flag: `test-tier1-emit`, `test-tier1-pipeline`,
+    `test-tier1-masks` and the call, division, label, narrow, terminal,
+    dropped-definition and variadic suites they include.
+  - `test-tier1-pipeline` requires certified emissions with facts.
+  - The C driver's `--verify` sets it with `--tier1`. There, a refused
+    certificate is the `certificate` stage of `--tier1-report` and fails the
+    compile, rather than leaving the body to Tier 0, which would hide it.
+- **#938's harness** gates each allocation of an imported problem on
+  `tier1_problem_certify` (`tier1_problem_intervals.c`). That runs the fragment
+  checker on the adapter's one-block problems and names a refusal
+  `certificate-rejected` in the tally.
+
 ## Tests and current integration
 
 The existing `tier1_allocate_test.c` is now a coordinator; its original fixtures
@@ -219,28 +360,56 @@ clang -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=addr
 clang -std=c17 -O3 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -DBUSTER_CERTIFICATE_STANDALONE src/buster/compiler/tier1_certificate_test.c -o /tmp/buster-certificate-test && /tmp/buster-certificate-test
 ```
 
-Standalone qualification: **2,072 stream checks, zero failures** in an
-address/undefined-sanitized build, including the guard-page pass. The fragment
-mutations also passed earlier builds in an isolated shim using the fetched
-allocator input contract and original quadratic oracle. That shim result is
-not a full compiler build or an approved-host measurement. The PR's CI is the
-integration qualification.
+Standalone qualification: **2,087 stream checks, zero failures** in an
+address/undefined-sanitized build, including the guard-page pass and the recipe
+operands' and class constants' pairs (`tier1_cert_test_recipe_operands`).
 
-## Remaining #939 acceptance
+## Cost on real code
 
-This change deliberately does not close #939. Remaining work is:
+`benchmark-tier1-certificate [--only VARIANT] [preprocessor options] file...`
+builds `benchmark-tier1-cfg-source`'s corpus of every function `-c` compiles of
+the files, keeping each function's vector-path allocation. Every allocation must
+pass `tier1_cfg_verify`, and its certificate is published and proved once
+outside the time; a refusal fails the benchmark, which then reports no time.
 
-1. Independently bridge the real selector/native emitted records to this
-   source/stream contract, and have the allocator publish entry assertions as
-   its machine-view/CFG producer lands. Do not synthesize a passing emitted
-   stream from fragment assignments.
-2. Connect #938's snapshot/quality harness to the applicable checker. Interval
-   validation alone must not be labeled machine-code correctness certification.
-3. Qualify the integrated compiler and measure preparation, assertion
-   publication and check-only cost per actual source instruction on the locked
-   Ryzen 7 9700X, including certificate sizes, edits, edges, units and memory.
-   Keep raw logs, measurement harnesses and campaign artifacts in
-   `buster14a/buster-performance`, and link the pinned report here.
+It reports the corpus's IR instructions, values, blocks and edges. It reports
+the certificates' sizes: source positions, records and operands, the stream's
+edits by kind, facts, recipe facts, renames, locations, units, the programs'
+bytes and the checker's scratch (sums and the largest), and the units the
+checker read and wrote.
 
-Unsupported forms, missing producer evidence and unavailable target-host
-measurements are outstanding work, not passing acceptance gates.
+It then times five variants over every function, after a warm-up, in 21 passes
+whose order rotates:
+
+- `allocate`: `tier1_cfg_allocate`, the allocation certified;
+- `publish`: `tier1_certificate_cfg`, the allocator's share of the cost;
+- `check`: `tier1_certificate_check` alone, on programs published before;
+- `certify`: both, as `Tier1EmitOptions.certify` runs them;
+- `verify`: `tier1_cfg_verify`, for comparison.
+
+Each is given per IR instruction (time, cycles, instructions, IPC) and in
+cycles per certificate item: the operands, edits, facts and renames the
+checker's work is linear in. The 9700X job runs it on the frozen `sqlite3.c`
+where its sources change (`changes`' `tier1-certificate`). Its results are on
+#939, and the raw logs and record go in `buster14a/buster-performance`.
+
+## What the certificate proves
+
+The CFG certificate proves the allocation: every use reads its value, along
+every path, through every edge's moves, phi renames, fixed-range clobbers,
+spill slots and recomputations. It proves this for every allocation the Tier 1
+tests produce, and, with `--verify`, for every one the driver's `--tier1`
+emits from.
+
+The stream it checks is the allocation's own. The emitter turns that plan into
+records: moves, stores and reloads at known frame offsets, call saves,
+prologues and epilogues. Those records are not decoded back into the
+certificate's stream. A bridge from the actual records needs:
+
+- the emitter's provenance of each record;
+- a decoder of its moves and frame accesses (`x86_semantics.c`'s effects);
+- a recognizer of each node's selected records against the selector's
+  expansion.
+
+That stays outstanding. The trust boundary above still holds for it: a
+producer may not synthesize a passing machine stream from the allocation.

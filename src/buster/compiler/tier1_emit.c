@@ -54,6 +54,8 @@ typedef enum Tier1EmitError
     TIER1_EMIT_FRAME,
     TIER1_EMIT_TARGET,
     TIER1_EMIT_LIMIT,
+    // With Tier1EmitOptions.certify, an allocation whose certificate the checker refuses (#939).
+    TIER1_EMIT_CERTIFICATE,
 } Tier1EmitError;
 
 // The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_DIRECT and _GOT, which
@@ -73,6 +75,10 @@ struct Tier1EmitOptions
     // reaches every symbol directly.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
+    // #939: check each allocation before code is emitted from it, by the certificate checker of its kind: a CFG
+    // allocation's published program (tier1_certificate_cfg_check), a straight-line allocation's fragments
+    // (tier1_allocation_certificate_check). A refusal is TIER1_EMIT_CERTIFICATE. The C driver's --verify sets it.
+    bool certify;
 };
 
 typedef struct Tier1EmitPrepared Tier1EmitPrepared;
@@ -157,6 +163,11 @@ struct Tier1EmitResult
     // `exit_count` of them. The C driver's unwind tables take the early returns' teardowns from them (#177).
     uint32_t* exits;
     uint32_t exit_count;
+    // With Tier1EmitOptions.certify, that the allocation passed its certificate (#939), and for the CFG consumer's the
+    // certificate's facts and edits.
+    bool certified;
+    uint64_t certificate_facts;
+    uint64_t certificate_edits;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -987,6 +998,18 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     {
         const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
+    }
+    if (error == TIER1_EMIT_OK && chain && options->certify)
+    {
+        // The fragments' certificate (#939): a straight line has no edges, so the fragment checker is the whole proof of
+        // its allocation; its scratch on `scratch`, popped after.
+        const uint64_t mark = scratch->length;
+        const size_t size = tier1_interval_scratch_size(&emitted.prepared.allocation, &emitted.allocation);
+        void* buffer = size != 0 ? arena_push(scratch, size, 64) : 0;
+        Tier1IntervalReport report = { 0 };
+        error = buffer == 0 ? TIER1_EMIT_MEMORY : tier1_allocation_certificate_check(&emitted.prepared.allocation, &emitted.allocation, buffer, size, &report) == TIER1_CERT_OK ? TIER1_EMIT_OK : TIER1_EMIT_CERTIFICATE;
+        emitted.certified = error == TIER1_EMIT_OK;
+        arena_pop_to(scratch, mark);
     }
     if (error == TIER1_EMIT_OK && chain)
     {
