@@ -27,6 +27,11 @@ reading source files or creating/replacing output. This applies to both tiers
 and to `--scalar`. The final resolved option state decides: disabling all
 requested sanitizers or OpenMP with later negative options permits ordinary,
 uninstrumented compilation; disabling only part of a sanitizer group does not.
+Coverage follows the same rule: a later `-fno-sanitize-coverage=` (or `-fsanitize-coverage=0`) that leaves no
+instrumenting feature permits compilation, and the refusal names the last `-fsanitize-coverage=` spelling still active.
+The bare `-fsanitize-coverage`, which clang doesn't take, is refused by name in the semantic driver's actions (`-c`, a
+link, `check` and the dumps), but not by the stand-alone preprocessor (`-E`)
+([checker guide](commands/checker.md#unsupported-hardening-requests)).
 Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeling.
 `-fsyntax-only` suppresses `-c` in either order. A sanitizer or `_OPENMP` macro
 observed in a non-emitting action is not a promise that Buster can generate the
