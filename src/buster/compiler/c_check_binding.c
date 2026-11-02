@@ -95,17 +95,18 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
 // The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn.
 static bool check_input_parameter_marks(const CheckInput* input, const Parser* parser, uint8_t* marks)
 {
-    bool valid = parser != NULL && marks != NULL && input->body_declarations != NULL && input->parameters != NULL && input->parameter_next != NULL;
+    bool valid = parser != NULL && marks != NULL && check_sparse_present(input->body_declarations) &&
+                 check_sparse_present(input->parameters) && check_sparse_present(input->parameter_next);
     for (uint32_t opening = 0; valid && opening < parser->tokens.count; opening += 1)
     {
-        const uint32_t declaration = input->body_declarations[opening];
+        const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         valid = declaration == BUSTER_CHECK_NONE || declaration < parser->tokens.count;
-        for (uint32_t parameter = declaration != BUSTER_CHECK_NONE ? input->parameters[opening] : BUSTER_CHECK_NONE, steps = 0;
+        for (uint32_t parameter = declaration != BUSTER_CHECK_NONE ? check_sparse_get(input->parameters, opening) : BUSTER_CHECK_NONE, steps = 0;
              valid && parameter != BUSTER_CHECK_NONE && steps < parser->tokens.count; steps += 1)
         {
             valid = parameter < parser->tokens.count;
             marks[parameter] = 1;
-            parameter = input->parameter_next[parameter];
+            parameter = check_sparse_get(input->parameter_next, parameter);
         }
     }
     return valid;
@@ -171,7 +172,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     {
         const uint32_t token = events->declaration[event];
         const uint32_t kind = events->kind[event];
-        const bool local = token < count && output->declaration_bodies[token] < count;
+        const bool local = token < count && check_sparse_get(output->declaration_bodies, token) < count;
         const uint32_t parameter = token < count && parameters != NULL && parameters[token] != 0;
         const bool implicit = token < count && output->function_flags != NULL &&
                               (output->function_flags[token] & (CHECK_INPUT_FUNCTION_IMPLICIT | CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY)) != 0;
@@ -194,7 +195,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                                     parameter ? CHECK_WARNING_EVENT_UNUSED_PARAMETER : CHECK_WARNING_EVENT_UNUSED_VARIABLE;
         if (selected && token == chosen && !reported[token])
         {
-            const uint32_t body = output->declaration_bodies[token];
+            const uint32_t body = check_sparse_get(output->declaration_bodies, token);
             const uint32_t closing = body < count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
             const CheckWarningEvent warning = {
                 .id = id,
@@ -275,8 +276,9 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             }
         }
     }
-    const bool unused_columns = output->body_declarations != NULL && output->parameters != NULL && output->parameter_next != NULL &&
-                                output->declaration_bodies != NULL && output->declaration_kinds != NULL && output->static_objects != NULL &&
+    const bool unused_columns = check_sparse_present(output->body_declarations) && check_sparse_present(output->parameters) &&
+                                check_sparse_present(output->parameter_next) && check_sparse_present(output->declaration_bodies) &&
+                                output->declaration_kinds != NULL && output->static_objects != NULL &&
                                 output->thread_local != NULL && output->linkage != NULL;
     if (valid && unused_columns && output->report_count == 0 && events->count != 0)
     {

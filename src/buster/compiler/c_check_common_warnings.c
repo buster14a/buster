@@ -16,6 +16,13 @@ struct CheckCommonNote
 
 static uint32_t check_common_address_root(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node, bool members);
 
+// A sparse token column's entry, or BUSTER_CHECK_NONE where the input left the column absent.
+static uint32_t check_common_sparse_get(CheckSparseColumn column, uint32_t token)
+{
+    const uint32_t result = check_sparse_present(column) ? check_sparse_get(column, token) : BUSTER_CHECK_NONE;
+    return result;
+}
+
 static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser* parser, const CheckInput* input, uint32_t token, uint32_t id, bool default_ignored)
 {
     const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, false);
@@ -705,8 +712,9 @@ static bool check_common_parameter_token(const CheckInput* input, const Parser* 
     bool result = false;
     for (uint32_t opening = 0; !result && opening < parser->tokens.count; opening += 1)
     {
-        for (uint32_t parameter = input->body_declarations[opening] != BUSTER_CHECK_NONE ? input->parameters[opening] : BUSTER_CHECK_NONE;
-             !result && parameter != BUSTER_CHECK_NONE && parameter < parser->tokens.count; parameter = input->parameter_next[parameter])
+        for (uint32_t parameter = check_common_sparse_get(input->body_declarations, opening) != BUSTER_CHECK_NONE ?
+                                  check_common_sparse_get(input->parameters, opening) : BUSTER_CHECK_NONE;
+             !result && parameter != BUSTER_CHECK_NONE && parameter < parser->tokens.count; parameter = check_common_sparse_get(input->parameter_next, parameter))
         {
             result = parameter == token;
         }
@@ -731,7 +739,7 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
             const CheckValue* value = root < graph->count ? &root_value : NULL;
             const uint32_t declaration = value != NULL && value->object != 0 ? value->object - 1 : BUSTER_CHECK_NONE;
             const bool local = value != NULL && value->category == CHECK_LVALUE && declaration < input->token_count &&
-                               input->declaration_bodies[declaration] < parser->tokens.count && !input->static_objects[declaration] &&
+                               check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count && !input->static_objects[declaration] &&
                                !input->thread_local[declaration];
             if (local && check_common_in_return(parser, graph->tokens[root]))
             {
@@ -1292,7 +1300,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         {
             const uint32_t format_node = graph->argument_nodes[offset + format_index];
             const uint32_t format_token = format_node < graph->count ? graph->tokens[format_node] : BUSTER_CHECK_NONE;
-            const uint32_t string = input->string_ids != NULL && format_token < input->token_count ? input->string_ids[format_token] : BUSTER_CHECK_NONE;
+            const uint32_t string = format_token < input->token_count ? check_common_sparse_get(input->string_ids, format_token) : BUSTER_CHECK_NONE;
             if (string != BUSTER_CHECK_NONE && string < input->string_count && input->strings != NULL)
             {
                 const uint8_t* bytes = input->strings[string].bytes;
@@ -1684,7 +1692,7 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         for (uint32_t at = body; at < body_end && at < count && !unknown_case; at += 1)
         {
             const uint8_t kind = parser->tokens.kinds[at];
-            const bool owned = input->control_owners != NULL && input->control_owners[at] == closer;
+            const bool owned = check_common_sparse_get(input->control_owners, at) == closer;
             if (kind == PARSE_KIND_DEFAULT && owned)
             {
                 has_default = true;
@@ -2077,16 +2085,15 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         // no expression node, so its write is before every later read; a read inside it is still its own.
         for (uint32_t declaration = 0; declaration < count; declaration += 1)
         {
-            const uint32_t node = input->initializer_nodes != NULL ? input->initializer_nodes[declaration] : BUSTER_CHECK_NONE;
+            const uint32_t node = check_common_sparse_get(input->initializer_nodes, declaration);
             if (input->declaration_kinds[declaration] == C_BINDING_OBJECT)
             {
                 if (node < graph->count)
                 {
                     first_write[declaration] = node + 1;
                 }
-                else if (input->initializer_begins != NULL && input->initializer_ends != NULL &&
-                         input->initializer_begins[declaration] != BUSTER_CHECK_NONE &&
-                         input->initializer_ends[declaration] != BUSTER_CHECK_NONE)
+                else if (check_common_sparse_get(input->initializer_begins, declaration) != BUSTER_CHECK_NONE &&
+                         check_common_sparse_get(input->initializer_ends, declaration) != BUSTER_CHECK_NONE)
                 {
                     first_write[declaration] = 0;
                 }
@@ -2118,8 +2125,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 const uint32_t declaration = input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
                 const uint32_t order = input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                 if (declaration < count && order < graph->count && input->declaration_kinds[declaration] == C_BINDING_OBJECT &&
-                    input->declaration_bodies[declaration] < parser->tokens.count && !input->static_objects[declaration] &&
-                    !input->thread_local[declaration] && input->initializer_nodes[declaration] == BUSTER_CHECK_NONE && !addressed[declaration])
+                    check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count && !input->static_objects[declaration] &&
+                    !input->thread_local[declaration] && check_common_sparse_get(input->initializer_nodes, declaration) == BUSTER_CHECK_NONE && !addressed[declaration])
                 {
                     first_read[declaration] = order < first_read[declaration] ? order : first_read[declaration];
                     first_use_read[declaration] = order < first_use_read[declaration] ? order : first_use_read[declaration];
@@ -2128,8 +2135,9 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         }
         for (uint32_t opening = 0; opening < count; opening += 1)
         {
-            for (uint32_t parameter = input->body_declarations[opening] != BUSTER_CHECK_NONE ? input->parameters[opening] : BUSTER_CHECK_NONE;
-                 parameter != BUSTER_CHECK_NONE && parameter < count; parameter = input->parameter_next[parameter])
+            for (uint32_t parameter = check_common_sparse_get(input->body_declarations, opening) != BUSTER_CHECK_NONE ?
+                                      check_common_sparse_get(input->parameters, opening) : BUSTER_CHECK_NONE;
+                 parameter != BUSTER_CHECK_NONE && parameter < count; parameter = check_common_sparse_get(input->parameter_next, parameter))
             {
                 parameters[parameter] = 1;
             }
@@ -2241,7 +2249,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         }
         for (uint32_t declaration = 0; valid && declaration < count; declaration += 1)
         {
-            const bool local = input->declaration_kinds[declaration] == C_BINDING_OBJECT && input->declaration_bodies[declaration] < parser->tokens.count &&
+            const bool local = input->declaration_kinds[declaration] == C_BINDING_OBJECT && check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
                                !input->static_objects[declaration] && !input->thread_local[declaration];
             const bool parameter = local && parameters[declaration] != 0;
             const bool plain = local && !parameter && !addressed[declaration];
@@ -2250,8 +2258,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             const bool scalar = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER ||
                                 kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_NULLPTR;
             const uint32_t name = parser->tokens.names[declaration];
-            const uint32_t initializer_begin = input->initializer_begins != NULL ? input->initializer_begins[declaration] : BUSTER_CHECK_NONE;
-            const uint32_t initializer_end = input->initializer_ends != NULL ? input->initializer_ends[declaration] : BUSTER_CHECK_NONE;
+            const uint32_t initializer_begin = check_common_sparse_get(input->initializer_begins, declaration);
+            const uint32_t initializer_end = check_common_sparse_get(input->initializer_ends, declaration);
             uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? graph->tokens[first_read[declaration]] : BUSTER_CHECK_NONE;
             // A lone identifier in a brace initializer (`int x = { x };`) is a self-read the graph's value column does
             // not retain; the declaration's own token range finds it. An expression initializer's reads are the
@@ -2315,7 +2323,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             {
                 const char* message = check_warning_text(scratch, "variable '%.*s' is uninitialized when used within its own initialization",
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                const uint32_t body = input->declaration_bodies[declaration];
+                const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
                 const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : read_token;
                 check_common_report_at(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message, NULL, 0, scratch);
                 continue;
@@ -2333,7 +2341,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 const CheckCommonNote note = { declaration + 1 < parser->tokens.count ? declaration + 1 : declaration,
                     check_warning_text(scratch, "initialize the variable '%.*s' to silence this warning",
                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name)) };
-                const uint32_t body = input->declaration_bodies[declaration];
+                const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
                 const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : read_token;
                 check_common_report_at(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
                                        self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
@@ -2343,7 +2351,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             {
                 const char* message = check_warning_text(scratch, "parameter '%.*s' set but not used",
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                const uint32_t body = input->declaration_bodies[declaration];
+                const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
                 const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : declaration;
                 check_common_report_phase_at(parser, pp, input, declaration, publication, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true,
                                              PP_DIAGNOSTIC_RETURN, message, scratch);
