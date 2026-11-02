@@ -5422,6 +5422,8 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
     unlink(object);
 }
 
+#include "c_check_hardening_driver_test.c"
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -6268,6 +6270,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_unsupported_codegen(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_hardening(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
