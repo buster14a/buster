@@ -377,6 +377,8 @@ struct CheckInput
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
     bool implicit_function_c99;
+    // -fcommon (PredefinesOptions.common, #147): the emission makes every tentative definition a common symbol.
+    bool common_tentatives;
     bool implicit_function_system;
     uint32_t* declarations;
     TypeId* declared_types;
@@ -8059,6 +8061,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
+                         .common_tentatives = pp->options.predefines.common,
                          .implicit_function_system = pp->options.implicit_function_system };
     check_input_kr_warning_policy(input, &pp->options);
     // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target

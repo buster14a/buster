@@ -3,7 +3,7 @@
 //
 // benchmark-check-lanes' preparation (#1045): the program it emits is the one -c compiles for the target its options give.
 // Original fixtures run through the command on one lane and one pass: a unit of 512-bit vectors, which the baseline x86-64
-// profile refuses ("vector results wider than the target's registers") and znver5 takes, must be measured with
+// profile refuses ("vector operations wider than the target's registers") and znver5 takes, must be measured with
 // -march=znver5 and fail at its emission for the baseline, as -c does; and a baseline unit whose function's target
 // attribute ("avx2") takes a 32-byte vector must be measured, which it is only when the program has the options'
 // predefines to resolve the attribute against. Each case's exit status and report line are checked.

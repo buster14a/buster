@@ -308,7 +308,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .functions = 2,
             .measured = 1,
             .left_out = 1,
-            .report = { "/5.c unsupported=\"vector results wider than the target's registers\"\n", "/0.c functions=2 entries=",
+            .report = { "/5.c unsupported=\"vector operations wider than the target's registers\"\n", "/0.c functions=2 entries=",
                         " totals files=1 left_out=1 failures=0 measurement=reported\n" },
         },
         {

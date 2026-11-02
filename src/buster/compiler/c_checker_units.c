@@ -359,6 +359,28 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     return valid;
 }
 
+// Whether a unit's definition `symbol` of `link` takes a name's place from the earlier one, `earlier` of `earlier_link`,
+// and whether the two are a duplicate (#147): a strong definition takes a weak one's or a common one's place, a common
+// one (BUSTER_LINK_SYMBOL_COMMON) a weak one's and a smaller common one's (by its size, then its atom's alignment), as a
+// linker keeps the largest of a name's commons, and only two strong definitions are a duplicate.
+static bool check_units_merge_replaces(const Link* earlier_link, SymbolId earlier, const Link* link, SymbolId symbol, bool* duplicate)
+{
+    const uint8_t was = earlier_link->symbols.flags[earlier];
+    const uint8_t is = link->symbols.flags[symbol];
+    const bool was_weak = (was & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool is_weak = (is & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool was_common = (was & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+    const bool is_common = (is & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+    const bool was_strong = !was_weak && !was_common;
+    const bool is_strong = !is_weak && !is_common;
+    const uint64_t was_size = earlier_link->symbols.size[earlier];
+    const uint64_t is_size = link->symbols.size[symbol];
+    const bool larger = is_size > was_size ||
+                        (is_size == was_size && link->atoms.alignment_log2[link->symbols.atom[symbol]] > earlier_link->atoms.alignment_log2[earlier_link->symbols.atom[earlier]]);
+    *duplicate = was_strong && is_strong;
+    return is_strong ? !was_strong : is_common && (was_weak || (was_common && larger));
+}
+
 // The units' kept links joined into `link`, in the units' order, as check_program_emit builds one unit's (#152): every
 // symbol first, a global name's once and each unit's locals its own, the units' definitions marked as the program's;
 // then the C runtime, which binding (`binding`, bind_begin) joins between the program's symbols and its atoms, its units
@@ -465,16 +487,15 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
             strong[merged] |= binding_flags != BUSTER_LINK_SYMBOL_WEAK;
             if (defined)
             {
-                const bool weak = binding_flags == BUSTER_LINK_SYMBOL_WEAK;
                 const bool earlier = defining_unit[merged] != count;
-                const bool earlier_weak = earlier && (units[defining_unit[merged]].kept.link.symbols.flags[defining_symbol[merged]] & BUSTER_LINK_SYMBOL_BINDING) ==
-                                                         BUSTER_LINK_SYMBOL_WEAK;
-                if (!earlier || (earlier_weak && !weak))
+                bool twice = false;
+                const bool replaces = earlier && check_units_merge_replaces(&units[defining_unit[merged]].kept.link, defining_symbol[merged], unit, s, &twice);
+                if (!earlier || replaces)
                 {
                     defining_unit[merged] = u;
                     defining_symbol[merged] = s;
                 }
-                else if (!earlier_weak && !weak)
+                else if (twice)
                 {
                     duplicate_unit = u;
                     duplicate = merged;
@@ -836,13 +857,13 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
         {
             const bool earlier = resolution->defining != UINT32_MAX;
             const CheckUnitsMergeRecord definer = earlier ? merge->records[resolution->defining] : (CheckUnitsMergeRecord){ 0 };
-            const bool earlier_weak = earlier && (merge->units[definer.unit].kept.link.symbols.flags[definer.symbol] & BUSTER_LINK_SYMBOL_BINDING) ==
-                                                     BUSTER_LINK_SYMBOL_WEAK;
-            if (!earlier || (earlier_weak && !weak))
+            bool twice = false;
+            const bool replaces = earlier && check_units_merge_replaces(&merge->units[definer.unit].kept.link, definer.symbol, unit, record.symbol, &twice);
+            if (!earlier || replaces)
             {
                 resolution->defining = (uint32_t)r;
             }
-            else if (!earlier_weak && !weak && resolution->duplicate == UINT32_MAX)
+            else if (twice && resolution->duplicate == UINT32_MAX)
             {
                 resolution->duplicate = (uint32_t)r;
                 const uint64_t key = (uint64_t)record.unit << 32 | record.symbol;

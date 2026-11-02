@@ -859,6 +859,9 @@ struct PredefinesOptions
     uint8_t dwarf2_cfi_asm;
     uint8_t asynchronous_unwind_tables;
     uint8_t unwind_tables;
+    // -fcommon (the last of it and -fno-common): every tentative definition of external linkage a common symbol (#147),
+    // which changes no macro.
+    bool common;
     bool exceptions;
     uint8_t exception_model;
     // The last -g option of clang's g_Group turns debug information on (-g, -g1, -ggdb, -gdwarf-4, -gcodeview,
@@ -1743,6 +1746,10 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     else if (strcmp(argument, "-funwind-tables") == 0 || strcmp(argument, "-fno-unwind-tables") == 0)
     {
         options->unwind_tables = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
+    {
+        options->common = argument[2] == 'c';
     }
     else if (strcmp(argument, "-fexceptions") == 0 || strcmp(argument, "-fno-exceptions") == 0)
     {

@@ -338,7 +338,11 @@ in the command line's order, as the emission builds one unit's
 1. **Symbols.** Each unit's symbols in its order. A global name is one symbol
    for all the units, found in a table of the names' hashes; a local symbol is
    its unit's own. A name that two units define is an error ("multiple
-   definition of 'x'"); a weak definition yields to a strong one. The symbol
+   definition of 'x'"); a weak definition yields to a strong one, and a common
+   one (GNU's `common` attribute or `-fcommon`, `BUSTER_LINK_SYMBOL_COMMON`, #147)
+   to a strong one too, while it takes a weak one's place and a smaller common
+   one's (by its size, then its alignment: `check_units_merge_replaces`, which
+   both merges share), as a linker keeps the largest of a name's commons. The symbol
    takes its definition's flags, the most constraining visibility any unit
    gives it, and for a reference a weak binding only when every unit's
    reference is weak. The units' definitions are the program's

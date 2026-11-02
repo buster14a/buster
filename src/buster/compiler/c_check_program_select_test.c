@@ -415,7 +415,7 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "hidden-symbol-visibility-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
-        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "explicit-common-publishes-a-common-symbol", 1, 1, CHECK_PROGRAM_OK, 0, 0, 0, false);
     // A section attribute's definition emits as any other's: check_program_sections gives its atom its section (#619).
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",

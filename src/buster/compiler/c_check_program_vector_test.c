@@ -483,9 +483,11 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         { "baseline-narrow-and-wide-transport",
           "typedef int V __attribute__((vector_size(8)));typedef unsigned char C __attribute__((vector_size(4)));\n"
           "static v16su hold;static void wide(v16su a){v16su b=a;hold=b;}static V narrow(V a){return a+3;}\n"
+          "static v16su back(v16su a){return a;}static v8sf half(v8sf a){return a;}static v8df pair(v8df a,v16su b){hold=b;return a;}\n"
           "int tested(int n){unsigned h=2166136261u;struct S{C v;unsigned guard;} s={{1,2,3,(unsigned char)n},0xdeadbeef};\n"
           "C t=s.v+2;s.v=t;FOLD(s);V a={n,-n},b=narrow(a);V out[2]={a,b};out[0]=out[1];FOLD(out);\n"
-          "v16su x;fill(&x,64,n);wide(x);v16su z=hold;FOLD(z);return (int)h;}\n"
+          "v16su x;fill(&x,64,n);wide(x);v16su z=hold;FOLD(z);v16su y=back(x);FOLD(y);v8sf f;fillf((float*)&f,8,n);v8sf g=half(f);FOLD(g);\n"
+          "v8df d;fill(&d,64,n+3);v8df e=pair(d,y);FOLD(e);FOLD(hold);return (int)h;}\n"
         },
         { "baseline-floating-pressure",
           "static double consume(double a,double b,double c,double d,double e,double f,double g,double h,double i,double j,double k,double l,double m,double o,double p,double q,v4si v){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+v[1];}\n"
@@ -540,9 +542,6 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));int tested(V a,V b){V c;c=a+b;return c[0];}",
                                                "baseline-wide-vector-operator", true, false, 0, 0,
                                                "vector operations wider than the target's registers", &target);
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a){return a;}",
-                                               "baseline-wide-vector-result", true, false, 0, 0,
-                                               "vector results wider than the target's registers", &target);
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
                                                "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
         }
