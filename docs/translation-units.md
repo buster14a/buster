@@ -326,7 +326,7 @@ So a units lane does five things:
 
 ### The units' memory
 
-[The record](https://github.com/buster14a/buster-performance/tree/49eac24cd07acdea5fdcb607e9595f7bc4c1a12a/docs/measurements/units-memory-1109-2026-11-02)
+[The record](https://github.com/buster14a/buster-performance/tree/a2219181c16d0cc0a355d9ea08a25212f1436d98/docs/measurements/units-memory-1109-2026-11-02)
 has this section's and the next one's measurements, their scripts and their
 machines.
 
@@ -401,7 +401,12 @@ By default no unit waited, and the run took main's time and memory: its
 the `main.c`-sized units (4.2 GB each by estimate, 4.9 GB for
 `main_unit_frontend.c`) ran at most three at a time beside the small ones,
 and the run took 24% longer and stayed under the budget; under 6 GiB they
-ran one at a time.
+ran one at a time. #1109's own command, the sources linked into one
+executable (`-o selfhost ... -lm -lpthread`, 42 sources by then), peaked at
+27.7 and 28.1 GiB by default and at 10.99 and 10.98 GiB under 12 GiB,
+against 10.86 and 10.92 GiB for `-c` under it: the links the lanes keep
+add 60 to 130 MB, inside the budget's spare eighth, and the self-hosted
+compiler ran.
 
 ### Huge pages on a virtual machine
 
