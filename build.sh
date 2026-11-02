@@ -1,146 +1,166 @@
 #!/usr/bin/env bash
-# ./build.sh builds build/compiler, the only thing it writes under build/ besides compile_commands.json. It compiles the
-# translation units in a clang process each, one per core at a time, the longest first (main.c's units, which include
-# most of the compiler, take most of the time), then links their objects in the sources' order: the same executable as
-# one clang command for all of them. It reports how long the compiles took, and which took longest.
-# ./build.sh check-call-graph checks the no-recursion rule on the built compiler's call graph: it writes the LLVM IR of
-# the same translation units into a temporary directory, one per allowed core, and runs build/compiler check-call-graph on it.
-# The IR is clang's before any LLVM pass, so a call in it is a call in the source, at the build's own optimization
-# level, so it holds every body the build may inline (at -O0, clang doesn't emit an extern inline body at all). First it
-# captures src/buster/compiler/call_graph_capture the same way, whose cycle runs through such a body, and fails if the
-# check doesn't report it.
-# ./build.sh lexer-variant NAME=SOURCE... builds build/compiler with other lexers in it, for benchmark-lexer to check
-# and time beside c_tokenize in one process: each SOURCE is a copy of c_lexer.c (compiled through
-# src/buster/compiler/c_lexer_variant.c into c_lexer_variant_NAME), or that file's assembly (.s), which
-# ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s writes with debug information, and label-spills may label.
-# ./build.sh shifts DIRECTORY SOURCE SHIFT... builds build/compiler, then links the same objects again into
-# DIRECTORY/compiler-SHIFT for each SHIFT, a number of bytes, with that much padding in .text before the objects of
-# SOURCE (a source's file name), a multiple of its .text's alignment: its code and what the linker places after it move
-# by SHIFT, the same instructions at other addresses. The same code ran up to 2% faster or slower so on the 9700X
-# (#509), so time-runs compares builds over several placements.
-# print-compile-flags and print-sources print expanded compile arguments and source paths as NUL-delimited argv,
-# without building. Consumers read arrays rather than reevaluating shell text from this script.
-set -e
-# Fuzzing is opt-in. Its entry source defines buster_fuzz_test_input and is
-# included where the compiler's normal entry point has access to its modules.
-case "${BUSTER_FUZZ_AVAILABLE:-0}" in
-    0) [ -z "${BUSTER_FUZZ_ENTRY:-}" ] || { echo 'build.sh: BUSTER_FUZZ_ENTRY requires BUSTER_FUZZ_AVAILABLE=1' >&2; exit 1; } ;;
-    1) BUSTER_SANITIZER=${BUSTER_SANITIZER:-address} ;;
-    *) echo 'build.sh: BUSTER_FUZZ_AVAILABLE must be 0 or 1' >&2; exit 1 ;;
-esac
-sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_checker.c src/buster/compiler/main_unit_check_builtins.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/dominators_benchmark.c src/buster/compiler/tier1_allocate_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/c_checker_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/tier1_frame_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c src/buster/compiler/tier1_schedule_benchmark.c src/buster/compiler/tier1_select_benchmark.c src/buster/compiler/tier1_model_measure.c src/buster/compiler/emission_metadata_test.c)
-# The stack-protector policy is pinned here (#916): a distribution's Clang may default to
-# -fstack-protector-strong while the official release CI stages does not, so the host's configured
-# default would otherwise decide the compiler's code and its measurement. The owner chose no stack
-# protection for now, which matches the official release's default and keeps host and CI builds
-# identical. check_stack_protector below fails a build whose link still references the canary.
-# The compiler's predefined macros still follow the host driver's configured default (c_predefines.c),
-# which -fno-stack-protector would hide, so record that default before adding the flag.
-case "$(clang -dM -E -x c /dev/null)" in
-    *'#define __SSP_ALL__ '*) host_ssp=BUSTER_PREDEFINES_SSP_ALL ;;
-    *'#define __SSP_STRONG__ '*) host_ssp=BUSTER_PREDEFINES_SSP_STRONG ;;
-    *'#define __SSP__ '*) host_ssp=BUSTER_PREDEFINES_SSP_ON ;;
-    *) host_ssp=BUSTER_PREDEFINES_SSP_OFF ;;
-esac
-flags=(-march="${BUSTER_HOST_ARCH:-native}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -fno-stack-protector
-    "-DBUSTER_HOST_SSP_DEFAULT=$host_ssp")
-# The target-query defaults follow the Clang driver used to build this compiler.
-# Keep the triple as a single argument and reject text that cannot be a triple.
-clang_default_target=$(clang -dumpmachine)
-[[ "$clang_default_target" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "build.sh: invalid clang default target" >&2; exit 1; }
-flags+=("-DBUSTER_CLANG_DEFAULT_TARGET=\"$clang_default_target\"")
-# The scalar host build retains the vector kernels in source but does not emit
-# them. Their unused helpers are expected in that build alone.
-host_defines=$(clang "${flags[@]}" -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
-if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$host_defines"; then
-    flags+=(-Wno-unused-function -Wno-psabi)
-    echo "build.sh: host execution: scalar (${BUSTER_HOST_ARCH:-native})" >&2
-fi
-optimization=-O3
-# The executable's debug information: -g, unless BUSTER_DEBUG_INFO is 0, which leaves it out of the sources' objects
-# and takes a fifth of the build's time (the 9700X job builds so, since nothing there reads it). Clang's code with -g is
-# its code without it but for a few functions' stack slots.
-debug=(-g)
-case "${BUSTER_DEBUG_INFO-1}" in
-    1) ;;
-    0) debug=() ;;
-    *) echo "build.sh: BUSTER_DEBUG_INFO must be 0 or 1" >&2; exit 1 ;;
-esac
-# Sanitizer builds keep the production semantics (-fwrapv, unsigned char and
-# aliasing) and instrument every unit and the final link with the same flags.
-# TSan requires PIE; use it for all diagnostic builds. Keep the ordinary fixed
-# address executable and its benchmark layout unchanged.
-sanitizer_flags=()
-link_mode=(-no-pie)
-case "${BUSTER_SANITIZER:-none}" in
-    none) ;;
-    address) sanitizer_flags=(-fsanitize=address,undefined,bounds -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=always) ;;
-    undefined) sanitizer_flags=(-fsanitize=undefined,bounds) ;;
-    thread) sanitizer_flags=(-fsanitize=thread) ;;
-    memory) sanitizer_flags=(-fsanitize=memory -fsanitize-memory-track-origins=2) ;;
-    *) echo 'build.sh: BUSTER_SANITIZER must be none, address, undefined, thread or memory' >&2; exit 1 ;;
-esac
-if [ "${BUSTER_SANITIZER:-none}" != none ]; then
-    [ -z "${BUSTER_HOST_RUNTIME:-}" ] || { echo 'build.sh: sanitizers require the host runtime, not BUSTER_HOST_RUNTIME' >&2; exit 1; }
-    sanitizer_flags+=(-fno-sanitize-recover=all -fno-sanitize-trap=all -fno-omit-frame-pointer -fno-optimize-sibling-calls -fPIE)
-    flags+=("${sanitizer_flags[@]}")
-    case "${BUSTER_SANITIZER_OPTIMIZATION:-3}" in
-        1|2|3) optimization="-O${BUSTER_SANITIZER_OPTIMIZATION:-3}" ;;
-        *) echo 'build.sh: BUSTER_SANITIZER_OPTIMIZATION must be 1, 2 or 3' >&2; exit 1 ;;
-    esac
-    debug=(-gline-tables-only)
-    link_mode=(-pie)
-fi
-fuzz_libraries=()
-if [ "${BUSTER_FUZZ_AVAILABLE:-0}" = 1 ]; then
-    [ "${BUSTER_SANITIZER:-none}" != thread ] || { echo 'build.sh: libFuzzer cannot be combined with ThreadSanitizer' >&2; exit 1; }
-    fuzz_entry=$(realpath "${BUSTER_FUZZ_ENTRY:-src/buster/compiler/fuzz.c}")
-    [[ -f "$fuzz_entry" && "$fuzz_entry" != *[\"\\]* && "$fuzz_entry" != *$'\n'* ]] || { echo 'build.sh: BUSTER_FUZZ_ENTRY must name a C file without quotes, backslashes or newlines' >&2; exit 1; }
-    # Clang's per-target runtime directory holds it (the official releases' only layout); older layouts name the
-    # architecture in the file.
-    fuzz_runtime="$(clang -print-runtime-dir)/libclang_rt.fuzzer_no_main.a"
-    [[ -f "$fuzz_runtime" ]] || fuzz_runtime=$(clang -print-file-name=libclang_rt.fuzzer_no_main-x86_64.a)
-    [[ "$fuzz_runtime" = /* && -f "$fuzz_runtime" ]] || { echo 'build.sh: Clang libFuzzer no-main runtime is missing' >&2; exit 1; }
-    flags+=(-fsanitize=fuzzer-no-link -DBUSTER_FUZZ_AVAILABLE=1 "-DBUSTER_FUZZ_ENTRY=\"$fuzz_entry\"")
-    fuzz_libraries=("$fuzz_runtime" -lstdc++ -pthread)
-fi
-# The order the compiles start in, each source's file name once, the longest first by their times on the 9700X (#270):
-# the build runs at most one compile per core (cores, below), so a long one that started late would make it wait for
-# it. A new source goes where its time puts it.
-order=(main_unit_checker.c main_unit_backend.c main_unit_frontend.c main_unit_executable.c main_unit_dynamic.c
-    main_unit_link.c c_parser_benchmark.c main.c main_unit_x86.c main_unit_types.c main_unit_check_builtins.c
-    c_files_benchmark.c c_preprocessor_benchmark.c link_benchmark.c executable_benchmark.c
-    main_unit_assembler.c foreign_benchmark.c tier0_benchmark.c snapshot_benchmark.c x86_64_encoder_benchmark.c
-    bind_benchmark.c c_refine_benchmark.c c_checker_benchmark.c import_benchmark.c tier1_select_benchmark.c
-    c_lexer_benchmark.c branch_sizing_benchmark.c object_writer_benchmark.c x86_64_disassembler_benchmark.c
-    calling_convention_benchmark.c tier1_schedule_benchmark.c x86_semantics_benchmark.c tier1_model_measure.c
-    c_types_benchmark.c dominators_benchmark.c tier1_frame_benchmark.c tier1_allocate_benchmark.c lane_benchmark.c
-    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c emission_metadata_test.c)
-# The sources' indices in `order`'s order, into `indices`. Fails, naming it, for two sources of one file name, which
-# `order` couldn't tell apart, for a file that `order` names twice or that isn't a source, and for a source that it
-# doesn't name.
-compile_order()
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+#
+# The front end of the CMake build (CMakeLists.txt, CMakePresets.json; docs/commands/build.md has the details):
+#
+#   ./build.sh [build] [--config Debug|Release] [--target TARGET]... [--jobs N] [--verbose]
+#   ./build.sh test [--config Debug|Release] [--jobs N] [-- CTEST_ARGUMENT...]
+#   ./build.sh clean [--config Debug|Release | --all]
+#   ./build.sh configure
+#   ./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-output [--config C]
+#   ./build.sh check-call-graph [--config C] [--jobs N]
+#   ./build.sh lexer-variant [--config C] [--jobs N] NAME=SOURCE...
+#   ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
+#   ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
+#
+# A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
+# runtime, sanitizer, fuzzing and debug information, only when the settings, PATH or the toolchain changed since it
+# last did (a changed clang starts the tree afresh), then has Ninja build what changed: an unchanged build compiles,
+# links and bakes nothing. It builds Release unless --config says Debug, at most one compile per core of the CPUs it may
+# run on, and when it builds the executable, build/cmake/VARIANT/CONFIG/compiler, it publishes that file as
+# build/compiler (a hard link, the same file) and its configuration's compile commands as build/compile_commands.json,
+# once the build has succeeded. Builds of one tree, and publications, wait for each other.
+#
+# print-compile-flags, print-sanitizer-flags and print-sources print expanded arguments and source paths as
+# NUL-delimited argv, without building (cmake/BusterPrint.cmake); consumers read arrays rather than reevaluating shell
+# text from this script. print-output prints the configuration's executable's path.
+set -euo pipefail
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+caller="$PWD"
+
+usage()
 {
-    local -A index=()
-    local name
-    indices=()
-    for i in "${!sources[@]}"; do
-        name="$(basename "${sources[$i]}")"
-        [ -z "${index[$name]-}" ] || { echo "build.sh: two sources are named $name, which order names by file name" >&2; return 1; }
-        index["$name"]="$i"
-    done
-    for name in "${order[@]}"; do
-        [ -n "${index[$name]-}" ] || { echo "build.sh: order names $name, which isn't a source or is named twice" >&2; return 1; }
-        indices+=("${index[$name]}")
-        unset "index[$name]"
-    done
-    [ "${#index[@]}" -eq 0 ] || { echo "build.sh: order doesn't name ${!index[*]}" >&2; return 1; }
+    sed -n '/^#   \.\/build\.sh/s/^#   //p' "$root/build.sh" >&2
+    exit 2
 }
-compile_order
-# The number of cores of the CPUs this process may run on, by their core_cpus_list, or 0 if /sys doesn't say: the
-# build runs at most one compile per core, since two clang processes on a core's two threads slow each other down, the
-# longest among them. On the 9700X before main.c's homes, its 15 threads compiling at once took 40.0 s and 331 s of CPU,
-# and its 8 cores one compile each, the longest first, 32.3 s and 233 s; with them, 25.3 s and 200 s (#270).
+
+die()
+{
+    printf 'build.sh: %s\n' "$*" >&2
+    exit 1
+}
+
+# $1 as an absolute path, a relative one being relative to the directory build.sh started in.
+absolute()
+{
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s\n' "$caller/$1" ;;
+    esac
+}
+
+command=build
+case "${1-}" in
+    build|test|clean|configure|print-sources|print-compile-flags|print-sanitizer-flags|print-output|check-call-graph|lexer-variant|lexer-variant-assembly|shifts)
+        command="$1"
+        shift
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+esac
+config=Release
+config_given=0
+jobs=""
+targets=()
+verbose=0
+clean_all=0
+arguments=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config|--target|--jobs|-j)
+            [ $# -ge 2 ] || die "$1 needs a value"
+            case "$1" in
+                --config) config="$2"; config_given=1 ;;
+                --target) targets+=("$2") ;;
+                *) jobs="$2" ;;
+            esac
+            shift 2
+            ;;
+        --config=*) config="${1#*=}"; config_given=1; shift ;;
+        --target=*) targets+=("${1#*=}"); shift ;;
+        --jobs=*) jobs="${1#*=}"; shift ;;
+        --verbose|-v) verbose=1; shift ;;
+        --all) clean_all=1; shift ;;
+        --) shift; arguments+=("$@"); break ;;
+        -*) die "unknown option $1; ./build.sh --help lists the commands" ;;
+        *) arguments+=("$1"); shift ;;
+    esac
+done
+case "$config" in
+    Debug|debug) config=Debug ;;
+    Release|release) config=Release ;;
+    *) die "--config must be Debug or Release" ;;
+esac
+[ -z "$jobs" ] || [[ "$jobs" =~ ^[1-9][0-9]{0,3}$ ]] || die "--jobs must be a positive number"
+# Each command's own options: the others would be ignored silently.
+case "$command" in
+    build) [ "${#arguments[@]}" -eq 0 ] || die "build takes no arguments: ${arguments[*]}" ;;
+    test) ;;
+    clean) [ "${#arguments[@]}" -eq 0 ] && { [ "$clean_all" = 0 ] || [ "$config_given" = 0 ]; } || die "usage: ./build.sh clean [--config Debug|Release | --all]" ;;
+    *) [ "$clean_all" = 0 ] || die "--all is clean's option" ;;
+esac
+case "$command" in
+    build) ;;
+    *) [ "${#targets[@]}" -eq 0 ] && [ "$verbose" = 0 ] || die "--target and --verbose are build's options" ;;
+esac
+
+# The tools. CMake 3.25 has every feature CMakeLists.txt and CMakePresets.json use; Ninja Multi-Config needs Ninja 1.10.
+clang="$(command -v clang)" || die "clang isn't on PATH"
+cmake="$(command -v cmake)" || die "cmake (3.25 or later) isn't on PATH"
+version_at_least()
+{
+    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | sed -n 1p)" = "$2" ]
+}
+cmake_version="$("$cmake" --version | sed -n '1s/^cmake version \([0-9][0-9.]*\).*/\1/p')"
+version_at_least "$cmake_version" 3.25 || die "cmake $cmake_version is older than 3.25"
+
+# The settings: the environment's BUSTER_* variables, each passed explicitly, so that unsetting one restores its
+# default rather than leaving a tree's cached value. An unset or empty one is its default, but BUSTER_DEBUG_INFO and
+# BUSTER_LINKER, for which an empty value is an error (cmake/BusterSettings.cmake checks them all).
+fuzz_entry="${BUSTER_FUZZ_ENTRY:-}"
+[ -z "$fuzz_entry" ] || fuzz_entry="$(absolute "$fuzz_entry")"
+host_runtime="${BUSTER_HOST_RUNTIME:-}"
+[ -z "$host_runtime" ] || host_runtime="$(absolute "$host_runtime")"
+settings=(
+    "-DBUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native}"
+    "-DBUSTER_HOST_RUNTIME=$host_runtime"
+    "-DBUSTER_DEBUG_INFO=${BUSTER_DEBUG_INFO-1}"
+    "-DBUSTER_LINKER=${BUSTER_LINKER-auto}"
+    "-DBUSTER_BUILD_DEFINES=${BUSTER_BUILD_DEFINES:-}"
+    "-DBUSTER_SANITIZER=${BUSTER_SANITIZER:-}"
+    "-DBUSTER_SANITIZER_OPTIMIZATION=${BUSTER_SANITIZER_OPTIMIZATION:-3}"
+    "-DBUSTER_FUZZ_AVAILABLE=${BUSTER_FUZZ_AVAILABLE:-0}"
+    "-DBUSTER_FUZZ_ENTRY=$fuzz_entry"
+    "-DBUSTER_BAKE=${BUSTER_BAKE:-1}"
+)
+
+temporary=()
+cleanup()
+{
+    [ "${#temporary[@]}" -eq 0 ] || rm -rf "${temporary[@]}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# The description's $1 (cmake/BusterPrint.cmake) for the settings, one argument per line, to standard output.
+describe()
+{
+    local output
+    output="$(mktemp)"
+    temporary+=("$output")
+    "$cmake" "-DBUSTER_PRINT=$1" "-DBUSTER_PRINT_OUTPUT=$output" "-DBUSTER_PRINT_CONFIG=$config" \
+        "-DBUSTER_C_COMPILER=$clang" "${settings[@]}" -P "$root/cmake/BusterPrint.cmake" >&2
+    cat "$output"
+}
+
+# The number of cores of the CPUs this process may run on, by their core_cpus_list, or 0 if /sys doesn't say: a build
+# runs at most one compile per core, since two clang processes on a core's two threads slow each other down, the
+# longest among them. On the 9700X before main.c's homes, its 15 threads compiling at once took 40.0 s and 331 s of
+# CPU, and its 8 cores one compile each, the longest first, 32.3 s and 233 s; with them, 25.3 s and 200 s (#270).
 cores()
 {
     local range cpu
@@ -155,310 +175,292 @@ cores()
     done
     echo "${#seen[@]}"
 }
-capture()
-{
-    # This is the source call graph. Sanitizer/coverage-generated globals and
-    # runtime calls are not compiler state or source recursion.
-    clang -S -emit-llvm "$optimization" -Xclang -disable-llvm-passes "${flags[@]}" -fno-sanitize=all "$1" -o "$2"
-}
-# The temporary directories, removed on exit, and the processes each_source runs, which an interrupt stops too.
-temporary=()
-pids=()
-trap 'rm -rf "${temporary[@]}"' EXIT
-trap 'kill "${pids[@]}" 2> /dev/null; wait; exit 130' INT
-trap 'kill "${pids[@]}" 2> /dev/null; wait; exit 143' TERM
+
 # Sets the variable $1 to the microseconds since the epoch. Bash writes $EPOCHREALTIME's seconds and microseconds (six
 # digits) apart by the locale's decimal point, a comma in es_ES, so they are its digits alone. This is the script's only
-# reader of $EPOCHREALTIME, as .github/workflows/build-locale.yml checks, with now() and timed() under such locales.
+# reader of $EPOCHREALTIME, as .github/workflows/build.yml checks, with now() under such locales.
 now()
 {
     printf -v "$1" %s "${EPOCHREALTIME//[!0-9]/}"
 }
-# Runs "${@:2}" and writes the microseconds it took to the file $1, with its status.
-timed()
-{
-    local start end status=0
-    now start
-    "${@:2}" || status=$?
-    now end
-    echo "$((end - start))" > "$1"
-    return "$status"
-}
-# Runs "$2 INDEX" for each source's index, in `indices`' order and at most $3 at once, each in a process of its own whose
-# standard error goes to the directory $1, with the microseconds it took, then prints what each wrote there in the
-# sources' order. Fails if any of them failed.
-each_source()
-{
-    local failed=0 running=0 finished status
-    local -A statuses=()
-    pids=()
-    for i in "${indices[@]}"; do
-        if [ "$running" -ge "$3" ]; then
-            status=0
-            wait -n -p finished || status=$?
-            statuses["$finished"]="$status"
-            running=$((running - 1))
-        fi
-        timed "$1/$i.time" "$2" "$i" 2> "$1/$i.log" &
-        pids[$i]="$!"
-        running=$((running + 1))
-    done
-    for i in "${!sources[@]}"; do
-        status="${statuses[${pids[$i]}]-}"
-        if [ -z "$status" ]; then
-            status=0
-            wait "${pids[$i]}" || status=$?
-        fi
-        [ "$status" -eq 0 ] || failed=1
-        cat "$1/$i.log" >&2
-    done
-    pids=()
-    return "$failed"
-}
-# The source of index $1 compiled, with the flags in `defines` besides the build's, into the directory
-# `object_directory` names, with its compile command beside it.
-compile_source()
-{
-    clang -c "${sources[$1]}" -o "$object_directory/$1.o" -MJ "$object_directory/$1.json" "${debug[@]}" "${flags[@]}" \
-        "$optimization" "${defines[@]}"
-}
-# Prints how long the sources' compiles in the directory $1 took, from each_source's times: the whole, which waits for
-# the longest (main.c's comment, #270), and the three longest.
-report_times()
-{
-    for i in "${!sources[@]}"; do
-        echo "$(< "$1/$i.time") $(basename "${sources[$i]}")"
-    done | sort -rn | awk -v count="${#sources[@]}" -v total="$2" '
-        NR <= 3 { longest = longest (NR > 1 ? ", " : "") sprintf("%s %.1f s", $2, $1 / 1e6) }
-        END { printf "build.sh: %u sources compiled in %.1f s; the longest: %s\n", count, total / 1e6, longest }' >&2
-}
-# The source of index $1's IR, in the directory `ir` names.
-capture_source()
-{
-    capture "${sources[$1]}" "$ir/$(basename "${sources[$1]%.c}").ll"
-}
-# Link a baseline runtime explicitly when CI emulates an old CPU. The host's
-# startup objects and loader can require a newer ISA even with -march=x86-64.
-link_program()
-{
-    local output="$1"
-    shift
-    if [ -n "${BUSTER_HOST_RUNTIME:-}" ]; then
-        [ "${BUSTER_HOST_ARCH:-native}" = x86-64 ] || { echo 'build.sh: BUSTER_HOST_RUNTIME requires BUSTER_HOST_ARCH=x86-64' >&2; return 1; }
-        local library="$BUSTER_HOST_RUNTIME/usr/lib/x86_64-linux-gnu"
-        local support="$BUSTER_HOST_RUNTIME/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a"
-        clang "${link_mode[@]}" -nostdlib "${linker_flags[@]}" "$library/crt1.o" "$library/crti.o" "$@" \
-            "$library/libm.so.6" "$library/libc.so.6" "$support" "$library/crtn.o" -o "$output"
-    else
-        clang "${link_mode[@]}" "${sanitizer_flags[@]}" "${linker_flags[@]}" "$@" "${fuzz_libraries[@]}" -lm -ldl -o "$output"
-    fi
-    if [ "${BUSTER_BAKE:-1}" != 0 ]; then
-        bake_program "$output"
-    fi
-}
 
-# Has the executable $1 write itself with the backend's tables built (bake-tables, src/buster/compiler/baked.c, #590),
-# so that a compile starts with them rather than building them: about 2 ms of a small file's compile on a Xeon VM whose
-# kernel only madvises huge pages. A PIE (the sanitizers' builds) keeps building them when it runs (status 77), and so
-# does every executable with BUSTER_BAKE=0. Any other failure, an initializer's state outside the section among them,
-# fails the build.
-bake_program()
-{
-    local status=0
-    "$1" bake-tables "$1.baked" || status=$?
-    if [ "$status" -eq 0 ]; then
-        mv -f "$1.baked" "$1"
-    else
-        rm -f "$1.baked"
-        if [ "$status" -ne 77 ]; then
-            echo "build.sh: $1 couldn't bake its tables" >&2
-            return 1
-        fi
-    fi
-}
+case "$command" in
+    print-sources|print-compile-flags|print-sanitizer-flags)
+        [ "${#arguments[@]}" -eq 0 ] || die "$command takes no arguments"
+        describe "${command#print-}" | tr '\n' '\0'
+        exit 0
+        ;;
+    lexer-variant-assembly)
+        # One lexer's assembly, with debug information, for label-spills to label and lexer-variant to build in.
+        [ "${#arguments[@]}" -eq 3 ] && [[ "${arguments[0]}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "usage: ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s"
+        source="$(realpath -e -- "$(absolute "${arguments[1]}")")" || die "lexer-variant-assembly: ${arguments[1]} doesn't exist"
+        [[ "$source" != *[\"\\]* && "$source" != *$'\n'* ]] || die "lexer-variant-assembly: $source has a quote, backslash or newline"
+        output="$(absolute "${arguments[2]}")"
+        text="$(describe assembly-flags)"
+        mapfile -t flags <<< "$text"
+        cd "$root"
+        "$clang" -S src/buster/compiler/c_lexer_variant.c -o "$output" "${flags[@]}" \
+            -DBUSTER_LEXER_VARIANT_SOURCE="\"$source\"" -DBUSTER_LEXER_VARIANT_NAME="c_lexer_variant_${arguments[0]}"
+        exit 0
+        ;;
+esac
 
-# The linked executable must not reference the stack canary's runtime (#916): -fno-stack-protector
-# above pins the policy, and this checks that the toolchain's configured default didn't add it back.
-check_stack_protector()
-{
-    if nm "$1" | grep -q '__stack_chk_fail'; then
-        echo "build.sh: $1 references __stack_chk_fail; -fno-stack-protector didn't take effect" >&2
-        return 1
-    fi
-}
-# Builds build/compiler from the sources, with the flags in `defines`, and the objects in "$@" after theirs. The sources'
-# objects go in a directory of their own, so that build/ keeps one file besides compile_commands.json, which gets their
-# compile commands in the sources' order. It is linked at a fixed address (-no-pie), from the same code: as a PIE, its
-# 10.6 MB of pointer tables (.data.rel.ro) took 366,684 relative relocations at every start, whose 2,800 page faults
-# made a run that does nothing take 8 to 13 ms, where linked at its address it takes 1.5 ms with 113 (#86: link-foreign
-# and the tests run it as a process of its own, and a small link's work is 0.8 ms).
-build_compiler()
-{
-    object_directory="$(mktemp -d)"
-    temporary+=("$object_directory")
-    local start end jobs
-    jobs="$(cores)"
-    now start
-    each_source "$object_directory" compile_source "$((jobs != 0 ? jobs : ${#sources[@]}))"
-    now end
-    report_times "$object_directory" "$((end - start))"
-    local linked=()
-    for i in "${!sources[@]}"; do
-        linked+=("$object_directory/$i.o")
-    done
-    for i in "${!sources[@]}"; do
-        cat "$object_directory/$i.json"
-    done > build/compile_commands.json
-    link_program build/compiler "${linked[@]}" "$@"
-    check_stack_protector build/compiler
-}
-# Links build_compiler's objects into $1 with $3 bytes of padding in .text before the objects of the source of index
-# $2, an object of its own, in the order build_compiler links them. The padding is a section of its own,
-# .text.buster_shift_padding, which the linkers put in .text in the objects' order, with the source's .text's alignment
-# and SHF_GNU_RETAIN: wild collects sections nothing refers to (0.10 even what -u names, which 0.11 keeps), and places
-# .text's by their alignment, the largest first, in the objects' order within each, so only padding of the same
-# alignment goes right before the source's. Fails for a shift that isn't a multiple of that alignment, which would
-# round it up, and if the linker dropped the padding all the same.
-link_shifted()
-{
-    local object="$object_directory/$2.o" padding="$object_directory/padding-$3.o" alignment linked=()
-    alignment="$(readelf -SW "$object" | awk '$0 ~ /\] \.text / { print $NF }')"
-    [[ "$alignment" =~ ^[1-9][0-9]*$ ]] || { echo "build.sh shifts: can't read the alignment of ${sources[$2]}'s .text" >&2; return 1; }
-    [ $(($3 % alignment)) -eq 0 ] || { echo "build.sh shifts: $3 isn't a multiple of ${sources[$2]}'s .text's alignment, $alignment" >&2; return 1; }
-    printf '\t.section .text.buster_shift_padding,"axR",@progbits\n\t.balign %d\n\t.globl buster_shift_padding\nbuster_shift_padding:\n\t.skip %d\n' \
-        "$alignment" "$3" | clang -c -x assembler - -o "$padding"
-    for i in "${!sources[@]}"; do
-        if [ "$i" -eq "$2" ]; then
-            linked+=("$padding")
-        fi
-        linked+=("$object_directory/$i.o")
-    done
-    link_program "$1" "${linked[@]}"
-    if ! nm "$1" | grep -q ' buster_shift_padding$' || { [ "$3" -ne 0 ] && cmp -s build/compiler "$1"; }; then
-        echo "build.sh shifts: the linker dropped $1's padding" >&2
-        return 1
-    fi
-    echo "build.sh shifts: $1: ${sources[$2]}'s code $3 bytes later (its .text is aligned to $alignment)" >&2
-}
-# Choose the linker for build/compiler only; compilation and IR capture keep their existing flags.
-select_linker()
-{
-    local linker="${BUSTER_LINKER-auto}"
-    linker_flags=()
-    case "$linker" in
-        auto) linker="$(command -v wild || command -v mold || true)" ;;
-        system) linker="" ;;
-        lld|bfd) linker="ld.$linker" ;;
-        wild|mold|/*) ;;
-        *) echo "build.sh: BUSTER_LINKER must be auto, system, wild, mold, lld, bfd or an absolute path" >&2; return 1 ;;
-    esac
-    if [ -n "$linker" ]; then
-        linker="$(command -v "$linker")" && [ -f "$linker" ] && [ -x "$linker" ] || { echo "build.sh: requested linker is not an executable file on PATH or at the specified path" >&2; return 1; }
-        linker_flags=("--ld-path=$linker")
-    fi
-    echo "build.sh: stage 1 linker: ${linker:-system default}" >&2
-}
-defines=()
-# BUSTER_BUILD_DEFINES adds preprocessor definitions to every translation unit for measurement-variant builds, split on
-# whitespace (e.g. to A/B a compile-time policy constant under perf).
-if [ -n "${BUSTER_BUILD_DEFINES:-}" ]; then
-    defines+=(${BUSTER_BUILD_DEFINES})
-fi
-if [ "$1" = print-compile-flags ]; then
-    printf '%s\0' "${debug[@]}" "${flags[@]}" "$optimization" "${defines[@]}"
-elif [ "$1" = print-sanitizer-flags ]; then
-    if [ "${#sanitizer_flags[@]}" -ne 0 ]; then
-        printf '%s\0' "$optimization" "${debug[@]}" "${sanitizer_flags[@]}" "${link_mode[@]}"
-    fi
-elif [ "$1" = print-sources ]; then
-    printf '%s\0' "${sources[@]}"
-elif [ "$1" = check-call-graph ]; then
-    test -x build/compiler || { echo "build.sh check-call-graph: build/compiler is missing; run ./build.sh first" >&2; exit 1; }
-    jobs="$(cores)"
-    [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "build.sh check-call-graph: couldn't determine a positive CPU budget" >&2; exit 1; }
-    root="$(pwd)"
-    ir="$(mktemp -d)"
-    temporary+=("$ir")
-    mkdir "$ir/capture"
-    capture src/buster/compiler/call_graph_capture/inline.c "$ir/capture/inline.ll"
-    capture src/buster/compiler/call_graph_capture/strong.c "$ir/capture/strong.ll"
-    expected="cycle: inline.ll:recurse -> inline.ll:again -> inline.ll:recurse"
-    if report="$(cd "$ir/capture" && "$root/build/compiler" check-call-graph inline.ll strong.ll)" || ! grep -qxF "$expected" <<< "$report"; then
-        printf 'build.sh check-call-graph: the capture lost the cycle through an inline body; expected "%s", got:\n%s\n' "$expected" "$report" >&2
-        exit 1
-    fi
-    mkdir "$ir/logs"
-    each_source "$ir/logs" capture_source "$jobs"
-    names=()
-    for source in "${sources[@]}"; do
-        names+=("$(basename "${source%.c}").ll")
-    done
-    (cd "$ir" && "$root/build/compiler" check-call-graph "${names[@]}")
-elif [ "$1" = lexer-variant-assembly ]; then
-    [ $# -eq 4 ] && [[ "$2" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "usage: ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s" >&2; exit 1; }
-    clang -S src/buster/compiler/c_lexer_variant.c -o "$4" -g "${flags[@]}" "$optimization" \
-        -DBUSTER_LEXER_VARIANT_SOURCE="\"$(realpath "$3")\"" -DBUSTER_LEXER_VARIANT_NAME="c_lexer_variant_$2"
-elif [ "$1" = lexer-variant ]; then
-    shift
-    [ $# -ne 0 ] || { echo "usage: ./build.sh lexer-variant NAME=SOURCE..." >&2; exit 1; }
-    select_linker
-    rm -rf build || true
-    mkdir -p build
-    variants=""
-    tags=""
-    objects=()
-    for variant in "$@"; do
-        name="${variant%%=*}"
-        source="${variant#*=}"
-        [[ "$variant" == *=* && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && -f "$source" ]] || { echo "build.sh lexer-variant: $variant isn't NAME=SOURCE" >&2; exit 1; }
-        # The objects go in a directory of their own, so that build/ keeps one file besides compile_commands.json.
-        object="$(mktemp -d)/$name.o"
-        if [[ "$source" == *.s ]]; then
-            grep -q "^c_lexer_variant_$name:" "$source" || { echo "build.sh lexer-variant: $source doesn't define c_lexer_variant_$name; write it with ./build.sh lexer-variant-assembly $name" >&2; exit 1; }
-            # Two labeled variants of one tag would share their symbols, and spill-report would mix their samples.
-            tag="$(grep -m1 -o '^buster_spill\.[A-Za-z0-9_]*\.' "$source" || true)"
-            if [ -n "$tag" ]; then
-                [[ " $tags " != *" $tag "* ]] || { echo "build.sh lexer-variant: $source is labeled with the tag of another variant (${tag:13:-1}); give label-spills each variant's own" >&2; exit 1; }
-                tags="$tags $tag"
+ninja="$(command -v ninja)" || die "ninja (1.10 or later) isn't on PATH"
+ninja_version="$("$ninja" --version)"
+version_at_least "$ninja_version" 1.10 || die "ninja $ninja_version is older than 1.10"
+
+variant="$(describe variant)"
+lexer_variants=""
+shift_source=""
+shift_bytes=""
+case "$command" in
+    lexer-variant)
+        # Other lexers in the executable, for benchmark-lexer to check and time beside c_tokenize in one process: each
+        # SOURCE is a copy of c_lexer.c (compiled through src/buster/compiler/c_lexer_variant.c into
+        # c_lexer_variant_NAME), or that file's assembly (.s), which lexer-variant-assembly writes, and label-spills
+        # may label. They have a tree of their own, whose units all take the list of variants in place of
+        # BUSTER_BUILD_DEFINES.
+        [ "${#arguments[@]}" -gt 0 ] || die "usage: ./build.sh lexer-variant NAME=SOURCE..."
+        tags=""
+        for entry in "${arguments[@]}"; do
+            name="${entry%%=*}"
+            source="${entry#*=}"
+            [[ "$entry" == *=* && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && -f "$(absolute "$source")" ]] || die "lexer-variant: $entry isn't NAME=SOURCE"
+            source="$(realpath -e -- "$(absolute "$source")")"
+            [[ "$source" != *[\"\\\;]* && "$source" != *$'\n'* ]] || die "lexer-variant: $source has a quote, backslash, semicolon or newline"
+            if [[ "$source" == *.s ]]; then
+                grep -q "^c_lexer_variant_$name:" "$source" || die "lexer-variant: $source doesn't define c_lexer_variant_$name; write it with ./build.sh lexer-variant-assembly $name"
+                # Two labeled variants of one tag would share their symbols, and spill-report would mix their samples.
+                tag="$(grep -m1 -o '^buster_spill\.[A-Za-z0-9_]*\.' "$source" || true)"
+                if [ -n "$tag" ]; then
+                    [[ " $tags " != *" $tag "* ]] || die "lexer-variant: $source is labeled with the tag of another variant (${tag:13:-1}); give label-spills each variant's own"
+                    tags="$tags $tag"
+                fi
             fi
-            clang -c "$source" -o "$object"
-        else
-            clang -c src/buster/compiler/c_lexer_variant.c -o "$object" "${debug[@]}" "${flags[@]}" "$optimization" \
-                -DBUSTER_LEXER_VARIANT_SOURCE="\"$(realpath "$source")\"" -DBUSTER_LEXER_VARIANT_NAME="c_lexer_variant_$name"
-        fi
-        objects+=("$object")
-        variants="$variants BUSTER_LEXER_VARIANT($name)"
-    done
-    defines=(-DBUSTER_LEXER_VARIANTS="$variants")
-    build_compiler "${objects[@]}"
-    for object in "${objects[@]}"; do
-        rm -rf "$(dirname "$object")"
-    done
-elif [ "$1" = shifts ]; then
-    [ $# -ge 4 ] || { echo "usage: ./build.sh shifts DIRECTORY SOURCE SHIFT..." >&2; exit 1; }
-    directory="$2"
-    unit=""
-    for i in "${!sources[@]}"; do
-        if [ "$(basename "${sources[$i]}")" = "$3" ]; then
-            unit="$i"
-        fi
-    done
-    [ -n "$unit" ] || { echo "build.sh shifts: $3 isn't a source's file name" >&2; exit 1; }
-    shift 3
-    for bytes in "$@"; do
-        [[ "$bytes" =~ ^(0|[1-9][0-9]{0,6})$ ]] || { echo "build.sh shifts: $bytes isn't a shift of 0 to 9,999,999 bytes" >&2; exit 1; }
-    done
-    mkdir -p "$directory"
-    select_linker
-    rm -rf build || true
-    mkdir -p build
-    build_compiler
-    for bytes in "$@"; do
-        link_shifted "$directory/compiler-$bytes" "$unit" "$bytes"
-    done
-else
-    select_linker
-    rm -rf build || true
-    mkdir -p build
-    build_compiler
+            lexer_variants="$lexer_variants${lexer_variants:+;}$name=$source"
+        done
+        variant="$variant-lexer"
+        ;;
+    shifts)
+        # The executable, then the same objects linked again into DIRECTORY/compiler-SHIFT for each SHIFT, a number of
+        # bytes, with that much padding in .text before the objects of SOURCE (a source's file name), a multiple of its
+        # .text's alignment: its code and what the linker places after it move by SHIFT, the same instructions at
+        # other addresses. The same code ran up to 2% faster or slower so on the 9700X (#509), so time-runs compares
+        # builds over several placements.
+        [ "${#arguments[@]}" -ge 3 ] || die "usage: ./build.sh shifts DIRECTORY SOURCE SHIFT..."
+        shift_directory="$(absolute "${arguments[0]}")"
+        shift_source="${arguments[1]}"
+        text="$(describe sources)"
+        mapfile -t sources <<< "$text"
+        found=0
+        for source in "${sources[@]}"; do
+            [ "${source##*/}" != "$shift_source" ] || found=1
+        done
+        [ "$found" = 1 ] || die "shifts: $shift_source isn't a source's file name"
+        for bytes in "${arguments[@]:2}"; do
+            [[ "$bytes" =~ ^(0|[1-9][0-9]{0,6})$ ]] || die "shifts: $bytes isn't a shift of 0 to 9,999,999 bytes"
+            shift_bytes="$shift_bytes${shift_bytes:+;}$bytes"
+        done
+        mkdir -p -- "$shift_directory"
+        ;;
+    *)
+        [ "$command" = test ] || [ "$command" = clean ] || [ "${#arguments[@]}" -eq 0 ] || die "$command takes no arguments"
+        ;;
+esac
+
+mkdir -p "$root/build/cmake"
+tree="$root/build/cmake/$variant"
+binary="$tree/$config/compiler"
+
+if [ "$command" = print-output ]; then
+    printf '%s\n' "$binary"
+    exit 0
 fi
+
+if [ "$command" = clean ]; then
+    # Explicit cleaning: --all removes every tree and the published files; --config, that configuration's outputs in
+    # this settings' tree; neither, this settings' tree.
+    exec {publication}> "$root/build/.publish.lock"
+    flock "$publication"
+    if [ "$clean_all" = 1 ]; then
+        rm -rf -- "$root/build/cmake" "$root/build/compiler" "$root/build/compile_commands.json"
+        echo "build.sh: removed every tree under build/cmake and the published build/compiler" >&2
+    elif [ -d "$tree" ]; then
+        exec {lock}> "$tree.lock"
+        flock "$lock"
+        for configuration in Debug Release; do
+            if [ "$config_given" = 0 ] || [ "$config" = "$configuration" ]; then
+                if [ "$root/build/compiler" -ef "$tree/$configuration/compiler" ]; then
+                    rm -f -- "$root/build/compiler" "$root/build/compile_commands.json"
+                fi
+            fi
+        done
+        if [ "$config_given" = 1 ]; then
+            [ ! -f "$tree/build.ninja" ] || "$cmake" --build "$tree" --config "$config" --target clean
+            echo "build.sh: cleaned ${tree#"$root/"}'s $config outputs" >&2
+        else
+            rm -rf -- "$tree"
+            echo "build.sh: removed ${tree#"$root/"}" >&2
+        fi
+    fi
+    exit 0
+fi
+
+# The tree's configuration, which CMake writes again only when it changed: the arguments, PATH (which finds the tools
+# and linkers) and the toolchain's identity. A different clang can't reuse the tree's objects, nor CMake its cache, so
+# the tree starts afresh.
+configure_arguments=(
+    -S "$root" -B "$tree" -G "Ninja Multi-Config"
+    "-DCMAKE_MAKE_PROGRAM=$ninja"
+    "-DCMAKE_C_COMPILER=$clang"
+    "-DCMAKE_CONFIGURATION_TYPES=Debug;Release"
+    -DCMAKE_DEFAULT_BUILD_TYPE=Release
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    # CMake would take these from the environment once, at the first configure, and keep them.
+    -DCMAKE_C_COMPILER_LAUNCHER=
+    -DCMAKE_C_LINKER_LAUNCHER=
+    "${settings[@]}"
+    "-DBUSTER_LEXER_VARIANTS=$lexer_variants"
+    "-DBUSTER_SHIFT_SOURCE=$shift_source"
+    "-DBUSTER_SHIFTS=$shift_bytes"
+)
+toolchain="clang $clang ($(realpath "$clang")): $("$clang" --version | sed -n 1p)"
+stamp="$tree/build.sh.configuration"
+wanted="$(printf '%s\n' "$toolchain" "cmake $cmake $cmake_version" "ninja $ninja $ninja_version" "PATH=$PATH" "${configure_arguments[@]}")"
+
+exec {lock}> "$tree.lock"
+if ! flock -n "$lock"; then
+    echo "build.sh: waiting for another build of ${tree#"$root/"}" >&2
+    flock "$lock"
+fi
+if [ -d "$tree" ]; then
+    previous=""
+    if [ -f "$stamp" ]; then
+        previous="$(head -n 1 "$stamp")"
+    elif [ -f "$tree/CMakeCache.txt" ]; then
+        # A tree a preset configured: its compiler is the cache's.
+        previous="$(sed -n 's/^CMAKE_C_COMPILER:[A-Z]*=//p' "$tree/CMakeCache.txt")"
+        [ "$previous" != "$clang" ] || previous="$toolchain"
+    fi
+    if [ -n "$previous" ] && [ "$previous" != "$toolchain" ]; then
+        echo "build.sh: ${tree#"$root/"} was configured for another toolchain ($previous); configuring it afresh" >&2
+        rm -rf -- "$tree"
+    fi
+fi
+if [ "$command" = configure ] || [ ! -f "$stamp" ] || [ ! -f "$tree/build.ninja" ] || [ "$(cat "$stamp")" != "$wanted" ]; then
+    rm -f -- "$stamp"
+    "$cmake" "${configure_arguments[@]}" >&2
+    printf '%s\n' "$wanted" > "$stamp"
+fi
+[ "$command" != configure ] || exit 0
+
+if [ -z "$jobs" ]; then
+    jobs="$(cores)"
+    [ "$jobs" -ne 0 ] || jobs="$(nproc)"
+fi
+
+# Builds the targets "$@" of the configuration, at most `jobs` compiles at once, and reports the units it compiled and
+# the longest, from Ninja's log of this run's commands.
+build()
+{
+    local log="$tree/.ninja_log" offset=0 inode="" start end
+    [ ! -f "$log" ] || { offset="$(stat -c %s "$log")"; inode="$(stat -c %i "$log")"; }
+    local options=(--build "$tree" --config "$config" --parallel "$jobs")
+    [ "$verbose" = 0 ] || options+=(--verbose)
+    local target
+    for target in "$@"; do
+        options+=(--target "$target")
+    done
+    now start
+    "$cmake" "${options[@]}" >&2
+    now end
+    # Ninja appends a line for each command it ran; when it rewrites its log to compact it, the report is skipped.
+    if [ -f "$log" ] && { [ -z "$inode" ] || [ "$(stat -c %i "$log")" = "$inode" ]; }; then
+        tail -c "+$((offset + 1))" "$log" | awk -F '\t' -v total="$((end - start))" -v config="$config" '
+            $4 ~ /\.c\.o$/ { count += 1; name = $4; sub(/^.*\//, "", name); sub(/\.o$/, "", name); time[name] = $2 - $1 }
+            END {
+                line = sprintf("build.sh: %s: %u units compiled, the build took %.1f s", config, count, total / 1e6)
+                n = 0
+                for (name in time) { names[++n] = name }
+                for (i = 1; i <= n && i <= 3; i += 1) {
+                    best = i
+                    for (j = i + 1; j <= n; j += 1) { if (time[names[j]] > time[names[best]]) { best = j } }
+                    swap = names[i]; names[i] = names[best]; names[best] = swap
+                    line = line sprintf("%s %s %.1f s", i == 1 ? "; the longest:" : ",", names[i], time[names[i]] / 1e3)
+                }
+                print line
+            }' >&2
+    fi
+}
+
+# Publishes the configuration's executable as build/compiler, a hard link to it (or a copy where the file system has
+# none), renamed into place, and its compile commands as build/compile_commands.json, each only when it changed.
+# Publications wait for each other.
+publish()
+{
+    exec {publication}> "$root/build/.publish.lock"
+    flock "$publication"
+    if [ ! "$root/build/compiler" -ef "$binary" ]; then
+        local next="$root/build/.compiler.$$"
+        ln -f -- "$binary" "$next" 2> /dev/null || cp -f -- "$binary" "$next"
+        mv -f -T -- "$next" "$root/build/compiler"
+    fi
+    local commands="$root/build/.compile_commands.json.$$"
+    temporary+=("$commands")
+    "$cmake" "-DINPUT=$tree/compile_commands.json" "-DOUTPUT=$commands" "-DCONFIG=$config" \
+        -P "$root/cmake/BusterCompileCommands.cmake"
+    if cmp -s -- "$commands" "$root/build/compile_commands.json"; then
+        rm -f -- "$commands"
+    else
+        mv -f -T -- "$commands" "$root/build/compile_commands.json"
+    fi
+    flock -u "$publication"
+    echo "build.sh: $config: ${binary#"$root/"}, published as build/compiler" >&2
+}
+
+case "$command" in
+    build)
+        if [ "${#targets[@]}" -eq 0 ]; then
+            build
+            publish
+        else
+            build "${targets[@]}"
+            for target in "${targets[@]}"; do
+                if [ "$target" = compiler ] || [ "$target" = all ]; then
+                    publish
+                    break
+                fi
+            done
+        fi
+        ;;
+    test)
+        build
+        publish
+        flock -u "$lock"
+        ctest="${cmake%/*}/ctest"
+        [ -x "$ctest" ] || ctest="$(command -v ctest)" || die "ctest isn't beside cmake or on PATH"
+        "$ctest" --test-dir "$tree" -C "$config" --output-on-failure "${arguments[@]}"
+        ;;
+    check-call-graph)
+        # The no-recursion rule on the call graph of the units' IR (CMakeLists.txt's call-graph-ir, captured at the
+        # Release configuration's optimization whatever the configuration), checked by BUSTER_COMPILER, which the
+        # parallel runner gives its commands, or else by the configuration's built executable.
+        build call-graph-ir
+        flock -u "$lock"
+        "$cmake" "-DCOMPILER=${BUSTER_COMPILER:-$binary}" "-DIR=$tree/call-graph" -P "$root/cmake/BusterCallGraph.cmake"
+        ;;
+    lexer-variant)
+        build compiler
+        publish
+        ;;
+    shifts)
+        build compiler shifts
+        publish
+        IFS=';' read -r -a shifted <<< "$shift_bytes"
+        for bytes in "${shifted[@]}"; do
+            output="$shift_directory/compiler-$bytes"
+            ln -f -- "$tree/$config/shifts/compiler-$bytes" "$output" 2> /dev/null || cp -f -- "$tree/$config/shifts/compiler-$bytes" "$output"
+            echo "build.sh shifts: $output: $shift_source's code $bytes bytes later" >&2
+        done
+        ;;
+esac

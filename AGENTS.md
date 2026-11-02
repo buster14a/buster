@@ -300,17 +300,16 @@ Where `~/llm-memory` doesn't exist, skip this.
 
 ## Build
 
-Use `./build.sh`, with Clang on Linux/x86-64; it produces `build/compiler`,
-including its tests and benchmarks. `BUSTER_HOST_ARCH=native` is the default;
+Use `./build.sh` (Clang, CMake 3.25+, Ninja): it builds Release, or
+`--config Debug`, incrementally in `build/cmake/VARIANT` and publishes that
+executable as `build/compiler`. `BUSTER_HOST_ARCH=native` is the default;
 use `x86-64` for the baseline scalar host and `znver5` for approved benchmark
 builds. Respect the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits
 debug information. Read [build details](docs/commands/build.md) before changing
-translation units, build order, baked tables or code-placement experiments.
+translation units, flags, baked tables or code-placement experiments.
 `build/` is disposable; never commit generated binaries or captures.
 
 ## Current repository and exact smoke commands
-
-- `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
 

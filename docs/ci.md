@@ -13,9 +13,9 @@ the host's configured default would otherwise decide the compiler's code and
 its measurements. The owner chose no stack protection for now, which matches
 the official release's default and gives host and CI builds the same canary
 count. The compiler's predefined macros still follow the host driver's
-configured default (`BUSTER_HOST_SSP_DEFAULT`). `build.sh` checks the linked
-executable for a `__stack_chk_fail` reference and fails if the policy did not
-take effect.
+configured default (`BUSTER_HOST_SSP_DEFAULT`). The build's post-link step
+checks each linked executable for a `__stack_chk_fail` reference and fails if
+the policy did not take effect.
 
 The baseline build runs on x86-64 without AVX-512. Native builds select the
 existing scalar twins when the compiler's host target lacks the full SIMD

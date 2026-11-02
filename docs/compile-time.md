@@ -1347,7 +1347,7 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 ### Baked tables (#590)
 
-build.sh has each executable it links write itself with the backend's tables
+The build's post-link step has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
 and their marked copies, the x86 semantics' tables, and the checker unit's
 copies of Tier 0's tables, the Zen 5 cost model's tables and the unwind
@@ -1379,7 +1379,7 @@ the page cache, shared with every other process.
   than the file's.
 - **Where it isn't.** PIEs (the sanitizers' builds, whose tables would hold
   their load address if any had a pointer), executables linked without
-  build.sh and builds with `BUSTER_BAKE=0` build the tables when they run, as
+  the build's post-link step and builds with `BUSTER_BAKE=0` build the tables when they run, as
   before. So do the benchmarks' units.
 
 Objects are the same bytes, baked or built: `hello.c` and c-testsuite's 220

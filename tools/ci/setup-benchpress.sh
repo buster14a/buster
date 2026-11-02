@@ -72,5 +72,8 @@ if [ -L "$destination/bin/cc" ] && [ "$(readlink "$destination/bin/cc")" = clang
     unlink "$destination/bin/cc"
 fi
 printf '%s\n' "$destination/bin" >> "${GITHUB_PATH:?GITHUB_PATH is required}"
+# The pinned CMake and Ninja that build.sh drives, staged in the same private cache.
+build_tools=$(bash "$(dirname "$0")/setup-build-tools.sh" "${XDG_CACHE_HOME:-$HOME/.cache}/buster/build-tools")
+printf '%s\n' "$build_tools" >> "$GITHUB_PATH"
 printf 'BUSTER_CLANG_RESOURCE_DIR=%s\n' "$destination/lib/clang/23" >> "${GITHUB_ENV:?GITHUB_ENV is required}"
 printf 'LD_LIBRARY_PATH=%s%s\n' "$destination/lib" "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
