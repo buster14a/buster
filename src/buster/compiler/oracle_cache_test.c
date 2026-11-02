@@ -236,6 +236,7 @@ static void oracle_test_roots(OracleTest* test)
     oracle_roots_find(&roots, "/buster-root-Ab3d9Z/c.c");
     oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 19 && roots.roots[0].random == 13 && memcmp(roots.roots[0].name, "/buster-root-Ab3d9Z", 19) == 0,
                        "roots: a directory under /");
+    oracle_roots_begin(&roots);
     oracle_roots_find(&roots, "-I/buster-option-Ab3d9Z/include");
     oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 21 && memcmp(roots.roots[0].name, "/buster-option-Ab3d9Z", 21) == 0,
                        "roots: a directory under / after an option's letter");
