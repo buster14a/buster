@@ -1,72 +1,32 @@
-name: Issue 1120 mixed driver workbench
+name: Issue 1120 test budget publication
 on:
   push:
     branches: [agent/1120-driver-workbench]
 permissions:
   contents: write
 jobs:
-  validate:
+  publish-test-budget:
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 5
     defaults:
       run:
         shell: bash
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_DEBUG_INFO: '0'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          fetch-depth: 0
-      - name: Apply isolated candidate to its pinned baseline
+          ref: agent/1120-mixed-inputs
+      - name: Declare the regression's two-worker scheduling budget
         run: |
-          gzip -dc .github/issue-1120.patch.gz > "$RUNNER_TEMP/issue1120.patch"
-          cp .github/issue-1120-fixup.patch "$RUNNER_TEMP/issue1120-fixup.patch"
-          cp .github/issue-1120-boundary.patch "$RUNNER_TEMP/issue1120-boundary.patch"
-          echo "47ce429ea5d0b92d49686cdc3499c3d9ac396c33b825603b3f31c01278225206  $RUNNER_TEMP/issue1120.patch" | sha256sum --check
-          git switch --detach df007cd52c074223cfa6deddb14b058714c0ed53
-          git apply --check "$RUNNER_TEMP/issue1120.patch"
-          git apply "$RUNNER_TEMP/issue1120.patch"
-          git apply "$RUNNER_TEMP/issue1120-fixup.patch"
-          git apply "$RUNNER_TEMP/issue1120-boundary.patch"
+          test "$(git rev-parse 'HEAD^{tree}')" = 27c007557d6665870ddc79b6c04c887b34fc45a9
+          grep -Fx '== Test mixed source, object, archive and shared-library input routing' tools/ci/correctness.tests
+          sed -i 's/^== Test mixed source, object, archive and shared-library input routing$/== Test mixed source, object, archive and shared-library input routing [2 CPUs]/' tools/ci/correctness.tests
+          grep -Fx '== Test mixed source, object, archive and shared-library input routing [2 CPUs]' tools/ci/correctness.tests
+          test "$(git diff --name-only)" = tools/ci/correctness.tests
           git diff --check
-      - name: Install repository-pinned Clang and test dependencies
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build scalar-host correctness compiler
-        id: build
-        run: ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue1120-build.log"
-      - name: Run heterogeneous input regressions
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./build/compiler test-source-driver 2>&1 | tee "$RUNNER_TEMP/issue1120-tests.log"
-      - name: Run existing semantic driver regressions
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./build/compiler test-checker-driver --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue1120-checker.log"
-      - name: Run existing multi-unit regressions
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./build/compiler test-check-units 2>&1 | tee "$RUNNER_TEMP/issue1120-units.log"
-      - name: Run existing assembler cross-checks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./build/compiler test-assembler --cross-check 2>&1 | tee "$RUNNER_TEMP/issue1120-assembler.log"
-      - name: Run existing linker cross-checks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./build/compiler test-foreign --cross-check 2>&1 | tee "$RUNNER_TEMP/issue1120-foreign.log"
-      - name: Check no-recursion call graph
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./build.sh check-call-graph 2>&1 | tee "$RUNNER_TEMP/issue1120-callgraph.log"
-      - name: Publish only the tested source changes
-        run: |
-          git switch -c agent/1120-mixed-inputs
           git config user.name 'OpenAI'
           git config user.email 'noreply@openai.com'
-          git add docs/c-checker.md src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_driver_test.c src/buster/compiler/c_checker_units.c src/buster/compiler/foreign_driver.c src/buster/compiler/main.c src/buster/compiler/source_driver.c src/buster/compiler/source_driver_test.c tools/ci/correctness.tests
-          git commit -m 'driver: route mixed C, assembly and ELF inputs before linking' -m 'Fixes #1120. Preserve parallel C compilation and pass generated objects to the foreign linker in memory.' -m 'Agent session: ChatGPT session; private permalink unavailable in the tool environment.' -m 'Model: OpenAI / GPT-6 Astra Pro'
+          git add tools/ci/correctness.tests
+          test "$(git write-tree)" = 1a3cc428413e2e9c673443b16f634cd6ac784484
+          git commit -m 'test: declare mixed source driver regression CPU budget' -m 'The test starts up to two C compilation lanes. Match the correctness scheduler declaration without changing the validated compiler or fixtures.' -m 'Agent session: ChatGPT session; private permalink unavailable in the tool environment.' -m 'Model: OpenAI / GPT-6 Astra Pro'
           git push origin HEAD:refs/heads/agent/1120-mixed-inputs
-          git rev-parse HEAD | tee "$RUNNER_TEMP/issue1120-commit.txt"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: issue-1120-validation
-          path: |
-            ${{ runner.temp }}/issue1120-*.log
-            ${{ runner.temp }}/issue1120-commit.txt
-          retention-days: 3
+          git rev-parse HEAD
