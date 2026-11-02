@@ -17,6 +17,7 @@
 // lanes their time is one stage, `lanes`, the lanes' span, since the stages of a thread don't add up across threads.
 // docs/compile-time.md has the stages and the 9700X's numbers.
 
+#include <sys/prctl.h>
 #include <sys/resource.h>
 
 #include "c_check_clock_rss.c"
