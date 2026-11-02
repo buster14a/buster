@@ -1131,9 +1131,9 @@ report, on standard error after the command, a row per stage.
 - **The walk's clock is always on.** The walk's row and parts are read with or
   without the option: two TSC reads a unit for the walk, two for the classes'
   pass, three a chunk of 1,024 positions, two a visit in a coded unit, and two
-  `getrusage` calls a unit. On sqlite3.c (2.7 million tokens, about 2,700
-  chunks and 7,800 visits) that is some 24,000 TSC reads and two system calls,
-  well under a millisecond against a walk of tens of milliseconds; reading them
+  `getrusage` calls a unit. On sqlite3.c (710,061 tokens: 694 chunks and
+  7,800 visits) that is some 18,000 TSC reads and two system calls, well under
+  a millisecond against a walk of about 30 ms on a 4-CPU VM; reading them
   only under the option would take a flag through the reader for less than the
   run-to-run noise.
 - **Off by default.** Without the option the driver reads no clock, and each lap
