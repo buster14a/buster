@@ -8,6 +8,9 @@ jobs:
   validate:
     runs-on: ubuntu-26.04
     timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
     env:
       BUSTER_HOST_ARCH: x86-64
       BUSTER_DEBUG_INFO: '0'
@@ -24,7 +27,7 @@ jobs:
           git apply "$RUNNER_TEMP/issue1120.patch"
           git diff --check
       - name: Install repository-pinned Clang and test dependencies
-        run: tools/ci/setup-hosted.sh
+        run: bash tools/ci/setup-hosted.sh
       - name: Build scalar-host correctness compiler
         run: ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue1120-build.log"
       - name: Run heterogeneous input regressions
