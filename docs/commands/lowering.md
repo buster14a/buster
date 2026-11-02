@@ -35,3 +35,40 @@ lowers other than its warm-up, and a run that measures no file fail the command
 (`test-checker` checks each, `c_lowering_source_benchmark_test.c`). Run it under
 the 9700X's lock with `taskset -c 2`. [The lowering guide](../../docs/c-lowering.md) records the
 contract, the comparisons' results and the completed `main.c` measurement.
+
+## Node templates (#1048)
+
+`./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N]
+[--ignore-tracking] [--allow CATEGORY]... [preprocessor options] file...`
+(`c_check_lower_inventory.c`) is #1048's inventory of node templates: each
+file's selected definitions lowered by the task loop with every entry's owner
+(`check_program_lower_owners`, the `-g` path's tokens replaced by owners through
+`CheckLowerWriter.owners`, which no compile sets) and again without, which must
+give the same entries; each node's key from the columns and its pattern; the
+exceptions by category; the coverage of the deterministic keys and of their
+abstract patterns; the bodies without an exception; and the maximal subtrees of
+template nodes. It counts rather than times, so it needs no lock beyond the
+build's. `test-checker` checks it on a fixture (`c_check_lower_inventory_test.c`).
+The lowering guide's "Node templates over a body: the inventory (#1048)" has
+`sqlite3.c`'s, Lua's and `main.c`'s results and what the design takes from them.
+
+`c_check_program_templates.c` is #1048's template path in scalar form: before a
+body's statements, a scatter gives each node's operands their contexts and
+targets by its op's rule (`check_lower_template_rules`), then each node on its
+own is classified, by the fast twin of the common shapes
+(`check_lower_template_fast`) or the general rules, writes its entries into a
+slot, and is marked closed or not, whose slots the task loop splices when it
+pops their roots in those contexts (`check_lower_template_splice`). The task
+loop stays the exact rules. No compile takes it (`CheckLowerShared.templates`):
+these scalar steps cost about what they save, so they wait for data-parallel
+ones. `./build/compiler test-lowering-templates [--passes N] [preprocessor
+options] file...` (`c_check_program_templates_test.c`) lowers each file by the
+tasks and with the templates forced (`check_program_lower_templates`), on any
+host, requires every function's entries, locals, calls and arguments to be the
+same and the fast twin to classify every node it takes as the general rules do
+(its `check`), and with `--passes N` times both; `test-checker` runs it on
+fixtures. `--time-stages`' `lowering-nodes` line reports the nodes and entries
+the templates took. A change to `check_lower_expand`'s rules for what the table
+takes changes the templates too: run the command on `sqlite3.c`, Lua and
+c-testsuite. [The lowering guide](../../docs/c-lowering.md)'s "Node templates
+over a body: the first path (#1048)" has the coverage and the measurements.
