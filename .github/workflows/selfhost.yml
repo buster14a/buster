@@ -123,20 +123,34 @@ jobs:
 
       - name: Stage the official Clang 23 toolchain
         if: steps.host.outputs.vector == '1'
+        run: bash tools/ci/setup-hosted.sh
+
+      - name: Verify the staged official Clang and host path
+        if: steps.host.outputs.vector == '1'
         run: |
           set -euo pipefail
-          bash tools/ci/setup-hosted.sh
+          test -n "${BUSTER_CLANG_RESOURCE_DIR:-}"
+          llvm_root="${BUSTER_CLANG_RESOURCE_DIR%/lib/clang/*}"
+          test -x "$llvm_root/bin/clang"
           artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           {
               printf 'official_toolchain:\n'
-              clang --version
+              "$llvm_root/bin/clang" --version
           } >> "$artifacts/metadata.txt"
+          defines=$("$llvm_root/bin/clang" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
+          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
+              printf '%s\n' '::error::The staged official Clang does not select the complete host vector path; baseline self-hosting is blocked by #1108.'
+              exit 1
+          fi
 
       - name: Build stage 1 and qualify the self-host
         if: steps.host.outputs.vector == '1'
         run: |
           set -euo pipefail
           unset CPATH C_INCLUDE_PATH
+          llvm_root="${BUSTER_CLANG_RESOURCE_DIR%/lib/clang/*}"
+          export PATH="$llvm_root/bin:$PATH"
+          test "$(clang -dumpversion)" = "23.1.4"
           artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           # Redirect before consuming; process substitution would hide an exporter failure.
