@@ -1,0 +1,120 @@
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -2605,7 +2605,7 @@
+         plain.no_standard_includes = true;
+         plain.include_count = 0;
+         plain.macro_count = 0;
+-        plain.predefines_path = "/dev/null";
++        plain.predefines_path = NULL;
+         options = &plain;
+     }
+     int result = 1;
+--- a/src/buster/compiler/source_driver.c
++++ b/src/buster/compiler/source_driver.c
+@@ -84,7 +84,9 @@
+         "--verify", "--dump-typed", "--dump-static", "-flazy-system-headers", "--lower-all", "--poison-arenas", "--shared-parts",
+         "--time-stages", "--tier1", "--tier1-report", "--tier1-refusals", "--tier1-no-rematerialize", "--tier1-gvn", "--tier1-no-lifetimes",
+     };
+-    bool found = strncmp(argument, "--lanes", 7) == 0 || strncmp(argument, "--worker-budget", 15) == 0 || strncmp(argument, "--id-order", 10) == 0;
++    bool found = strcmp(argument, "--lanes") == 0 || strncmp(argument, "--lanes=", 8) == 0 ||
++                 strcmp(argument, "--worker-budget") == 0 || strncmp(argument, "--worker-budget=", 16) == 0 ||
++                 strcmp(argument, "--id-order") == 0 || strncmp(argument, "--id-order=", 11) == 0;
+     for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(options); i += 1)
+     {
+         found = strcmp(argument, options[i]) == 0;
+@@ -152,6 +154,12 @@
+                 driver->libraries[driver->library_count++] = arguments[i + 1];
+             }
+         }
++        else if (option && (strncmp(argument, "-Wl,", 4) == 0 || strcmp(argument, "-Xlinker") == 0))
++        {
++            // The preprocessor accepts other -W options, but cannot consume a linker request on its behalf.
++            fprintf(stderr, "error: unsupported linker option '%s'\n", argument);
++            valid = false;
++        }
+         else if (option && strcmp(argument, "-c") == 0)
+         {
+             driver->compile = true;
+@@ -409,7 +417,7 @@
+         }
+     }
+     PPOptions preprocessing = { 0 };
+-    if (valid && driver.assembly_count != 0 && !driver.checking_only)
++    if (valid && (driver.assembly_count != 0 || c_count == 0) && !driver.checking_only)
+     {
+         const char* source = NULL;
+         const char* output = NULL;
+@@ -418,7 +426,7 @@
+         valid = pp_parse_options((int)driver.preprocessing_count, driver.preprocessing, &preprocessing, &arena, &source, &output, &markers);
+         if (!valid)
+         {
+-            fprintf(stderr, "error: unsupported assembly options\n");
++            fprintf(stderr, "error: unsupported source driver options\n");
+             result = 1;
+         }
+     }
+--- a/src/buster/compiler/source_driver_test.c
++++ b/src/buster/compiler/source_driver_test.c
+@@ -108,10 +108,14 @@
+         char* force_plain[] = { executable, "--lanes", "1", "main.c", "-x", "assembler", "macro.S", "-o", "rejected", NULL };
+         source_driver_test_command(&test, "-x assembler overrides .S preprocessing", force_plain, 1, NULL, false);
+         // Compile the preprocessed input independently: the deliberately destructive -D must not rename its symbol.
+-        char* plain[] = { executable, "--lanes", "1", "-Danswer=wrong", "-x", "cpp-output", "-c", "plain.i", "-o", "plain.o", NULL };
+-        source_driver_test_command(&test, "cpp-output is not given command-line macros", plain, 0, NULL, false);
++        char* plain[] = { executable, "--lanes", "1", "-Danswer=wrong", "-include", "nonexistent.h", "-x", "cpp-output", "-c", "plain.i", "-o", "plain.o", NULL };
++        source_driver_test_command(&test, "cpp-output ignores command-line macros and forced includes", plain, 0, NULL, false);
+         char* link_plain[] = { executable, "--lanes", "1", "main.c", "plain.o", "-o", "program", NULL };
+         source_driver_test_command(&test, "preprocessed C object retains its identifier", link_plain, 0, NULL, true);
++        // Compile .i separately so -D does not change main.c's expected external name.
++        char* suffix_object[] = { executable, "--lanes", "1", "-Danswer=wrong", "-c", "plain.i", "-o", "plain.o", NULL };
++        source_driver_test_command(&test, ".i suffix ignores command-line macros", suffix_object, 0, NULL, false);
++        source_driver_test_command(&test, ".i suffix retains its identifier", link_plain, 0, NULL, true);
+         char* parallel[] = { executable, "--lanes", "2", "--poison-arenas", "main.c", "extra.c", "own.o", "-o", "program", NULL };
+         source_driver_test_command(&test, "parallel captured C objects survive worker arena release", parallel, 0, NULL, true);
+         check_test_expect(&test, access("main.o", F_OK) != 0 && access("extra.o", F_OK) != 0, "mixed linking writes no temporary object files");
+@@ -121,6 +125,15 @@
+         source_driver_test_command(&test, "compile main for object-only link", object_only, 0, NULL, false);
+         char* only[] = { executable, "--lanes", "1", "main.o", "own.o", "-o", "program", NULL };
+         source_driver_test_command(&test, "object-only invocation links without a C frontend", only, 0, NULL, true);
++        char* via_library[] = { executable, "--lanes", "1", "main.o", "-L", ".", "-l", "answer", "-o", "program", NULL };
++        source_driver_test_command(&test, "object and -l archive use the default link driver", via_library, 0, NULL, true);
++        char* mixed_compile[] = { executable, "--lanes", "1", "-c", "main.c", "answer.s", NULL };
++        source_driver_test_command(&test, "mixed -c emits each source's object", mixed_compile, 0, NULL, false);
++        check_test_expect(&test, access("main.o", F_OK) == 0 && access("answer.o", F_OK) == 0, "mixed -c wrote both frontend outputs");
++        char* unknown_option[] = { executable, "--unknown-driver-option", "main.o", "own.o", "-o", "rejected", NULL };
++        source_driver_test_command(&test, "object-only link rejects unknown options", unknown_option, 1, "unknown argument", false);
++        char* raw_linker[] = { executable, "-Wl,--no-such-linker-option", "main.o", "own.o", "-o", "rejected", NULL };
++        source_driver_test_command(&test, "raw linker options are not silently discarded", raw_linker, 1, "unsupported linker option", false);
+         char* compile_asm[] = { executable, "-x", "assembler", "-c", "extensionless", "-o", "forced.o", NULL };
+         source_driver_test_command(&test, "explicit -x assembler -c is accepted", compile_asm, 0, NULL, false);
+         char* unused_link[] = { executable, "-c", "own.o", "-o", "unused-output", NULL };
+--- a/docs/c-checker.md
++++ b/docs/c-checker.md
+@@ -12,6 +12,27 @@
+ ./build/compiler [--scalar] [--lower-all] -c [-o file.o] [preprocessor options] file.c
+ ./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
+ ```
++
++The default command classifies each input before reading it (#1120): `.c` and `.h` are C, `.i` is preprocessed C,
++`.s` is assembly, and `.S` is assembly preprocessed with the command's macros and include paths. Other suffixes
++are linker inputs, including `.o`, `.a` and versioned `.so` paths. `-x c`, `-x cpp-output`, `-x assembler` and
++`-x assembler-with-cpp` apply to following inputs until another `-x`; `-x none` restores suffix selection.
++Preprocessed C ignores command-line macros, forced includes and replacement predefines files.
++
++```sh
++./build/compiler -c helper.c -o helper.o
++./build/compiler main.c helper.o extra.s macros.S libsupport.a -o program
++./build/compiler main.o helper.o -o program
++```
++
++A link containing assembly or linker inputs compiles its C units together on the usual lanes, retains their ELF
++objects in memory, assembles its assembly inputs, then passes the original input order to the foreign linker with
++the normal C startup objects and runtime libraries. No temporary object files or external linker are used. The
++result is a dynamic PIE; this input-routing change does not add other link modes or raw `-Wl,`/`-Xlinker` forwarding.
++All-C commands retain the direct native path described below. With `-c`, each source produces an object; linker
++inputs are unused with a warning. Multiple emitting inputs cannot share `-o` or an inferred object filename.
++`test-source-driver` exercises the real CLI with Buster and Clang objects, archives, shared libraries, both assembly
++modes, positional languages, parallel C capture, and failures that must not publish an executable.
+ 
+ The compiler driver accepts `-pipe` in C compilation and preprocessing; it has no effect because its stages run in
+ one process. `--version` identifies a development build and prints its target, while `-dumpmachine` prints only the
