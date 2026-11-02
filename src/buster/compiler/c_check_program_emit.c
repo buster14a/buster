@@ -570,12 +570,10 @@ static uint8_t check_program_result_class(const Tier0Function* function, const C
 
 // Body `b`'s raw source rows (c_check_debug.c), from where each entry's code starts now that the branches are sized: the
 // record count's offset is the end. Only -g reaches it, out of line so that the plain emission carries none of it.
-static __attribute__((noinline)) void check_program_emit_body_rows(CheckEmitBody* body, const CheckProgram* program, const Parser* parser,
+static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody* body, const CheckProgram* program, const Parser* parser,
                                                                    const uint32_t* tokens, const Tier0Code* code, uint32_t b, uint32_t* offsets, uint32_t length,
-                                                                   bool scalar)
+                                                                   bool scalar, Arena* scratch)
 {
-    (void)scalar;
-
     offsets[code->count] = length;
     const uint32_t declaration = program->bodies[b].declaration;
     const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
@@ -584,6 +582,21 @@ static __attribute__((noinline)) void check_program_emit_body_rows(CheckEmitBody
                                check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing, body->row_offsets,
                                                 body->row_tokens);
     body->body_offset = offsets[code->entry_records[0]];
+    EmissionSourceEvent* events = BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionSourceEvent, (uint64_t)code->entry_count + 1);
+    EmissionSourceRow* resolved = BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionSourceRow, (uint64_t)code->entry_count + 1);
+    bool valid = events != 0 && resolved != 0;
+    body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
+    body->reason = valid ? 0 : "no room for the source metadata protocol's rows";
+    body->token = valid ? body->token : declaration;
+    if (valid)
+    {
+        valid = check_debug_rows_protocol(code->entry_records, tokens, code->entry_count, offsets, code->count, length, declaration, closing, body->row_offsets,
+                                          body->row_tokens, body->row_count, scalar, events, resolved);
+        body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+        body->reason = valid ? 0 : "internal compiler error: source metadata disagrees with the raw rows";
+        body->token = valid ? body->token : declaration;
+    }
+    return valid;
 }
 
 // Body `b`'s code after Tier 0, on its lane (`lane`): branch sizing, encoding into the lane's bytes, its unwind frame, its
@@ -640,7 +653,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         valid = length >= 0;
         if (valid && run->sources)
         {
-            check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar);
+            valid = check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar, scratch);
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
         if (valid && run->unwind && naked != 0)
