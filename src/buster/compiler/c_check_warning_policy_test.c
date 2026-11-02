@@ -59,23 +59,23 @@ static void check_test_warning_policy(CheckTest* test)
             .semantic_warning_options = arguments,
             .semantic_warning_option_count = cases[i].second != NULL ? 2 : 1,
         };
-        const CheckWarningCommandLine actual = check_warning_command_line(&options, cases[i].id, false);
+        const CheckWarningCommandLine actual = check_warning_command_line(&options, cases[i].id, false, false);
         check_test_expect(test, actual.severity == cases[i].expected, "sparse warning options follow independently observed Clang group and global policy");
     }
     const PPOptions empty = { 0 };
     for (uint32_t id = CHECK_WARNING_ID_NON_LITERAL_NULL; id < CHECK_WARNING_ID_COUNT; id += 1)
     {
-        const CheckWarningCommandLine enabled = check_warning_command_line(&empty, id, false);
-        const CheckWarningCommandLine ignored = check_warning_command_line(&empty, id, true);
+        const CheckWarningCommandLine enabled = check_warning_command_line(&empty, id, false, false);
+        const CheckWarningCommandLine ignored = check_warning_command_line(&empty, id, true, false);
         check_test_expect(test, enabled.severity == CHECK_WARNING_WARNING && ignored.severity == CHECK_WARNING_IGNORE,
                           "event defaults remain independent of every high policy ID");
     }
     const char* arguments[] = { "-Wsystem-headers", "-Wno-system-headers" };
     PPOptions options = { .semantic_warning_options = arguments, .semantic_warning_option_count = 1 };
-    check_test_expect(test, check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false).system_headers,
+    check_test_expect(test, check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false, false).system_headers,
                       "source warning visibility can explicitly include system headers");
     options.semantic_warning_option_count = 2;
-    check_test_expect(test, !check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false).system_headers,
+    check_test_expect(test, !check_warning_command_line(&options, CHECK_WARNING_ID_LITERAL_RANGE, false, false).system_headers,
                       "the last system-header visibility option controls the sparse warnings");
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     char* ordered[] = { "-Wno-everything", "-include", "-Werror=literal-range", "-Wliteral-range", "source.c", "-o", "-Werror", "-pedantic-errors" };
@@ -88,7 +88,7 @@ static void check_test_warning_policy(CheckTest* test)
                            strcmp(parsed.semantic_warning_options[0], "-Wno-everything") == 0 &&
                            strcmp(parsed.semantic_warning_options[1], "-Wliteral-range") == 0 &&
                            strcmp(parsed.semantic_warning_options[2], "-pedantic-errors") == 0 &&
-                           check_warning_command_line(&parsed, CHECK_WARNING_ID_LITERAL_RANGE, false).severity == CHECK_WARNING_WARNING,
+                           check_warning_command_line(&parsed, CHECK_WARNING_ID_LITERAL_RANGE, false, false).severity == CHECK_WARNING_WARNING,
                       "actual CLI capture keeps option order and never mistakes an include or output filename for warning policy");
     arena_release(&arena);
 }

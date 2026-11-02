@@ -23,6 +23,10 @@
 //   - Assembly: asm_assemble_code's records of the text, by the checker's path (the assembler's vector path or its
 //     scalar twin), from a match index that admits every form the encoder has (an inline template's instructions are
 //     its author's to choose, as GNU as and clang's integrated assembler take any).
+//   - A template that takes a directive besides the syntax switches is one source assembled whole by asm_assemble
+//     (check_asm_unit_helper): its frame and operand loads around the template, the template, its stores and epilogue.
+//     The emission publishes its atoms, symbols and fixups (check_program_emit_asm_unit). A template of alignment or
+//     section directives alone has no code: its atoms and labels are published and the statement calls nothing.
 //   - The helper (check_asm_helper_code): pushes of the callee-saved registers the statement touches, rsp aligned to 16
 //     at the asm, the operands loaded from the operand block whose address comes in rdi (the x87's onto its stack), the
 //     records, the register outputs stored through their addresses (which the block holds), the x87's popped so and the
@@ -46,9 +50,9 @@
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
 // (rsp, a high byte, APX's and the other classes') and as memory inputs, clobbers of an operand's register, APX's
-// registers, templates the assembler refuses, a label two templates define, and a `.L` name no template defines; and of
-// naked functions (CheckProgramNaked.reason) statements other than asm statements, operands other than integer
-// constants, and bodies of no instructions.
+// registers, templates the assembler refuses, a template's CFI directives, a label two templates define, and a `.L`
+// name no template defines; and of naked functions (CheckProgramNaked.reason) statements other than asm statements,
+// operands other than integer constants, and bodies of no instructions.
 // Include after c_check_program_helpers.c, assembler.c, x86_target.c and tier0.c.
 #ifndef BUSTER_C_CHECK_PROGRAM_ASM_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_ASM_INCLUDED
@@ -118,7 +122,18 @@ typedef struct CheckAsmName CheckAsmName;
 struct CheckAsmName
 {
     String8 spelling;
+    // The binding and visibility a template's directive gives the name (BUSTER_LINK_SYMBOL_LOCAL, GLOBAL or WEAK, and
+    // the visibility bits), and whether a template defines it, as a label. An absolute (`.set`) name is the template's
+    // alone: the emission adds no symbol for it, and another template's reference is refused by name.
+    uint8_t flags;
+    // The binding and size directives a template gave the name (BUSTER_ASM_DIRECTIVE_BINDING and _SIZE), and the size
+    // a `.size` did: a name that maps to one of the unit's program symbols takes them, as clang's assembled module does.
+    uint8_t directives;
+    uint64_t size;
     bool label;
+    bool absolute;
+    // Whether a fixup refers to the name: an undefined global that none does is a declaration, not a reference.
+    bool referenced;
 };
 
 // A statement's plan: its operands' places (output_count + input_count of them), its block's bytes (0 for none), its
@@ -138,6 +153,14 @@ struct CheckProgramAsm
     uint32_t label_count;
     uint32_t block;
     uint32_t helper;
+    // The callee-saved registers the helper touches, and its frame's reservation (8 or 16): a unit's synthetic unwind
+    // entry (check_program_emit_asm_unit's frame, check_asm_unit_frame).
+    uint32_t saved;
+    uint32_t frame;
+    // A template that uses a directive besides the syntax switches: the whole helper, assembled by asm_assemble into a
+    // unit of its own (atoms, symbols and fixups), which the emission publishes as a helper's code and sections.
+    AsmResult unit;
+    bool unit_assembled;
     bool planned;
 };
 
@@ -151,6 +174,9 @@ struct CheckProgramNaked
     String8* names;
     CheckProgramAsmLabel* labels;
     uint32_t label_count;
+    // Its templates use a directive besides the syntax switches: the whole function, assembled by asm_assemble.
+    AsmResult unit;
+    bool unit_assembled;
     bool planned;
 };
 
@@ -873,6 +899,190 @@ static const X86MatchIndex* check_asm_matches(Arena* scratch)
     return index;
 }
 
+// The text being written at the top of `output` for a template that takes directives (check_asm_unit_helper): appends
+// bytes, text and a decimal number, and clears `*valid` without room.
+static void check_asm_unit_bytes(Arena* output, const void* bytes, uint64_t count, bool* valid)
+{
+    uint8_t* at = *valid && count != 0 ? arena_push(output, count, 1) : 0;
+    *valid &= count == 0 || at != 0;
+    if (at != 0)
+    {
+        memcpy(at, bytes, count);
+    }
+}
+
+static void check_asm_unit_text(Arena* output, const char* text, bool* valid)
+{
+    check_asm_unit_bytes(output, text, strlen(text), valid);
+}
+
+static void check_asm_unit_number(Arena* output, int64_t value, bool* valid)
+{
+    char digits[24];
+    const int length = snprintf(digits, sizeof(digits), "%lld", (long long)value);
+    check_asm_unit_bytes(output, digits, (uint64_t)length, valid);
+}
+
+// `%` and general register `reg` of `size` bytes (1, 2, 4 or 8), as AT&T names it.
+static void check_asm_unit_register(Arena* output, uint8_t reg, uint32_t size, bool* valid)
+{
+    const uint32_t row = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : 3;
+    check_asm_unit_text(output, "%", valid);
+    check_asm_unit_text(output, check_asm_registers[row][reg], valid);
+}
+
+// `%xmmN`, which a VECTOR operand's place holds.
+static void check_asm_unit_vector(Arena* output, uint8_t reg, bool* valid)
+{
+    check_asm_unit_text(output, "%xmm", valid);
+    check_asm_unit_number(output, reg, valid);
+}
+
+// The whole helper of a template that takes directives, as GNU assembly: its pushes, its frame's reservation and the
+// operand block's address, the operand loads, the template `text` (already substituted, in AT&T syntax unless it switches
+// itself), the register outputs' stores and the epilogue. Its code is its default text section's atom, at
+// AsmResult.entry_atom. A failure keeps nothing.
+static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t count, const uint8_t stores[2], bool block, uint32_t saved, String8 text,
+                                       const X86MatchIndex* index, bool scalar, Arena* output)
+{
+    const uint64_t mark = output->length;
+    uint32_t pushes = 0;
+    bool stored = false;
+    for (uint32_t r = 0; r < BUSTER_TIER0_CALLEE_SAVED; r += 1)
+    {
+        pushes += (saved >> tier0_callee_saved[r] & 1) != 0;
+    }
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        stored |= check_asm_stores(places + k);
+    }
+    // At the call, rsp is 8 past a multiple of 16; the pushes and the reservation (the block's address's slot) leave it
+    // at one at the template, as clang -O0's functions have it in their bodies.
+    const uint32_t frame = pushes % 2 == 0 ? 8 : 16;
+    bool valid = true;
+    check_asm_unit_text(output, ".att_syntax prefix\n", &valid);
+    for (uint32_t r = 0; r < BUSTER_TIER0_CALLEE_SAVED; r += 1)
+    {
+        if ((saved >> tier0_callee_saved[r] & 1) != 0)
+        {
+            check_asm_unit_text(output, "pushq ", &valid);
+            check_asm_unit_register(output, tier0_callee_saved[r], 8, &valid);
+            check_asm_unit_text(output, "\n", &valid);
+        }
+    }
+    check_asm_unit_text(output, "subq $", &valid);
+    check_asm_unit_number(output, frame, &valid);
+    check_asm_unit_text(output, ", %rsp\n", &valid);
+    if (block)
+    {
+        check_asm_unit_text(output, "movq %rdi, (%rsp)\n", &valid);
+    }
+    // The loads, from the block rdi holds: the one into rdi last. Only a matching pair shares a register, and of it only
+    // the input loads, so one load at most goes into rdi.
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const CheckAsmPlace* place = places + k;
+            const bool into_rdi = place->kind != BUSTER_CHECK_ASM_VECTOR && place->reg == X86_REGISTER_RDI;
+            if (!check_asm_loads(place) || into_rdi != (pass == 1))
+            {
+                continue;
+            }
+            // A `+` register operand's value is in its value slot; an input's value and a memory operand's address in
+            // its slot.
+            const uint32_t slot = place->written && place->kind != BUSTER_CHECK_ASM_MEMORY ? place->value : place->slot;
+            if (place->kind == BUSTER_CHECK_ASM_VECTOR)
+            {
+                check_asm_unit_text(output, place->size == 4 ? "movd " : "movq ", &valid);
+                check_asm_unit_number(output, slot, &valid);
+                check_asm_unit_text(output, "(%rdi), ", &valid);
+                check_asm_unit_vector(output, place->reg, &valid);
+            }
+            else if (place->kind == BUSTER_CHECK_ASM_MEMORY)
+            {
+                check_asm_unit_text(output, "movq ", &valid);
+                check_asm_unit_number(output, slot, &valid);
+                check_asm_unit_text(output, "(%rdi), ", &valid);
+                check_asm_unit_register(output, place->reg, 8, &valid);
+            }
+            else
+            {
+                check_asm_unit_text(output, place->size == 1 ? "movzbl " : place->size == 2 ? "movzwl " : place->size == 4 ? "movl " : "movq ", &valid);
+                check_asm_unit_number(output, slot, &valid);
+                check_asm_unit_text(output, "(%rdi), ", &valid);
+                check_asm_unit_register(output, place->reg, place->size == 8 ? 8 : 4, &valid);
+            }
+            check_asm_unit_text(output, "\n", &valid);
+        }
+    }
+    check_asm_unit_bytes(output, text.pointer, text.length, &valid);
+    // The template may have left another syntax or another section behind; the helper's stores and epilogue are its own
+    // default text section's.
+    if (text.length != 0 && text.pointer[text.length - 1] != '\n')
+    {
+        check_asm_unit_text(output, "\n", &valid);
+    }
+    check_asm_unit_text(output, ".att_syntax prefix\n.text\n", &valid);
+    if (stored)
+    {
+        check_asm_unit_text(output, "movq (%rsp), ", &valid);
+        check_asm_unit_register(output, stores[0], 8, &valid);
+        check_asm_unit_text(output, "\n", &valid);
+    }
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const CheckAsmPlace* place = places + k;
+        if (!check_asm_stores(place))
+        {
+            continue;
+        }
+        check_asm_unit_text(output, "movq ", &valid);
+        check_asm_unit_number(output, place->slot, &valid);
+        check_asm_unit_text(output, "(", &valid);
+        check_asm_unit_register(output, stores[0], 8, &valid);
+        check_asm_unit_text(output, "), ", &valid);
+        check_asm_unit_register(output, stores[1], 8, &valid);
+        check_asm_unit_text(output, "\n", &valid);
+        if (place->kind == BUSTER_CHECK_ASM_VECTOR)
+        {
+            check_asm_unit_text(output, place->size == 4 ? "movd " : "movq ", &valid);
+            check_asm_unit_vector(output, place->reg, &valid);
+        }
+        else
+        {
+            check_asm_unit_text(output, place->size == 1 ? "movb " : place->size == 2 ? "movw " : place->size == 4 ? "movl " : "movq ", &valid);
+            check_asm_unit_register(output, place->reg, place->size, &valid);
+        }
+        check_asm_unit_text(output, ", (", &valid);
+        check_asm_unit_register(output, stores[1], 8, &valid);
+        check_asm_unit_text(output, ")\n", &valid);
+    }
+    check_asm_unit_text(output, "addq $", &valid);
+    check_asm_unit_number(output, frame, &valid);
+    check_asm_unit_text(output, ", %rsp\n", &valid);
+    for (uint32_t r = BUSTER_TIER0_CALLEE_SAVED; r-- > 0;)
+    {
+        if ((saved >> tier0_callee_saved[r] & 1) != 0)
+        {
+            check_asm_unit_text(output, "popq ", &valid);
+            check_asm_unit_register(output, tier0_callee_saved[r], 8, &valid);
+            check_asm_unit_text(output, "\n", &valid);
+        }
+    }
+    check_asm_unit_text(output, "retq\n", &valid);
+    const uint64_t length = output->length - mark;
+    AsmResult result = valid ? asm_assemble((String8){ .pointer = (char*)output->base + mark, .length = length }, index,
+                                            (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output) :
+                               (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
+    if (result.error != 0)
+    {
+        output->length = mark;
+        result = (AsmResult){ .error = result.error, .location = result.location };
+    }
+    return result;
+}
+
 // Whether input `checked` is an integer constant an immediate takes (the checker's, without side effects, of an integer
 // or a pointer type), and then its value as clang prints it into `*constant`: its type's bits (`*bits` of them),
 // sign-extended.
@@ -1266,6 +1476,15 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         reason = reg < 0 ? "inline assembly operands past the registers left" : NULL;
         taken |= reg >= 0 ? 1u << reg : 0;
     }
+    // The frame the helper's pushes leave (check_asm_helper_code): 8 or 16 bytes at the template's entry, rsp 16-byte
+    // aligned there. `saved` is Tier0Code.frame_saved's encoding: bit r for tier0_callee_saved[r], not the registers'.
+    uint32_t saved_positions = 0;
+    for (uint32_t r = 0; r < BUSTER_TIER0_CALLEE_SAVED; r += 1)
+    {
+        saved_positions |= (taken >> tier0_callee_saved[r] & 1) != 0 ? 1u << r : 0;
+    }
+    plan->saved = saved_positions;
+    plan->frame = __builtin_popcount(saved_positions) % 2 == 0 ? 8 : 16;
     // The template, its operands substituted, assembled by the checker's path.
     String8 text = { 0 };
     if (valid && reason == NULL)
@@ -1273,43 +1492,103 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         reason = check_asm_substitute(statement, places, program->identifiers, s, scratch, &text, &valid);
     }
     AsmCode code = { 0 };
+    AsmResult unit = { 0 };
+    bool unit_assembled = false;
     if (valid && reason == NULL)
     {
         code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
-        reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
-        valid = code.error == NULL || reason != NULL;
-        // A label with no instruction to follow in its template would be a place in the statement's function, which its
-        // code (Tier 0's) doesn't mark.
-        reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
-        // A template that returns before any branch would leave the helper with its frame still reserved, where clang's
-        // inline emission returns from the enclosing function. Refuse that initial flow by name; a template that jumps
-        // over its return (a called snippet's label) stays admitted, as clang's own asm labels do.
-        for (uint32_t r = 0; reason == NULL && r < code.count; r += 1)
+        if (code.error != NULL && code.directive)
         {
-            const uint16_t form = code.records[r].form;
-            const bool ret = form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 ||
-                             form == X86_FORM_RETD || form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
-            bool branch = false;
-            for (uint32_t b = 0; b < code.branch_count; b += 1)
+            // A template that takes a directive besides the syntax switches is assembled by the full assembler
+            // (asm_assemble). A template of alignment and section directives alone has no code: its sections and symbols
+            // are published, and the statement calls nothing, as clang's emits no instructions for it.
+            const uint64_t body_mark = output->length;
+            char* body_source = text.length != 0 ? arena_push(output, text.length, 1) : 0;
+            bool body_valid = text.length == 0 || body_source != 0;
+            if (body_source != 0)
             {
-                branch |= code.branches[b] == r;
+                memcpy(body_source, text.pointer, text.length);
             }
-            reason = ret ? "inline assembly templates that return from their helper" : branch ? NULL : reason;
-            if (ret || branch)
+            AsmResult body = body_valid ? asm_assemble((String8){ .pointer = body_source, .length = text.length }, index,
+                                                       (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output) :
+                                          (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
+            valid = body_valid;
+            const bool entry_code = body.error == NULL && body.entry_code;
+            if (body.error != NULL)
             {
-                break;
+                reason = strstr(body.error, "arena exhausted") == NULL ? body.error : NULL;
+                valid = body.error == NULL || reason != NULL;
+            }
+            else if (entry_code && body.ret_first)
+            {
+                // The template returns before any branch: its helper would leave its frame reserved, as the record path's
+                // check refuses a record RET before a branch (check_program_asm_plan_one's record path).
+                reason = "inline assembly templates that return from their helper";
+            }
+            else if (!entry_code)
+            {
+                unit = body;
+                unit_assembled = true;
+            }
+            else
+            {
+                // The template's own code is a helper's: discard its standalone assembly and assemble the whole helper, its
+                // frame and operand block around the template.
+                arena_pop_to(output, body_mark);
+                unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, text, index, scalar, output);
+                unit_assembled = unit.error == NULL;
+                reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
+                valid = unit.error == NULL || reason != NULL;
+            }
+            // A template's CFI would be a frame of its own, which the helper's own unwind entry describes.
+            for (uint32_t a = 1; unit_assembled && reason == NULL && a < unit.link.atoms.count; a += 1)
+            {
+                reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
+            }
+        }
+        else
+        {
+            reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
+            valid = code.error == NULL || reason != NULL;
+            // A label with no instruction to follow in its template would be a place in the statement's function, which its
+            // code (Tier 0's) doesn't mark.
+            reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
+            // A template that returns before any branch would leave the helper with its frame still reserved, where clang's
+            // inline emission returns from the enclosing function. Refuse that initial flow by name; a template that jumps
+            // over its return (a called snippet's label) stays admitted, as clang's own asm labels do.
+            for (uint32_t r = 0; reason == NULL && r < code.count; r += 1)
+            {
+                const uint16_t form = code.records[r].form;
+                const bool ret = form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 ||
+                                 form == X86_FORM_RETD || form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
+                bool branch = false;
+                for (uint32_t b = 0; b < code.branch_count; b += 1)
+                {
+                    branch |= code.branches[b] == r;
+                }
+                reason = ret ? "inline assembly templates that return from their helper" : branch ? NULL : reason;
+                if (ret || branch)
+                {
+                    break;
+                }
             }
         }
     }
+    // The x87's places and the held operands have their own paths in the record helper; a template assembled whole takes
+    // neither (its wrapper would have to load and store them too).
+    bool x87 = false;
+    bool held = false;
+    for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
+    {
+        x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
+        held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
+    }
+    reason = valid && reason == NULL && unit_assembled && x87 ? "inline assembly x87 operands in templates that take directives" : reason;
+    reason = valid && reason == NULL && unit_assembled && held ? "inline assembly vector operands in templates that take directives" : reason;
     // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
     // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
     // Only a statement whose places are all written has them to read: none with an arena that had no room for them, nor
     // past a refusal (#929's review).
-    bool x87 = false;
-    for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
-    {
-        x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
-    }
     const bool helped = code.count != 0 || x87;
     // The held operands (BUSTER_CHECK_ASM_HELD): refused by a statement with a helper, which would read or write their
     // registers, and in one without an output's object or an input's value, which the lowering evaluates alone.
@@ -1319,7 +1598,31 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         reason = place->kind == BUSTER_CHECK_ASM_HELD && helped ? "inline assembly operands of this type in their constraint's registers" : NULL;
         place->kind = place->kind != BUSTER_CHECK_ASM_HELD ? place->kind : place->written ? BUSTER_CHECK_ASM_MEMORY : BUSTER_CHECK_ASM_VECTOR;
     }
-    if (valid && reason == NULL && helped)
+    if (valid && reason == NULL && unit_assembled)
+    {
+        const bool unit_code = unit.entry_code;
+        helper->code = (Tier0Code){ .error = TIER0_OK };
+        plan->unit = unit;
+        plan->unit_assembled = true;
+        if (unit_code)
+        {
+            helper->id = CBUILTIN_NONE;
+            helper->assembly = s + 1;
+            helper->parameter_count = block != 0 ? 1 : 0;
+            helper->parameter_types[0] = block != 0 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID;
+            helper->parameter_types[1] = BUSTER_TYPE_VOID;
+            helper->parameter_types[2] = BUSTER_TYPE_VOID;
+            helper->result_type = BUSTER_TYPE_VOID;
+            helper->compiler_barrier = true;
+            plan->helper = 0;
+        }
+        else
+        {
+            // Directives alone: no helper, so the lowering evaluates the operands and calls nothing.
+            plan->helper = BUSTER_CHECK_NONE;
+        }
+    }
+    else if (valid && reason == NULL && helped)
     {
         // The callee-saved registers the statement touches: its clobbers', its operands' and the stores'.
         uint32_t first = 0;
@@ -1363,6 +1666,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->places = 0;
         plan->names = 0;
         plan->labels = 0;
+        plan->unit = (AsmResult){ 0 };
+        plan->unit_assembled = false;
         plan->label_count = 0;
     }
     arena_pop_to(scratch, scratch_mark);
@@ -1447,8 +1752,9 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             }
         }
     }
-    // The templates as one source, each on lines of its own.
-    char* source = valid && reason == NULL ? arena_push(scratch, length + 1, 1) : 0;
+    // The templates as one source, each on lines of its own. In the output arena, so that a unit's section names, whose
+    // bytes are the source's, live as long as its link.
+    char* source = valid && reason == NULL ? arena_push(output, length + 1, 1) : 0;
     valid = valid && (reason != NULL || source != 0);
     uint64_t at = 0;
     for (uint32_t i = 0; valid && reason == NULL && i < statements; i += 1)
@@ -1463,15 +1769,39 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
         source[at++] = '\n';
     }
     AsmCode code = { 0 };
+    AsmResult unit = { 0 };
+    bool unit_assembled = false;
     if (valid && reason == NULL)
     {
         code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
-        reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
-        valid = code.error == NULL || reason != NULL;
-        // clang makes an empty function of none, which would have an unwind entry of no bytes.
-        reason = reason == NULL && valid && code.count == 0 ? "naked functions of no instructions" : reason;
+        if (code.error != NULL && code.directive)
+        {
+            // The naked function's templates take directives: its whole code is a unit assembled by the full assembler.
+            unit = asm_assemble((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output);
+            unit_assembled = unit.error == NULL;
+            reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
+            valid = unit.error == NULL || reason != NULL;
+            for (uint32_t a = 1; unit_assembled && reason == NULL && a < unit.link.atoms.count; a += 1)
+            {
+                reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
+            }
+            // clang makes an empty function of none, which would have an unwind entry of no bytes.
+            reason = reason == NULL && valid && !unit.entry_code ? "naked functions of no instructions" : reason;
+        }
+        else
+        {
+            reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
+            valid = code.error == NULL || reason != NULL;
+            // clang makes an empty function of none, which would have an unwind entry of no bytes.
+            reason = reason == NULL && valid && code.count == 0 ? "naked functions of no instructions" : reason;
+        }
     }
-    if (valid && reason == NULL)
+    if (valid && reason == NULL && unit_assembled)
+    {
+        naked->unit = unit;
+        naked->unit_assembled = true;
+    }
+    else if (valid && reason == NULL)
     {
         LinkReference* references = code.reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, code.reference_count) : 0;
         uint32_t* entries = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2);
@@ -1525,8 +1855,10 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
 }
 
 // The entry of `spelling` in the names' table (`table`, `mask` + 1 slots of an index plus one, or 0 for none), added to
-// `names` if it isn't there.
-static uint32_t check_asm_name(CheckAsmName* names, uint32_t* count, uint32_t* table, uint32_t mask, String8 spelling)
+// `names` if it isn't there, with `flags`' binding (the last directive's, as GNU as's). `label` marks a definition. With
+// `upgrade`, an existing name takes a non-local binding too: a reference's default global doesn't make a label of another
+// template's global.
+static uint32_t check_asm_name(CheckAsmName* names, uint32_t* count, uint32_t* table, uint32_t mask, String8 spelling, uint8_t flags, bool upgrade)
 {
     uint32_t slot = (uint32_t)link_hash((const uint8_t*)spelling.pointer, (uint32_t)spelling.length) & mask;
     while (table[slot] != 0 && (names[table[slot] - 1].spelling.length != spelling.length ||
@@ -1536,19 +1868,42 @@ static uint32_t check_asm_name(CheckAsmName* names, uint32_t* count, uint32_t* t
     }
     if (table[slot] == 0)
     {
-        names[*count] = (CheckAsmName){ .spelling = spelling };
+        names[*count] = (CheckAsmName){ .spelling = spelling, .flags = flags };
         *count += 1;
         table[slot] = *count;
     }
+    else
+    {
+        CheckAsmName* name = &names[table[slot] - 1];
+        if (upgrade && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL)
+        {
+            name->flags = (name->flags & ~BUSTER_LINK_SYMBOL_BINDING) | (flags & BUSTER_LINK_SYMBOL_BINDING);
+        }
+        // A non-default visibility is a directive's, and stays with the name even where its binding doesn't upgrade the
+        // name: `.hidden puts` makes the undefined reference hidden, as clang's assembler does.
+        if ((flags & BUSTER_LINK_SYMBOL_VISIBILITY) != BUSTER_LINK_SYMBOL_DEFAULT)
+        {
+            name->flags = (name->flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | (flags & BUSTER_LINK_SYMBOL_VISIBILITY);
+        }
+    }
     return table[slot] - 1;
+}
+
+// `symbol`'s name in `unit`, as the source spells it; an empty string for one with none.
+static String8 check_asm_unit_name(const AsmResult* unit, uint32_t symbol)
+{
+    const NameId name = unit->link.symbols.name[symbol];
+    return name != 0 && name < unit->link.names.count ? (String8){ .pointer = (char*)unit->link.names.bytes[name], .length = unit->link.names.length[name] } :
+                                                         (String8){ 0 };
 }
 
 // Gives every name the planned templates define or refer to its entry in `result->names`, once: each label its index,
 // and each reference's target its index (the emission makes it the name's symbol's). The labels come first, so that a
 // reference finds a label wherever its template is. A label two templates define, and a `.L` name (an assembler-local
 // one) no template defines, refuse the statement or the naked function that names it, as GNU as and clang reject them.
-// The scan is scalar, over a unit's few labels and references: main.c's units have 6. False only for an arena without
-// room.
+// A template that takes directives contributes its assembled unit's symbols; the record path's labels and references
+// keep their record indices. The scan is scalar, over a unit's few labels and references: main.c's units have 6. False
+// only for an arena without room.
 static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgramHelpers* helpers, const CheckProgram* program, Arena* output, Arena* scratch)
 {
     const uint32_t statements = result->plans != 0 ? program->input->asm_count : 0;
@@ -1557,12 +1912,20 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
     for (uint32_t s = 0; s < statements; s += 1)
     {
         const CheckProgramAsm* plan = result->plans + s;
-        total += plan->planned && plan->reason == NULL && plan->helper != BUSTER_CHECK_NONE ? plan->label_count + (uint64_t)helpers->items[plan->helper].code.reference_count : 0;
+        total += plan->planned && plan->reason == NULL ? plan->label_count +
+                                                             (plan->unit_assembled ? plan->unit.link.symbols.count + (uint64_t)plan->unit.absolute_count :
+                                                                                     plan->helper != BUSTER_CHECK_NONE ?
+                                                                                                                               helpers->items[plan->helper].code.reference_count :
+                                                                                                                               0) :
+                                                         0;
     }
     for (uint32_t b = 0; b < bodies; b += 1)
     {
         const CheckProgramNaked* naked = result->naked + b;
-        total += naked->planned && naked->reason == NULL ? naked->label_count + (uint64_t)naked->code.reference_count : 0;
+        total += naked->planned && naked->reason == NULL ? naked->label_count +
+                                                               (naked->unit_assembled ? naked->unit.link.symbols.count + (uint64_t)naked->unit.absolute_count :
+                                                                                        naked->code.reference_count) :
+                                                           0;
     }
     uint32_t slots = 2;
     while (slots < 2 * total && slots < (UINT32_C(1) << 31))
@@ -1577,22 +1940,42 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
     if (valid && total != 0)
     {
         memset(table, 0, (uint64_t)slots * sizeof(uint32_t));
-        // Each pass over the codes: the statements' helpers', then the naked functions'.
+        // The templates' absolute (`.set`) symbols, once each: they are the template's alone, so another template's
+        // reference to one is refused below by name rather than becoming an undefined global at link time.
+        for (uint32_t c = 0; c < statements + bodies; c += 1)
+        {
+            CheckProgramAsm* plan = c < statements ? result->plans + c : 0;
+            CheckProgramNaked* naked = c >= statements ? result->naked + (c - statements) : 0;
+            const bool planned = plan != 0 ? plan->planned && plan->reason == NULL : naked->planned && naked->reason == NULL;
+            const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : (naked->unit_assembled ? &naked->unit : 0);
+            for (uint32_t a = 0; unit != 0 && a < unit->absolute_count; a += 1)
+            {
+                const uint32_t name = check_asm_name(names, &count, table, slots - 1, unit->absolutes[a].name, BUSTER_LINK_SYMBOL_LOCAL, true);
+                // `.set`/`.equ` may reassign, and two templates' definitions of one name are each their own: a label of
+                // that name is refused when labels are added below.
+                names[name].label = true;
+                names[name].absolute = true;
+            }
+        }
+        // Each pass over the codes: the statements' helpers', then the naked functions'. A unit's labels (its defined
+        // symbols) are its pass 0's, and its other symbols its pass 1's.
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             for (uint32_t c = 0; c < statements + bodies; c += 1)
             {
                 CheckProgramAsm* plan = c < statements ? result->plans + c : 0;
                 CheckProgramNaked* naked = c >= statements ? result->naked + (c - statements) : 0;
-                const bool planned = plan != 0 ? plan->planned && plan->reason == NULL && plan->helper != BUSTER_CHECK_NONE : naked->planned && naked->reason == NULL;
-                const Tier0Code* code = !planned ? 0 : plan != 0 ? &helpers->items[plan->helper].code : &naked->code;
+                const bool planned = plan != 0 ? plan->planned && plan->reason == NULL && (plan->helper != BUSTER_CHECK_NONE || plan->unit_assembled) :
+                                                 naked->planned && naked->reason == NULL;
+                const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : (naked->unit_assembled ? &naked->unit : 0);
+                const Tier0Code* code = !planned || unit != 0 ? 0 : plan != 0 ? &helpers->items[plan->helper].code : &naked->code;
                 CheckProgramAsmLabel* labels = plan != 0 ? plan->labels : naked->labels;
-                const uint32_t label_count = !planned ? 0 : plan != 0 ? plan->label_count : naked->label_count;
+                const uint32_t label_count = !planned || unit != 0 ? 0 : plan != 0 ? plan->label_count : naked->label_count;
                 const String8* spellings = plan != 0 ? plan->names : naked->names;
                 const char** reason = plan != 0 ? &plan->reason : &naked->reason;
                 for (uint32_t k = 0; pass == 0 && k < label_count; k += 1)
                 {
-                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, labels[k].spelling);
+                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, labels[k].spelling, BUSTER_LINK_SYMBOL_LOCAL, true);
                     *reason = names[name].label ? "inline assembly labels another template defines too" : *reason;
                     names[name].label = true;
                     labels[k].name = name;
@@ -1600,10 +1983,56 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
                 for (uint32_t r = 0; pass == 1 && code != 0 && r < code->reference_count; r += 1)
                 {
                     const String8 spelling = spellings[r];
-                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, spelling);
+                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, spelling, BUSTER_LINK_SYMBOL_GLOBAL, false);
                     const bool local = spelling.length >= 2 && spelling.pointer[0] == '.' && spelling.pointer[1] == 'L';
-                    *reason = local && !names[name].label ? "inline assembly's local labels that no template defines" : *reason;
+                    *reason = names[name].absolute ? "inline assembly absolute symbols are per-template" :
+                              local && !names[name].label ? "inline assembly's local labels that no template defines" :
+                                                                                         *reason;
+                    names[name].referenced = true;
                     code->references[r].target = name;
+                }
+                for (uint32_t u = 1; unit != 0 && u < unit->link.symbols.count; u += 1)
+                {
+                    const String8 spelling = check_asm_unit_name(unit, u);
+                    const bool defined = unit->link.symbols.atom[u] != 0;
+                    if (spelling.length == 0 || defined != (pass == 0))
+                    {
+                        continue;
+                    }
+                    const uint8_t flags = unit->link.symbols.flags[u] & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY);
+                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, spelling, flags,
+                                                         defined || (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK);
+                    if (unit->directives != 0)
+                    {
+                        names[name].directives |= unit->directives[u];
+                        if ((unit->directives[u] & BUSTER_ASM_DIRECTIVE_BINDING) != 0)
+                        {
+                            // A binding directive is the template's, even when a reference to the name was seen first.
+                            names[name].flags = (uint8_t)((names[name].flags & ~BUSTER_LINK_SYMBOL_BINDING) | (flags & BUSTER_LINK_SYMBOL_BINDING));
+                        }
+                        if ((unit->directives[u] & BUSTER_ASM_DIRECTIVE_SIZE) != 0)
+                        {
+                            names[name].size = unit->link.symbols.size[u];
+                        }
+                    }
+                    if (defined)
+                    {
+                        *reason = names[name].label ? "inline assembly labels another template defines too" : *reason;
+                        names[name].label = true;
+                    }
+                    else
+                    {
+                        const bool local = spelling.length >= 2 && spelling.pointer[0] == '.' && spelling.pointer[1] == 'L';
+                        *reason = names[name].absolute ? "inline assembly absolute symbols are per-template" :
+                                  local && !names[name].label ? "inline assembly's local labels that no template defines" :
+                                                                                             *reason;
+                        // An undefined global a fixup of this unit refers to is a reference; one no fixup refers to is
+                        // a declaration, as `.globl sym2` alone. A unit's few symbols and fixups make the scan free.
+                        for (uint32_t f = 0; f < unit->link.fixups.count; f += 1)
+                        {
+                            names[name].referenced |= unit->link.fixups.target[f] == u;
+                        }
+                    }
                 }
             }
         }

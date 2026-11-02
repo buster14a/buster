@@ -102,7 +102,7 @@ static uint32_t asm_find_section(const AsmParser* parser, String8 name)
 static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t end)
 {
     const uint32_t location = parser->tokens[token].start;
-    const bool named = asm_is(parser, token, ".section");
+    const bool named = asm_is(parser, token, ".section") || asm_is(parser, token, ".pushsection");
     const uint32_t name_token = named ? parser->at++ : token;
     const String8 name = asm_name_text(parser, name_token);
     uint32_t id = asm_find_section(parser, name);
@@ -210,6 +210,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         {
             asm_section_index(parser, id);
         }
+        parser->previous_section = parser->section;
         parser->section = id;
         asm_fragment(parser, ASM_LABEL, location);
     }
