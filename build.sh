@@ -23,7 +23,9 @@
 # without building. Consumers read arrays rather than reevaluating shell text from this script.
 # BUSTER_PGO=1 builds build/compiler, and the shifts' executables, with a profile of its own compiles (#880): first an
 # instrumented executable compiles the training inputs, then build/compiler.profdata, what they counted, goes to every
-# compile with -fprofile-instr-use. It isn't the default, and no CI job builds so (train_profile, below).
+# compile with -fprofile-instr-use. It isn't the default, and no CI job builds so (train_profile, below); build-pgo.yml
+# checks its refusals, which come before any compile.
+# print-compile-flags leaves -fprofile-instr-use out, since only a build trains its profile.
 set -e
 # Fuzzing is opt-in. Its entry source defines buster_fuzz_test_input and is
 # included where the compiler's normal entry point has access to its modules.

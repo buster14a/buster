@@ -152,7 +152,7 @@ static __attribute__((unused)) uint32_t c_bindings_mark(const CBindings* binding
     return bindings->active_count;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_input_resolve_range, once per declaration.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_resolve_range, once per declaration.
 static inline __attribute__((always_inline)) uint32_t c_bindings_append(CBindings* bindings, CBindingNamespace space, uint32_t name, uint32_t token, uint32_t point, uint32_t depth, CBindingOperation operation, CBindingKind kind)
 {
     uint32_t result = 0;
@@ -186,7 +186,7 @@ static uint32_t c_bindings_declare(CBindings* bindings, CBindingNamespace space,
     return c_bindings_append(bindings, space, name, token, point, depth, C_BINDING_DECLARE, kind);
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_input_resolve_range, once per identifier.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_resolve_range, once per identifier.
 static inline __attribute__((always_inline)) uint32_t c_bindings_use(CBindings* bindings, CBindingNamespace space, uint32_t name, uint32_t token, uint32_t point)
 {
     return c_bindings_append(bindings, space, name, token, point, 0, C_BINDING_USE, C_BINDING_OBJECT);

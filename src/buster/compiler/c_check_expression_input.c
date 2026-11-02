@@ -93,7 +93,7 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
 // initializer's context, and in a unit with overload tables the token's overload head, which an address of an operand
 // (ADDRESS) and __extension__ (SELECT) take from their operand's token and every other operator clears, so that a call
 // finds its callee's set through them (the walk's action's last step).
-// Always inlined (#880), as profile-guided builds do: called from the expression reader, once per operator.
+// Always inlined (#880), as profile-guided builds do; hot caller: the expression reader, once per operator.
 static inline __attribute__((always_inline)) uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
     const uint32_t node = check_input_add_node(reader, op, token, a, b, c);
@@ -390,7 +390,7 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
 }
 
 // A binary operator, or a comma operator: two values. An initializer's assignment is the walk's class.
-// Always inlined (#880), as profile-guided builds do: called from check_input_expression_coded, once per binary
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_expression_coded, once per binary
 // operator.
 static inline __attribute__((always_inline)) bool check_input_expression_binary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {

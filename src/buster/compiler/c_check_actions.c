@@ -949,7 +949,7 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
     return value;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_arithmetic.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_arithmetic.
 static inline __attribute__((always_inline)) void check_action_promote(const TypeTable* table, CheckValue* value, CheckConversion* conversion, uint32_t node)
 {
     const TypeId promoted = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0 ? type_promote_bit_field(table, value->type, value->bit_width) : type_promote(table, value->type);
@@ -1033,7 +1033,7 @@ static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, 
 // pointers to pointers whose levels' qualifiers differ. void * converts to and from any object pointer, and to and
 // from a function pointer as a pedantic extension, without the qualifier warning. strict takes clang's Compatible
 // alone, as transparent-union selection does: no warning, and no function pointer through void *.
-// Always inlined (#880), as profile-guided builds do: called from check_action_assignable.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignable.
 static inline __attribute__((always_inline)) bool check_action_assignable_mode(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result, bool strict)
 {
     const TypeId target = type_unqualified(type_strip_aligned(table, destination));
@@ -1103,7 +1103,7 @@ static inline __attribute__((always_inline)) bool check_action_assignable_mode(c
     return accepted;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_assignment and check_action_call.
+// Always inlined (#880), as profile-guided builds do; hot callers: check_action_assignment and check_action_call.
 static inline __attribute__((always_inline)) bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
 {
     const bool accepted = check_action_assignable_mode(table, destination, source, action, result, false);
@@ -1903,7 +1903,7 @@ static bool check_action_const_member(const TypeTable* table, const CheckAction*
     return allowed && !searching;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_compute.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
 static inline __attribute__((always_inline)) void check_action_member(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool arrow = action->op == CHECK_OP_ARROW;
@@ -2049,7 +2049,7 @@ static bool check_action_record_modifiable(const TypeTable* table, TypeId record
     return valid;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_assignment.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignment.
 static inline __attribute__((always_inline)) bool check_action_modifiable(const TypeTable* table, const CheckValue* value, const CheckAction* action, CheckActionResult* result)
 {
     const uint8_t kind = check_action_kind(table, value->type);
@@ -2070,7 +2070,7 @@ static inline __attribute__((always_inline)) bool check_action_modifiable(const 
     return valid;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_assignment.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignment.
 static inline __attribute__((always_inline)) void check_action_bit_field_store(const TypeTable* table, const CheckValue* target, CheckValue* value)
 {
     if ((target->flags & BUSTER_CHECK_BIT_FIELD) != 0)
@@ -2092,7 +2092,7 @@ static inline __attribute__((always_inline)) void check_action_bit_field_store(c
     }
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_compute.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
 static inline __attribute__((always_inline)) void check_action_assignment(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool store = action->op == CHECK_OP_ASSIGN;
@@ -2220,7 +2220,7 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
     }
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_compute.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
 static inline __attribute__((always_inline)) void check_action_cast(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     CheckValue source = check_action_operand(table, action, result, 0);
@@ -2475,7 +2475,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
 #include "c_check_complex.c"
 #include "c_check_vector.c"
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_compute, once per action.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute, once per action.
 static inline __attribute__((always_inline)) uint32_t check_action_operand_count(const CheckAction* action)
 {
     uint32_t count = 2;
@@ -2591,7 +2591,7 @@ static void check_action_fp_environment(const TypeTable* table, const CheckActio
     }
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_graph_scalar_node, once per action.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per action.
 static inline __attribute__((always_inline)) void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
 {
     memset(result, 0, sizeof(*result));

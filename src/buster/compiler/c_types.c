@@ -2433,7 +2433,7 @@ static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* 
     return type_function_abi(table, result_type, parameters, count, flags, TYPE_FUNCTION_ABI_SYSV);
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_input_declarator_step, once per parameter.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_declarator_step, once per parameter.
 static inline __attribute__((always_inline)) TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 {
     TypeId result = type_strip_aligned(table, type);
@@ -3117,7 +3117,7 @@ static inline __attribute__((always_inline)) uint32_t type_lookup_member_with(co
     return result;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_action_member.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_member.
 static inline __attribute__((always_inline)) uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
 {
     return type_lookup_member_with(table, record, name, offset, qualifiers, BUSTER_SCALAR_PATH(false));

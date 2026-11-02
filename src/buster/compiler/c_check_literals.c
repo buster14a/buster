@@ -177,7 +177,7 @@ static __attribute__((noinline, cold)) void check_literal_bit_precise(const uint
 // The literals' functions write into their caller's result rather than return a CheckLiteral: clang built each returned
 // one in a temporary and copied it up with loads wider than the stores that wrote it, a failed store-to-load forward on
 // every integer literal (#510). A spelling this can't read may be a bit-precise constant's (check_literal_bit_precise).
-// Always inlined (#880), as profile-guided builds do: called from check_input_run, once per integer literal.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_run, once per integer literal.
 static inline __attribute__((always_inline)) void check_literal_integer(const uint8_t* bytes, uint32_t length, CheckLiteral* result)
 {
     uint32_t radix = 10;
@@ -484,7 +484,7 @@ static CheckValue check_literal_value(CheckLiteral literal)
 
 #include "c_check_literal_warning.c"
 
-// Always inlined (#880), as profile-guided builds do: called from check_literal_string_part, once per character.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_literal_string_part, once per character.
 static inline __attribute__((always_inline)) bool check_literal_character_unit(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23)
 {
     uint32_t i = *position;
@@ -673,7 +673,7 @@ static CheckStringSpan check_literal_string_span(const CheckStringPart* part)
     return result;
 }
 
-// Always inlined (#880), as profile-guided builds do: called from check_literal_string_part, once per unit of a string.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_literal_string_part, once per unit of a string.
 static inline __attribute__((always_inline)) bool check_literal_string_unit(uint32_t value, bool numeric, CheckStringEncoding encoding, uint8_t* output, uint64_t* length)
 {
     const uint32_t width = encoding == CHECK_STRING_UTF16 ? 2 : encoding == CHECK_STRING_UTF32 || encoding == CHECK_STRING_WIDE ? 4 : 1;

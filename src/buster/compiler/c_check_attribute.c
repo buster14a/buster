@@ -1278,7 +1278,7 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
 // Calling conventions attach to the first function inside a completed declarator, through its pointer, array and
 // aligned-typedef wrappers. Preserve all those wrappers and their qualifiers; attributes on a scalar subject are
 // warning-only ignored metadata. A prefix caller waits for the full declarator before invoking this helper.
-// Always inlined (#880), as profile-guided builds do: called from check_input_declarator_step and
+// Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
 static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
 {
