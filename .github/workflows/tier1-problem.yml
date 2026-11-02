@@ -5,6 +5,8 @@ on:
     paths:
       - 'src/buster/compiler/tier1_problem*.c'
       - 'src/buster/compiler/tier1_allocate.c'
+      - 'src/buster/compiler/tier1_certificate.c'
+      - 'src/buster/compiler/tier1_certificate_interval.c'
       - 'src/buster/compiler/lane.c'
       - 'src/buster/compiler/host_isa.h'
       - 'tests/tier1-problem/**'
@@ -14,6 +16,8 @@ on:
     paths:
       - 'src/buster/compiler/tier1_problem*.c'
       - 'src/buster/compiler/tier1_allocate.c'
+      - 'src/buster/compiler/tier1_certificate.c'
+      - 'src/buster/compiler/tier1_certificate_interval.c'
       - 'src/buster/compiler/lane.c'
       - 'src/buster/compiler/host_isa.h'
       - 'tests/tier1-problem/**'

@@ -89,17 +89,26 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
     return values;
 }
 
-// An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, and a
-// static initializer's context.
+// An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, a static
+// initializer's context, and in a unit with overload tables the token's overload head, which an address of an operand
+// (ADDRESS) and __extension__ (SELECT) take from their operand's token and every other operator clears, so that a call
+// finds its callee's set through them (the walk's action's last step).
 // Always inlined (#880), as profile-guided builds do: called from the expression reader, once per operator.
 static inline __attribute__((always_inline)) uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
     const uint32_t node = check_input_add_node(reader, op, token, a, b, c);
     if (node != BUSTER_CHECK_NONE)
     {
-        CheckGraph* graph = &reader->output->graph;
+        CheckInput* input = reader->output;
+        CheckGraph* graph = &input->graph;
         graph->types[node] = reader->query_types[token];
         graph->contexts[node] = reader->static_initializers[token] ? BUSTER_CHECK_CONTEXT_STATIC : 0;
+        if (input->overload_heads != NULL)
+        {
+            const uint32_t count = reader->parser->tokens.count;
+            const uint32_t operand = (op == CHECK_OP_ADDRESS || op == CHECK_OP_SELECT) && a != BUSTER_CHECK_NONE ? graph->tokens[a] : count;
+            input->overload_heads[token] = operand < count ? input->overload_heads[operand] : 0;
+        }
     }
     return node;
 }
@@ -134,64 +143,198 @@ static void check_input_expression_list(CheckInputReader* reader, uint32_t token
     }
 }
 
+// A chunk's identifiers' leaves, made before its actions (#1038). An identifier's leaf is a function of columns at its
+// token (its declared type, declaration and overload head) and at its declaration (kind, storage, flags, object,
+// enumerator's value) and of its type's kind, which no action writes: the reader's run wrote them all before the walk.
+// So the chunk's identifiers' leaves are made at once, by gathers whose loads don't wait for the walk's serial order, and
+// each identifier's action writes its leaf from them, rather than load at its declaration as the walk reaches it.
+typedef struct CheckInputIdentifiers CheckInputIdentifiers;
+struct CheckInputIdentifiers
+{
+    // Per identifier of the chunk, in its order: the leaf's first two words (type and category; flags and constant kind),
+    // its ninth (object and overload head), the declaration, whose enumerator's value an enumeration's leaf holds, and
+    // the identifier's status (BUSTER_CHECK_IDENTIFIER_*).
+    uint64_t types[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint64_t flags[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint64_t objects[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint32_t declarations[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint32_t status[BUSTER_CHECK_EXPRESSION_CHUNK];
+};
+
+// An identifier's status: its class's action takes it (not a K&R unit's, not a constexpr object's use), it makes a node
+// (it has a declared type), and its declaration is an enumerator.
+#define BUSTER_CHECK_IDENTIFIER_ACTED 0x01u
+#define BUSTER_CHECK_IDENTIFIER_NODE 0x02u
+#define BUSTER_CHECK_IDENTIFIER_ENUMERATOR 0x04u
+
 _Static_assert(sizeof(CheckValue) == 96 && offsetof(CheckValue, category) == 4 && offsetof(CheckValue, flags) == 8 &&
                offsetof(CheckValue, constant_kind) == 12 && offsetof(CheckValue, integer) == 16 && offsetof(CheckValue, floating_storage) == 32 &&
                offsetof(CheckValue, imaginary_storage) == 48 && offsetof(CheckValue, object) == 64 && offsetof(CheckValue, overload_head) == 68 &&
                offsetof(CheckValue, offset) == 72 && offsetof(CheckValue, object_bit_offset) == 92 && sizeof(CheckCategory) == 4 &&
-               sizeof(CheckConstantKind) == 4,
-               "an identifier's leaf is written as twelve words");
+               sizeof(CheckConstantKind) == 4 && BUSTER_CHECK_ICE < 256 && BUSTER_CHECK_STATIC_OBJECT < 256 && BUSTER_CHECK_REGISTER < 256,
+               "an identifier's leaf is written as twelve words, of which three vary but for an enumerator's value");
 
-// An identifier's leaf, into `leaf`: the twelve words of its type, category, flags, constant kind, value and object, all
-// else zero (no x87 store of the zero floating parts), as the walk's action makes it of the identifier's declaration.
-static void check_input_identifier_leaf(const CheckInputReader* reader, TypeId type, uint32_t declaration, CheckValue* leaf)
+// The identifier `token`'s entry `at` in `identifiers`, as the walk's action makes its leaf: the scalar twin of
+// check_input_expression_identifiers' vector path.
+static void check_input_identifier_entry(const CheckInputReader* reader, uint32_t token, CheckInputIdentifiers* identifiers, uint32_t at)
 {
-    const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-    const uint64_t category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
+    const CheckInput* input = reader->output;
+    const TypeId type = reader->declared_types[token];
+    const uint32_t declaration = type != 0 ? input->declarations[token] : 0;
+    const bool acted = input->kr_parameter_count == 0 && (type == 0 || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) == 0);
+    const bool enumeration = type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+    const uint64_t category = enumeration ? CHECK_RVALUE : type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     const uint64_t flags = (enumeration ? BUSTER_CHECK_ICE : 0) |
-                           (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                           (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0);
+                           (type != 0 && reader->static_objects[declaration] && !input->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
+                           (type != 0 && reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0);
     const uint64_t kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS;
-    const unsigned __int128 integer = enumeration ? reader->enum_values[declaration] : 0;
-    const uint64_t words[12] =
-    {
-        (uint64_t)type | category << 32,
-        flags | kind << 32,
-        (uint64_t)integer,
-        (uint64_t)(integer >> 64),
-        0,
-        0,
-        0,
-        0,
-        reader->objects[declaration],
-        0,
-        0,
-        0,
-    };
-    memcpy(leaf, words, sizeof(words));
+    const uint64_t head = input->overload_heads != NULL ? input->overload_heads[token] : 0;
+    identifiers->types[at] = (uint64_t)type | category << 32;
+    identifiers->flags[at] = flags | kind << 32;
+    identifiers->objects[at] = (type != 0 ? reader->objects[declaration] : 0) | head << 32;
+    identifiers->declarations[at] = declaration;
+    identifiers->status[at] = (acted ? BUSTER_CHECK_IDENTIFIER_ACTED : 0) | (acted && type != 0 ? BUSTER_CHECK_IDENTIFIER_NODE : 0) |
+                              (enumeration ? BUSTER_CHECK_IDENTIFIER_ENUMERATOR : 0);
 }
 
-// An identifier operand: a VALUE node of its declaration and its leaf, or nothing for one without a declared type. A K&R
-// unit's identifiers, whose types a K&R function's designator interns, and a constexpr object's, which reads its value,
-// are the walk's.
-static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t token)
+// The bytes of `column` at the 16 `indices` in `lanes`, a dword each: the aligned dword that holds each byte, which never
+// crosses a page the column's bytes aren't on (the column's start rounded down to four bytes), shifted down to the byte.
+static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column)
 {
-    const TypeId type = reader->declared_types[token];
-    const uint32_t declaration = type != 0 ? reader->output->declarations[token] : 0;
-    const bool acted = reader->output->kr_parameter_count == 0 && (type == 0 || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) == 0);
-    if (acted && type != 0)
+    const uintptr_t start = (uintptr_t)column & ~(uintptr_t)3;
+    const __m512i offsets = _mm512_add_epi32(indices, _mm512_set1_epi32((int32_t)((uintptr_t)column - start)));
+    const __m512i aligned = _mm512_andnot_si512(_mm512_set1_epi32(3), offsets);
+    const __m512i shifts = _mm512_slli_epi32(_mm512_and_si512(offsets, _mm512_set1_epi32(3)), 3);
+    const __m512i dwords = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, aligned, (const void*)start, 1);
+    return _mm512_and_si512(_mm512_srlv_epi32(dwords, shifts), _mm512_set1_epi32(0xff));
+}
+
+// The entries of the chunk's identifiers, the `acting` tokens and classes whose class is CHECK_INPUT_CODE_IDENTIFIER, in
+// their order into `identifiers`; returns how many. The vector path compresses the identifiers 16 tokens at a time, then
+// gathers 16 identifiers' columns at once: their types and declarations, then their declarations' columns and their
+// types' kinds; the scalar path, its twin, makes each entry by check_input_identifier_entry.
+static uint32_t check_input_expression_identifiers(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+                                                   CheckInputIdentifiers* identifiers, bool scalar)
+{
+    const CheckInput* input = reader->output;
+    const uint32_t identifier = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+    // Gathers index by signed 32-bit offsets: the tokens' and the types' (the compaction checked the tokens').
+    const bool indexed = reader->parser->tokens.count <= (uint32_t)INT32_MAX - 4 && reader->types->types.count <= (uint32_t)INT32_MAX - 4;
+    uint32_t found[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint32_t count = 0;
+    uint32_t position = 0;
+    for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < acting; position += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, acting - position < 16 ? acting - position : 16);
+        const __mmask16 matched = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, classes + position), _mm512_set1_epi32((int32_t)identifier));
+        _mm512_mask_compressstoreu_epi32(found + count, matched, _mm512_maskz_loadu_epi32(lanes, tokens + position));
+        count += (uint32_t)__builtin_popcount(matched);
+    }
+    for (uint32_t at = 0; at < count; at += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at < 16 ? count - at : 16);
+        const __m512i zero = _mm512_setzero_si512();
+        const __m512i token = _mm512_maskz_loadu_epi32(lanes, found + at);
+        const __m512i type = _mm512_mask_i32gather_epi32(zero, lanes, token, reader->declared_types, 4);
+        const __mmask16 typed = _mm512_mask_test_epi32_mask(lanes, type, type);
+        const __m512i declaration = _mm512_mask_i32gather_epi32(zero, typed, token, input->declarations, 4);
+        const __m512i kinds = check_input_gather_bytes(typed, declaration, reader->declaration_kinds);
+        const __m512i statics = check_input_gather_bytes(typed, declaration, reader->static_objects);
+        const __m512i locals = check_input_gather_bytes(typed, declaration, input->thread_local);
+        const __m512i registers = check_input_gather_bytes(typed, declaration, reader->registers);
+        const __m512i declared = check_input_gather_bytes(typed, declaration, reader->declaration_flags);
+        const __m512i type_kinds = check_input_gather_bytes(typed, _mm512_srli_epi32(type, BUSTER_TYPE_INDEX_SHIFT), reader->types->types.kind);
+        const __m512i objects = _mm512_mask_i32gather_epi32(zero, typed, declaration, reader->objects, 4);
+        const __m512i heads = input->overload_heads != NULL ? _mm512_mask_i32gather_epi32(zero, lanes, token, input->overload_heads, 4) : zero;
+        const __mmask16 enumeration = _mm512_mask_cmpeq_epi32_mask(typed, kinds, _mm512_set1_epi32(C_BINDING_ENUMERATOR));
+        const __mmask16 function = _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_FUNCTION));
+        const __mmask16 constexprs = _mm512_mask_test_epi32_mask(typed, declared, _mm512_set1_epi32(BUSTER_CHECK_DECLARATION_CONSTEXPR));
+        const __mmask16 acted = input->kr_parameter_count == 0 ? (__mmask16)(lanes & ~constexprs) : 0;
+        __m512i category = _mm512_mask_mov_epi32(_mm512_set1_epi32(CHECK_LVALUE), function, _mm512_set1_epi32(CHECK_FUNCTION));
+        category = _mm512_mask_mov_epi32(category, enumeration, _mm512_set1_epi32(CHECK_RVALUE));
+        const __mmask16 static_object = _mm512_mask_test_epi32_mask(typed, statics, statics) & _mm512_mask_testn_epi32_mask(typed, locals, locals);
+        const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, registers, registers);
+        const __m512i flags = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(enumeration, _mm512_set1_epi32(BUSTER_CHECK_ICE)),
+                                                              _mm512_maskz_mov_epi32(static_object, _mm512_set1_epi32(BUSTER_CHECK_STATIC_OBJECT))),
+                                              _mm512_maskz_mov_epi32(in_register, _mm512_set1_epi32(BUSTER_CHECK_REGISTER)));
+        const __m512i constant = _mm512_mask_mov_epi32(_mm512_set1_epi32(CHECK_CONSTANT_ADDRESS), enumeration, _mm512_set1_epi32(CHECK_CONSTANT_INTEGER));
+        const __m512i status = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(acted, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_ACTED)),
+                                                               _mm512_maskz_mov_epi32(acted & typed, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_NODE))),
+                                               _mm512_maskz_mov_epi32(enumeration, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_ENUMERATOR)));
+        // The 64-bit words, the low lanes' then the high lanes': each a low dword and a high one.
+        const __m512i pairs[3][2] =
+        {
+            { type, category },
+            { flags, constant },
+            { objects, heads },
+        };
+        uint64_t* words[3] =
+        {
+            identifiers->types + at,
+            identifiers->flags + at,
+            identifiers->objects + at,
+        };
+        for (uint32_t w = 0; w < 3; w += 1)
+        {
+            const __m512i low = _mm512_or_si512(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(pairs[w][0])),
+                                                _mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(pairs[w][1])), 32));
+            const __m512i high = _mm512_or_si512(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(pairs[w][0], 1)),
+                                                 _mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(pairs[w][1], 1)), 32));
+            _mm512_mask_storeu_epi64(words[w], (__mmask8)lanes, low);
+            _mm512_mask_storeu_epi64(words[w] + 8, (__mmask8)(lanes >> 8), high);
+        }
+        _mm512_mask_storeu_epi32(identifiers->declarations + at, lanes, declaration);
+        _mm512_mask_storeu_epi32(identifiers->status + at, lanes, status);
+    }
+    for (; position < acting; position += 1)
+    {
+        if (classes[position] == identifier)
+        {
+            check_input_identifier_entry(reader, tokens[position], identifiers, count);
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// An identifier operand, the chunk's identifier `at`: a VALUE node of its declaration and its leaf, or nothing for one
+// without a declared type. In a unit with overload tables the leaf holds the use's overload head, which the reader's run
+// wrote at the token, and which the walk's action writes back there unchanged. A K&R unit's identifiers, whose types a
+// K&R function's designator interns, and a constexpr object's, which reads its value, are the walk's.
+static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t token, const CheckInputIdentifiers* identifiers, uint32_t at)
+{
+    const uint32_t status = identifiers->status[at];
+    if ((status & BUSTER_CHECK_IDENTIFIER_NODE) != 0)
     {
         const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
-            check_input_identifier_leaf(reader, type, declaration, check_graph_leaf_of(&reader->output->graph, node));
+            const unsigned __int128 integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0;
+            // The twelve words, all else zero (no x87 store of the zero floating parts).
+            const uint64_t words[12] =
+            {
+                identifiers->types[at],
+                identifiers->flags[at],
+                (uint64_t)integer,
+                (uint64_t)(integer >> 64),
+                0,
+                0,
+                0,
+                0,
+                identifiers->objects[at],
+                0,
+                0,
+                0,
+            };
+            memcpy(check_graph_leaf_of(&reader->output->graph, node), words, sizeof(words));
             check_input_expression_value(reader, token, node);
         }
     }
-    return acted;
+    return (status & BUSTER_CHECK_IDENTIFIER_ACTED) != 0;
 }
 
-// A number or a character operand: its literal's VALUE node, or the report of an invalid one. A function's name is the
-// walk's, as its tests take it after the literals.
+// A number or a character operand: its literal's VALUE node, or the report of an invalid one; in a unit with overload
+// tables, its token's head is its leaf's, none. A function's name is the walk's, as its tests take it after the literals.
 static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
@@ -208,7 +351,12 @@ static bool check_input_expression_literal(CheckInputReader* reader, uint32_t to
             const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(&reader->output->graph, node) = check_input_literal_value(reader, token, literal);
+                CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
+                *leaf = check_input_literal_value(reader, token, literal);
+                if (reader->output->overload_heads != NULL)
+                {
+                    reader->output->overload_heads[token] = leaf->overload_head;
+                }
                 check_input_expression_value(reader, token, node);
             }
         }
@@ -233,7 +381,7 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
         case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
         default: break;
     }
-    const bool acted = op != CHECK_OP_COUNT && values.count == 1 && reader->builtins[token] == 0;
+    const bool acted = op != CHECK_OP_COUNT && values.count == 1;
     if (acted)
     {
         check_input_expression_value(reader, token, check_input_expression_operator(reader, op, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE));
@@ -241,13 +389,13 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
     return acted;
 }
 
-// A binary operator, or a comma operator: two values, but an initializer's assignment.
+// A binary operator, or a comma operator: two values. An initializer's assignment is the walk's class.
 // Always inlined (#880), as profile-guided builds do: called from check_input_expression_coded, once per binary
 // operator.
 static inline __attribute__((always_inline)) bool check_input_expression_binary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const CheckOp op = check_input_binary(reader->parser->tokens.kinds[token]);
-    const bool acted = op != CHECK_OP_COUNT && values.count == 2 && reader->initializers[token] == 0 && reader->builtins[token] == 0;
+    const bool acted = op != CHECK_OP_COUNT && values.count == 2;
     if (acted)
     {
         const uint32_t second = reader->value_next[values.first];
@@ -259,7 +407,7 @@ static inline __attribute__((always_inline)) bool check_input_expression_binary(
 // A conditional operator of three values, or of two with the middle one omitted (x ?: y), whose first is both.
 static bool check_input_expression_ternary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
-    const bool acted = (values.count == 3 || values.count == 2) && reader->builtins[token] == 0;
+    const bool acted = values.count == 3 || values.count == 2;
     if (acted)
     {
         const bool omitted = values.count == 2;
@@ -275,7 +423,7 @@ static bool check_input_expression_ternary(CheckInputReader* reader, uint32_t to
 static bool check_input_expression_member(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const Parser* parser = reader->parser;
-    const bool acted = values.count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER && reader->builtins[token] == 0;
+    const bool acted = values.count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
     if (acted)
     {
         const bool arrow = parser->tokens.kinds[token] == PARSE_KIND_ARROW;
@@ -296,7 +444,7 @@ static bool check_input_expression_member(CheckInputReader* reader, uint32_t tok
 // An operator of `values.count` values (one, or two for a subscript), where the class asks for `wanted`.
 static bool check_input_expression_fixed(CheckInputReader* reader, uint32_t token, CheckInputValues values, CheckOp op, uint32_t wanted)
 {
-    const bool acted = values.count == wanted && reader->builtins[token] == 0;
+    const bool acted = values.count == wanted;
     if (acted)
     {
         const uint32_t second = wanted == 2 ? reader->value_next[values.first] : BUSTER_CHECK_NONE;
@@ -305,19 +453,104 @@ static bool check_input_expression_fixed(CheckInputReader* reader, uint32_t toke
     return acted;
 }
 
+// A string literal operand: a VALUE node of its string's object (check_input_string, which makes the object the first time
+// a string is met), or nothing where it has none; in a unit with overload tables, its token's head is its leaf's, none.
+static bool check_input_expression_string(CheckInputReader* reader, uint32_t token)
+{
+    const CheckInitString* string = check_input_string(reader, token);
+    if (string != 0)
+    {
+        const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
+            *leaf = (CheckValue)
+            {
+                .type = string->type,
+                .category = CHECK_LVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = string->object,
+            };
+            if (reader->output->overload_heads != NULL)
+            {
+                reader->output->overload_heads[token] = leaf->overload_head;
+            }
+            check_input_expression_value(reader, token, node);
+        }
+    }
+    return true;
+}
+
+// A return statement: its one value converted to the function's return type (a CONVERT node, the token's node but no value
+// of an operand's), or without one a report where the function's type isn't void, but in a system header, as clang
+// warns (-Wreturn-mismatch). A return outside a function's body, or of more values, is the walk's.
+static bool check_input_expression_return(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+{
+    const TypeId type = reader->return_types[token];
+    const bool acted = type != 0 && values.count <= 1;
+    if (acted && values.count == 1)
+    {
+        reader->query_types[token] = type;
+        const uint32_t node = check_input_expression_operator(reader, CHECK_OP_CONVERT, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            reader->output->token_nodes[token] = node;
+        }
+    }
+    else if (acted && check_action_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && !check_graph_system_token(&reader->output->graph, token))
+    {
+        check_input_report(reader, token, CHECK_INPUT_RETURN);
+    }
+    return acted;
+}
+
 // A statement's terminator, or a for's closing parenthesis: each of its values discarded, a CAST to void, or a CONDITION
-// in a condition's context, which may hold one value at most. A unit with statement expressions, whose last statements'
-// values are their results and whose discards the regions chain, is the walk's.
+// in a condition's context, which may hold one value at most. In a unit with statement expressions, the last statement of
+// a statement expression's region (CheckInputRegion.final_statement, found through its parent, or a label's) gives the
+// region its one value as its result, and the discards are chained from the token for the region's walk
+// (CheckInputReader.region_roots): what the walk's action does, in the same order. A region's last statement without
+// exactly one value is the walk's, which refuses it.
 static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
+    CheckInput* input = reader->output;
     const bool condition = reader->conditions[token] != 0;
-    const bool acted = reader->output->region_count == 0 && (!condition || values.count <= 1);
+    CheckInputRegion* region = NULL;
+    if (input->region_count != 0)
+    {
+        const Parser* parser = reader->parser;
+        const uint32_t parent = parser->tree.parents[token];
+        uint32_t selected = parent < parser->tokens.count ? input->expression_regions[parent] : 0;
+        if (selected == 0 && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
+        {
+            selected = check_input_labeled_region(reader, parent);
+        }
+        region = selected != 0 && input->regions[selected - 1].final_statement == token ? &input->regions[selected - 1] : NULL;
+    }
+    const bool acted = (!condition || values.count <= 1) && (region == NULL || values.count == 1);
+    if (acted && region != NULL)
+    {
+        region->result = values.first;
+    }
+    uint32_t last = BUSTER_CHECK_NONE;
     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
     {
         const uint32_t discard = check_input_add_node(reader, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (discard != BUSTER_CHECK_NONE)
         {
-            reader->output->graph.types[discard] = BUSTER_TYPE_VOID;
+            input->graph.types[discard] = BUSTER_TYPE_VOID;
+            if (reader->region_roots != NULL)
+            {
+                if (last == BUSTER_CHECK_NONE)
+                {
+                    reader->region_roots[token] = discard;
+                }
+                else
+                {
+                    reader->value_next[last] = discard;
+                }
+                last = discard;
+            }
         }
     }
     return acted;
@@ -328,7 +561,7 @@ static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t
 static bool check_input_expression_condition(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const Parser* parser = reader->parser;
-    const bool acted = values.count == 1 && reader->builtins[token] == 0;
+    const bool acted = values.count == 1;
     if (acted)
     {
         const uint32_t keyword = reader->first_child[token];
@@ -345,12 +578,13 @@ static bool check_input_expression_condition(CheckInputReader* reader, uint32_t 
 
 // A call of a function: the callee's value its operand, and the arguments' values its own slice of argument_nodes, each
 // with its first token; a call of a plain library builtin's declaration that clang folds marked in its members
-// (check_input_library_call, #148). A builtin's, an intrinsic's and a K&R unit's calls are the walk's.
+// (check_input_library_call, #148); and in a unit with overload tables, a call whose callee's token names an overload set
+// recorded with the set's head (CheckGraph.overload_calls), in node order as the walk records them. A K&R unit's calls are
+// the walk's, and so are a builtin's and an intrinsic's, by their class (check_input_expression_fold).
 static bool check_input_expression_call(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     CheckInput* input = reader->output;
-    const bool acted = values.count != 0 && reader->builtins[token] == 0 && (input->intrinsic_ids == 0 || input->intrinsic_ids[token] == 0) &&
-                       input->kr_parameter_count == 0;
+    const bool acted = values.count != 0 && input->kr_parameter_count == 0;
     if (acted)
     {
         CheckGraph* graph = &input->graph;
@@ -365,6 +599,19 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
                 const uint32_t use = designator < node && graph->ops[designator] == CHECK_OP_VALUE ? graph->tokens[designator] : BUSTER_CHECK_NONE;
                 const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
                 graph->members[node] = library != 0 ? library : graph->members[node];
+            }
+            const uint32_t callee_token = input->overload_heads != NULL ? graph->tokens[callee] : reader->parser->tokens.count;
+            const uint32_t head = callee_token < reader->parser->tokens.count ? input->overload_heads[callee_token] : 0;
+            if (head != 0)
+            {
+                if (graph->overload_count < graph->overload_capacity)
+                {
+                    graph->overload_calls[graph->overload_count++] = (CheckOverloadCall){ .node = node, .head = head - 1 };
+                }
+                else
+                {
+                    input->resource = true;
+                }
             }
             graph->argument_offsets[node] = graph->argument_count;
             graph->argument_counts[node] = values.count - 1;
@@ -390,7 +637,8 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
 // features every class leaves to the walk), else and where the class's action doesn't take it, the walk's visit. A
 // class's action that leaves the token has written only its first value, NONE, and its children's chains (value_next),
 // both of which the walk's visit writes again as they were.
-static void check_input_expression_coded(CheckInputReader* reader, uint32_t token, uint8_t classes, bool coded)
+static void check_input_expression_coded(CheckInputReader* reader, uint32_t token, uint8_t classes, bool coded, const CheckInputIdentifiers* identifiers,
+                                         uint32_t* identifier)
 {
     const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     bool acted = coded && code != CHECK_INPUT_CODE_SCALAR;
@@ -406,7 +654,8 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
             case CHECK_INPUT_CODE_DROP:
                 break;
             case CHECK_INPUT_CODE_IDENTIFIER:
-                acted = check_input_expression_identifier(reader, token);
+                acted = check_input_expression_identifier(reader, token, identifiers, *identifier);
+                *identifier += 1;
                 break;
             case CHECK_INPUT_CODE_LITERAL:
                 acted = check_input_expression_literal(reader, token);
@@ -418,14 +667,7 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
                 acted = check_input_expression_binary(reader, token, values);
                 break;
             case CHECK_INPUT_CODE_SEPARATOR:
-                if (reader->expression_commas[token])
-                {
-                    acted = check_input_expression_binary(reader, token, values);
-                }
-                else
-                {
-                    check_input_expression_list(reader, token, values);
-                }
+                check_input_expression_list(reader, token, values);
                 break;
             case CHECK_INPUT_CODE_GROUP:
                 acted = values.count == 1;
@@ -455,6 +697,12 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
             case CHECK_INPUT_CODE_CALL:
                 acted = check_input_expression_call(reader, token, values);
                 break;
+            case CHECK_INPUT_CODE_STRING:
+                acted = check_input_expression_string(reader, token);
+                break;
+            case CHECK_INPUT_CODE_RETURN:
+                acted = check_input_expression_return(reader, token, values);
+                break;
             case CHECK_INPUT_CODE_POSTFIX:
             {
                 const uint8_t kind = reader->parser->tokens.kinds[token];
@@ -478,27 +726,32 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
-// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred,
-// or with overload tables (CheckInput.overload_heads: a unit that spells `overloadable` or `__overloadable__`, whose
-// every function declaration is a candidate whose head the walk's action carries through its nodes to its calls), is
-// acted at by the walk's visit throughout, though still compacted.
+// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
+// is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
+// overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
+// candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
 static void check_input_expressions_coded(CheckInputReader* reader)
 {
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
     // Every token's expression ends by the count, so that within these limits none is past them.
-    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count &&
-                       input->overload_heads == NULL;
+    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
+    CheckInputIdentifiers identifiers;
     for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint32_t end = count - first < BUSTER_CHECK_EXPRESSION_CHUNK ? count : first + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX, false);
+        if (coded)
+        {
+            check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
+        }
+        uint32_t identifier = 0;
         for (uint32_t i = 0; i < acting && !reader->output->resource; i += 1)
         {
-            check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded);
+            check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier);
         }
     }
 }

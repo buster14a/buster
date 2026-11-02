@@ -122,3 +122,16 @@ requirements. [Command index](README.md).
   No benchmark's timed code calls these tests.
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
+
+## Build-system integration (#1113)
+
+Dependency files (`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`),
+buffered standard input (`-`), the explicit `-static`/`-static-pie`/`-pie`
+link modes, stderr-only `-v`, and the common `-print-*` and numeric-version
+probes are handled by the driver. `c_dependency_driver.c` owns dependency
+collection, naming and publication; `c_driver_information.c` owns the
+information probes; `string8.h` is the bounded byte slice those modules share
+with the preprocessor. The [CC driver guide](../../docs/cc-driver.md) records
+the contract, publication guarantees and the remaining compatibility limits,
+and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
+executable invocations against Clang and GNU Make.
