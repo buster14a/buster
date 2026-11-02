@@ -92,7 +92,10 @@ with `emits` false, as the driver's `-fsyntax-only` reads them.
 
 These are the only departures from `-c`'s preparation, and each is explicit:
 
-- `CheckSourceRequest.scalar` (the scalar twins, as `--scalar`);
+- the scalar twins: `CheckSourceRequest.scalar`, or `--scalar` among the
+  options, which the preprocessor's twins read too (`PPOptions.scalar`). Either
+  one sets `CheckSource.scalar`, which every stage takes, and so does each
+  client's emission after them, as the driver's `-c --scalar` does;
 - the tests' injected failures (`CheckSourceRequest.fault`);
 - what each client does after the preparation: its selection mode
   (`benchmark-lowering-source` also lowers everything), forced lane counts,
@@ -117,7 +120,11 @@ next, and the process-lifetime lanes and worker budget (#905) are untouched.
 ## Receipts
 
 `benchmark-backend-source`, `benchmark-check-lanes` and
-`benchmark-lowering-source` print a line per prepared file before its outcome:
+`benchmark-lowering-source` print a line before each file's outcome, for every
+file whose request was read and preprocessed (`check_source_receipt`), whether
+it was measured or left out, so a file the target-feature check refuses has its
+resolved target in the report too. A refused request, or a file that doesn't
+preprocess, has none:
 
 ```text
 backend-source: file=F configuration=DIGEST target=znver5 features=HEX extensions=HEX language=gnu17 unwind=on debug=off overrides=path:vector,selection:reachable,unwind:off,debug:off
@@ -136,7 +143,8 @@ backend-source: file=F configuration=DIGEST target=znver5 features=HEX extension
   `--embed-dir`, `-nostdinc`, `-nobuiltininc`, `--buster-headers`);
 - `-c`'s own output requirements for the request: its unwind tables
   (`predefines_unwind_tables`) and `-g`'s rows;
-- the client's overrides.
+- the path (`path:scalar` or `path:vector`, `CheckSource.scalar`) and the
+  client's own overrides.
 
 It never hashes a pointer's value or an intern id: the same file prepared
 twice with the same options gets the same receipt, and another `-march`, `-D`,
@@ -160,15 +168,21 @@ The default `test-checker` run deals them to its parts too. The checks:
 - **Program options:** the identifiers, target and predefines are the
   preprocessor's, and the unit's fields and overrides are kept.
 - **Receipts:** stable across two preparations, changed by `-march`, `-D`,
-  `-funsigned-char`, `-I` and the overrides, and only `-march` changes the
-  target's text.
+  `-funsigned-char`, `--scalar`, `-I` and the overrides, and only `-march`
+  changes the target's text. `--scalar` among the options is the receipt's
+  path. A file left out at the target-feature check has its receipt, and a
+  refused request has none.
+- **Reading:** `check_request_read` with the file among the options, an
+  option's value that looks like a refused option, `-o`, no room and a
+  refusal; and each refusal's message against the driver's literal text.
 - **Parity:** original fixtures prepared by `check_source_prepare`, emitted,
   published and built as `-c` builds its object (`check_driver_object_build`,
   which `check_driver_object` calls), against the driver's own `-c` object of
   the same options, byte for byte. The fixtures cover scalar code with static
   data and a jump table, the baseline, AVX2 (`-march=x86-64-v3`) and AVX-512
   (`-march=x86-64-v4`, `znver5`) targets, a function's `target("avx2")`
-  attribute, `-funsigned-char`, `-D` and `-std=c11`, and the scalar path.
+  attribute, `-funsigned-char`, `-D` and `-std=c11`, and the scalar path, both
+  the request's and `--scalar` among the options (the driver's `--scalar`).
   Where `-c` refuses, both must refuse the same way: wider vectors than the
   target's registers at the emission, an `always_inline` callee whose target
   the caller lacks at the target-feature check, and `-fshort-enums` at the
@@ -176,15 +190,26 @@ The default `test-checker` run deals them to its parts too. The checks:
   make the same object again: one preparation's configuration never reaches the
   next.
 
+`test-checker --requests` also runs `benchmark-check-lanes`' own cases: a unit
+whose target features `-c` refuses is left out with its receipt and the file
+after it measured, a run of that unit alone measures no file and fails, and a
+refused request fails with the driver's refusal.
+
 ## Discontinuities in the measurements' series
 
 At the commit that adds this:
 
 - `benchmark-backend-source`, `benchmark-check-lanes` and
-  `benchmark-lowering-source` print a configuration line per file. They now
-  refuse the requests the driver refuses (`-fPIC`, `-fshort-enums`, `-pg`, ...),
-  which they used to measure as if the options weren't there, and they leave
-  out a unit whose target features `-c` refuses. Their checked programs take
+  `benchmark-lowering-source` print a configuration line per preprocessed
+  file. They now refuse the requests the driver refuses (`-fPIC`,
+  `-fshort-enums`, `-pg`, ...), which they used to measure as if the options
+  weren't there: the refusal fails the command, without its usage text. They
+  leave out a unit whose target features `-c` refuses. `benchmark-check-lanes`
+  leaves out every unit `-c` would refuse (the checker's rejection, a refusal
+  by name, its target features), as the other two do, where it used to fail on
+  the first, and fails a run that measures no file. `--scalar` among their
+  options now takes the scalar path through every stage and their emission,
+  where the preprocessor alone used to take it. Their checked programs take
   the prepared data's declarations, as `-c`'s do, which gives the same program
   by `CheckProgramOptions`' contract. For the 9700X job's options on the frozen
   `sqlite3.c`, which `-c` compiles, none of this changes what is timed.

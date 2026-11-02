@@ -12,14 +12,15 @@
 //   must be check_request_describe's;
 // - the program's options: check_request_program_options takes the identifiers, the target and the predefines from
 //   the preprocessor and keeps the unit's own fields;
-// - receipts: one file prepared twice gives the same digest and text; another -march, -D, -funsigned-char, -I or
-//   override changes the digest, and only -march the target's text;
+// - receipts: one file prepared twice gives the same digest and text; another -march, -D, -funsigned-char, --scalar,
+//   -I or override changes the digest, and only -march the target's text; --scalar among the options is the receipt's
+//   path; a file left out at the target-feature check has its receipt, and a refused request has none;
 // - parity: original fixtures (scalar code with static data and a switch's jump table, 32-byte and 64-byte vectors, a
 //   function's target attribute, predefined and command-line macros, an always_inline callee whose target the caller
 //   lacks) prepared as the source clients prepare them and emitted, published and built as -c builds its object
 //   (check_driver_object_build), against the driver's -c object of the same options, byte for byte, for the
 //   baseline, AVX2 and AVX-512 targets, a function's target attribute, language and predefine switches and the scalar
-//   path; or refused by both, at the same stage's kind: -c's emission refusal, its target-feature errors, or the
+//   path, the request's and --scalar's among the options (the driver's --scalar); or refused by both, at the same stage's kind: -c's emission refusal, its target-feature errors, or the
 //   request's refusal. The parity cases run in an order that changes the target from one to the next, and the first
 //   again last, whose object must be the first's: one preparation's configuration never reaches the next.
 //
@@ -250,6 +251,70 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
     unlink(object_path);
 }
 
+// check_request_read, the reading of a client's own arguments with the file among them (benchmark-checker-source's and
+// benchmark-checker-deferred's): the file in the middle, an option's value that looks like a code generation option,
+// -o (not read), no room for the arguments (not read) and a refused one, each leaving a zero configuration where it
+// isn't accepted; then the refusals' messages, as the driver prints them, against literal text.
+static void check_test_request_read(CheckTest* test, const char* file)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    PPOptions parsed;
+    CheckRequestRefusal refusal = { 0 };
+    const char* input = "poisoned";
+    char* mixed[] = { "-DVALUE=2", (char*)file, "-I", "-pg", "-nostdinc" };
+    memset(&parsed, 0xa5, sizeof(parsed));
+    bool read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, mixed, BUSTER_ARRAY_LENGTH(mixed), false, &arena);
+    check_test_expect(test, read && input == file && refusal.error == CHECK_REQUEST_ACCEPTED && parsed.semantic_pragmas && parsed.macro_count == 1 &&
+                            strcmp(parsed.macros[0], "DVALUE=2") == 0 && parsed.include_directory_count == 1 && strcmp(parsed.include_directories[0], "-pg") == 0 &&
+                            parsed.no_standard_includes,
+                      "request: check_request_read takes the file among the options and an option's value as a value");
+    char* output[] = { "-DVALUE=2", "-o", "out.o", (char*)file };
+    memset(&parsed, 0xa5, sizeof(parsed));
+    input = "poisoned";
+    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, output, BUSTER_ARRAY_LENGTH(output), false, &arena);
+    check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_ACCEPTED && check_request_test_zero(&parsed, sizeof(parsed)),
+                      "request: check_request_read refuses -o and leaves a zero configuration");
+    char* refused[] = { (char*)file, "-fshort-enums", "-ftls-model=initial-exec" };
+    memset(&parsed, 0xa5, sizeof(parsed));
+    input = "poisoned";
+    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, refused, BUSTER_ARRAY_LENGTH(refused), false, &arena);
+    check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_CODEGEN && strcmp(refusal.option, "-ftls-model=initial-exec") == 0 &&
+                            check_request_test_zero(&parsed, sizeof(parsed)),
+                      "request: check_request_read refuses code generation before the layout, before parsing");
+    Arena empty = { 0 };
+    char* plain[] = { (char*)file };
+    memset(&parsed, 0xa5, sizeof(parsed));
+    input = "poisoned";
+    read = check_request_read(&parsed, &refusal, &input, plain, 1, false, &empty);
+    check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_ACCEPTED && check_request_test_zero(&parsed, sizeof(parsed)),
+                      "request: check_request_read without room for its arguments leaves a zero configuration, unrefused");
+    arena_release(&arena);
+    static const struct
+    {
+        CheckRequestRefusal refusal;
+        const char* text;
+    } messages[] = {
+        { { CHECK_REQUEST_CODEGEN, "-pg" }, "unsupported code generation option '-pg'" },
+        { { CHECK_REQUEST_PIC, "-fPIC" }, "unsupported code generation option '-fPIC' (position-independent code for shared libraries is not implemented)" },
+        { { CHECK_REQUEST_LAYOUT, "-fshort-enums" }, "unsupported option '-fshort-enums' (the checker does not implement its ABI layout)" },
+        { { CHECK_REQUEST_TARGET, NULL }, "checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation" },
+        { { CHECK_REQUEST_ACCEPTED, NULL }, "" },
+    };
+    bool literal = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(messages); i += 1)
+    {
+        char text[256];
+        check_request_describe_text(messages[i].refusal, text, sizeof(text));
+        literal &= strcmp(text, messages[i].text) == 0;
+    }
+    // Cut short: a prefix of the message, terminated within the buffer.
+    char short_text[8];
+    check_request_describe_text(messages[0].refusal, short_text, sizeof(short_text));
+    const size_t cut = strnlen(short_text, sizeof(short_text));
+    literal &= cut != 0 && cut < sizeof(short_text) && strncmp(short_text, messages[0].text, cut) == 0;
+    check_test_expect(test, literal, "request: each refusal's message is the driver's literal text, cut short in a short buffer");
+}
+
 static void check_test_request_program_options(CheckTest* test)
 {
     Preprocessor* pp = calloc(1, sizeof(Preprocessor));
@@ -283,14 +348,15 @@ static void check_test_request_program_options(CheckTest* test)
     free(pp);
 }
 
-// The receipt of `file` prepared with `options` and `overrides` in *receipt: whether it was prepared.
+// The receipt of `file` prepared with `options` and the client's `overrides` (check_source_receipt) in *receipt:
+// whether it was prepared.
 static bool check_request_test_receipt(const char* file, char** options, uint32_t count, const char* overrides, CheckRequestReceipt* receipt)
 {
     CheckSource source;
     const bool ready = check_source_prepare(&source, file, options, count, (CheckSourceRequest){ .emits = true });
-    *receipt = ready ? check_request_receipt(source.pp, overrides) : (CheckRequestReceipt){ 0 };
+    const bool known = check_source_receipt(&source, overrides, receipt);
     check_source_release(&source);
-    return ready;
+    return ready && known;
 }
 
 static void check_test_request_receipts(CheckTest* test, const char* directory, const char* file)
@@ -303,6 +369,7 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
         { "-nostdinc", "-DVALUE=2", 0 },
         { "-nostdinc", "-funsigned-char", 0 },
         { "-nostdinc", 0 },
+        { "-nostdinc", "--scalar", 0 },
     };
     enum { SETS = BUSTER_ARRAY_LENGTH(sets) };
     CheckRequestReceipt receipts[SETS + 2];
@@ -316,12 +383,12 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
             options[count] = (char*)sets[s][count];
             count += 1;
         }
-        ready = check_request_test_receipt(file, options, count, "path:vector", receipts + s);
+        ready = check_request_test_receipt(file, options, count, "client:test", receipts + s);
     }
     char* included[] = { "-nostdinc", include };
     char* first[] = { "-nostdinc" };
-    ready = ready && check_request_test_receipt(file, included, 2, "path:vector", receipts + SETS);
-    ready = ready && check_request_test_receipt(file, first, 1, "path:scalar", receipts + SETS + 1);
+    ready = ready && check_request_test_receipt(file, included, 2, "client:test", receipts + SETS);
+    ready = ready && check_request_test_receipt(file, first, 1, "client:other", receipts + SETS + 1);
     check_test_expect(test, ready, "request: the receipts' preparations");
     if (ready)
     {
@@ -339,9 +406,12 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
             const bool same_target = target != 0 && language != 0 && zero_target != 0 && strncmp(target, zero_target, (size_t)(language - target)) == 0;
             distinct &= s == 4 || (receipts[s].digest != receipts[0].digest && same_target);
         }
-        check_test_expect(test, distinct, "request: -D, -funsigned-char, -I and the overrides each change the digest, not the target");
-        check_test_expect(test, strstr(receipts[SETS + 1].text, " overrides=path:scalar") != 0 && strstr(receipts[0].text, " unwind=on debug=off ") != 0,
-                          "request: the receipt names -c's output requirements and the client's overrides");
+        check_test_expect(test, distinct, "request: -D, -funsigned-char, --scalar, -I and the overrides each change the digest, not the target");
+        check_test_expect(test, strstr(receipts[0].text, " overrides=path:vector,client:test") != 0 && strstr(receipts[0].text, " unwind=on debug=off ") != 0 &&
+                                strstr(receipts[SETS + 1].text, " overrides=path:vector,client:other") != 0,
+                          "request: the receipt names -c's output requirements, the path and the client's overrides");
+        check_test_expect(test, strstr(receipts[5].text, " overrides=path:scalar,client:test") != 0,
+                          "request: --scalar among the options is the receipt's path");
     }
 }
 
@@ -374,9 +444,10 @@ static bool check_request_test_object(const char* file, char** options, uint32_t
     const Preprocessor* pp = source.pp;
     // -c's emission: the unit's unwind tables as clang has them, no rows without -g, no verification without --verify.
     const bool unwind = ready && predefines_unwind_tables(&pp->options.predefines, pp->options.freestanding);
+    // The path the preparation took: the request's or --scalar's among the options (CheckSource.scalar).
     const bool emitted = ready && output.base != 0 && bytes.base != 0 &&
-                         check_program_emit(&code, &selected->program, source.parser, pp->table, selected->data.capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes,
-                                            &source.path.scratch, NULL, NULL, unwind, false);
+                         check_program_emit(&code, &selected->program, source.parser, pp->table, selected->data.capacity, BUSTER_SCALAR_PATH(source.scalar), &output,
+                                            &bytes, &source.path.scratch, NULL, NULL, unwind, false);
     ObjectAtomSection* sections = 0;
     const bool published = emitted &&
                            check_data_publish(&selected->data, &source.path.types, selected->program.stream, selected->program.object_symbols,
@@ -400,11 +471,17 @@ static bool check_request_test_object(const char* file, char** options, uint32_t
     }
     else if (outcome == 2)
     {
-        result = source.stage == CHECK_SOURCE_TARGET_FEATURES && source.target_feature_errors != 0;
+        // Left out as -c refuses it, with its configuration's receipt all the same.
+        CheckRequestReceipt receipt;
+        result = source.stage == CHECK_SOURCE_TARGET_FEATURES && source.target_feature_errors != 0 && check_source_left_out(&source) &&
+                 check_source_receipt(&source, NULL, &receipt) && strstr(receipt.text, " target=x86-64 ") != 0;
     }
     else if (outcome == 3)
     {
-        result = source.stage == CHECK_SOURCE_OPTIONS && source.refusal.error != CHECK_REQUEST_ACCEPTED && check_request_test_zero(&source.options, sizeof(source.options));
+        // A refused request: no configuration, and so no receipt, and the client's failure.
+        CheckRequestReceipt receipt;
+        result = source.stage == CHECK_SOURCE_OPTIONS && source.refusal.error != CHECK_REQUEST_ACCEPTED && check_request_test_zero(&source.options, sizeof(source.options)) &&
+                 !check_source_receipt(&source, NULL, &receipt) && check_source_failed(&source);
     }
     arena_release(&bytes);
     arena_release(&output);
@@ -442,6 +519,7 @@ static void check_test_request_parity(CheckTest* test, const char* directory)
         { .label = "scalar code for AVX2", .fixture = 0, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
         { .label = "scalar code for AVX-512", .fixture = 0, .options = { "-nostdinc", "-march=znver5", 0 } },
         { .label = "scalar code for the baseline by the scalar path", .fixture = 0, .options = { "-nostdinc", 0 }, .scalar = true },
+        { .label = "scalar code for AVX-512 by --scalar among the options", .fixture = 0, .options = { "-nostdinc", "-march=znver5", "--scalar", 0 } },
         { .label = "32-byte vectors for AVX2", .fixture = 1, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
         { .label = "32-byte vectors refused for the baseline", .fixture = 1, .options = { "-nostdinc", 0 }, .outcome = 1 },
         { .label = "64-byte vectors for AVX-512", .fixture = 2, .options = { "-nostdinc", "-march=x86-64-v4", 0 } },
@@ -561,6 +639,7 @@ static __attribute__((noinline)) void check_test_requests(CheckTest* test)
     if (ready)
     {
         check_test_request_refusals(test, directory, file);
+        check_test_request_read(test, file);
         check_test_request_program_options(test);
         check_test_request_receipts(test, directory, file);
         check_test_request_parity(test, directory);

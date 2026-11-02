@@ -8,8 +8,9 @@
 //
 // Each file is prepared as -c prepares it (check_source_prepare, #1057: its options read and refused as the driver reads
 // and refuses them, checked as the driver checks it, the vector path's, its static data and checked program made for
-// the target and predefines its options give, and -c's selection's target features checked), outside the time, and its
-// configuration's receipt printed (check_request_receipt). Then each pass times, in turns that alternate which goes first, the two
+// the target and predefines its options give, and -c's selection's target features checked; by the scalar path with
+// --scalar among the options), outside the time, and its configuration's receipt printed for every file preprocessed
+// (check_source_receipt). Then each pass times, in turns that alternate which goes first, the two
 // selections (check_program_select_mode, C_LOWERING_REACHABLE and C_LOWERING_ALL) and everything -c does after one:
 // lowering, Tier 0, branch sizing, encoding and the link's code (check_program_emit), the static data's publication
 // (check_data_publish) and the object's bytes (object_build), not the file's write. The arenas are reserved once per
@@ -71,10 +72,11 @@ struct LoweringSourceFault
     uint32_t file;
 };
 
-// Selects, lowers, publishes and builds the object of a checked file's program `full` with `mode`: whether it could,
+// Selects, lowers, publishes and builds the object of a checked file's program `full` with `mode`, by the scalar path
+// with `scalar` (the file's: CheckSource.scalar): whether it could,
 // with the counts in `way` and the reason in way->failure if not. `fault`, of stage EMIT or PUBLISH, fails that stage
 // as the tests inject it. Every arena is put back as it was.
-static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
+static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode, bool scalar,
                                 const Parser* parser, Preprocessor* pp, TypeTable* types, const char* file, Arena* output, Arena* scratch,
                                 Arena* code_output, Arena* bytes, LoweringSourceFault fault)
 {
@@ -87,10 +89,10 @@ static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     way->failure = NULL;
     way->unsupported = false;
-    bool valid = check_program_select_mode(&selected, full, data, mode, false, output, scratch);
+    bool valid = check_program_select_mode(&selected, full, data, mode, scalar, output, scratch);
     way->failure = way->failure == NULL && !valid ? "the selection failed" : way->failure;
-    bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, code_output, bytes, scratch,
-                                               NULL, NULL, false, false);
+    bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, BUSTER_SCALAR_PATH(scalar), code_output,
+                                               bytes, scratch, NULL, NULL, false, false);
     if (lowered && fault.stage == LOWERING_SOURCE_STAGE_EMIT)
     {
         lowered = false;
@@ -181,13 +183,9 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     Preprocessor* pp = source.pp;
     CheckCorpusPath* path = &source.path;
     const char* input = source.input;
-    if (ready)
-    {
-        // The configuration measured: -c's for these options, both ways' selections, and the objects without the
-        // emission's tables and rows, which -c writes and these don't.
-        const CheckRequestReceipt receipt = check_request_receipt(pp, "path:vector,selection:reachable+all,unwind:off,debug:off");
-        printf("lowering-source: file=%s %s\n", file, receipt.text);
-    }
+    // The configuration, for every file preprocessed, measured or not: -c's for these options, both ways' selections,
+    // and the objects without the emission's tables and rows, which -c writes and these don't.
+    check_source_print_receipt(stdout, "lowering-source", file, &source, "selection:reachable+all,unwind:off,debug:off");
     // Each way's warm-up, then its last timed run.
     LoweringSourceWay ways[4] = { 0 };
     bool lowered[2] = { false, false };
@@ -198,7 +196,7 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     {
         // The warm-up, which also says whether this way lowers the file at all.
         const bool warm_fault = (fault.ways & (1u << way)) != 0 && (fault.stage == LOWERING_SOURCE_STAGE_EMIT || fault.stage == LOWERING_SOURCE_STAGE_PUBLISH);
-        lowered[way] = lowering_source_run(ways + way, program, data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, parser, pp, &path->types, input,
+        lowered[way] = lowering_source_run(ways + way, program, data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, source.scalar, parser, pp, &path->types, input,
                                            &path->output_arena, &path->scratch, &code_output, &bytes, warm_fault ? fault : (LoweringSourceFault){ 0 });
     }
     // Both ways warmed up, or every way that didn't was refused a feature by name, which only leaves the file out.
@@ -216,7 +214,7 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
             const uint64_t begin = check_source_time();
             const bool timed_fault = fault.stage == LOWERING_SOURCE_STAGE_TIMED && pass + 1 == passes && way == 0;
             const LoweringSourceFault timed = { .stage = timed_fault ? LOWERING_SOURCE_STAGE_EMIT : LOWERING_SOURCE_STAGE_NONE, .unsupported = fault.unsupported };
-            const bool ran = lowering_source_run(run, program, data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, parser, pp, &path->types, input,
+            const bool ran = lowering_source_run(run, program, data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, source.scalar, parser, pp, &path->types, input,
                                                  &path->output_arena, &path->scratch, &code_output, &bytes, timed);
             ways[way].nanoseconds[pass] = check_source_time() - begin;
             measured = ran && run->functions == ways[way].functions && run->objects == ways[way].objects && run->object_bytes == ways[way].object_bytes;

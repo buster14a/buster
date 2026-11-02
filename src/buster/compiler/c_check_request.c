@@ -396,7 +396,7 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
     digest = check_request_mix_word(digest, 4, (uint64_t)language.standard << 32 | (uint64_t)language.gnu << 16 | (uint64_t)language.gnu_keywords << 8 | language.digraphs);
     const uint64_t lexical = (uint64_t)options->freestanding | (uint64_t)options->no_builtin << 1 | (uint64_t)options->undefine << 2 | (uint64_t)options->trigraphs << 3 |
                              (uint64_t)options->assembly << 4 | (uint64_t)options->clang_features << 5 | (uint64_t)options->no_standard_includes << 6 |
-                             (uint64_t)options->no_builtin_includes << 7 | (uint64_t)options->buster_headers << 8 | (uint64_t)options->implicit_function_system << 9 |
+                             (uint64_t)options->no_builtin_includes << 7 | (uint64_t)options->buster_headers << 8 | (uint64_t)options->implicit_function_system << 9 | (uint64_t)options->scalar << 10 |
                              (uint64_t)options->dollars << 16 | (uint64_t)options->raw_strings << 24 | (uint64_t)options->implicit_function_diagnostic << 32 |
                              (uint64_t)options->implicit_library_diagnostic << 40;
     digest = check_request_mix_word(digest, 5, lexical);

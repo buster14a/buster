@@ -129,8 +129,9 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     const CheckProgramSelection* selected = &source.selected;
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    const bool emitted = chosen && bytes.base != 0 && check_program_emit(&code, &selected->program, parser, identifiers, selected->data.capacity, false, lowered,
-                                                                         &bytes, &path->scratch, NULL, NULL, false, false);
+    const bool emitted = chosen && bytes.base != 0 && check_program_emit(&code, &selected->program, parser, identifiers, selected->data.capacity,
+                                                                         BUSTER_SCALAR_PATH(source.scalar), lowered, &bytes, &path->scratch, NULL, NULL, false,
+                                                                         false);
     const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
     uint8_t* defined = 0;
     const bool accessed = emitted && check_program_access(&code, &selected->program, lowered, &path->scratch, &defined);

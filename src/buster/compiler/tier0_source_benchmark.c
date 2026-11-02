@@ -12,9 +12,10 @@
 // and refuses them, checked as the driver checks it, the vector path's), and its reachable definitions
 // (check_program_select_mode's C_LOWERING_REACHABLE), their target features checked as -c checks them, lowered and
 // emitted by check_program_emit, outside the time, for the target its options give (-march and the -m features:
-// PPOptions.target), and each function for its target attribute's, as -c compiles them (#1041). Each file's line
-// before its outcome gives the configuration measured (check_request_receipt): its digest, its resolved target and
-// language, -c's own output requirements, and what the benchmark does otherwise (no unwind tables or rows).
+// PPOptions.target), and each function for its target attribute's, as -c compiles them (#1041); by the scalar path
+// with --scalar among the options, as -c --scalar does. Each preprocessed file's line before its outcome gives its
+// configuration (check_source_receipt): its digest, its resolved target and language, -c's own output requirements,
+// its path, and what the benchmark does otherwise (no unwind tables or rows).
 // Admission ends at function emission: static-data publication and object-section placement (including descriptors
 // for assembled file-scope atoms) are outside this benchmark. A valid typed function stream can be measured when
 // whole-object publication is unsupported; use the driver/corpus object checks to establish that eligibility.
@@ -81,8 +82,9 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const bool reserved = bytes.base != 0;
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    bool emitted = chosen && reserved && check_program_emit(&code, &selected->program, prepared.parser, prepared.pp->table, selected->data.capacity, false,
-                                                            &source->lowered, &bytes, &prepared.path.scratch, NULL, NULL, false, false);
+    bool emitted = chosen && reserved && check_program_emit(&code, &selected->program, prepared.parser, prepared.pp->table, selected->data.capacity,
+                                                            BUSTER_SCALAR_PATH(prepared.scalar), &source->lowered, &bytes, &prepared.path.scratch, NULL, NULL,
+                                                            false, false);
     if (emitted && refuse)
     {
         emitted = false;
@@ -111,13 +113,9 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     source->failures += failed;
     source->left_out += valid && !failed && !added;
     source->files += added;
-    if (chosen)
-    {
-        // The configuration measured (#1057): -c's for these options, but for the emission's tables and rows, which -c
-        // writes and the benchmark's emission doesn't.
-        const CheckRequestReceipt receipt = check_request_receipt(prepared.pp, "path:vector,selection:reachable,unwind:off,debug:off");
-        printf("backend-source: file=%s %s\n", file, receipt.text);
-    }
+    // The configuration (#1057), for every file preprocessed, measured or not: -c's for these options, but for the
+    // emission's tables and rows, which -c writes and the benchmark's emission doesn't.
+    check_source_print_receipt(stdout, "backend-source", file, &prepared, "selection:reachable,unwind:off,debug:off");
     if (valid && !chosen)
     {
         check_source_report(stdout, "backend-source", file, &prepared);

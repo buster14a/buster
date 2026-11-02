@@ -388,7 +388,8 @@ was always the baseline x86-64 profile's. Since #1057 the file is prepared by
 the preparation the source clients share ([the request
 guide](compilation-requests.md)), which refuses what the driver refuses and
 runs `-c`'s target-feature check, and the report gives its configuration's
-receipt. `test-checker` runs it on a unit of
+receipt. A unit `-c` would refuse is left out, as the other source benchmarks
+leave it out, and a run that measures no file fails. `test-checker` runs it on a unit of
 512-bit vectors (`c_check_lanes_benchmark_test.c`), measured with
 `-march=znver5` and refused for the baseline profile, as `-c` refuses it, and
 on a baseline unit whose function's `target("avx2")` attribute takes a 32-byte

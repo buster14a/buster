@@ -58,6 +58,7 @@ struct CheckSourceRequest
     // The client emits code: the request's code generation refusals apply (-fPIC), as they do to -c and a link.
     bool emits;
     // --scalar's override: the checker's, the data's and the selection's scalar twins, and the program's scalar path.
+    // `--scalar` among the options asks for it too, as the driver's does (CheckSource.scalar).
     bool scalar;
     // The tests' injected failure: the stage it stops the file at (CHECK or PROGRAM; READY for none), as a real failure
     // there would, the checker's running out of a resource, or the program's with `fault_unsupported` a refusal by name
@@ -87,6 +88,10 @@ struct CheckSource
     CheckProgramSelection selected;
     CheckSourceStage stage;
     uint32_t target_feature_errors;
+    // The scalar path the file was prepared by: the request's override or `--scalar` among its options (PPOptions.scalar,
+    // which the preprocessor's twins read), so that every stage, and the client's emission after them, takes the same
+    // path, as the driver's -c --scalar does.
+    bool scalar;
 };
 
 // Prepares `file` read with `options` (-E's, `option_count` of them) as `request` asks into `*source`, which
@@ -104,8 +109,10 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
     Preprocessor* pp = source->pp;
     Parser* parser = source->parser;
     CheckCorpusPath* path = &source->path;
+    source->scalar = request.scalar || source->options.scalar;
+    const bool scalar = source->scalar;
     const bool preprocessed = requested && intern_initialize(source->identifiers) && pp_initialize(pp, &source->options, source->identifiers) && pp_run(pp, source->input);
-    bool accepted = preprocessed && check_corpus_check_policy(path, parser, pp, request.scalar, source->options.quiet);
+    bool accepted = preprocessed && check_corpus_check_policy(path, parser, pp, scalar, source->options.quiet);
     if (accepted && request.fault == CHECK_SOURCE_CHECK)
     {
         accepted = false;
@@ -120,7 +127,7 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         .prepared_data = request.emits ? &source->data : NULL,
         .initializer_references = source->data.references,
         .initializer_reference_count = source->data.reference_count,
-        .scalar = request.scalar,
+        .scalar = scalar,
     }) : (CheckProgramOptions){ 0 };
     prepared = prepared && check_program(&source->program, parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
     if (prepared && request.fault == CHECK_SOURCE_PROGRAM)
@@ -129,12 +136,12 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         source->program.status = request.fault_unsupported ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
     }
     const bool selected = prepared && (!request.select || check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE,
-                                                                                   request.scalar, &path->output_arena, &path->scratch));
+                                                                                   scalar, &path->output_arena, &path->scratch));
     // -c's check of the selected definitions' target features (the driver's check_driver_target_features), its errors
     // counted rather than printed; its output popped, as the driver pops it.
     const uint64_t mark = path->output_arena.length;
     CheckTargetFeatureError* errors = 0;
-    const bool checked = selected && (!request.select || check_program_target_features(&source->selected.program, &pp->options, &pp->options.predefines, request.scalar,
+    const bool checked = selected && (!request.select || check_program_target_features(&source->selected.program, &pp->options, &pp->options.predefines, scalar,
                                                                                        &path->output_arena, &path->scratch, &errors, &source->target_feature_errors));
     arena_pop_to(&path->output_arena, mark);
     const bool ready = checked && source->target_feature_errors == 0;
@@ -157,6 +164,37 @@ static bool check_source_failed(const CheckSource* source)
     return stage == CHECK_SOURCE_OPTIONS || stage == CHECK_SOURCE_PREPROCESS || (stage == CHECK_SOURCE_CHECK && source->path.resource) ||
            (stage == CHECK_SOURCE_PROGRAM && source->program.status != CHECK_PROGRAM_UNSUPPORTED) || stage == CHECK_SOURCE_SELECT ||
            (stage == CHECK_SOURCE_TARGET_FEATURES && source->target_feature_errors == 0);
+}
+
+// Whether the file's stopping stage leaves it out of a measurement, as -c would refuse it, rather than failing the client
+// (check_source_failed): the checker's rejection, a refusal by name, or its target features' errors.
+static bool check_source_left_out(const CheckSource* source)
+{
+    return source->stage != CHECK_SOURCE_READY && !check_source_failed(source);
+}
+
+// The file's configuration receipt (check_request_receipt), its overrides the path it was prepared by (`path:scalar` or
+// `path:vector`, CheckSource.scalar) and then the client's own, `overrides` (null for none): for a file whose request was
+// read and preprocessed, whatever stage stopped it after that, so that a file left out has its configuration in the
+// report too; *receipt is zero, and the result false, before that.
+static bool check_source_receipt(const CheckSource* source, const char* overrides, CheckRequestReceipt* receipt)
+{
+    const bool known = source->stage != CHECK_SOURCE_OPTIONS && source->stage != CHECK_SOURCE_PREPROCESS;
+    char text[BUSTER_CHECK_REQUEST_RECEIPT_BYTES / 2];
+    snprintf(text, sizeof(text), "path:%s%s%s", source->scalar ? "scalar" : "vector", overrides != NULL ? "," : "", overrides != NULL ? overrides : "");
+    *receipt = known ? check_request_receipt(source->pp, text) : (CheckRequestReceipt){ 0 };
+    return known;
+}
+
+// Prints the file's receipt (check_source_receipt) as `prefix: file=FILE configuration=...`, before its outcome, where it
+// has one.
+static void check_source_print_receipt(FILE* stream, const char* prefix, const char* file, const CheckSource* source, const char* overrides)
+{
+    CheckRequestReceipt receipt;
+    if (check_source_receipt(source, overrides, &receipt))
+    {
+        fprintf(stream, "%s: file=%s %s\n", prefix, file, receipt.text);
+    }
 }
 
 // What stopped the file, for a client's report, as `prefix: file=FILE failed="..."` or `... rejected=...`,
