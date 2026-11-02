@@ -639,7 +639,8 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
 // straight-line consumer's function, a CFG block), `owed` are the registers whose values are in their rows and not in
 // the registers, which the calls clobbered, and `rows` the value each row holds: its register's owner when a call stored
 // or kept it. A call doesn't store a register whose row holds its owner, unchanged since: within straight-line code an
-// SSA value's bits don't change, so the row still holds them. A register is owed while its owner is unchanged, so
+// SSA value's bits don't change, so the row still holds them. (A CFG block whose one predecessor comes first starts from
+// that block's rows, tier1_emit_cfg_records.) A register is owed while its owner is unchanged, so
 // whatever would change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
 typedef struct Tier1EmitSaves Tier1EmitSaves;
 struct Tier1EmitSaves

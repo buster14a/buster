@@ -1350,6 +1350,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     uint32_t* pending_branches = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint32_t* pending_goals = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint8_t* dropped = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+    // Each block's call-save rows at its end (Tier1EmitSaves.rows), which a block whose one predecessor it is starts from.
+    uint32_t* exit_rows = ok && emitted->prepared.call_count != 0 ? ir_allocate(scratch, (uint64_t)blocks * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, 4, &ok) : 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     uint32_t* entries = 0;
     uint32_t pending = 0;
@@ -1500,9 +1502,17 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         }
         const uint32_t first = b < added ? 0 : function->block_offsets[b - added];
         const uint32_t end = b < added ? 0 : function->block_offsets[b - added + 1];
-        // The calls' saves in this block (Tier1EmitSaves, #1116). Control enters a block from elsewhere, so none carry in.
+        // The calls' saves in this block (Tier1EmitSaves, #1116). No load is owed at a block's start. The rows carry in
+        // from a block's one predecessor where it comes before it in layout: control enters from there alone, and no
+        // value whose bits a row holds is defined on the way, which would take its block dominating the predecessor.
+        // From elsewhere, nothing carries in.
         Tier1EmitSaves saves;
         tier1_emit_saves_reset(&saves);
+        const uint32_t only = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] == 1 ? input->predecessors[input->predecessor_offsets[b]] : BUSTER_TIER1_CFG_NONE;
+        for (uint32_t reg = 0; exit_rows != 0 && only < b && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            saves.rows[reg] = exit_rows[(uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg];
+        }
         for (uint32_t node = first; error == TIER1_EMIT_OK && node < end; node += 1)
         {
             const uint32_t op = function->op[node];
@@ -1755,6 +1765,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         }
         // The block's last node took every owed value back, or left the function.
         error = saves.owed == 0 ? error : TIER1_EMIT_INVALID;
+        for (uint32_t reg = 0; exit_rows != 0 && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            exit_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg] = saves.rows[reg];
+        }
         // The added entry's single edge: its moves, then it falls through into the IR's entry.
         if (error == TIER1_EMIT_OK && b < added && cfg->edge_placements[0] == TIER1_CFG_EDGE_PREDECESSOR)
         {

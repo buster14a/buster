@@ -550,8 +550,11 @@ chain, or a block of a CFG (`Tier1EmitSaves`).
 - **A row isn't stored again while it holds the value.** For each general
   register, the code keeps the owner its row was stored or kept for. A call
   stores a register only where its owner is now another value. A fixed
-  registers' sequence, which stores those rows, forgets them, and nothing
-  carries into another block.
+  registers' sequence, which stores those rows, forgets them. A CFG block whose
+  one predecessor comes before it in layout starts from that block's rows:
+  control enters from there alone, and a value a row holds can't be defined on
+  the way, since its block would then dominate the predecessor. Any other
+  block starts with none.
 
 An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value
