@@ -931,7 +931,7 @@ static uint64_t check_transition_batch(TypeTable* types, const CheckGraph* graph
         const uint32_t span = graph->count - first < BUSTER_CHECK_TRANSITION_HORIZON ? graph->count - first : BUSTER_CHECK_TRANSITION_HORIZON;
         const __m512i bytes = _mm512_maskz_loadu_epi8(span == 64 ? UINT64_MAX : (UINT64_C(1) << span) - 1, graph->fp_environments + first);
         const __m512i picked = _mm512_permutexvar_epi8(_mm512_zextsi128_si512(_mm512_cvtepi32_epi8(place)), bytes);
-        environment = _mm512_maskz_cvtepu8_epi32(active, _mm512_castsi512_si128(picked));
+        environment = _mm512_maskz_mov_epi32(active, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(picked)));
     }
     __m512i extensions = _mm512_set1_epi32((int)graph->extensions);
     for (uint32_t lanes = graph->system_tokens != NULL ? (uint32_t)active : 0; lanes != 0; lanes &= lanes - 1)
