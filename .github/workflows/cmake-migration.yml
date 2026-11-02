@@ -8,17 +8,57 @@ permissions:
   contents: read
 
 jobs:
-  source:
+  materialize:
+    if: github.repository_id == '1421805693'
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: 59082e7c02e4c8b9e2dcc4b1cce696bdf9e5ed25
           persist-credentials: false
-      - name: Prepare tracked-source snapshot for isolated validation
-        run: git archive --format=tar HEAD -o "$RUNNER_TEMP/buster-source.tar"
-      - uses: actions/upload-artifact@v4
+      - name: Reconstruct and verify the locally tested source tree
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          chunks=(16a2bafa2c1ce5f6be1c86c1258530075c8b793f 08ea882e9dcec3ac3f02dd84a9eb764b5fed890c acf7398b495bd2188bfcb4f1d94231fc4ab36deb eae87cb1049086212aaeac95132f1cc7fb096bd8 3a7cee2220f34adc44714e814b9a52cdcc859275 b20c4062f3efbc2879e685ab016295eae7e98c74 3adc9c2ca7a51b5fdd1ce47ae2887db9749c645f)
+          : > "$RUNNER_TEMP/migration.patch.gz"
+          for sha in "${chunks[@]}"; do
+              gh api "repos/buster14a/buster/git/blobs/$sha" --jq .content | base64 --decode >> "$RUNNER_TEMP/migration.patch.gz"
+          done
+          gzip --decompress --stdout "$RUNNER_TEMP/migration.patch.gz" > "$RUNNER_TEMP/migration.patch"
+          test "$(wc -c < "$RUNNER_TEMP/migration.patch")" = 154201
+          git apply --index --unidiff-zero "$RUNNER_TEMP/migration.patch"
+          test "$(git write-tree)" = 180bc5ccc0d8da89a0e2d00892e78004e79c9c40
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Store verified blobs and tree without changing any branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/entries.jsonl"
+          while IFS= read -r -d '' path; do
+              mode=$(git ls-files -s -- "$path" | cut -d ' ' -f 1)
+              base64 -w 0 "$path" > "$RUNNER_TEMP/content.base64"
+              jq -n --rawfile content "$RUNNER_TEMP/content.base64" '{content: $content, encoding: "base64"}' > "$RUNNER_TEMP/blob.json"
+              sha=$(gh api --method POST repos/buster14a/buster/git/blobs --input "$RUNNER_TEMP/blob.json" --jq .sha)
+              test "$sha" = "$(git hash-object "$path")"
+              jq -n --arg path "$path" --arg mode "$mode" --arg sha "$sha" '{path: $path, mode: $mode, type: "blob", sha: $sha}' >> "$RUNNER_TEMP/entries.jsonl"
+          done < <(git diff --cached --name-only -z)
+          jq -s '{base_tree: "915a3d8ae7059c87c6e1ad8cb9fd4229bad56fc5", tree: .}' "$RUNNER_TEMP/entries.jsonl" > "$RUNNER_TEMP/tree.json"
+          gh api --method POST repos/buster14a/buster/git/trees --input "$RUNNER_TEMP/tree.json" > "$RUNNER_TEMP/receipt.json"
+          test "$(jq -r .sha "$RUNNER_TEMP/receipt.json")" = 180bc5ccc0d8da89a0e2d00892e78004e79c9c40
+          printf 'Verified implementation tree: %s\n' "$(jq -r .sha "$RUNNER_TEMP/receipt.json")"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: buster-source
-          path: ${{ runner.temp }}/buster-source.tar
+          name: cmake-tree-receipt
+          path: |
+            ${{ runner.temp }}/receipt.json
+            ${{ runner.temp }}/entries.jsonl
           retention-days: 1
