@@ -1592,9 +1592,9 @@ static uint8_t check_lower_transparent_class(const CheckLowerWriter* writer, Typ
 static bool check_lower_initializer_names_function(const CheckInput* input, uint32_t token)
 {
     const uint32_t count = input->token_count;
-    const uint32_t end = input->initializer_ends[token] < count ? input->initializer_ends[token] : count;
+    const uint32_t end = check_sparse_get(input->initializer_ends, token) < count ? check_sparse_get(input->initializer_ends, token) : count;
     bool named = false;
-    for (uint32_t use = input->initializer_begins[token]; use < end && !named; use += 1)
+    for (uint32_t use = check_sparse_get(input->initializer_begins, token); use < end && !named; use += 1)
     {
         const uint32_t declaration = input->declarations[use];
         named = declaration < count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
@@ -1628,7 +1628,7 @@ static __attribute__((noinline)) uint32_t check_lower_first_classification(Check
             const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
             const __mmask16 initialized = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
                                           _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128()) &
-                                          _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_begins + token), _mm512_loadu_si512(input->initializer_ends + token));
+                                          _mm512_cmplt_epu32_mask(check_sparse_vector(input->initializer_begins, token), check_sparse_vector(input->initializer_ends, token));
             for (uint32_t bits = initialized; bits != 0 && found == none; bits &= bits - 1)
             {
                 const uint32_t declaration = token + (uint32_t)__builtin_ctz(bits);
@@ -1637,7 +1637,7 @@ static __attribute__((noinline)) uint32_t check_lower_first_classification(Check
         }
         for (; found == none && token < limit; token += 1)
         {
-            if (input->declarations[token] == token && input->static_objects[token] && input->initializer_begins[token] < input->initializer_ends[token] &&
+            if (input->declarations[token] == token && input->static_objects[token] && check_sparse_get(input->initializer_begins, token) < check_sparse_get(input->initializer_ends, token) &&
                 check_lower_initializer_names_function(input, token))
             {
                 found = token;
@@ -11422,7 +11422,7 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
 // list's links and the clearing of its heads before them test the same tokens.
 static bool check_lower_local_declaration(const CheckInput* input, uint32_t token)
 {
-    return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count &&
+    return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count &&
            input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
 }
 
@@ -11696,7 +11696,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 }
             }
         }
-        const uint32_t declaring_count = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
+        const uint32_t declaring_count = check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
         // Each body's locals' list is empty before the links below, where it is read (each body's, at its opening) and
         // where it is written (each local's body), rather than at every token (#877).
         for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -11707,18 +11707,18 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         {
             if (check_lower_local_declaration(input, declaring[d]))
             {
-                shared->local_first[input->declaration_bodies[declaring[d]]] = BUSTER_CHECK_NONE;
+                shared->local_first[check_sparse_get(input->declaration_bodies, declaring[d])] = BUSTER_CHECK_NONE;
             }
         }
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
         for (uint32_t d = declaring_count; d-- > 0;)
         {
             const uint32_t token = declaring[d];
-            if (input->initializer_nodes[token] < nodes)
+            if (check_sparse_get(input->initializer_nodes, token) < nodes)
             {
-                shared->initializer_declarations[input->initializer_nodes[token]] = token;
+                shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
             }
-            const uint32_t body = input->declaration_bodies[token];
+            const uint32_t body = check_sparse_get(input->declaration_bodies, token);
             if (check_lower_local_declaration(input, token))
             {
                 shared->local_next[token] = shared->local_first[body];
@@ -11732,7 +11732,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         for (uint32_t b = 0; b < program->body_count; b += 1)
         {
             const uint32_t opening = program->bodies[b].opening;
-            for (uint32_t parameter = input->parameters[opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+            for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
             {
                 check_lower_local_keep(shared, input->objects[parameter], count);
             }
@@ -12168,10 +12168,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // still consumes its register(s) or stack slot; only the source object's binding is absent (#792).
         uint32_t parameter_count = 0;
         const TypeId* parameter_types = type_parameters(types, type, &parameter_count);
-        uint32_t parameter = input->parameters[body.opening];
+        uint32_t parameter = check_sparse_get(input->parameters, body.opening);
         for (uint32_t p = 0; !bare && p < parameter_count; p += 1)
         {
-            const bool named = parameter != BUSTER_CHECK_NONE && input->parameters[parameter] == p;
+            const bool named = parameter != BUSTER_CHECK_NONE && check_sparse_get(input->parameters, parameter) == p;
             const TypeId declared_type = named ? input->declared_types[parameter] : parameter_types[p];
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
             const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
@@ -12206,7 +12206,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             if (named)
             {
                 writer->local_map[input->objects[parameter]] = local;
-                parameter = input->parameter_next[parameter];
+                parameter = check_sparse_get(input->parameter_next, parameter);
             }
             // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
             abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
@@ -12216,8 +12216,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // Incoming ABI locals must remain the contiguous prefix, including a hidden result pointer. Allocate the
         // declared objects only after that prefix, then convert once before any body expression can read or address
         // them. This cold pass exists only for K&R definitions; ordinary prototypes keep their original path.
-        for (uint32_t parameter = kr && !bare ? input->parameters[body.opening] : BUSTER_CHECK_NONE;
-             parameter != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK; parameter = input->parameter_next[parameter])
+        for (uint32_t parameter = kr && !bare ? check_sparse_get(input->parameters, body.opening) : BUSTER_CHECK_NONE;
+             parameter != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK; parameter = check_sparse_get(input->parameter_next, parameter))
         {
             const TypeId declared_type = input->declared_types[parameter];
             const TypeId incoming_type = check_input_kr_parameter_type(types, declared_type);
@@ -12611,7 +12611,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             writer->local_map[input->objects[declaration]] = BUSTER_CHECK_NONE;
         }
-        for (uint32_t parameter = input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+        for (uint32_t parameter = check_sparse_get(input->parameters, body.opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
         {
             writer->local_map[input->objects[parameter]] = BUSTER_CHECK_NONE;
         }

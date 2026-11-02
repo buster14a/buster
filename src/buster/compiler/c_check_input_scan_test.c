@@ -147,39 +147,39 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
-static CheckInput check_test_output_none_columns(uint32_t* const* columns, uint32_t count)
+// The columns check_input_output_none fills, `columns`' 8: the output's declarations and token_nodes, and the reader's
+// own six.
+static void check_test_output_none_columns(uint32_t* const* columns, uint32_t count, CheckInput* input, CheckInputReader* reader)
 {
-    return (CheckInput)
+    *input = (CheckInput)
     {
         .declarations = columns[0],
-        .initializer_nodes = columns[1],
-        .initializer_begins = columns[2],
-        .initializer_ends = columns[3],
-        .token_nodes = columns[4],
-        .body_declarations = columns[5],
-        .declaration_bodies = columns[6],
-        .parameter_next = columns[7],
-        .control_owners = columns[8],
-        .label_targets = columns[9],
-        .case_ranges = columns[10],
-        .string_ids = columns[11],
-        .parameters = columns[12],
-        .evaluation_nodes = columns[13],
+        .token_nodes = columns[1],
         .token_count = count,
+    };
+    *reader = (CheckInputReader)
+    {
+        .output = input,
+        .initializer_declarations = columns[2],
+        .initializer_finish_heads = columns[3],
+        .selected_tokens = columns[4],
+        .activate = columns[5],
+        .first_value = columns[6],
+        .last_value = columns[7],
     };
 }
 
 static void check_test_output_none(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mappings[14];
+    uint8_t* mappings[8];
     bool ready = true;
     for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
     {
         mappings[column] = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         ready &= mappings[column] != MAP_FAILED && mprotect(mappings[column] + page, page, PROT_NONE) == 0;
     }
-    check_test_expect(test, ready, "guarded retained NONE output columns allocate");
+    check_test_expect(test, ready, "guarded NONE columns allocate");
     for (uint32_t count = 0; ready && count <= 200; count += 1)
     {
         uint32_t* columns[BUSTER_ARRAY_LENGTH(mappings)];
@@ -188,8 +188,10 @@ static void check_test_output_none(CheckTest* test)
             memset(mappings[column], 0xa5, page);
             columns[column] = (uint32_t*)(mappings[column] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
         }
-        CheckInput input = check_test_output_none_columns(columns, count);
-        check_input_output_none(&input, count);
+        CheckInput input;
+        CheckInputReader reader;
+        check_test_output_none_columns(columns, count, &input, &reader);
+        check_input_output_none(&input, &reader, count);
         bool exact = true;
         for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
         {
@@ -204,7 +206,7 @@ static void check_test_output_none(CheckTest* test)
             }
         }
         char description[120];
-        snprintf(description, sizeof(description), "retained NONE outputs: %u dirty tokens plus sentinel match scalar bits within guard bounds", count);
+        snprintf(description, sizeof(description), "NONE columns: %u dirty tokens plus sentinel match scalar bits within guard bounds", count);
         check_test_expect(test, exact, description);
     }
     for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
@@ -223,7 +225,7 @@ static void check_test_output_none(CheckTest* test)
         memset(owned.base, 0x63, owned.capacity);
         owned.length = 37;
         Arena borrowed = owned;
-        uint32_t* columns[14];
+        uint32_t* columns[8];
         bool exact = true;
         for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
         {
@@ -231,11 +233,13 @@ static void check_test_output_none(CheckTest* test)
             exact &= columns[column] != NULL;
         }
         uint32_t asm_id = UINT32_C(0x91919191);
-        CheckInput input = check_test_output_none_columns(columns, counts[at]);
+        CheckInput input;
+        CheckInputReader reader;
+        check_test_output_none_columns(columns, counts[at], &input, &reader);
         input.asm_ids = &asm_id;
         if (exact)
         {
-            check_input_output_none(&input, counts[at]);
+            check_input_output_none(&input, &reader, counts[at]);
             for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
             {
                 for (uint32_t token = 0; token <= counts[at]; token += 1)
@@ -254,9 +258,255 @@ static void check_test_output_none(CheckTest* test)
     arena_release(&owned);
 }
 
+// The sparse columns' lanes (c_check_sparse.c): a shared pool written by several lanes at once.
+typedef struct CheckTestSparseLanes CheckTestSparseLanes;
+struct CheckTestSparseLanes
+{
+    CheckSparsePool* pool;
+    CheckSparseColumn columns[3];
+    uint32_t count;
+    uint32_t lanes;
+    // Whether each lane's scan of its range found the entries the writes made, by both paths.
+    bool scanned[3];
+    uint32_t* positions[3];
+};
+
+// The value the lanes write at `token` of column `c`: NONE at every seventh token.
+static uint32_t check_test_sparse_value(uint32_t token, uint32_t c)
+{
+    return token % 7 == 3 ? BUSTER_CHECK_NONE : token * 3 + c;
+}
+
+// First every lane writes every lanes-th token of each column from its index, so that the lanes race for every block's
+// claim and every 2 MB region's; then, after a sync, each lane scans a range of its own that starts and ends inside blocks
+// and writes each entry it finds again, plus one, as the deferred merge does, while its neighbors write their ranges.
+static void check_test_sparse_lane_writes(void* argument)
+{
+    CheckTestSparseLanes* lanes = argument;
+    const uint32_t lane = lane_index();
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lanes->columns); c += 1)
+    {
+        for (uint32_t token = lane; token <= lanes->count; token += lanes->lanes)
+        {
+            check_sparse_set(lanes->pool, lanes->columns[c], token, check_test_sparse_value(token, c));
+        }
+    }
+    lane_sync();
+    const uint32_t begin = lane == 0 ? 0 : (uint32_t)((uint64_t)(lanes->count + 1) * lane / lanes->lanes) | 5;
+    const uint32_t end = lane + 1 == lanes->lanes ? lanes->count + 1 : (uint32_t)((uint64_t)(lanes->count + 1) * (lane + 1) / lanes->lanes) | 5;
+    bool scanned = true;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lanes->columns); c += 1)
+    {
+        const uint32_t found = check_sparse_entries(lanes->columns[c], begin, end, c != 1, lanes->positions[lane]);
+        uint32_t expected = 0;
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            expected += check_test_sparse_value(token, c) != BUSTER_CHECK_NONE;
+        }
+        scanned &= found == expected;
+        for (uint32_t e = 0; e < found; e += 1)
+        {
+            const uint32_t token = lanes->positions[lane][e];
+            check_sparse_set(lanes->pool, lanes->columns[c], token, check_sparse_get(lanes->columns[c], token) + 1);
+        }
+    }
+    lanes->scanned[lane] = scanned;
+}
+
+static void check_test_sparse_lanes(CheckTest* test)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 27);
+    CheckTestSparseLanes lanes = { .count = 600000, .lanes = 3 };
+    bool exact = arena.base != NULL && check_sparse_reserve(&arena, &lanes.pool, lanes.columns, BUSTER_ARRAY_LENGTH(lanes.columns), lanes.count, true, true);
+    for (uint32_t lane = 0; exact && lane < lanes.lanes; lane += 1)
+    {
+        lanes.positions[lane] = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)lanes.count + 1);
+        exact = lanes.positions[lane] != NULL;
+    }
+    exact = exact && lane_run(lanes.lanes, check_test_sparse_lane_writes, &lanes, 0);
+    uint32_t blocks = 1;
+    for (uint32_t c = 0; exact && c < BUSTER_ARRAY_LENGTH(lanes.columns); c += 1)
+    {
+        for (uint32_t token = 0; token <= lanes.count; token += 1)
+        {
+            const uint32_t value = check_test_sparse_value(token, c);
+            exact &= check_sparse_get(lanes.columns[c], token) == (value != BUSTER_CHECK_NONE ? value + 1 : BUSTER_CHECK_NONE);
+        }
+        for (uint32_t first = 0; first <= lanes.count; first += BUSTER_CHECK_SPARSE_TOKENS)
+        {
+            bool entry = false;
+            for (uint32_t token = first; token < first + BUSTER_CHECK_SPARSE_TOKENS && token <= lanes.count; token += 1)
+            {
+                entry |= check_test_sparse_value(token, c) != BUSTER_CHECK_NONE;
+            }
+            blocks += entry;
+        }
+    }
+    // Every block taken once, with no claim left open: each region in place where a block was filled, or unclaimed.
+    exact = exact && lanes.pool->count == blocks && !lanes.pool->exhausted;
+    const uint64_t block_bytes = (uint64_t)lanes.pool->capacity * BUSTER_CHECK_SPARSE_TOKENS * sizeof(uint32_t);
+    const uint64_t regions = exact ? ((uintptr_t)lanes.pool->blocks + block_bytes - 1) / BUSTER_ARENA_HUGE_PAGE_BYTES - (uintptr_t)lanes.pool->blocks / BUSTER_ARENA_HUGE_PAGE_BYTES + 1 : 0;
+    const uint64_t filled = exact ? ((uintptr_t)(lanes.pool->blocks + (uint64_t)blocks * BUSTER_CHECK_SPARSE_TOKENS) - 1) / BUSTER_ARENA_HUGE_PAGE_BYTES -
+                                        (uintptr_t)lanes.pool->blocks / BUSTER_ARENA_HUGE_PAGE_BYTES + 1 : 0;
+    // Block 0, which the reserve wrote, can end a region no lane's block lies in.
+    const uint64_t first = exact ? (uintptr_t)(lanes.pool->blocks + BUSTER_CHECK_SPARSE_TOKENS) / BUSTER_ARENA_HUGE_PAGE_BYTES -
+                                       (uintptr_t)lanes.pool->blocks / BUSTER_ARENA_HUGE_PAGE_BYTES : 0;
+    for (uint64_t region = 0; region < regions; region += 1)
+    {
+        exact &= lanes.pool->regions[region] == (region >= first && region < filled ? 2u : 0u);
+    }
+    for (uint32_t lane = 0; lane < lanes.lanes; lane += 1)
+    {
+        exact &= lanes.scanned[lane];
+    }
+    check_test_expect(test, exact && filled > 1, "a shared pool's lanes write interleaved tokens of the same blocks and scan their own ranges at once");
+    arena_release(&arena);
+}
+
+// The sparse columns (c_check_sparse.c, #628) against columns of a value a token, for every count to 200: random writes,
+// NONE among them and overwrites, then every token's value, every 16 tokens' vector at every start, the below masks and
+// the entries' lists by both paths. Each column's directory ends at a PROT_NONE page, so that a read past its last entry
+// faults; the pool is a dirty arena's, so that a block the columns don't take is never read, and a dirty directory is
+// cleared (`zero` false). Then a fresh arena's directories, which a reserve with `zero` leaves unwritten.
+static void check_test_sparse_columns(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    Arena owned = arena_reserve(UINT64_C(1) << 22);
+    uint8_t* guard = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool ready = owned.base != NULL && guard != MAP_FAILED && mprotect(guard + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "guarded sparse columns allocate");
+    uint64_t random = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        assert(arena_commit(&owned, owned.capacity));
+        memset(owned.base, 0x5c, owned.capacity);
+        owned.length = 0;
+        CheckSparsePool* pool = NULL;
+        CheckSparseColumn columns[3] = { 0 };
+        bool exact = check_sparse_reserve(&owned, &pool, columns, BUSTER_ARRAY_LENGTH(columns), count, false, (count & 1) != 0);
+        uint32_t values[BUSTER_ARRAY_LENGTH(columns)][201];
+        const uint64_t slots = check_sparse_slots(count);
+        for (uint32_t c = 0; exact && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+        {
+            // The last column's directory moved to end at the guard page, with what reserve left in it.
+            if (c == BUSTER_ARRAY_LENGTH(columns) - 1 && slots * sizeof(uint32_t) <= page)
+            {
+                uint32_t* directory = (uint32_t*)(guard + page - slots * sizeof(uint32_t));
+                memcpy(directory, columns[c].directory, slots * sizeof(uint32_t));
+                columns[c].directory = directory;
+            }
+            for (uint32_t token = 0; token <= count; token += 1)
+            {
+                values[c][token] = BUSTER_CHECK_NONE;
+                exact &= check_sparse_get(columns[c], token) == BUSTER_CHECK_NONE;
+            }
+            const uint32_t writes = count / (c + 1) + 1;
+            for (uint32_t w = 0; w < writes; w += 1)
+            {
+                random = random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                const uint32_t token = (uint32_t)(random >> 33) % (count + 1);
+                const uint32_t value = (random >> 13) % 5 == 0 ? BUSTER_CHECK_NONE : (uint32_t)(random >> 40);
+                check_sparse_set(pool, columns[c], token, value);
+                values[c][token] = value;
+            }
+            for (uint32_t token = 0; token <= count; token += 1)
+            {
+                exact &= check_sparse_get(columns[c], token) == values[c][token];
+            }
+            for (uint32_t first = 0; first <= count; first += 1)
+            {
+                uint32_t lanes[16];
+                _mm512_storeu_si512(lanes, check_sparse_vector(columns[c], first));
+                for (uint32_t lane = 0; lane < 16 && first + lane <= count; lane += 1)
+                {
+                    exact &= lanes[lane] == values[c][first + lane];
+                }
+            }
+            for (uint32_t first = 0; first < count; first += 1)
+            {
+                const uint32_t bound = (uint32_t)(random >> 44);
+                uint32_t expected = 0;
+                for (uint32_t lane = 0; lane < 16 && first + lane < count; lane += 1)
+                {
+                    expected |= (uint32_t)(values[c][first + lane] < bound) << lane;
+                }
+                exact &= check_sparse_below(columns[c], first, count, bound) == expected;
+            }
+            for (uint32_t begin = 0; begin <= count; begin += 7)
+            {
+                for (uint32_t end = begin; end <= count + 1; end += 5)
+                {
+                    uint32_t positions[2][202];
+                    const uint32_t found = check_sparse_entries(columns[c], begin, end, true, positions[0]);
+                    exact &= check_sparse_entries(columns[c], begin, end, false, positions[1]) == found;
+                    uint32_t expected = 0;
+                    for (uint32_t token = begin; token < end; token += 1)
+                    {
+                        exact &= values[c][token] == BUSTER_CHECK_NONE || (expected < found && positions[0][expected] == token && positions[1][expected] == token);
+                        expected += values[c][token] != BUSTER_CHECK_NONE;
+                    }
+                    exact &= expected == found;
+                }
+            }
+        }
+        exact &= pool != NULL && pool->count <= pool->capacity && !pool->exhausted;
+        // A shared pool's regions: in place where a block was filled, or unclaimed, none left being faulted in.
+        for (uint32_t region = 0; exact && pool->shared && region * BUSTER_ARENA_HUGE_PAGE_BYTES < (uint64_t)pool->capacity * 64; region += 1)
+        {
+            exact = pool->regions[region] == 0 || pool->regions[region] == 2;
+        }
+        char description[120];
+        snprintf(description, sizeof(description), "sparse columns of %u tokens match columns of a value a token within guard bounds", count);
+        check_test_expect(test, exact, description);
+    }
+    if (guard != MAP_FAILED)
+    {
+        munmap(guard, 2 * page);
+    }
+    arena_release(&owned);
+    // A reserve with `zero`, as on a fresh arena, writes no directory entry: here over a pattern, which stays. And writes
+    // of NONE take no block, where a value's write takes one for its 16 tokens.
+    Arena patterned = arena_reserve(UINT64_C(1) << 22);
+    const uint32_t count = 100000;
+    bool exact = patterned.base != NULL && arena_commit(&patterned, patterned.capacity);
+    if (exact)
+    {
+        memset(patterned.base, 0x37, patterned.capacity);
+        CheckSparsePool* pool = NULL;
+        CheckSparseColumn columns[2] = { 0 };
+        exact = check_sparse_reserve(&patterned, &pool, columns, 2, count, true, false);
+        const uint8_t* directories = exact ? (const uint8_t*)columns[0].directory : NULL;
+        for (uint64_t at = 0; exact && at < 2 * check_sparse_slots(count) * sizeof(uint32_t); at += 1)
+        {
+            exact = directories[at] == 0x37;
+        }
+        exact &= pool != NULL && pool->count == 1 && columns[0].blocks[0] == BUSTER_CHECK_NONE && columns[0].blocks[15] == BUSTER_CHECK_NONE;
+    }
+    check_test_expect(test, exact, "a sparse reserve for a fresh arena leaves its directories unwritten");
+    arena_release(&patterned);
+    Arena dirty = arena_reserve(UINT64_C(1) << 22);
+    CheckSparsePool* pool = NULL;
+    CheckSparseColumn columns[2] = { 0 };
+    exact = dirty.base != NULL && check_sparse_reserve(&dirty, &pool, columns, 2, count, false, false);
+    if (exact)
+    {
+        check_sparse_set(pool, columns[0], 3, BUSTER_CHECK_NONE);
+        check_sparse_set(pool, columns[1], 70001, BUSTER_CHECK_NONE);
+        exact = pool->count == 1;
+        check_sparse_set(pool, columns[1], 70000, 7);
+        check_sparse_set(pool, columns[1], 70001, BUSTER_CHECK_NONE);
+        exact &= pool->count == 2 && check_sparse_get(columns[1], 70000) == 7 && check_sparse_get(columns[1], 70001) == BUSTER_CHECK_NONE &&
+                 check_sparse_get(columns[0], 70000) == BUSTER_CHECK_NONE && check_sparse_get(columns[0], 3) == BUSTER_CHECK_NONE;
+    }
+    check_test_expect(test, exact, "a NONE write takes no sparse block, and a value's write takes one for its 16 tokens");
+    arena_release(&dirty);
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
+    check_test_sparse_columns(test);
+    check_test_sparse_lanes(test);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     // The columns, each in two pages, the second PROT_NONE: kinds, roles, names (or 32-bit values), pointers, and the
     // syntax bits and the marks count_tokens writes; then the expressions' classes' inputs (ignored tokens, first children

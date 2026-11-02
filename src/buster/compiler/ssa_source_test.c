@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // #134's acceptance on real and generated C (test-ssa-source):
 //
@@ -29,6 +30,7 @@
 // ssa_ir.c, interpreter_link.c, ir_interpreter.c, oracle_cache.c, c_testsuite.c (whose processes, files and directory
 // removal it takes) and ssa_source_generate.c.
 
+#include "buster/compiler/test_paths.h"
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -995,7 +997,7 @@ static int run_ssa_source_tests(int count, char** arguments)
         valid = valid && arenas.forms[form].base != 0;
     }
     valid = valid && arenas.lowered.base != 0 && arenas.tables.base != 0 && arenas.scratch.base != 0;
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char work[PATH_MAX];
     snprintf(work, sizeof(work), "%s/ssa-source-XXXXXX", temporary != 0 && temporary[0] == '/' ? temporary : "/tmp");
     valid = valid && mkdtemp(work) != 0;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The preprocessor tests (c_preprocessor.c), for the test-preprocessor command:
 //
@@ -37,6 +38,7 @@
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
 // keywords, features, -f option sets and timestamps checks, and run_preprocessor_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -8109,8 +8111,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
     }
     char directory[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary);
     const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
     // The oracle cache, set up before the parts fork, so that their counts reach its report.
     OracleCache* oracle = oracle_cache();

@@ -229,8 +229,8 @@ static void check_region_input_cases(CheckRegionInput* writer)
         }
         else if (role == PARSE_ROLE_CLOSE_CASE)
         {
-            const uint32_t owner = reader->output->control_owners[token];
-            if (owner <= opening || owner >= writer->region->closing || reader->output->case_ranges[token] != BUSTER_CHECK_NONE)
+            const uint32_t owner = check_sparse_get(reader->output->control_owners, token);
+            if (owner <= opening || owner >= writer->region->closing || check_sparse_get(reader->output->case_ranges, token) != BUSTER_CHECK_NONE)
             {
                 writer->unsupported = true;
             }

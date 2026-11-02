@@ -853,7 +853,7 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
     uint32_t count = 0;
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
-        uint32_t token = pass == 0 ? cut->opening : reader->parameters[cut->opening];
+        uint32_t token = pass == 0 ? cut->opening : check_sparse_get(reader->parameters, cut->opening);
         while (token != BUSTER_CHECK_NONE && (pass == 1 || token <= cut->closing))
         {
             const uint32_t name = parser->tokens.names[token];
@@ -869,7 +869,7 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
                 check_deferred_name_state(deferred, lane, name, cut);
                 count += 2;
             }
-            token = pass == 0 ? token + 1 : reader->parameter_next[token];
+            token = pass == 0 ? token + 1 : check_sparse_get(reader->parameter_next, token);
         }
     }
     const CEnvironment* environment = &deferred->environment;
@@ -1556,7 +1556,7 @@ static uint32_t check_deferred_owner(const CheckDeferred* deferred, const CheckI
     {
         const CheckDeferredCut* cut = deferred->cuts + b;
         owner = cut->opening <= token ? b + 1 : 0;
-        for (uint32_t p = reader->parameters[cut->opening]; owner == 0 && p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+        for (uint32_t p = check_sparse_get(reader->parameters, cut->opening); owner == 0 && p != BUSTER_CHECK_NONE; p = check_sparse_get(reader->parameter_next, p))
         {
             owner = p == token ? b + 1 : 0;
         }
@@ -1566,11 +1566,12 @@ static uint32_t check_deferred_owner(const CheckDeferred* deferred, const CheckI
 
 // A column of ids into one of the walk's appended tables, which the pass maps at its entries through their owners'
 // places in the table's layout (check_deferred_layout's `map` of the top level's `top` ids and the bodies' `bases`):
-// ids, or with `one` 1 ids + 1, none being `none`.
+// ids, or with `one` 1 ids + 1, none being `none`. A sparse column's (`sparse`, without `column`) none is NONE.
 typedef struct CheckDeferredIds CheckDeferredIds;
 struct CheckDeferredIds
 {
     uint32_t* column;
+    CheckSparseColumn sparse;
     uint32_t none;
     uint32_t one;
     const uint32_t* map;
@@ -1695,13 +1696,25 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
     for (uint32_t c = 0; c < pass->id_count; c += 1)
     {
         const CheckDeferredIds* ids = pass->ids + c;
-        const uint32_t entries = check_deferred_entries(ids->column, begin, finish, ids->none, pass->vector, positions);
+        const bool sparse = ids->column == NULL;
+        const uint32_t entries = sparse ? check_sparse_entries(ids->sparse, begin, finish, pass->vector, positions) :
+                                          check_deferred_entries(ids->column, begin, finish, ids->none, pass->vector, positions);
         uint32_t body = first;
         for (uint32_t e = 0; e < entries; e += 1)
         {
             const uint32_t token = positions[e];
             const uint32_t owner = check_deferred_owner(deferred, reader, token, &body);
-            ids->column[token] = check_deferred_id(ids->map, ids->top, owner != 0 ? ids->bases[owner - 1] : 0, ids->column[token] - ids->one) + ids->one;
+            const uint32_t id = sparse ? check_sparse_get(ids->sparse, token) : ids->column[token];
+            const uint32_t mapped = check_deferred_id(ids->map, ids->top, owner != 0 ? ids->bases[owner - 1] : 0, id - ids->one) + ids->one;
+            if (sparse)
+            {
+                // The token has its entry, so its block: the write takes none.
+                check_sparse_set(reader->output->sparse_pool, ids->sparse, token, mapped);
+            }
+            else
+            {
+                ids->column[token] = mapped;
+            }
         }
     }
     const uint32_t jobs = check_deferred_entries64((const uint64_t*)reader->specifier_finishes, begin, finish, pass->vector, positions);
@@ -2153,20 +2166,20 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         CheckDeferredIds ids;
         uint32_t total;
     } id_columns[] = {
-        { { reader->string_ids, BUSTER_CHECK_NONE, 0, string_map, string_bases, top_strings }, string_total },
-        { { input->expression_regions, 0, 1, region_map, region_bases, top_regions }, region_total },
-        { { reader->vla_bounds, 0, 1, vla_map, vla_bases, top_vlas }, vla_total },
-        { { reader->vla_ends, 0, 1, vla_map, vla_bases, top_vlas }, vla_total },
-        { { input->asm_ids, 0, 1, asm_map, asm_bases, top_asms }, asm_total },
-        { { input->intrinsic_ids, 0, 1, call_map, call_bases, top_calls }, call_total },
-        { { reader->vararg_calls, 0, 1, vararg_map, vararg_bases, top_varargs }, vararg_total },
-        { { reader->vararg_types, 0, 1, vararg_map, vararg_bases, top_varargs }, vararg_total },
-        { { reader->constant_present, 0, 1, constant_map, constant_bases, top_constants }, constant_total },
+        { { NULL, reader->string_ids, BUSTER_CHECK_NONE, 0, string_map, string_bases, top_strings }, string_total },
+        { { input->expression_regions, { 0 }, 0, 1, region_map, region_bases, top_regions }, region_total },
+        { { reader->vla_bounds, { 0 }, 0, 1, vla_map, vla_bases, top_vlas }, vla_total },
+        { { reader->vla_ends, { 0 }, 0, 1, vla_map, vla_bases, top_vlas }, vla_total },
+        { { input->asm_ids, { 0 }, 0, 1, asm_map, asm_bases, top_asms }, asm_total },
+        { { input->intrinsic_ids, { 0 }, 0, 1, call_map, call_bases, top_calls }, call_total },
+        { { reader->vararg_calls, { 0 }, 0, 1, vararg_map, vararg_bases, top_varargs }, vararg_total },
+        { { reader->vararg_types, { 0 }, 0, 1, vararg_map, vararg_bases, top_varargs }, vararg_total },
+        { { reader->constant_present, { 0 }, 0, 1, constant_map, constant_bases, top_constants }, constant_total },
     };
     _Static_assert(BUSTER_ARRAY_LENGTH(id_columns) == BUSTER_ARRAY_LENGTH(pass.ids), "every id column has room in the pass");
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(id_columns); c += 1)
     {
-        if (id_columns[c].ids.column != NULL && id_columns[c].total != id_columns[c].ids.top)
+        if ((id_columns[c].ids.column != NULL || check_sparse_present(id_columns[c].ids.sparse)) && id_columns[c].total != id_columns[c].ids.top)
         {
             pass.ids[pass.id_count] = id_columns[c].ids;
             pass.id_count += 1;
@@ -2445,7 +2458,7 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->costs[b] = total;
         deferred->results[b] = (CheckDeferredResult){ .unsupported = true };
         uint32_t parameters = 0;
-        for (uint32_t p = reader->parameters[cut->opening]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+        for (uint32_t p = check_sparse_get(reader->parameters, cut->opening); p != BUSTER_CHECK_NONE; p = check_sparse_get(reader->parameter_next, p))
         {
             parameters += 1;
         }

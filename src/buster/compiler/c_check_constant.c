@@ -1373,7 +1373,7 @@ static void check_constant_source_regions(CheckConstantInput* input)
                 input->syntax[index] = true;
             }
             if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == token &&
-                reader->output->declaration_bodies[token] == reader->function_body)
+                check_sparse_get(reader->output->declaration_bodies, token) == reader->function_body)
             {
                 input->statement_syntax[index] |= 2;
             }
@@ -1895,7 +1895,7 @@ static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t to
     }
     else if (name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME || name == C_NAME_BUILTIN_FUNCTION)
     {
-        const uint32_t string = reader->string_ids[keyword];
+        const uint32_t string = check_sparse_get(reader->string_ids, keyword);
         type = string != BUSTER_CHECK_NONE ? check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_CHAR)) : 0;
         valid = count == 0 && type != 0;
         address = true;

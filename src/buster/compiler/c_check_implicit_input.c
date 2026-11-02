@@ -155,7 +155,7 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
                 reader->objects[token] = token + 1;
                 reader->static_objects[token] = true;
                 reader->linkage[token] = 2;
-                input->declaration_bodies[token] = reader->function_body;
+                check_sparse_set(input->sparse_pool, input->declaration_bodies, token, reader->function_body);
                 check_input_bind(reader, token, token);
                 if (library && reader->library_declarations != NULL)
                 {

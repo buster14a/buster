@@ -270,7 +270,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                 result->objects[written] = (CheckDataObject){
                     .type = type,
                     .object = object,
-                    .initializer = input->initializer_nodes[selected],
+                    .initializer = check_sparse_get(input->initializer_nodes, selected),
                     .token = selected,
                     .initializer_plan = plan,
                     .alignment_log2 = check_data_declared_alignment(input, types, object, type, alignments[at]),

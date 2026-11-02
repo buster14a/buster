@@ -97,10 +97,10 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
         const uint32_t body = reader->function_body;
         if (body < parser->tokens.count)
         {
-            const uint32_t function = reader->output->body_declarations[body];
+            const uint32_t function = check_sparse_get(reader->output->body_declarations, body);
             context.function_type = reader->declared_types[function];
             context.variadic = (reader->types->types.flags[type_index(context.function_type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
-            for (uint32_t parameter = reader->parameters[body]; parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+            for (uint32_t parameter = check_sparse_get(reader->parameters, body); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
             {
                 context.last_parameter = parameter;
                 context.last_parameter_type = reader->declared_types[parameter];
