@@ -554,6 +554,9 @@ struct ExecutableDynamic
     // soname for DT_SONAME (empty for none).
     bool shared;
     String8 soname;
+    // Optional runtime search path. A non-null pointer requests a tag even for an empty path; bytes are borrowed.
+    String8 runpath;
+    bool old_dtags;
 };
 
 // What a static executable that links the C runtime (crt1.o, libc.a's members and the rest of the driver's group, which
@@ -3186,6 +3189,8 @@ struct ExecutableDynamicTotals
     uint64_t version_names;
     // A shared library's soname in .dynstr (DT_SONAME), or 0 for none.
     uint64_t soname_name;
+    uint64_t runpath_name;
+    bool old_dtags;
     uint64_t got_relative;
     uint64_t got_symbolic;
     uint64_t got_tpoff;
@@ -4958,7 +4963,7 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
 // DT_DEBUG (a PIE's), the relocations' (.rela.dyn's, a static PIE's IRELATIVE ones among them, then .relr.dyn's), the
 // symbols' and strings', DT_GNU_HASH, the init and fini arrays', DT_INIT and DT_FINI, the versions', and DT_NULL. With
 // `entries` 0, only how many; otherwise their values from the layout, and DT_INIT's and DT_FINI's addresses.
-#define BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES 26
+#define BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES 27
 
 static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const ExecutableDynamicTotals* totals, uint64_t init, uint64_t fini, Elf64_Dyn* entries)
 {
@@ -4978,6 +4983,7 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
     const ExecutableSectionLayout* fini_array = sections != 0 ? &sections[EXECUTABLE_SECTION_FINI_ARRAY] : 0;
     const Elf64_Dyn all[BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES] = {
         { .d_tag = totals->soname_name != 0 ? DT_SONAME : DT_NULL, .d_un.d_val = totals->soname_name },
+        { .d_tag = totals->runpath_name != 0 ? (totals->old_dtags ? DT_RPATH : DT_RUNPATH) : DT_NULL, .d_un.d_val = totals->runpath_name },
         { .d_tag = totals->static_tls ? DT_FLAGS : DT_NULL, .d_un.d_val = DF_STATIC_TLS },
         { .d_tag = totals->shared ? DT_NULL : DT_FLAGS_1, .d_un.d_val = DF_1_PIE },
         { .d_tag = totals->shared ? DT_NULL : DT_DEBUG, .d_un.d_val = 0 },
@@ -5200,7 +5206,10 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
         soname += needed ? dynamic->libraries[l].name.length + 1 : 0;
     }
     totals->soname_name = dynamic->soname.length != 0 ? soname : 0;
-    totals->version_names = soname + (dynamic->soname.length != 0 ? dynamic->soname.length + 1 : 0);
+    const uint64_t runpath = soname + (dynamic->soname.length != 0 ? dynamic->soname.length + 1 : 0);
+    totals->runpath_name = dynamic->runpath.pointer != NULL ? runpath : 0;
+    totals->old_dtags = dynamic->old_dtags;
+    totals->version_names = runpath + (dynamic->runpath.pointer != NULL ? dynamic->runpath.length + 1 : 0);
     totals->shared = dynamic->shared;
     totals->buckets = executable_gnu_hash_buckets(totals->exports);
     uint64_t words = 1;
@@ -6280,6 +6289,11 @@ static bool executable_dynamic_sections(Link* link, ExecutableShared* shared, co
             memcpy(dynstr + totals->soname_name, dynamic->soname.pointer, dynamic->soname.length);
             dynstr[totals->soname_name + dynamic->soname.length] = 0;
         }
+        if (totals->runpath_name != 0)
+        {
+            memcpy(dynstr + totals->runpath_name, dynamic->runpath.pointer, dynamic->runpath.length);
+            dynstr[totals->runpath_name + dynamic->runpath.length] = 0;
+        }
         uint8_t* verneed = shared->section_bytes[EXECUTABLE_SECTION_VERNEED];
         const uint64_t files = totals->verneed_files;
         uint64_t file = 0;
@@ -6767,6 +6781,16 @@ static bool executable_dynamic_valid(const Link* link, const ExecutableDynamic* 
         valid = valid && exported;
     }
     uint64_t names = 0;
+    if (valid && dynamic != NULL)
+    {
+        const String8 path = dynamic->runpath;
+        valid = path.length < UINT32_MAX && (path.length == 0 || path.pointer != NULL);
+        if (valid && path.pointer != NULL)
+        {
+            valid = memchr(path.pointer, 0, path.length) == NULL;
+            names = path.length + 1;
+        }
+    }
     uint32_t previous_library = 0;
     uint64_t indices[0x8000 / 64] = { 0 };
     for (uint32_t l = 0; valid && dynamic != 0 && l < dynamic->library_count; l += 1)

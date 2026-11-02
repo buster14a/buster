@@ -425,6 +425,8 @@ struct RuntimeLibraries
     String8 paths[BUSTER_RUNTIME_LIBRARIES];
     // By library: whether the -l search found it, rather than a script naming its path (runtime_libraries_name).
     bool searched[BUSTER_RUNTIME_LIBRARIES];
+    // Libraries explicitly retained by --no-as-needed, including repeated names.
+    uint32_t required;
     // By library: each reference's required version and the file its .gnu.version_r entry requires it of, beside
     // libraries[l].references (both empty for a reference without one); its exports at other versions than their
     // names' defaults; and its version needs (runtime_libraries_versions).
@@ -449,6 +451,8 @@ struct RuntimeLibraries
 // `failed` saying where.
 BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
                                                                     uint32_t name_count, const String8* directories, uint32_t directory_count);
+BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import_options(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
+                                                                 uint32_t name_count, const String8* directories, uint32_t directory_count, const bool* required);
 static __attribute__((unused)) void runtime_libraries_release(RuntimeLibraries* libraries);
 // The first library, in link order, that exports `name`: its index plus 1, and the export's index in *export; 0 for none
 // (also with no libraries).
@@ -2276,7 +2280,7 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
 // version indices moved past `*base`, which moves past its own; with an index of the names it refers to and the names
 // its DT_NEEDED entries give. A library named twice (by its soname, whatever the
 // path) is linked once, at its first place, as GNU ld loads it once.
-static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const char* path, bool searched, String8 bytes, uint16_t* base)
+static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const char* path, bool searched, String8 bytes, uint16_t* base, bool required)
 {
     RuntimeError result = libraries->count < BUSTER_RUNTIME_LIBRARIES ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
     ImportLibrary* library = &libraries->libraries[libraries->count];
@@ -2289,7 +2293,9 @@ static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const cha
     for (uint32_t l = 0; result == RUNTIME_ERROR_NONE && l < libraries->count; l += 1)
     {
         const String8 soname = libraries->libraries[l].soname;
-        repeated = repeated || (soname.length != 0 && soname.length == library->soname.length && memcmp(soname.pointer, library->soname.pointer, soname.length) == 0);
+        const bool same = soname.length != 0 && soname.length == library->soname.length && memcmp(soname.pointer, library->soname.pointer, soname.length) == 0;
+        repeated |= same;
+        libraries->required |= same && required ? UINT32_C(1) << l : 0;
     }
     const uint16_t top = result == RUNTIME_ERROR_NONE ? runtime_libraries_top(library) : 0;
     if (result == RUNTIME_ERROR_NONE && (uint32_t)*base + top >= 0x8000)
@@ -2332,6 +2338,7 @@ static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const cha
                 .length = length,
             };
             libraries->searched[libraries->count] = searched;
+            libraries->required |= required ? UINT32_C(1) << libraries->count : 0;
             libraries->count += 1;
         }
     }
@@ -2348,8 +2355,8 @@ static bool runtime_libraries_elf(String8 bytes)
     return bytes.length >= SELFMAG && memcmp(bytes.pointer, ELFMAG, SELFMAG) == 0;
 }
 
-BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
-                                             const String8* directories, uint32_t directory_count)
+BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import_options(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
+                                                                 const String8* directories, uint32_t directory_count, const bool* required)
 {
     *libraries = (RuntimeLibraries){ 0 };
     libraries->arena = arena_reserve(BUSTER_RUNTIME_LIBRARIES_BYTES);
@@ -2382,7 +2389,7 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
         }
         else if (result == RUNTIME_ERROR_NONE && runtime_libraries_elf(bytes))
         {
-            result = runtime_libraries_add(libraries, path, true, bytes, &base);
+            result = runtime_libraries_add(libraries, path, true, bytes, &base, required != NULL && required[n]);
         }
         else if (result == RUNTIME_ERROR_NONE)
         {
@@ -2413,11 +2420,17 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
                     result = RUNTIME_ERROR_IMPORT;
                     snprintf(libraries->failed, sizeof(libraries->failed), "%s, a script that %s names", input_path, path);
                 }
-                result = result == RUNTIME_ERROR_NONE ? runtime_libraries_add(libraries, input_path, false, input_bytes, &base) : result;
+                result = result == RUNTIME_ERROR_NONE ? runtime_libraries_add(libraries, input_path, false, input_bytes, &base, required != NULL && required[n] && !input->as_needed) : result;
             }
         }
     }
     return result;
+}
+
+BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
+                                                         const String8* directories, uint32_t directory_count)
+{
+    return runtime_libraries_import_options(libraries, runtime, names, name_count, directories, directory_count, NULL);
 }
 
 static void runtime_libraries_release(RuntimeLibraries* libraries)

@@ -2786,6 +2786,7 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 }
 
 #include "c_check_pic_driver_test.c"
+#include "c_check_linker_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
@@ -6214,6 +6215,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_option_values(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_linker(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

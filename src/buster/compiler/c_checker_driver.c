@@ -4,6 +4,8 @@
 // Source checking and object emission share one typed stream. Unsupported constructs are errors, never silently
 // accepted. Diagnostics retain source/macro history and are ordered by the point their constraint is known.
 
+#include "linker_options.c"
+
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
     const char* result = "invalid expression";
@@ -2108,6 +2110,8 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
 typedef struct CheckDriverLibraries CheckDriverLibraries;
 struct CheckDriverLibraries
 {
+    LinkerOptions linker;
+    bool* required;
     String8* names;
     uint32_t count;
     String8* directories;
@@ -2179,8 +2183,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         // The libraries -l names, imported for this runtime, whose version indices theirs follow.
         static RuntimeLibraries named;
         const bool naming = libraries->count != 0 && opened.error == RUNTIME_ERROR_NONE;
-        const RuntimeError imported = naming ? runtime_libraries_import(&named, &runtime, libraries->names, libraries->count, libraries->directories,
-                                                                        libraries->directory_count) : RUNTIME_ERROR_NONE;
+        const RuntimeError imported = naming ? runtime_libraries_import_options(&named, &runtime, libraries->names, libraries->count, libraries->directories,
+                                                                                libraries->directory_count, libraries->required) : RUNTIME_ERROR_NONE;
         Arena output = arena_reserve(UINT64_C(1) << 34);
         Arena bytes = arena_reserve(UINT64_C(1) << 34);
         Arena arena = arena_reserve(UINT64_C(1) << 32);
@@ -2276,6 +2280,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             // Binding takes the libraries between bind_begin, which check_program_emit ran, and bind_end.
             bind.libraries = naming ? &named : 0;
+            bind.libraries_needed |= naming ? named.required : 0;
             valid = bind_end(&bind, &code.link);
             again = !valid && bind.error == BIND_ERROR_SNAPSHOT;
             if (!valid && !again)
@@ -2358,6 +2363,31 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 fprintf(stderr, "internal compiler error: the bound link isn't valid (link error %u)\n", (uint32_t)checked);
             }
         }
+        dynamic.runpath = libraries->linker.runpath;
+        dynamic.old_dtags = libraries->linker.old_dtags;
+        SymbolId entry = valid ? dynamic_global(&runtime, &bind, "_start") : 0;
+        if (valid && libraries->linker.entry.pointer != NULL)
+        {
+            const String8 wanted = libraries->linker.entry;
+            entry = 0;
+            const uint32_t symbol_count = code.link.symbols.count;
+            for (SymbolId s = 1; s < symbol_count; s += 1)
+            {
+                const NameId n = code.link.symbols.name[s];
+                const AtomId atom = code.link.symbols.atom[s];
+                const uint8_t binding_kind = code.link.symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING;
+                if (n != 0 && atom != 0 && binding_kind != BUSTER_LINK_SYMBOL_LOCAL && code.link.names.length[n] == wanted.length &&
+                    memcmp(code.link.names.bytes[n], wanted.pointer, wanted.length) == 0 && code.link.atoms.class[atom] == BUSTER_LINK_CLASS_TEXT)
+                {
+                    entry = s;
+                }
+            }
+            valid = entry != 0;
+            if (!valid)
+            {
+                fprintf(stderr, "error: linker entry '%.*s' is not a defined code symbol\n", (int)wanted.length, wanted.pointer);
+            }
+        }
         // The program's symbols in the executable's symbol table, as a linker writes its objects' (#152): every named one
         // of the program's (the link's below bind_begin's start), but the compiler's local labels (.L), which an
         // assembler leaves out of its objects, and a TLS variable of no size, which the writer has no section for. -g's
@@ -2382,7 +2412,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 .link = &code.link,
                 .options = {
                     .path = { .pointer = (char*)output_path, .length = strlen(output_path) },
-                    .entry = dynamic_global(&runtime, &bind, "_start"),
+                    .entry = entry,
                     .dynamic = &dynamic,
                     .debug = debug ? &dwarf.attach : NULL,
                     .symbols = selected != NULL ? &symbols : NULL,
@@ -3293,11 +3323,25 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
     // error after the command (#518).
-    // The direct path's -l libraries and -L directories, which every other mode leaves alone.
+    // Flatten only the linker stream, preserving the order of forwarded options and native -l/-L arguments.
+    // Counting all commas may overestimate when an argument is another option's value, but never underallocates.
+    uint64_t linker_capacity = (uint64_t)count + 1;
+    for (int i = 0; i < count; i += 1)
+    {
+        for (const char* c = arguments[i]; *c != 0; c += 1)
+        {
+            linker_capacity += *c == ',';
+        }
+    }
+    char** linker_arguments = linker_capacity <= INT_MAX ? arena_push_array(&arena, linker_capacity, sizeof(char*), _Alignof(char*)) : NULL;
+    int linker_count = 0;
     CheckDriverLibraries libraries = {
-        .names = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
-        .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
+        .names = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
+        .directories = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
+        .required = arena_push_array(&arena, linker_capacity, sizeof(bool), _Alignof(bool)),
     };
+    const bool linker_ready = linker_arguments != NULL && libraries.required != NULL &&
+                              linker_options_initialize(&libraries.linker, (uint32_t)linker_capacity, &arena);
     bool missing_value = false;
     const char* unsupported_codegen = NULL;
     const char* unsupported_stack_protector = NULL;
@@ -3324,13 +3368,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* packed_value = NULL;
     const char* invalid_pack = NULL;
     bool has_pack_value = false;
-    for (int i = 0; filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
+    for (int i = 0; linker_ready && !libraries.linker.resource && filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
         // An option that takes the next argument as its value (pp_option_takes_value: pp_parse_options' and
         // c_predefines.c's) passes on with it, unread: `-o -lresult` writes -lresult, as clang's driver takes it.
-        const bool valued = i + 1 < count && pp_option_takes_value(arguments[i]);
+        const bool forwarding = strcmp(arguments[i], "-Xlinker") == 0 || strncmp(arguments[i], "-Wl,", 4) == 0;
+        const bool valued = !forwarding && i + 1 < count && pp_option_takes_value(arguments[i]);
         if (!valued)
         {
             const char* argument = arguments[i];
@@ -3388,7 +3433,42 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         const bool library = !valued && arguments[i][0] == '-' && arguments[i][1] == 'l';
         const bool directory = !valued && arguments[i][0] == '-' && arguments[i][1] == 'L';
-        if (valued)
+        if (forwarding)
+        {
+            if (strcmp(arguments[i], "-Xlinker") == 0)
+            {
+                if (i + 1 < count)
+                {
+                    linker_arguments[linker_count++] = arguments[++i];
+                }
+                else
+                {
+                    libraries.linker.error = arguments[i];
+                    libraries.linker.missing = true;
+                }
+            }
+            else
+            {
+                const char* value = arguments[i] + 4;
+                const uint64_t length = strlen(value);
+                char* copy = arena_push(&arena, length + 1, 1);
+                libraries.linker.resource |= copy == NULL;
+                if (copy != NULL)
+                {
+                    memcpy(copy, value, length + 1);
+                    linker_arguments[linker_count++] = copy;
+                    for (uint64_t c = 0; c < length; c += 1)
+                    {
+                        if (copy[c] == ',')
+                        {
+                            copy[c] = 0;
+                            linker_arguments[linker_count++] = copy + c + 1;
+                        }
+                    }
+                }
+            }
+        }
+        else if (valued)
         {
             // The option and its value, however the value is spelled, for pp_parse_options.
             filtered[filtered_count++] = arguments[i];
@@ -3397,19 +3477,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (library || directory)
         {
-            const char* value = arguments[i][2] != 0 ? arguments[i] + 2 : i + 1 < count ? arguments[++i] : 0;
-            const String8 text = {
-                .pointer = (char*)value,
-                .length = value != 0 ? strlen(value) : 0,
-            };
-            missing_value |= text.length == 0;
-            if (library)
+            linker_arguments[linker_count++] = arguments[i];
+            if (arguments[i][2] == 0)
             {
-                libraries.names[libraries.count++] = text;
-            }
-            else
-            {
-                libraries.directories[libraries.directory_count++] = text;
+                missing_value |= i + 1 == count;
+                if (i + 1 < count)
+                {
+                    linker_arguments[linker_count++] = arguments[++i];
+                }
             }
         }
         else if (strcmp(arguments[i], "-fno-stack-protector") == 0 || strcmp(arguments[i], "-fstack-protector") == 0 ||
@@ -3540,13 +3615,59 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
+    // Non-linking actions consume the transport but do not invoke a linker, as -c and -E do in a system driver.
+    // A missing -Xlinker operand is still a malformed driver command, not an unused linker option.
+    bool as_needed = true;
+    for (int i = 0; link && linker_ready && libraries.linker.error == NULL && !libraries.linker.resource && i < linker_count; i += 1)
+    {
+        const char* argument = linker_arguments[i];
+        if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i))
+        {
+            // Shared output options.
+        }
+        else if (strcmp(argument, "--as-needed") == 0 || strcmp(argument, "--no-as-needed") == 0)
+        {
+            as_needed = strcmp(argument, "--as-needed") == 0;
+        }
+        else if (argument[0] == '-' && (argument[1] == 'l' || argument[1] == 'L'))
+        {
+            const bool library = argument[1] == 'l';
+            const char* value = argument[2] != 0 ? argument + 2 : i + 1 < linker_count ? linker_arguments[++i] : NULL;
+            if (value == NULL || value[0] == 0)
+            {
+                libraries.linker.error = argument;
+                libraries.linker.missing = true;
+            }
+            else
+            {
+                const String8 text = {
+                    .pointer = (char*)value,
+                    .length = strlen(value),
+                };
+                if (library)
+                {
+                    libraries.required[libraries.count] = !as_needed;
+                    libraries.names[libraries.count++] = text;
+                }
+                else
+                {
+                    libraries.directories[libraries.directory_count++] = text;
+                }
+            }
+        }
+        else
+        {
+            libraries.linker.error = argument;
+        }
+    }
+    const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
-    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+    const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
+    const bool parsed = reserved && arguments_ready && linker_valid && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
                         pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
     // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
@@ -3607,6 +3728,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!arguments_ready || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "checker arguments", (uint64_t)(count + 1) * sizeof(char*));
+    }
+    else if (!linker_valid)
+    {
+        linker_options_diagnose(&libraries.linker);
     }
     else if (unsupported_codegen != NULL)
     {

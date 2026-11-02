@@ -32,6 +32,8 @@
 // session's start, the first inputs' opening with their objects' bytes, the resolution's phases (the slowest lane's),
 // the conversion, the optional passes and the writer's phases (lane 0's).
 
+#include "linker_options.c"
+
 typedef struct ForeignDriver ForeignDriver;
 struct ForeignDriver
 {
@@ -40,6 +42,7 @@ struct ForeignDriver
     String8 entry;
     String8 interpreter;
     String8 soname;
+    LinkerOptions linker;
     RuntimeKind kind;
     ForeignPath path;
     // --lanes's, or 0 for the lanes the link's objects pay for (foreign_driver_lanes).
@@ -144,7 +147,7 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         .path = FOREIGN_PATH_VECTOR,
     };
     char** inputs = argc >= 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)argc + 2) : 0;
-    bool valid = inputs != 0;
+    bool valid = inputs != 0 && linker_options_initialize(&driver->linker, (uint32_t)argc + 1, arena);
     uint32_t count = 1;
     bool pie = false;
     bool static_link = false;
@@ -161,7 +164,15 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         const bool entry = strcmp(argument, "-e") == 0 || strcmp(argument, "--entry") == 0 || foreign_starts_with(argument, "--entry=");
         const bool interpreter = strcmp(argument, "-dynamic-linker") == 0 || strcmp(argument, "--dynamic-linker") == 0 || foreign_starts_with(argument, "--dynamic-linker=");
         const bool lanes = strcmp(argument, "--lanes") == 0 || foreign_starts_with(argument, "--lanes=");
-        if (foreign_value)
+        if (linker_options_parse(&driver->linker, argc, argv, &i))
+        {
+            valid = driver->linker.error == NULL && !driver->linker.resource;
+            if (!valid)
+            {
+                linker_options_diagnose(&driver->linker);
+            }
+        }
+        else if (foreign_value)
         {
             inputs[count] = argv[i];
             count += 1;
@@ -342,7 +353,25 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
             count += 1;
         }
     }
+    if (valid)
+    {
+        valid = linker_options_finish(&driver->linker, arena);
+        if (!valid)
+        {
+            linker_options_diagnose(&driver->linker);
+        }
+    }
+    if (driver->linker.entry.pointer != NULL)
+    {
+        driver->entry = driver->linker.entry;
+        driver->entry_given = true;
+    }
     driver->kind = shared ? RUNTIME_KIND_SHARED : pie && static_link ? RUNTIME_KIND_STATIC_PIE : pie ? RUNTIME_KIND_DYNAMIC : RUNTIME_KIND_STATIC;
+    if (valid && runtime_kind_is_static(driver->kind) && driver->linker.runpath.pointer != NULL)
+    {
+        fprintf(stderr, "link-foreign: runtime search paths require dynamic output\n");
+        valid = false;
+    }
     // GNU ld takes -shared with -static as a library that links no shared library; lld and this command refuse it, and
     // --no-dynamic-linker without -static, a dynamic PIE without an interpreter.
     if (valid && ((shared && (static_link || pie)) || (no_interpreter && driver->kind != RUNTIME_KIND_STATIC_PIE)))
@@ -939,6 +968,8 @@ static int foreign_driver_link(ForeignDriverRun* run)
     if (succeeded && !driver.help)
     {
         converted.dynamic.soname = driver.kind == RUNTIME_KIND_SHARED ? driver.soname : (String8){ 0 };
+        converted.dynamic.runpath = driver.linker.runpath;
+        converted.dynamic.old_dtags = driver.linker.old_dtags;
         // The inputs' DWARF, unless -s or -S strips it, as GNU ld strips it.
         bool debug = !driver.strip_all && !driver.strip_debug;
         uint64_t debug_bytes = 0;

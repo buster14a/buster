@@ -735,7 +735,7 @@ static bool main_preprocessing(int count, char** arguments)
 {
     static const char* const valued[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter",
                                           "-target", "--predefines", "--location-limit", "--window-bytes", "--lanes",
-                                          "--worker-budget", "--id-order", "-l", "-L" };
+                                          "--worker-budget", "--id-order", "-l", "-L", "-Xlinker" };
     bool result = false;
     for (int i = 0; !result && i < count; i += 1)
     {
@@ -776,7 +776,8 @@ static bool main_assembly_source(int count, char** arguments)
         }
         else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 ||
                   strcmp(argument, "-U") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
-                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "--predefines") == 0) && i + 1 < count)
+                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "--predefines") == 0 ||
+                  strcmp(argument, "-Xlinker") == 0) && i + 1 < count)
         {
             i += 1;
         }
