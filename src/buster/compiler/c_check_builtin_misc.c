@@ -38,12 +38,7 @@ struct CheckBuiltinMiscAction
     const CheckValue* arguments;
     uint32_t argument_count;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
-    const CheckConstValues* const_values;
-    bool constant_evaluated;
+    CheckContext context;
     // An alignment builtin's first argument's object, where its source names one (CheckBuiltinCall.base_object), and that
     // object's declaration alignment as clang gives it, its log2 plus 1, 0 when unknown: what folds an address.
     uint32_t pointer_object;
@@ -86,15 +81,7 @@ struct CheckBuiltinMiscResult
 
 static bool check_builtin_misc_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinMiscAction* action)
 {
-    bool complete = type_is_complete(table, type);
-    const TypeId base = type_strip_aligned(table, type);
-    const uint8_t kind = type_kind(table, base);
-    if (complete && action->tag_completions != NULL &&
-        (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM))
-    {
-        const uint32_t tag = table->types.index[type_index(base)];
-        complete = tag < action->tag_completion_count && action->tag_completions[tag] <= action->source_position;
-    }
+    const bool complete = type_is_complete(table, type) && check_context_tag_visible(table, type, &action->context);
     return complete;
 }
 
@@ -117,12 +104,7 @@ static CheckValue check_builtin_misc_argument(TypeTable* table, const CheckBuilt
         const CheckAction action = {
             .operands = { value },
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
-            .const_values = input->const_values,
-            .constant_evaluated = input->constant_evaluated,
+            .context = input->context,
         };
         value = check_action_operand(table, &action, &converted, 0);
         if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -138,10 +120,7 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
 {
     const CheckAction context = {
         .node = input->node,
-        .tag_completions = input->tag_completions,
-        .tag_completion_count = input->tag_completion_count,
-        .source_position = input->source_position,
-        .extensions = input->extensions,
+        .context = input->context,
     };
     bool accepted = destination != 0 && output->action.diagnostic == CHECK_DIAG_NONE;
     if (destination == 0)
@@ -210,17 +189,14 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
 static CheckValue check_builtin_misc_evaluated(TypeTable* table, const CheckBuiltinMiscAction* input, const CheckValue* value, uint32_t index, TypeId destination)
 {
     CheckValue result = *value;
-    if (!input->constant_evaluated)
+    if (!input->context.constant_evaluated)
     {
+        CheckContext evaluation = input->context;
+        evaluation.constant_evaluated = true;
         const CheckAction context = {
             .operands = { input->arguments[index] },
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
-            .const_values = input->const_values,
-            .constant_evaluated = true,
+            .context = evaluation,
         };
         CheckActionResult read = { 0 };
         result = check_action_operand(table, &context, &read, 0);
@@ -288,7 +264,7 @@ static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAc
         }
         else if (folded)
         {
-            output->constant_value.flags |= BUSTER_CHECK_ICE;
+            check_action_builtin_ice(&output->constant_value);
         }
         output->action.value = folded ? output->constant_value : values[0];
         output->action.value.category = CHECK_RVALUE;

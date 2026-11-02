@@ -1,4 +1,4 @@
 @AGENTS.md
 
-All project instructions live in AGENTS.md. Read and follow it before changing
-this repository; update that file rather than duplicating guidance here.
+Read the shared rules in AGENTS.md, then only the linked command/module guide
+needed for the task. Maintain detailed instructions in that guide, not here.

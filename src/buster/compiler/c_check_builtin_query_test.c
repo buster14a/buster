@@ -84,7 +84,7 @@ static CheckBuiltinQueryResult check_builtin_query_test_action(TypeTable* table,
         .arguments = arguments,
         .argument_count = count,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     CheckBuiltinQueryResult result;
     check_builtin_query_one(table, &input, &result);
@@ -110,7 +110,7 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
         .arguments = &argument,
         .argument_count = 1,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     check_builtin_query_one(table, &complex_query, &result);
     check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 0), "complex value without producer folding proof stays unknown");
@@ -152,7 +152,7 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
         .arguments = &argument,
         .argument_count = 1,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .absolute_address_constant = true,
     };
     check_builtin_query_one(table, &absolute, &result);
@@ -174,7 +174,7 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
         .arguments = &argument,
         .argument_count = 1,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .string_literal_start = true,
     };
     check_builtin_query_one(table, &input, &result);
@@ -234,7 +234,7 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
         .arguments = arguments,
         .argument_count = 2,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .object_size_known = { true, true, true, true },
         .object_size_source_constant = { true, true, true, true },
         .object_sizes = { 64, 8, 32, 4 },
@@ -365,13 +365,13 @@ static void check_builtin_query_test_constraints(CheckBuiltinQueryTest* test, Ty
             .arguments = arguments,
             .argument_count = 1,
             .node = 999,
-            .tag_completions = completions,
-            .tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
-            .source_position = 19,
+            .context.tag_completions = completions,
+            .context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
+            .context.source_position = 19,
         };
         check_builtin_query_one(table, &input, &result);
         check_builtin_query_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "enum completion remains source-position sensitive in unevaluated query");
-        input.source_position = 20;
+        input.context.source_position = 20;
         check_builtin_query_one(table, &input, &result);
         check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 1), "completed enum is a foldable constant");
         arguments[0] = check_builtin_query_test_pointer(type_pointer(table, type_tag(table, BUSTER_TYPE_KIND_STRUCT, 148)), 1, 0);
@@ -591,7 +591,7 @@ static void check_builtin_query_test_pages(CheckBuiltinQueryTest* test, TypeTabl
                 .arguments = arguments + cursor,
                 .argument_count = object ? 2 : 1,
                 .node = i,
-                .source_position = UINT32_MAX,
+                .context.source_position = UINT32_MAX,
                 .object_size_known = { true, true, true, true },
                 .object_size_source_constant = { true, true, true, true },
                 .object_sizes = { 64, 8, 32, 4 },

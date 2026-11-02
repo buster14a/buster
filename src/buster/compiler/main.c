@@ -607,6 +607,9 @@ int run_backend_benchmark(int argc, char** argv);
 // The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_tier1.c"
+#pragma clang optimize off
+#include "buster/compiler/c_check_tier1_outcome_test.c"
+#pragma clang optimize on
 #pragma clang section text = ""
 // #1056: the tier-neutral emitted function's tests (row programs, Tier 0's and Tier 1's frame events, the verifier).
 #include "buster/compiler/emitted_code_test.c"
