@@ -2814,6 +2814,7 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 }
 
 #include "c_check_pic_driver_test.c"
+#include "c_check_linker_driver_test.c"
 #include "c_check_instrumentation_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
@@ -2976,6 +2977,9 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     }
     // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too.
     valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL;
+    // The graph run's memoized transitions' counts (#1050), each on a line of its own.
+    valid = valid && strstr(text, "\ntime-check\ttransition-hits\t") != NULL && strstr(text, "\ntime-check\ttransition-misses\t") != NULL &&
+            strstr(text, "\ntime-check\ttransition-folds\t") != NULL && strstr(text, "\ntime-check\ttransition-entries\t") != NULL;
     const double stage_error = sum > total ? sum - total : total - sum;
     // The preprocessor's rows add up to its stage, and the lowering's to its own.
     const double preprocess = stages[CHECK_STAGE_PREPROCESS];
@@ -5074,6 +5078,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_tier1_driver_test.c"
+#include "c_check_fence_driver_test.c"
 
 // Whether the objects at `ours_path` and `theirs_path` both read and their .text sections have the same bytes, into *same:
 // false when either doesn't read or has no .text, with `error` saying so.
@@ -6284,6 +6289,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_multiversion(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_retained(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -6388,6 +6397,34 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_scopes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_stack(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_float(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_records(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_dynamic(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_fences(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_helper_report(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_float_classify(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -6421,6 +6458,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_option_values(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_linker(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

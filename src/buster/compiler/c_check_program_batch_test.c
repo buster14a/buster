@@ -404,6 +404,7 @@ static void check_test_program_batch(CheckTest* test)
             10,
             20,
         };
+        Arena sparse = arena_reserve(UINT64_C(1) << 16);
         uint8_t flags[2] = { 0 };
         uint8_t static_flags[2] = { 0 };
         SymbolId object_symbols[3] = { 0 };
@@ -431,7 +432,7 @@ static void check_test_program_batch(CheckTest* test)
             .token_count = 2,
             .compound_objects = flags,
             .static_objects = static_flags,
-            .declaration_bodies = bodies,
+            .declaration_bodies = check_sparse_from_values(&sparse, bodies, 2),
         };
         CheckStream stream = {
             .dense_values = source_values,
@@ -503,6 +504,7 @@ static void check_test_program_batch(CheckTest* test)
         source_values[0].flags = 0;
         source_values[0].fault = CHECK_FAULT_SIGNED_OVERFLOW;
         check_test_expect(test, !check_lower_value(&writer, 0, false, false), "a faulted constant retains the original lowering rule");
+        arena_release(&sparse);
     }
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sizes); c += 1)
     {

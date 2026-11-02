@@ -106,6 +106,9 @@
 
 #include "buster/compiler/string8.h"
 
+// The tests' normalized temporary directory, for the test files and benchmarks that build their trees from it.
+#include "buster/compiler/test_paths.h"
+
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
 
@@ -708,7 +711,8 @@ static bool main_assembly_source(int count, char** arguments)
         }
         else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 ||
                   strcmp(argument, "-U") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
-                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "--predefines") == 0) && i + 1 < count)
+                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "--predefines") == 0 ||
+                  strcmp(argument, "-Xlinker") == 0) && i + 1 < count)
         {
             i += 1;
         }
@@ -1084,10 +1088,12 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
+        arena_static_base_pages();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
+        arena_static_base_pages();
         result = run_parse_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
@@ -1562,6 +1568,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
+        arena_static_base_pages();
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
         if (!main_information(argc - 1, argv + 1, &result))
         {

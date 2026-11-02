@@ -1656,18 +1656,26 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
         }
     }
     arena_pop_to(scratch, scratch_mark);
-    // Each batch size by both of the vector path's orders, in postorder and by level (CheckOptions.level_order).
-    for (uint32_t run = partitions ? 2 : 2 * BUSTER_CHECK_BATCH; scalar_valid && run < 2 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
+    // (CheckOptions.level_order), and its memoized transitions (#1050) in node order and in windows, every hit verified
+    // against its action.
+    for (uint32_t run = partitions ? 4 : 4 * BUSTER_CHECK_BATCH; scalar_valid && run < 4 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
-        const uint32_t batch = run / 2;
+        const uint32_t batch = run / 4;
+        const uint32_t order = run % 4;
         const CheckOptions vector_options = {
             .batch_size = batch,
-            .level_order = (run & 1) != 0,
+            .level_order = order == 1,
+            .transitions = order >= 2,
+            .transition_windows = order == 3,
+            .verify_transitions = true,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count),
-                          (run & 1) != 0 ? "graph paths or level-order batch partitions differ" : "graph paths or batch partitions differ");
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
+                          order == 1 ? "graph paths or level-order batch partitions differ" :
+                          order == 2 ? "graph paths or the transitions differ" :
+                          order == 3 ? "graph paths or the transitions' windows differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {
@@ -2437,7 +2445,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             {
                 const CheckOptions options = {
                     .scalar = p == 0,
-                    .verify = true
+                    .verify = true,
                 };
                 struct timespec start;
                 struct timespec stop;
@@ -2522,6 +2530,14 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         {
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
                                    check_test_stream_equal(&streams[0], &streams[1], input[0].graph.argument_count), "source paths produce different typed streams");
+            // The vector path by its memoized transitions too (#1050, CheckOptions.transitions), every hit verified.
+            const uint64_t mark = output_storage[1].length;
+            const CheckOptions memoized = { .verify = true, .transitions = true, .verify_transitions = true };
+            CheckStream stream;
+            const bool rechecked = check_graph_run(&types[1].table, &input[1].graph, &output_storage[1], &scratch[1], &memoized, &stream);
+            check_test_expect(test, rechecked && stream.statistics.transition_mismatches == 0 &&
+                                   check_test_stream_equal(&streams[0], &stream, input[0].graph.argument_count), "source paths' transitions produce another typed stream");
+            arena_pop_to(&output_storage[1], mark);
         }
     }
     for (uint32_t p = 0; p < 2; p += 1)
@@ -5353,6 +5369,175 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // GNU's function multiversioning (#839): target("default") makes a function multiversioned even alone, and
+        // clang refuses these declaration attributes beside it, at the function's name.
+        {
+            "multiversioning: always_inline beside target default",
+            "int g(int x) { return x; }\n__attribute__((always_inline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: noinline beside target default",
+            "int g(int x) { return x; }\n__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: flatten beside target default",
+            "int g(int x) { return x; }\n__attribute__((flatten, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cold beside target default",
+            "int g(int x) { return x; }\n__attribute__((cold, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: hot beside target default",
+            "int g(int x) { return x; }\n__attribute__((hot, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: weak beside target default",
+            "int g(int x) { return x; }\n__attribute__((weak, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: const beside target default",
+            "int g(int x) { return x; }\n__attribute__((const, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: pure beside target default",
+            "int g(int x) { return x; }\n__attribute__((pure, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: naked beside target default",
+            "int g(int x) { return x; }\n__attribute__((naked, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: alias beside target default",
+            "int g(int x) { return x; }\n__attribute__((alias(\"g\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: target_clones beside target",
+            "int g(int x) { return x; }\n__attribute__((target_clones(\"avx2\", \"default\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_specific beside target",
+            "int g(int x) { return x; }\n__attribute__((cpu_specific(generic), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: used beside target default",
+            "int g(int x) { return x; }\n__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: nothrow beside target default",
+            "int g(int x) { return x; }\n__attribute__((nothrow, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a second target version checks the first declaration",
+            "__attribute__((always_inline, target(\"avx2\"))) int h(int x);\n"
+            "__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_dispatch beside target",
+            "__attribute__((cpu_dispatch(generic), target(\"default\"))) int h(int x) { return x + 1; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: aligned beside target default",
+            "int h(void) __attribute__((aligned(16), target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: may_alias beside target default",
+            "int h(void) __attribute__((may_alias, target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: inline nonnull beside target default",
+            "inline int h(int *p) __attribute__((nonnull, nothrow, target(\"default\"))) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a block-scope declaration beside target default",
+            "int f(void) { int h(void) __attribute__((target(\"default\"), always_inline)); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: several declarators beside target default",
+            "__attribute__((target(\"default\"), always_inline)) int h(void), g(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific declaration alone is unsupported",
+            "__attribute__((cpu_specific(generic))) int h(void);\n",
+            true,
+            true
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu17",
+            "int h(void) __attribute__((nodiscard, target(\"default\")));\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu23",
+            "int h(void) __attribute__((nodiscard, maybe_unused, no_sanitize_undefined, target(\"default\")));\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "multiversioning: no_builtin on a declaration still reports the conflict",
+            "__attribute__((no_builtin(\"printf\"), always_inline, target(\"default\"))) int h(void);\n",
+            true,
+            false
+        },
     };
     enum
     {
@@ -5813,6 +5998,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
 #include "c_check_sizeof_test.c"
+#include "c_check_transitions_test.c"
 #include "c_check_integer_policy_test.c"
 #include "c_check_fp_actions_test.c"
 #include "c_check_query_runtime_test.c"
@@ -5944,6 +6130,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_library = false;
     bool embed_initializers = false;
     bool sizeof_only = false;
+    bool transitions_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6003,6 +6190,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             sizeof_only = true;
         }
+        else if (strcmp(argv[i], "--transitions") == 0)
+        {
+            transitions_only = true;
+        }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
             clang = argv[++i];
@@ -6028,16 +6219,20 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || sizeof_only));
+                                                           program_library || embed_initializers || sizeof_only || transitions_only));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof|--transitions]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && sizeof_only)
+        if (initialized && transitions_only)
+        {
+            check_test_transitions(&test);
+        }
+        else if (initialized && sizeof_only)
         {
             check_test_sizeof_scaling(&test);
             check_test_integer_extensions(&test, clang);
@@ -6410,6 +6605,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_sizeof_scaling(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_transitions(&test);
             }
             if (check_test_shared())
             {

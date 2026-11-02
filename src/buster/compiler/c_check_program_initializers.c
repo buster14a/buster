@@ -44,7 +44,7 @@ static bool check_lower_init_selected(const CheckProgram* program, uint32_t plan
     if (!wanted && declaration < input->token_count && input->compound_objects[declaration] && !input->static_objects[declaration] &&
         program->compound_initializers != NULL && program->compound_initializers[plan] != 0)
     {
-        const uint32_t opening = input->declaration_bodies[declaration];
+        const uint32_t opening = check_sparse_get(input->declaration_bodies, declaration);
         uint32_t first = 0;
         uint32_t end = program->body_count;
         while (first < end)

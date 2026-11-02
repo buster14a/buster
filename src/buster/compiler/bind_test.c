@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Binding's tests, for the test-bind command:
 //
@@ -101,6 +102,7 @@
 // hand, the rules, the atexit program, the libgcc program, the room, the cross-check, the linkers' cases, the checks,
 // the static runtimes, the shared library's runtime, split-stack code, and run_bind_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -1511,7 +1513,7 @@ static void bind_test_library_import_cases(BindTestTally* tally, const Runtime* 
         { "buster_nowhere", RUNTIME_ERROR_MISSING, 0 },
         { "buster_members", RUNTIME_ERROR_ARCHIVE, 0 },
         { "buster_empty", RUNTIME_ERROR_NONE, 0 },
-        { "buster_script", RUNTIME_ERROR_IMPORT, 0 },
+        { "buster_script", RUNTIME_ERROR_MISSING, 0 },
     };
     for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -5242,6 +5244,8 @@ static bool bind_test_split_stack(const Runtime* runtime, const Runtime* shared_
     return bind_test_report(&tally);
 }
 
+#include "runtime_library_search_test.c"
+
 // ---------------------------------------------------------------------------------------------------------------------
 // run_bind_tests
 
@@ -5273,8 +5277,8 @@ static int run_bind_tests(int argc, char** argv)
     }
     int result = 1;
     char directory[BUSTER_BIND_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-bind-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-bind-XXXXXX", temporary);
     Arena arena = arena_reserve(BUSTER_BIND_TEST_ARENA_BYTES);
     Runtime runtime;
     const RuntimeError imported = valid ? runtime_import(&runtime) : RUNTIME_ERROR_NONE;
@@ -5299,6 +5303,7 @@ static int run_bind_tests(int argc, char** argv)
         bool passed = bind_test_programs(&runtime, seed, cross_check, directory, keep, &arena);
         passed = bind_test_rules(&runtime) && passed;
         passed = bind_test_libraries(&runtime, directory) && passed;
+        passed = bind_test_gcc_libraries(&runtime, directory, keep, cross_check) && passed;
         passed = bind_test_atexit_program(&runtime) && passed;
         passed = bind_test_libgcc_program(&runtime) && passed;
         passed = bind_test_room_bound(&runtime, "room", &arena) && passed;
