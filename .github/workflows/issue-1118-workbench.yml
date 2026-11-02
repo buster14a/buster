@@ -1,27 +1,51 @@
 name: Issue 1118 workbench
 
-# Temporary source-transfer workbench; not part of the implementation PR.
+# Temporary, isolated correctness workbench; not part of the implementation PR.
 on:
   push:
     branches: [agent/1118-address-space-workbench]
-    paths: [.github/workflows/issue-1118-workbench.yml]
+    paths: [.github/workflows/issue-1118-workbench.yml, .github/issue-1118.patch]
 
 permissions:
   contents: read
 
 jobs:
-  source:
+  baseline:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Export the source snapshot
-        run: git archive --format=tar.gz -o "$RUNNER_TEMP/buster-source.tar.gz" HEAD
+      - name: Install the repository's pinned compiler
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build the baseline
+        run: ./build.sh > "$RUNNER_TEMP/build.log" 2>&1
+      - name: Reproduce address-space refusals
+        shell: bash
+        run: |
+          set -uo pipefail
+          clang -O0 .github/issue-1118-probe.c -o "$RUNNER_TEMP/reference" -lm || exit 1
+          ./build/compiler -E .github/issue-1118-probe.c > "$RUNNER_TEMP/probe.i"
+          wc -c "$RUNNER_TEMP/probe.i" > "$RUNNER_TEMP/baseline.log"
+          for limit in 1048576 2097152 3670016 4194304 6291456 unlimited; do
+            for mode in default scalar; do
+              printf '\nLIMIT=%s MODE=%s\n' "$limit" "$mode" >> "$RUNNER_TEMP/baseline.log"
+              flags=(); [ "$mode" = scalar ] && flags+=(--scalar)
+              (ulimit -v "$limit"; ./build/compiler --lanes 1 "${flags[@]}" --time-stages -o "$RUNNER_TEMP/probe" .github/issue-1118-probe.c -lm) >> "$RUNNER_TEMP/baseline.log" 2>&1
+              printf 'STATUS=%s\n' "$?" >> "$RUNNER_TEMP/baseline.log"
+            done
+          done
+          cat "$RUNNER_TEMP/baseline.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue-1118-source
-          path: ${{ runner.temp }}/buster-source.tar.gz
+          name: issue-1118-baseline
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/baseline.log
           retention-days: 1
           if-no-files-found: error
