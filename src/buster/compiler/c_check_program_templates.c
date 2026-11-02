@@ -1,19 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #1048's node templates, included by c_check_program_lower.c before the tasks' loop. Before a body's statements, a pass
-// over its range of nodes (check_lower_template_range) from the last node down gives each node the context its parent's
-// rule evaluates it in (address, discard, and the type its conversion converts it to) before the node's own turn, which
-// classifies it (check_lower_template_classify: a template where its lowering is one of the table's) and writes its
-// entries and its conversion's into its slot of BUSTER_CHECK_LOWER_TEMPLATE_MOST. A pass from the first node up then
-// gives each node its entries' offset in node order, which is postorder, and decides whether its subtree is closed: a
-// template whose evaluated operands are closed and converted, each operand's entries (its subtree's, then its
-// conversion's) following the one before's, and the last one's ending where the node's own start. When the tasks' loop
-// pops a closed node in the context the pass gave it (check_lower_template_splice), it copies the slots of the node's
-// subtree in node order, but the node's own conversion, which the task under it writes, instead of expanding the node and
-// its operands task by task. Everything else (the controls, the exceptions, a node out of the body's range or in another
-// context) takes the tasks as before, which remain the exact rules: the table's templates write what check_lower_expand
-// and the conversions write for the cases they take, which test-lowering-templates checks function by function.
+// #1048's node templates, included by c_check_program_lower.c before the tasks' loop. Before a body's statements, three
+// steps over its range of nodes (check_lower_template_range), each of the shape a data-parallel pass takes:
+//
+// 1. The scatter (check_lower_template_scatter), from the last node down: each node's rule, by its op alone
+//    (check_lower_template_rules), gives its operands their contexts (a value or an address) and the targets their
+//    conversions convert them to, an operand two nodes name being shared; a node the tasks fold
+//    (check_lower_template_folds) gives its operands, and theirs, no evaluation instead.
+// 2. The classification, each node on its own from the first up: its context with its discard, its template and its
+//    entries and its conversion's in its slot of BUSTER_CHECK_LOWER_TEMPLATE_MOST, by the fast twin where it takes the node
+//    (check_lower_template_fast: the common shapes, each by its own rules alone) and by the general rules
+//    (check_lower_template_classify) otherwise. A template takes its operands only where the scatter gave each the
+//    context and the target its rule gives it.
+// 3. In the same step, once its operands are done: its entries' offset in node order, which is postorder, and whether
+//    its subtree is closed: a template whose evaluated operands are closed and converted, each operand's entries (its
+//    subtree's, then its conversion's) following the one before's, and the last one's ending where the node's own start.
+//
+// When the tasks' loop pops a closed node in the context the pass gave it (check_lower_template_splice), it copies the
+// slots of the node's subtree in node order, but the node's own conversion, which the task under it writes, instead of
+// expanding the node and its operands task by task. Everything else (the controls, the exceptions, a node out of the
+// body's range or in another context) takes the tasks as before, which remain the exact rules: the table's templates
+// write what check_lower_expand and the conversions write for the cases they take, which test-lowering-templates checks
+// function by function, and the fast twin what the general rules give, which its check compares node by node.
 //
 // The table (CheckLowerTemplate): a VALUE's read of a local or a global, its address; a folded constant (an integer, a
 // float or double, an address); `&x`; a cast, a conversion, a unary plus and a selection; `*p`; a member's access; the
@@ -24,7 +33,7 @@
 // compound literal or a variable-length array. A writer takes templates only where its caller asks
 // (check_program_lower_templates, the tests), and not with -g's tokens, a tracked stack or a program with a _BitInt type or
 // an overloaded address: this scalar classification costs about as much as the tasks it saves (docs/c-lowering.md), so
-// no compile takes it until its classification is data-parallel.
+// no compile takes it until its steps are data-parallel.
 #ifndef BUSTER_C_CHECK_PROGRAM_TEMPLATES_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_TEMPLATES_INCLUDED
 
@@ -630,7 +639,98 @@ static void check_lower_template_range(const CheckLowerWriter* writer, const Che
     *span = node <= high && node < count ? high - node + 1 : 0;
 }
 
-// Marks `node`'s operands unevaluated (in the range), a node its rule doesn't evaluate.
+// The operands each op's rule evaluates where its node is a template (check_lower_template_classify's), two per op, each
+// a byte: whether it is evaluated, its context (a value, an address, or its parent's: a selection's and a comma's right
+// operand), and the target its conversion converts it to. A superset where the rules choose (an assignment's destination,
+// which a store to a local or a global doesn't evaluate): the pass scatters each node's to its operands before any node
+// is classified, and a template takes an operand only where what it was given is what the template's rule gives it.
+#define BUSTER_CHECK_LOWER_TEMPLATE_EVALUATED 0x80u
+#define BUSTER_CHECK_LOWER_TEMPLATE_VALUE 0x00u
+#define BUSTER_CHECK_LOWER_TEMPLATE_PLACE 0x01u
+#define BUSTER_CHECK_LOWER_TEMPLATE_PARENT 0x02u
+// The target: none, the node's type, its first or second operand's converted type, void, long where the first operand is
+// a pointer (an index) and the second's otherwise, and a comma's right operand's: void where the comma is discarded.
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_NONE (0u << 2)
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_NODE (1u << 2)
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_A (2u << 2)
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_B (3u << 2)
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_VOID (4u << 2)
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_INDEX (5u << 2)
+#define BUSTER_CHECK_LOWER_TEMPLATE_TO_COMMA (6u << 2)
+
+#define BUSTER_CHECK_LOWER_TEMPLATE_RULE(context, target) (BUSTER_CHECK_LOWER_TEMPLATE_EVALUATED | (context) | (target))
+#define BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES                                                                                           \
+    { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_A),                              \
+      BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_B) }
+#define BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_A), 0 }
+#define BUSTER_CHECK_LOWER_TEMPLATE_WRAPPER_RULES { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_NODE), 0 }
+#define BUSTER_CHECK_LOWER_TEMPLATE_POINTER_RULES                                                                                          \
+    { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_A),                              \
+      BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_INDEX) }
+
+static const uint8_t check_lower_template_rules[CHECK_OP_COUNT][2] = {
+    [CHECK_OP_POSITIVE] = BUSTER_CHECK_LOWER_TEMPLATE_WRAPPER_RULES,
+    [CHECK_OP_NEGATIVE] = BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES,
+    [CHECK_OP_NOT] = BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES,
+    [CHECK_OP_BIT_NOT] = BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES,
+    [CHECK_OP_ADD] = BUSTER_CHECK_LOWER_TEMPLATE_POINTER_RULES,
+    [CHECK_OP_SUBTRACT] = BUSTER_CHECK_LOWER_TEMPLATE_POINTER_RULES,
+    [CHECK_OP_MULTIPLY] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_DIVIDE] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_REMAINDER] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_SHIFT_LEFT] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_SHIFT_RIGHT] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_LESS] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_LESS_EQUAL] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_GREATER] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_GREATER_EQUAL] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_EQUAL] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_NOT_EQUAL] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_BIT_AND] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_BIT_OR] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_BIT_XOR] = BUSTER_CHECK_LOWER_TEMPLATE_BINARY_RULES,
+    [CHECK_OP_CAST] = BUSTER_CHECK_LOWER_TEMPLATE_WRAPPER_RULES,
+    [CHECK_OP_ADDRESS] = { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_PLACE, BUSTER_CHECK_LOWER_TEMPLATE_TO_NONE), 0 },
+    [CHECK_OP_DEREFERENCE] = BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES,
+    [CHECK_OP_ASSIGN] = { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_PLACE, BUSTER_CHECK_LOWER_TEMPLATE_TO_NONE),
+                          BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_NODE) },
+    [CHECK_OP_COMMA] = { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_VALUE, BUSTER_CHECK_LOWER_TEMPLATE_TO_VOID),
+                         BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_PARENT, BUSTER_CHECK_LOWER_TEMPLATE_TO_COMMA) },
+    [CHECK_OP_SUBSCRIPT] = BUSTER_CHECK_LOWER_TEMPLATE_POINTER_RULES,
+    [CHECK_OP_MEMBER] = { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_PLACE, BUSTER_CHECK_LOWER_TEMPLATE_TO_A), 0 },
+    [CHECK_OP_ARROW] = BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES,
+    [CHECK_OP_INITIALIZE] = BUSTER_CHECK_LOWER_TEMPLATE_WRAPPER_RULES,
+    [CHECK_OP_CONVERT] = BUSTER_CHECK_LOWER_TEMPLATE_WRAPPER_RULES,
+    [CHECK_OP_CONDITION] = BUSTER_CHECK_LOWER_TEMPLATE_UNARY_RULES,
+    [CHECK_OP_SELECT] = { BUSTER_CHECK_LOWER_TEMPLATE_RULE(BUSTER_CHECK_LOWER_TEMPLATE_PARENT, BUSTER_CHECK_LOWER_TEMPLATE_TO_NONE), 0 },
+};
+
+// Whether the tasks lower `node`, evaluated with `address`, as its folded value, without its operands
+// (check_lower_expand's constant: its branches before it are the overloads', _BitInts', complex values', compound
+// literals', statement expressions' and atomic lvalues', which this takes as no fold, so that their operands stay
+// evaluated). From the stream's columns, its payload row read only for a constant.
+static bool check_lower_template_folds(const CheckLowerWriter* writer, uint32_t node, bool address)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const CheckOp op = program->input->graph.ops[node];
+    bool folds = false;
+    if (op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_VALUE &&
+        (stream->dense_values != NULL || stream->value_constants[node] != CHECK_CONSTANT_NONE))
+    {
+        const CheckLowerTemplateValue value = check_lower_template_value(stream, node);
+        const uint8_t facts = check_lower_facts(writer, value.type);
+        const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
+        const bool atomic = !address && value.category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0;
+        folds = value.constant_kind != CHECK_CONSTANT_NONE && value.fault == CHECK_FAULT_NONE &&
+                (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && value.overload_head == 0 &&
+                (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) == 0 && !atomic &&
+                ((value.category == CHECK_RVALUE && !address) || ((address || address_value) && value.constant_kind == CHECK_CONSTANT_ADDRESS));
+    }
+    return folds;
+}
+
+// Marks `node`'s operands (in the range) unevaluated: a node the tasks fold, or one under it.
 static void check_lower_template_unevaluated(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckGraph* graph = &writer->program->input->graph;
@@ -643,8 +743,7 @@ static void check_lower_template_unevaluated(CheckLowerWriter* writer, uint32_t 
             writer->template_states[operands[k] - first] |= BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED;
         }
     }
-    const CheckOp op = graph->ops[node];
-    const uint32_t arguments = op != CHECK_OP_VARARGS ? graph->argument_counts[node] : 0;
+    const uint32_t arguments = graph->ops[node] != CHECK_OP_VARARGS ? graph->argument_counts[node] : 0;
     for (uint32_t k = 0; k < arguments; k += 1)
     {
         const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + k];
@@ -653,6 +752,371 @@ static void check_lower_template_unevaluated(CheckLowerWriter* writer, uint32_t 
             writer->template_states[argument - first] |= BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED;
         }
     }
+}
+
+// From the last node down, each node's rule gives its operands their contexts and targets (`template_contexts`'
+// BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and `template_targets`), before an operand's own turn: a selection's and a comma's
+// right operand take their parent's, which its own parent gave it already. An operand two nodes give theirs is shared, the
+// tasks'. A node whose op isn't the table's gives none: its operands keep a value's context and no target, which the
+// splice checks against the tasks' flags (a template takes an operand only where its rule gives the same, and a closed root
+// copies none of its own conversion).
+static void check_lower_template_scatter(CheckLowerWriter* writer, uint32_t first, uint32_t span)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    for (uint32_t r = span; r-- > 0;)
+    {
+        const uint32_t node = first + r;
+        const CheckOp op = graph->ops[node];
+        const bool silent = (writer->template_states[r] & BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED) != 0 ||
+                            check_lower_template_folds(writer, node, (writer->template_contexts[r] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0);
+        if (silent)
+        {
+            check_lower_template_unevaluated(writer, node);
+        }
+        const uint8_t* rules = op < CHECK_OP_COUNT && !silent ? check_lower_template_rules[op] : check_lower_template_rules[CHECK_OP_VALUE];
+        const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const uint8_t rule = rules[k];
+            const uint32_t c = operands[k] - first;
+            if ((rule & BUSTER_CHECK_LOWER_TEMPLATE_EVALUATED) != 0 && operands[k] < node && c < span)
+            {
+                const uint8_t mode = rule & 3u;
+                const uint8_t parent = writer->template_contexts[r];
+                const uint8_t to = rule & (7u << 2);
+                TypeId target = 0;
+                if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_NODE)
+                {
+                    target = check_stream_type(stream, node);
+                }
+                else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_A || to == BUSTER_CHECK_LOWER_TEMPLATE_TO_B)
+                {
+                    target = stream->conversions[node].operands[to == BUSTER_CHECK_LOWER_TEMPLATE_TO_B].type;
+                }
+                else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_VOID)
+                {
+                    target = BUSTER_TYPE_VOID;
+                }
+                else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_INDEX)
+                {
+                    const bool pointer = (check_lower_facts(writer, stream->conversions[node].operands[0].type) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
+                    target = pointer ? BUSTER_TYPE_LONG : stream->conversions[node].operands[1].type;
+                }
+                else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_COMMA)
+                {
+                    // The comma's own context: discarded where its parent gave it void and no address.
+                    const uint8_t own = check_lower_template_child_context(writer, node, (parent & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, writer->template_targets[r]);
+                    target = (own & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) != 0 ? BUSTER_TYPE_VOID : check_stream_type(stream, node);
+                }
+                const uint8_t context = mode == BUSTER_CHECK_LOWER_TEMPLATE_PLACE ? BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS :
+                                        mode == BUSTER_CHECK_LOWER_TEMPLATE_PARENT ? (uint8_t)(parent & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) : 0;
+                uint8_t* state = writer->template_states + c;
+                *state |= (*state & BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED) != 0 ? BUSTER_CHECK_LOWER_TEMPLATE_SHARED : BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED;
+                writer->template_contexts[c] = context;
+                writer->template_targets[c] = target;
+            }
+        }
+    }
+}
+
+// The common nodes' templates without check_lower_template_classify's walk through every rule: a VALUE's read and address,
+// an integer constant, `&x`, a cast, a conversion and a unary plus, `*p`, pointer plus or minus an integer and a
+// subscript, the negation and the complement, the truth tests and the scalar binary operators, each where the rules
+// before its own in check_lower_template_classify can't apply (no payload row but an integer constant's, so no overload,
+// fault or offset; no _BitInt, complex or atomic lvalue; no compound literal; not discarded). It writes the node's own
+// entries and gives its evaluated operands, which take the contexts and targets the scatter's table gives them, or
+// returns unhandled for the general rules. Its results are the general rules', which check_program_lower_templates'
+// check (CheckLowerWriter.template_check) compares node by node; it is the twin of a vector pass to come.
+typedef struct CheckLowerTemplateFast CheckLowerTemplateFast;
+struct CheckLowerTemplateFast
+{
+    uint32_t children[2];
+    uint32_t count;
+    bool handled;
+};
+
+static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* writer, uint32_t node, bool address, CheckLowerTemplateEntries* entries)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const CheckOp op = graph->ops[node];
+    const TypeId type = stream->value_types[node];
+    const uint32_t flags = stream->value_flags[node];
+    const uint32_t object = stream->value_objects[node];
+    const uint8_t category = stream->value_categories[node];
+    const uint8_t constant = stream->value_constants[node];
+    const uint32_t row = stream->payload_rows[node];
+    const uint8_t facts = check_lower_facts(writer, type);
+    const bool aggregate = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
+    const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
+    const uint8_t class = aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
+    const bool known = object != 0 && object < program->object_count;
+    const bool ordinary = (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) == 0 &&
+                          (address || category != CHECK_LVALUE || (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0);
+    const bool reads = !address && !address_value;
+    const bool compound = op == CHECK_OP_VALUE && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
+    // The payload row's parts the rules read: an overload (which no template takes), a fault, an integer and an offset.
+    const CheckValue* payload = row != 0 && row <= stream->payload_count ? stream->payloads + row - 1 : NULL;
+    const bool payloaded = row == 0 || payload != NULL;
+    const bool overloaded = payload != NULL && payload->overload_head != 0;
+    const CheckFault fault = payload != NULL ? payload->fault : CHECK_FAULT_NONE;
+    const int64_t offset = payload != NULL ? payload->offset : 0;
+    // check_lower_expand's constant: its value folded, its operands not evaluated.
+    const bool folds = constant != CHECK_CONSTANT_NONE && fault == CHECK_FAULT_NONE && (flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
+                       op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE &&
+                       ((category == CHECK_RVALUE && !address) || (!reads && constant == CHECK_CONSTANT_ADDRESS));
+    const bool usable = ordinary && payloaded && !overloaded && !compound;
+    CheckLowerTemplateFast fast = { .handled = false };
+    if (!usable)
+    {
+    }
+    else if (op == CHECK_OP_VALUE && category == CHECK_LVALUE && type != BUSTER_TYPE_VOID)
+    {
+        // A read, whatever its constant (the rules fold only an rvalue's or an address's), or an address: the constant's
+        // and the VALUE's rules give an lvalue's address the same entries (check_lower_address, no conversion).
+        const uint32_t local = known ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
+        const SymbolId symbol = known ? program->object_symbols[object] : 0;
+        if (!reads && (object == 0 || (known && (local != BUSTER_CHECK_NONE || symbol != 0))))
+        {
+            check_lower_template_address(writer, entries, object, offset);
+            fast.handled = true;
+        }
+        else if (reads && known && !aggregate && check_lower_template_class(class) && (local != BUSTER_CHECK_NONE || symbol != 0))
+        {
+            check_lower_template_put(entries, local != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL, class, local != BUSTER_CHECK_NONE ? local : symbol);
+            fast.handled = true;
+        }
+    }
+    else if (folds)
+    {
+        // An integer constant of a class I8 to U64, of an op that is never discarded (its context has no discard).
+        const bool discardable = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_COMMA || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+        if (constant == CHECK_CONSTANT_INTEGER && category == CHECK_RVALUE && !address && !discardable && !aggregate && class >= BUSTER_TYPED_CLASS_I8 &&
+            class <= BUSTER_TYPED_CLASS_U64)
+        {
+            uint64_t bits = payload != NULL ? (uint64_t)payload->integer : 0;
+            const uint32_t width = 8u << ((class - 1) / 2);
+            if (width < 64)
+            {
+                const uint64_t mask = (UINT64_C(1) << width) - 1;
+                bits &= mask;
+                bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+            }
+            check_lower_template_put(entries, BUSTER_TYPED_CONST, class, bits);
+            fast.handled = true;
+        }
+        else if (constant == CHECK_CONSTANT_ADDRESS)
+        {
+            // An address constant (check_lower_constant's): its object's address and offset, converted where it is a signed
+            // integer's rvalue.
+            const uint32_t local = known ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
+            if (object == 0 || (known && (local != BUSTER_CHECK_NONE || program->object_symbols[object] != 0)))
+            {
+                check_lower_template_address(writer, entries, object, offset);
+                if (category == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
+                {
+                    check_lower_template_put(entries, BUSTER_TYPED_CONVERT, class, 0);
+                }
+                fast.handled = true;
+            }
+        }
+    }
+    else if (op == CHECK_OP_VALUE)
+    {
+        // Not an lvalue's, not folded: a void value's (none), or an address at offset 0 (an offset has a payload row).
+        const uint32_t local = known ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
+        const SymbolId symbol = known ? program->object_symbols[object] : 0;
+        if (type == BUSTER_TYPE_VOID)
+        {
+            fast.handled = true;
+        }
+        else if (!reads && (object == 0 || (known && (local != BUSTER_CHECK_NONE || symbol != 0))))
+        {
+            check_lower_template_address(writer, entries, object, offset);
+            fast.handled = true;
+        }
+    }
+    else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+    {
+        // A member's read, or its address: past the base's, its offset's addition where it has one.
+        const TypeId type_a = stream->conversions[node].operands[0].type;
+        const TypeId record = op == CHECK_OP_ARROW ? type_element(program->types, type_a) : check_stream_type(stream, graph->operand0[node]);
+        const uint8_t record_kind = check_action_kind(program->types, record);
+        const uint64_t bits = stream->member_offsets[node];
+        if (stream->diagnostics[node] == CHECK_DIAG_NONE && (record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) &&
+            (flags & BUSTER_CHECK_BIT_FIELD) == 0 && bits % 8 == 0 && (!reads || check_lower_template_class(class)))
+        {
+            if (bits / 8 != 0)
+            {
+                check_lower_template_put(entries, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, bits / 8);
+                check_lower_template_put(entries, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+            }
+            if (reads)
+            {
+                check_lower_template_put(entries, BUSTER_TYPED_LOAD, class, 0);
+            }
+            fast.children[0] = graph->operand0[node];
+            fast.count = 1;
+            fast.handled = true;
+        }
+    }
+    else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && !aggregate && check_lower_template_class(class))
+    {
+        // A scalar store: to a local or a global it names, or through its destination's address.
+        const uint32_t a = graph->operand0[node];
+        const uint32_t destination_facts = a < stream->count ? check_lower_facts(writer, check_stream_type(stream, a)) : 0;
+        const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
+        if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
+        {
+            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+            const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] :
+                                    a < stream->count && graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
+            const bool named = target != 0 && target < program->object_count;
+            const uint32_t local = named ? check_lower_local_of(writer, target) : BUSTER_CHECK_NONE;
+            const SymbolId symbol = named ? program->object_symbols[target] : 0;
+            if (local != BUSTER_CHECK_NONE || symbol != 0)
+            {
+                check_lower_template_put(entries, local != BUSTER_CHECK_NONE ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
+                                         local != BUSTER_CHECK_NONE ? local : symbol);
+                fast.children[0] = op == CHECK_OP_INITIALIZE ? a : graph->operand1[node];
+                fast.count = 1;
+                fast.handled = true;
+            }
+            else if (op == CHECK_OP_ASSIGN)
+            {
+                check_lower_template_put(entries, BUSTER_TYPED_STORE, class, 0);
+                fast.children[0] = a;
+                fast.children[1] = graph->operand1[node];
+                fast.count = 2;
+                fast.handled = true;
+            }
+        }
+    }
+    else if (constant == CHECK_CONSTANT_NONE)
+    {
+        const uint32_t a = graph->operand0[node];
+        const uint32_t b = graph->operand1[node];
+        const TypeId type_a = stream->conversions[node].operands[0].type;
+        const TypeId type_b = stream->conversions[node].operands[1].type;
+        const bool arithmetic = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_SUBSCRIPT;
+        const bool left_pointer = arithmetic && (check_lower_facts(writer, type_a) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
+        const bool right_pointer = arithmetic && (check_lower_facts(writer, type_b) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
+        const bool element = (flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0;
+        const bool computes = !aggregate && check_lower_template_class(class);
+        const uint8_t binary = op < CHECK_OP_PRE_INCREMENT && !arithmetic ? check_lower_binary(op) : BUSTER_TYPED_NONE;
+        fast.children[0] = a;
+        fast.children[1] = b;
+        if (op == CHECK_OP_ADDRESS)
+        {
+            fast.count = 1;
+        }
+        else if (op == CHECK_OP_DEREFERENCE && (aggregate || !reads || check_lower_template_class(class)))
+        {
+            if (reads)
+            {
+                check_lower_template_put(entries, BUSTER_TYPED_LOAD, class, 0);
+            }
+            fast.count = 1;
+        }
+        else if (arithmetic && !element && left_pointer && !right_pointer && (op != CHECK_OP_SUBSCRIPT || !reads || check_lower_template_class(class)))
+        {
+            const CheckAction action = { .extensions = graph->extensions };
+            const uint64_t stride = check_action_pointer_stride(program->types, type_a, &action);
+            if (stride != 0)
+            {
+                if (op == CHECK_OP_SUBTRACT)
+                {
+                    check_lower_template_put(entries, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
+                }
+                check_lower_template_put(entries, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, stride);
+                if (op == CHECK_OP_SUBSCRIPT && reads)
+                {
+                    check_lower_template_put(entries, BUSTER_TYPED_LOAD, class, 0);
+                }
+                fast.count = 2;
+            }
+        }
+        else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
+        {
+            fast.count = class < BUSTER_TYPED_CLASS_VECTOR ? 1 : 0;
+        }
+        else if (!computes)
+        {
+        }
+        else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
+        {
+            check_lower_template_put(entries, op == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
+            fast.count = 1;
+        }
+        else if (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION)
+        {
+            const uint8_t operand_class = check_lower_class(writer, type_a);
+            if (!check_lower_aggregate(writer, type_a) && operand_class < BUSTER_TYPED_CLASS_VECTOR && operand_class != BUSTER_TYPED_CLASS_VOID)
+            {
+                const bool narrow = check_lower_narrow(operand_class);
+                if (narrow)
+                {
+                    check_lower_template_put(entries, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+                }
+                check_lower_template_put(entries, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : operand_class, 0);
+                check_lower_template_put(entries, op == CHECK_OP_NOT ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+                fast.count = 1;
+            }
+        }
+        else if ((op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT) && !element && !left_pointer && !right_pointer)
+        {
+            if (check_lower_template_class(check_lower_class(writer, type_a)) && check_lower_template_class(check_lower_class(writer, type_b)))
+            {
+                check_lower_template_put(entries, check_lower_binary(op), class, 0);
+                fast.count = 2;
+            }
+        }
+        else if (binary != BUSTER_TYPED_NONE)
+        {
+            if (check_lower_template_class(check_lower_class(writer, type_a)) && check_lower_template_class(check_lower_class(writer, type_b)) &&
+                !check_lower_aggregate(writer, type_a))
+            {
+                check_lower_template_put(entries, binary, class, 0);
+                fast.count = 2;
+            }
+        }
+        fast.handled = fast.count != 0;
+    }
+    return fast;
+}
+
+// The fast twin's check (CheckLowerWriter.template_check): the general rules must give `node` a template, its own entries
+// and its evaluated operands as `fast` and `entries` do, and give each operand the context and the target the scatter
+// gave it, where the operand is one a template could take.
+static bool check_lower_template_twin(const CheckLowerWriter* writer, uint32_t node, uint32_t r, uint8_t context, const CheckLowerTemplateFast* fast,
+                                      const CheckLowerTemplateEntries* entries)
+{
+    uint8_t kinds[BUSTER_CHECK_LOWER_TEMPLATE_MOST];
+    uint8_t classes[BUSTER_CHECK_LOWER_TEMPLATE_MOST];
+    uint64_t values[BUSTER_CHECK_LOWER_TEMPLATE_MOST];
+    CheckLowerTemplateEntries general = { .kinds = kinds, .classes = classes, .values = values };
+    const CheckLowerTemplateValue value = check_lower_template_value(writer->program->stream, node);
+    const CheckLowerTemplateUse use = check_lower_template_classify(writer, node, context, &value);
+    bool same = use.kind != CHECK_LOWER_TEMPLATE_NONE && use.count == fast->count;
+    if (same)
+    {
+        check_lower_template_own(writer, node, use.kind, context, &value, &general);
+        same = general.count == entries->count && general.taken_address == entries->taken_address && memcmp(kinds, entries->kinds, general.count) == 0 &&
+               memcmp(classes, entries->classes, general.count) == 0 && memcmp(values, entries->values, general.count * sizeof(uint64_t)) == 0;
+    }
+    for (uint32_t k = 0; same && k < use.count; k += 1)
+    {
+        const uint32_t c = use.children[k] - writer->template_first_node;
+        same = use.children[k] == fast->children[k];
+        if (same && use.children[k] < node && c < r && (writer->template_states[c] & (BUSTER_CHECK_LOWER_TEMPLATE_SHARED | BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED)) == 0)
+        {
+            same = writer->template_contexts[c] == use.contexts[k] && writer->template_targets[c] == use.targets[k];
+        }
+    }
+    return same;
 }
 
 // Body `body`'s templates (CheckLowerWriter.template_ready): its nodes' contexts, templates, entries and closed subtrees,
@@ -671,118 +1135,106 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
         memset(writer->template_states, 0, span);
         memset(writer->template_contexts, 0, span);
         memset(writer->template_targets, 0, (uint64_t)span * sizeof(TypeId));
-        // From the last node down: a parent's rule gives each of its evaluated operands its context, before the operand's
-        // own turn, which classifies it and writes its entries and its conversion's into its slot.
-        for (uint32_t r = span; r-- > 0;)
-        {
-            const uint32_t node = first + r;
-            uint8_t state = writer->template_states[r];
-            CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
-            uint32_t own_count = 0;
-            uint32_t total = 0;
-            if ((state & BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED) != 0)
-            {
-                check_lower_template_unevaluated(writer, node);
-            }
-            else if ((state & BUSTER_CHECK_LOWER_TEMPLATE_SHARED) == 0)
-            {
-                const CheckLowerTemplateValue value = check_lower_template_value(stream, node);
-                const uint8_t context = writer->template_contexts[r];
-                use = check_lower_template_classify(writer, node, context, &value);
-                if (use.kind != CHECK_LOWER_TEMPLATE_NONE)
-                {
-                    const uint64_t slot = (uint64_t)r * BUSTER_CHECK_LOWER_TEMPLATE_MOST;
-                    CheckLowerTemplateEntries entries = {
-                        .kinds = writer->template_slot_kinds + slot,
-                        .classes = writer->template_slot_classes + slot,
-                        .values = writer->template_slot_values + slot,
-                    };
-                    check_lower_template_own(writer, node, use.kind, context, &value, &entries);
-                    own_count = entries.count;
-                    const bool converted = check_lower_template_conversion(writer, value.type, writer->template_targets[r], context, &entries);
-                    total = entries.count;
-                    state |= converted ? BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED : 0;
-                    state |= entries.taken_address ? BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS : 0;
-                    // The operands it doesn't evaluate are none's (a constant's, a store's destination; a VALUE has none), then
-                    // the evaluated ones take their contexts: one that a node after it took already is shared, the tasks'.
-                    if (stream->dense_values != NULL || writer->program->input->graph.ops[node] != CHECK_OP_VALUE)
-                    {
-                        check_lower_template_unevaluated(writer, node);
-                    }
-                    for (uint32_t k = 0; k < use.count; k += 1)
-                    {
-                        const uint32_t c = use.children[k] - first;
-                        if (use.children[k] < node && c < span)
-                        {
-                            uint8_t* child_state = writer->template_states + c;
-                            *child_state &= (uint8_t)~BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED;
-                            *child_state |= (*child_state & BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED) != 0 ? BUSTER_CHECK_LOWER_TEMPLATE_SHARED :
-                                                                                                        BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED;
-                            writer->template_contexts[c] = use.contexts[k];
-                            writer->template_targets[c] = use.targets[k];
-                        }
-                        else
-                        {
-                            use.kind = CHECK_LOWER_TEMPLATE_NONE;
-                        }
-                    }
-                }
-            }
-            writer->template_states[r] = state;
-            writer->template_ids[r] = (uint8_t)use.kind;
-            writer->template_own[r] = (uint8_t)own_count;
-            writer->template_total[r] = (uint8_t)total;
-            writer->template_children[2 * r] = use.count > 0 && use.kind != CHECK_LOWER_TEMPLATE_NONE ? use.children[0] : BUSTER_CHECK_NONE;
-            writer->template_children[2 * r + 1] = use.count > 1 && use.kind != CHECK_LOWER_TEMPLATE_NONE ? use.children[1] : BUSTER_CHECK_NONE;
-        }
-        // From the first node up: each node's entries' offset in node order, and whether its subtree is closed: a template
-        // whose evaluated operands are closed and converted, the first operand's entries (its subtree's, then its
-        // conversion's) followed by the second's, and the last ending where the node's own start. The splice copies the
-        // slots of a closed subtree's nodes in node order, which then give those entries.
+        check_lower_template_scatter(writer, first, span);
+        // Each node on its own, from the first up: its operands' contexts are final before its own turn, and their
+        // classifications and closures before its own. Its context with its discard, its template, its entries and its
+        // conversion's in its slot, then its entries' offset in node order, which is postorder, and whether its subtree is
+        // closed: a template whose evaluated operands the scatter gave the context and the target its rule gives them, each
+        // taken alone, closed and converted, the first one's entries (its subtree's, then its conversion's) followed by the
+        // second's, and the last ending where the node's own start. The splice copies the slots of a closed subtree's nodes
+        // in node order, which then give those entries.
+        const uint8_t mask = BUSTER_CHECK_LOWER_TEMPLATE_CLOSED | BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED;
         uint32_t cursor = 0;
-        const uint8_t mask = BUSTER_CHECK_LOWER_TEMPLATE_CLOSED | BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED | BUSTER_CHECK_LOWER_TEMPLATE_SHARED;
-        const uint8_t wanted = BUSTER_CHECK_LOWER_TEMPLATE_CLOSED | BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED;
         for (uint32_t r = 0; r < span; r += 1)
         {
             const uint32_t node = first + r;
             uint8_t state = writer->template_states[r];
-            const uint32_t c0 = writer->template_children[2 * r];
-            const uint32_t c1 = writer->template_children[2 * r + 1];
-            const uint32_t r0 = c0 - first;
-            const uint32_t r1 = c1 - first;
-            bool closed = writer->template_ids[r] != CHECK_LOWER_TEMPLATE_NONE &&
-                          (state & (BUSTER_CHECK_LOWER_TEMPLATE_SHARED | BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED)) == 0;
-            closed = closed && (c0 == BUSTER_CHECK_NONE || (writer->template_states[r0] & mask) == wanted);
-            closed = closed && (c1 == BUSTER_CHECK_NONE || (c0 != BUSTER_CHECK_NONE && (writer->template_states[r1] & mask) == wanted &&
-                                                           writer->template_offsets[r0] + writer->template_total[r0] ==
-                                                               writer->template_offsets[writer->template_first[r1] - first]));
-            const uint32_t final_child = c1 != BUSTER_CHECK_NONE ? r1 : r0;
-            closed = closed && (c0 == BUSTER_CHECK_NONE || writer->template_offsets[final_child] + writer->template_total[final_child] == cursor);
+            const TypeId target = writer->template_targets[r];
+            const uint8_t context = check_lower_template_child_context(writer, node, (writer->template_contexts[r] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, target);
+            uint32_t own_count = 0;
+            uint32_t total = 0;
+            bool closed = false;
+            uint32_t start = r;
             uint32_t nodes = 1;
             uint32_t last = node;
-            bool taken_address = (state & BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS) != 0;
-            if (closed && c0 != BUSTER_CHECK_NONE)
+            writer->template_contexts[r] = context;
+            if ((state & (BUSTER_CHECK_LOWER_TEMPLATE_SHARED | BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED)) == 0)
             {
-                nodes += writer->template_nodes[r0];
-                last = writer->template_last[r0];
-                taken_address = taken_address || (writer->template_states[r0] & BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS) != 0;
+                const uint64_t slot = (uint64_t)r * BUSTER_CHECK_LOWER_TEMPLATE_MOST;
+                CheckLowerTemplateEntries entries = {
+                    .kinds = writer->template_slot_kinds + slot,
+                    .classes = writer->template_slot_classes + slot,
+                    .values = writer->template_slot_values + slot,
+                };
+                // The fast twin where it takes the node (its operands' contexts and targets the scatter's table's, which
+                // need no comparison), the general rules otherwise.
+                const bool columns = stream->dense_values == NULL && (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0;
+                const CheckLowerTemplateFast fast = columns ? check_lower_template_fast(writer, node, (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, &entries) :
+                                                              (CheckLowerTemplateFast){ .handled = false };
+                CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
+                TypeId type = 0;
+                if (fast.handled)
+                {
+                    use.kind = CHECK_LOWER_TEMPLATE_PASS;
+                    use.count = fast.count;
+                    use.children[0] = fast.children[0];
+                    use.children[1] = fast.children[1];
+                    type = stream->value_types[node];
+                    writer->template_fast_nodes += 1;
+                    if (writer->template_check)
+                    {
+                        writer->template_mismatches += check_lower_template_twin(writer, node, r, context, &fast, &entries) ? 0 : 1;
+                    }
+                }
+                else
+                {
+                    const CheckLowerTemplateValue value = check_lower_template_value(stream, node);
+                    entries.count = 0;
+                    entries.taken_address = false;
+                    use = check_lower_template_classify(writer, node, context, &value);
+                    type = value.type;
+                    if (use.kind != CHECK_LOWER_TEMPLATE_NONE)
+                    {
+                        check_lower_template_own(writer, node, use.kind, context, &value, &entries);
+                    }
+                }
+                if (use.kind != CHECK_LOWER_TEMPLATE_NONE)
+                {
+                    own_count = entries.count;
+                    const bool converted = check_lower_template_conversion(writer, type, target, context, &entries);
+                    total = entries.count;
+                    state |= converted ? BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED : 0;
+                    closed = true;
+                    bool taken_address = entries.taken_address;
+                    // The offset the next operand's subtree must start at: the node's own entries' for the last.
+                    for (uint32_t k = use.count; k-- > 0;)
+                    {
+                        const uint32_t c = use.children[k] - first;
+                        const bool given = closed && use.children[k] < node && c < span && (writer->template_states[c] & mask) == mask &&
+                                           (fast.handled || (writer->template_contexts[c] == use.contexts[k] && writer->template_targets[c] == use.targets[k])) &&
+                                           writer->template_offsets[c] + writer->template_total[c] == (k + 1 == use.count ? cursor : writer->template_offsets[start]);
+                        closed = given;
+                        start = given ? writer->template_first[c] - first : start;
+                        nodes += given ? writer->template_nodes[c] : 0;
+                        last = given && k + 1 == use.count ? writer->template_last[c] : last;
+                        taken_address = taken_address || (given && (writer->template_states[c] & BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS) != 0);
+                    }
+                    state |= closed ? BUSTER_CHECK_LOWER_TEMPLATE_CLOSED : 0;
+                    state |= closed && taken_address ? BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS : 0;
+                    state = closed ? state : (uint8_t)(state & ~BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED);
+                }
             }
-            if (closed && c1 != BUSTER_CHECK_NONE)
-            {
-                nodes += writer->template_nodes[r1];
-                last = writer->template_last[r1];
-                taken_address = taken_address || (writer->template_states[r1] & BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS) != 0;
-            }
+            start = closed ? start : r;
+            nodes = closed ? nodes : 1;
+            last = closed ? last : node;
+            writer->template_states[r] = state;
+            writer->template_own[r] = (uint8_t)own_count;
+            writer->template_total[r] = (uint8_t)total;
             writer->template_offsets[r] = cursor;
-            writer->template_first[r] = closed && c0 != BUSTER_CHECK_NONE ? writer->template_first[r0] : node;
+            writer->template_first[r] = first + start;
             writer->template_nodes[r] = nodes;
             writer->template_last[r] = last;
-            state = (uint8_t)(state & ~BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS);
-            state |= closed ? BUSTER_CHECK_LOWER_TEMPLATE_CLOSED : 0;
-            state |= closed && taken_address ? BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS : 0;
-            state = closed ? state : (uint8_t)(state & ~BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED);
-            writer->template_states[r] = state;
-            cursor += writer->template_total[r];
+            cursor += total;
         }
         writer->template_ready = true;
     }

@@ -5770,17 +5770,21 @@ The lowering guide's "Node templates over a body: the inventory (#1048)" has
 `sqlite3.c`'s, Lua's and `main.c`'s results and what the design takes from them.
 
 `c_check_program_templates.c` is #1048's template path in scalar form: before a
-body's statements, a pass over its nodes gives each its context from its
-parent's rule, classifies it and writes its entries into a slot, then marks the
-closed subtrees, whose slots the task loop splices when it pops their roots in
-those contexts (`check_lower_template_splice`). The task loop stays the exact
-rules. No compile takes it (`CheckLowerShared.templates`): this classification
-costs about what it saves, so it waits for a data-parallel one. `./build/compiler
-test-lowering-templates [--passes N] [preprocessor options] file...`
-(`c_check_program_templates_test.c`) lowers each file by the tasks and with the
-templates forced (`check_program_lower_templates`), on any host, requires every
-function's entries, locals, calls and arguments to be the same, and with
-`--passes N` times both; `test-checker` runs it on fixtures. `--time-stages`'
+body's statements, a scatter gives each node's operands their contexts and
+targets by its op's rule (`check_lower_template_rules`), then each node on its
+own is classified, by the fast twin of the common shapes
+(`check_lower_template_fast`) or the general rules, writes its entries into a
+slot, and is marked closed or not, whose slots the task loop splices when it
+pops their roots in those contexts (`check_lower_template_splice`). The task
+loop stays the exact rules. No compile takes it (`CheckLowerShared.templates`):
+these scalar steps cost about what they save, so they wait for data-parallel
+ones. `./build/compiler test-lowering-templates [--passes N] [preprocessor
+options] file...` (`c_check_program_templates_test.c`) lowers each file by the
+tasks and with the templates forced (`check_program_lower_templates`), on any
+host, requires every function's entries, locals, calls and arguments to be the
+same and the fast twin to classify every node it takes as the general rules do
+(its `check`), and with `--passes N` times both; `test-checker` runs it on
+fixtures. `--time-stages`'
 `lowering-nodes` line reports the nodes and entries the templates took. A change
 to `check_lower_expand`'s rules for what the table takes changes the templates
 too: run the command on `sqlite3.c`, Lua and c-testsuite. The lowering guide's

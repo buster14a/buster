@@ -358,56 +358,86 @@ What the design takes from it:
 ## Node templates over a body: the first path (#1048)
 
 `c_check_program_templates.c` is the template path in scalar form, with the
-task loop as its exact rules. Before a body's statements, a pass over its range
-of nodes from the last node down gives each node the context its parent's rule
-evaluates it in (address, discard, and its conversion's target), before the
-node's own turn classifies it and writes its entries and its conversion's into
-a slot of eight. A pass from the first node up gives each node its entries'
-offset in node order and decides whether its subtree is closed: a template
-whose evaluated operands are closed and converted, their entries in turn and
-the last ending where the node's own start. When the task loop pops a closed
-node in the context the pass gave it, it copies the slots of the node's subtree
-in node order (but the node's own conversion, which the task under it writes)
-instead of expanding the node and its operands task by task, and leaves the
-writer as its tasks would (the locals whose addresses it takes, the token, the
-counts). The table takes a `VALUE`'s read and address, folded constants, `&x`,
-the casts and conversions, `*p`, member accesses, the unary and binary
-operators of the classes I8 to F64, the truth tests, the comma, pointer
-arithmetic and subscripts, and scalar assignments and initializations; never an
-atomic, complex, bit-field or `_BitInt` value, an overload, a compound literal,
-a variable-length array, a body with `-g`'s tokens or a tracked stack.
+task loop as its exact rules. Before a body's statements, three steps run over
+its range of nodes, each shaped as a data-parallel pass will take it:
+
+1. **The scatter**, from the last node down: each node's rule, by its op alone
+   (`check_lower_template_rules`, two operands each), gives its operands their
+   contexts (value or address) and their conversions' targets. An operand two
+   nodes name is shared, and a node the tasks fold gives its operands, and
+   theirs, no evaluation.
+2. **The classification**, each node on its own from the first up: its context
+   with its discard, its template, and its entries and its conversion's in a
+   slot of eight. The fast twin (`check_lower_template_fast`) takes the common
+   shapes, each by its own rule alone: a `VALUE`'s read and address, integer
+   and address constants, `&x`, the casts, `*p`, member accesses, pointer
+   arithmetic and subscripts, the unary, binary and truth operators, and scalar
+   stores. The general rules (`check_lower_template_classify`) take the rest.
+   A template takes its operands only where the scatter gave each the context
+   and the target its rule gives it.
+3. **The closure**, in the same step once its operands are done: its entries'
+   offset in node order, and whether its subtree is closed. A subtree is closed
+   when its node is a template whose evaluated operands are closed and
+   converted, their entries in turn, and the last ending where the node's own
+   start.
+
+When the task loop pops a closed node in the context the pass gave it, it
+copies the slots of the node's subtree in node order (but the node's own
+conversion, which the task under it writes) instead of expanding the node and
+its operands task by task. It leaves the writer as its tasks would (the locals
+whose addresses it takes, the token, the counts). The table takes a `VALUE`'s
+read and address, folded constants, `&x`, the casts and conversions, `*p`,
+member accesses, the unary and binary operators of the classes I8 to F64, the
+truth tests, the comma, pointer arithmetic and subscripts, and scalar
+assignments and initializations. It never takes an atomic, complex, bit-field or
+`_BitInt` value, an overload, a compound literal, a variable-length array, a
+body with `-g`'s tokens or a tracked stack.
 
 `test-lowering-templates [--passes N] [-E's options] file...` lowers each
 file's selected program by the tasks alone and with the templates
 (`check_program_lower_templates`, on any host), and requires the same entries,
-locals, calls and arguments in every function; `--passes N` times both.
-`test-checker` runs it on original fixtures of every template
-(`c_check_program_templates_test.c`).
+locals, calls and arguments in every function. Its lowering with the templates
+also checks the fast twin: each node it takes is classified by the general rules
+too, which must give the same template, entries and operands, with the contexts
+and targets the scatter gave them. `--passes N` times both lowerings, without
+that check. `test-checker` runs the command on original fixtures of every
+template (`c_check_program_templates_test.c`).
 
-| | functions | evaluated nodes taken | entries taken |
-| --- | ---: | ---: | ---: |
-| `sqlite3.c` | 2,668, all the same | 75.5% | 60.9% |
-| Lua 5.4.8 (34 units) | 1,104, all the same | 68.7% | 55.0% |
-| c-testsuite's subset (220) | 430, all the same | 65.4% | 43.1% |
+| | functions | evaluated nodes taken | entries taken | fast twin's nodes |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` (the system's headers) | 2,602, all the same | 75.3% | 60.8% | 259,992 |
+| Lua 5.4.8 (34 units) | 1,104, all the same | 68.9% | 55.1% | 63,182 |
+| c-testsuite's subset (220) | 430, all the same | 65.7% | 43.2% | 8,652 |
 
+The fast twin and the general rules disagreed on none of those nodes.
 `main.c`'s functions are the same too, with none taken: every body tracks its
 stack.
 
-It is slower than the tasks: on this session's host (an Intel Xeon whose build
-is the scalar host path), `sqlite3.c`'s lowering took 54 to 62 ms by the tasks
-and 73 to 81 ms with the templates, 1.30 to 1.37 times (21 passes, 3 runs,
-pinned). The splices save about 23 ms of the tasks' work, and the body pass
-costs more: about 300 cycles a node of its range, 304,000 nodes a lowering.
-callgrind on Lua's units (a baseline build) puts it at about 450 instructions a
-node, spread over the rules' checks with no one of them more than a few percent:
-classifying a node rule by rule costs what expanding it did. So no compile
-takes the templates (`CheckLowerShared.templates` is set only by
+It is still slower than the tasks. On this session's host (an Intel Xeon whose
+build is the scalar host path), `sqlite3.c`'s lowering took 54 to 58 ms by the
+tasks and 67 to 72 ms with the templates, 1.24 to 1.25 times (21 passes, 3
+runs, pinned). The first version of the pass, with its two passes and the
+general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
+(a baseline build) counts the pass's instructions:
+
+| pass | instructions | per node of the ranges |
+| --- | ---: | ---: |
+| the first version | 36.9 M | about 450 |
+| the three steps, the general rules for every node | 40.2 M | about 495 |
+| the three steps with the fast twin | 32.0 M | about 395 |
+
+The splices save about 12.4 M of the tasks' 111.8 M there. The pass's cost is
+spread over its steps (the scatter about a fifth, the fast twin a third, the
+classification step's bookkeeping a quarter) with no one line more than a few
+percent: the scalar steps can't pay by trimming. So no compile takes the
+templates (`CheckLowerShared.templates` is set only by
 `check_program_lower_templates`), and the default compile's objects are the
 same as before (`sqlite3.c`'s byte for byte). What remains is the issue's
-point: the classification by tables, 64 nodes at a time (the contexts from each
-parent's op and operand index, the template ids from #570's classes and facts),
-whose results this path's passes and splice then take, checked against the
-tasks by the same command.
+point: the three steps 64 nodes at a time. The scatter's table is by op
+alone. The fast twin's shapes read the stream's columns and #570's classes and
+facts. The closure can run over prefix sums of the slots' counts. The vector
+pass's results are to be checked against these scalar ones, and the lowering
+against the tasks, by the same command.
 
 ## Against clang -O0's objects
 

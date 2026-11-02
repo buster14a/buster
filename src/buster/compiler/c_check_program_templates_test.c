@@ -26,6 +26,8 @@ struct LowerTemplatesTotals
     uint64_t entries;
     uint64_t template_nodes;
     uint64_t template_entries;
+    uint64_t template_fast;
+    uint64_t template_mismatches;
     uint64_t differences;
     uint64_t failures;
     uint64_t passes;
@@ -49,7 +51,7 @@ static bool lower_templates_time(const CheckProgram* program, uint32_t passes, A
             const bool with_templates = ((pass + step) & 1) != 0;
             CheckProgramLowered lowered = { 0 };
             const uint64_t begin = check_source_time();
-            valid = with_templates ? check_program_lower_templates(&lowered, program, output, scratch) : check_program_lower(&lowered, program, true, output, scratch);
+            valid = with_templates ? check_program_lower_templates(&lowered, program, false, output, scratch) : check_program_lower(&lowered, program, true, output, scratch);
             const uint64_t elapsed = check_source_time() - begin;
             if (with_templates)
             {
@@ -109,8 +111,8 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
     CheckProgramLowered tasks = { 0 };
     CheckProgramLowered templates = { 0 };
     const bool lowered_tasks = check_program_lower(&tasks, program, true, output, scratch);
-    const bool lowered_templates = check_program_lower_templates(&templates, program, output, scratch);
-    bool same = lowered_tasks == lowered_templates && tasks.status == templates.status && tasks.token == templates.token;
+    const bool lowered_templates = check_program_lower_templates(&templates, program, true, output, scratch);
+    bool same = lowered_tasks == lowered_templates && tasks.status == templates.status && tasks.token == templates.token && templates.template_mismatches == 0;
     for (uint32_t b = 0; same && lowered_tasks && b < program->body_count; b += 1)
     {
         const Tier0Function* a = tasks.functions + b;
@@ -131,6 +133,10 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
         }
         same = function;
     }
+    if (templates.template_mismatches != 0)
+    {
+        printf("lowering-templates-test: %s fast-twin-mismatches=%" PRIu64 "\n", name, templates.template_mismatches);
+    }
     if (lowered_tasks != lowered_templates || tasks.status != templates.status || tasks.token != templates.token)
     {
         printf("lowering-templates-test: %s lowered with status %u at token %u by the tasks and %u at %u with the templates\n", name, (uint32_t)tasks.status,
@@ -141,6 +147,8 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
     totals->entries += tasks.entries;
     totals->template_nodes += templates.template_nodes;
     totals->template_entries += templates.template_entries;
+    totals->template_fast += templates.template_fast;
+    totals->template_mismatches += templates.template_mismatches;
     totals->differences += !same;
     return same;
 }
@@ -198,10 +206,11 @@ static bool lower_templates_file(LowerTemplatesTotals* totals, const char* file,
 static void lower_templates_report(const LowerTemplatesTotals* totals)
 {
     printf("lowering-templates-test: files=%" PRIu64 " functions=%" PRIu64 " nodes=%" PRIu64 " templates=%" PRIu64 " (%.2f%%) entries=%" PRIu64
-           " template-entries=%" PRIu64 " (%.2f%%) differences=%" PRIu64 " failures=%" PRIu64 "\n",
+           " template-entries=%" PRIu64 " (%.2f%%) fast=%" PRIu64 " fast-mismatches=%" PRIu64 " differences=%" PRIu64 " failures=%" PRIu64 "\n",
            totals->files, totals->functions, totals->nodes, totals->template_nodes,
            totals->nodes != 0 ? 100.0 * (double)totals->template_nodes / (double)totals->nodes : 0.0, totals->entries, totals->template_entries,
-           totals->entries != 0 ? 100.0 * (double)totals->template_entries / (double)totals->entries : 0.0, totals->differences, totals->failures);
+           totals->entries != 0 ? 100.0 * (double)totals->template_entries / (double)totals->entries : 0.0, totals->template_fast,
+           totals->template_mismatches, totals->differences, totals->failures);
     if (totals->passes != 0)
     {
         printf("lowering-templates-test: passes=%" PRIu64 " tasks_ns=%" PRIu64 " templates_ns=%" PRIu64 " ratio=%.3f\n", totals->passes, totals->tasks_nanoseconds,
@@ -333,6 +342,7 @@ static __attribute__((noinline)) void check_test_lowering_templates(CheckTest* t
                       "node templates lower the fixtures as the tasks do, function for function");
     check_test_expect(test, totals.template_nodes * 2 > totals.nodes && totals.template_entries != 0,
                       "node templates take more than half of the fixtures' evaluated nodes");
+    check_test_expect(test, totals.template_fast != 0 && totals.template_mismatches == 0, "the templates' fast twin classifies nodes as the general rules do");
     if (ready)
     {
         rmdir(directory);
