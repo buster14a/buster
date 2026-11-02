@@ -21,8 +21,8 @@
 // report of the stage that stopped a file. The source's state lives in an arena of its own, so the function holds no
 // static object and can be an entry point's callee in any unit (ir_source_prepare's), and check_source_release frees
 // it whatever stage the file reached. A failed stage leaves the stages after it zero, never a partly made
-// configuration, program or selection; CheckSourceRequest's explicit overrides (the scalar path, the tests' injected
-// failures) are its only departures from -c's preparation.
+// configuration, program or selection; CheckSourceRequest's explicit overrides (the scalar path, the blocks' lifetimes,
+// the tests' injected failures) are its only departures from -c's preparation.
 #ifndef BUSTER_C_CHECK_SOURCE_PREPARE_INCLUDED
 #define BUSTER_C_CHECK_SOURCE_PREPARE_INCLUDED
 
@@ -60,6 +60,9 @@ struct CheckSourceRequest
     // --scalar's override: the preprocessor's, the checker's, the data's and the selection's scalar twins, and the
     // program's scalar path. `--scalar` among the options asks for it too, as the driver's does (CheckSource.scalar).
     bool scalar;
+    // The blocks' objects' lifetimes in the checked program (CheckProgramOptions.lifetimes), as the driver's --tier1 asks
+    // for them (#177), for a client whose IR carries them as lifetime markers (ir_source_prepare's, #141).
+    bool lifetimes;
     // The tests' injected failure: the stage it stops the file at (CHECK or PROGRAM; READY for none), as a real failure
     // there would, the checker's running out of a resource, or the program's with `fault_unsupported` a refusal by name
     // and otherwise a resource's.
@@ -131,6 +134,7 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         .initializer_references = source->data.references,
         .initializer_reference_count = source->data.reference_count,
         .scalar = scalar,
+        .lifetimes = request.lifetimes,
     }) : (CheckProgramOptions){ 0 };
     prepared = prepared && check_program(&source->program, parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
     if (prepared && request.fault == CHECK_SOURCE_PROGRAM)

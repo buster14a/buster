@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The tests of x86_semantics.c (test-x86-semantics). The processor is the oracle: a harness runs records in this process
 // (x86_semantics_test_enter loads every general register, the flags and the available 128- or 512-bit vector state,
@@ -33,6 +34,7 @@
 // effects; the effects table's execution check; the immediate's contract; form choice (its fixtures, the reference
 // sequences, the semantic check); the vector paths' twins; x86_match's agreement; GNU as; run_x86_semantics_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdarg.h>
 #include <stddef.h>
 #include <signal.h>
@@ -3429,7 +3431,7 @@ static int run_x86_semantics_tests(int argc, char** argv)
         }
         if (cross_check && initialized)
         {
-            const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+            const char* parent = oracle_temporary_directory();
             result = x86_semantics_check_assembler(seed, parent, keep) && result;
         }
         x86_semantics_machine_close(&machine);

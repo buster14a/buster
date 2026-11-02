@@ -432,6 +432,347 @@ static const char check_test_tier1_narrow_callee_source[] =
     "int tier1_narrow_entry(int a, int b, int c);\n"
     "int clang_calls_narrow(int x) { return tier1_narrow_entry(0x123456f0 + x, 0x7fff0000 | (x & 0xffff), 0x5a5a0000 | (x & 1)); }\n";
 
+// The stack arguments' fixture (#141): a unit by --tier1 whose functions pass 7 to 16 arguments of mixed types (longs,
+// ints, pointers, chars and shorts, extended by their types) to functions clang -O2 compiles in the other unit, which
+// read the ones past the registers from the stack, and take 7 to 12 parameters from callers clang -O2 compiles there,
+// some through function pointers. Each of the other unit's functions folds its arguments into one value.
+static const char check_test_tier1_stack_caller_source[] =
+    "#include <stdio.h>\n"
+    "long tier1_other7(long a, int b, long c, char* d, short e, long f, long g);\n"
+    "long tier1_other8(int a, long b, long c, long d, long e, unsigned char f, long g, int h);\n"
+    "long tier1_other12(long a, long b, int c, long d, long e, long f, signed char g, long h, long* i, int j, long k, unsigned short l);\n"
+    "long tier1_other16(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, long k, long l, long m, long n, long o, long p);\n"
+    "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x);\n"
+    "static long tier1_pass(long x, long y)\n"
+    "{\n"
+    "    char text[4] = { 'a', 'b', 'c', 0 };\n"
+    "    long cell = x ^ 77;\n"
+    "    long r = tier1_other7(x, (int)y, x + y, text, (short)(x * 3), x - y, y * 5);\n"
+    "    r = r * 31 + tier1_other8((int)(x + 1), y, x * y, x ^ y, ~x, (unsigned char)(y + 200), x + 7, (int)-y);\n"
+    "    r = r * 31 + tier1_other12(x, y, (int)(x - 9), y + 1, x + 2, y + 3, (signed char)(x * 11), y - 4, &cell, (int)(y * 13), x * 9, (unsigned short)(y * 4099));\n"
+    "    r = r * 31 + tier1_other16(x, y, x + 1, y + 1, x + 2, y + 2, x + 3, y + 3, x + 4, y + 4, x + 5, y + 5, x + 6, y + 6, x + 7, y + 7);\n"
+    "    return r;\n"
+    "}\n"
+    "long tier1_take7(long a, long b, long c, long d, long e, long f, long g)\n"
+    "{\n"
+    "    return ((((((a * 3 + b) * 3 + c) * 3 + d) * 3 + e) * 3 + f) * 3 + g);\n"
+    "}\n"
+    "long tier1_take12(long a, long b, long c, long d, long e, long f, int g, long h, long i, long j, short k, long l)\n"
+    "{\n"
+    "    long r = a ^ (b * 2) ^ (c * 4) ^ (d * 8) ^ (e * 16) ^ (f * 32);\n"
+    "    return r * 1000003 + g * 7 + h * 11 + (i ^ j) * 13 + k * 17 + l;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long total = 0;\n"
+    "    for (long x = -40; x < 40; x += 3)\n"
+    "    {\n"
+    "        total = total * 31 + (unsigned long)tier1_pass(x, x * 7 - 5) + (unsigned long)tier1_drive(tier1_take7, tier1_take12, x);\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", total);\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_stack_callee_source[] =
+    "long tier1_other7(long a, int b, long c, char* d, short e, long f, long g) { return a * 3 + b * 5 + c * 7 + d[1] * 11 + e * 13 + f * 17 + g * 19; }\n"
+    "long tier1_other8(int a, long b, long c, long d, long e, unsigned char f, long g, int h) { return (a ^ b) + c * 3 - d + (e ^ 99) + f * 7 + g * 11 + h * 13; }\n"
+    "long tier1_other12(long a, long b, int c, long d, long e, long f, signed char g, long h, long* i, int j, long k, unsigned short l)\n"
+    "{\n"
+    "    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + *i * 9 + j * 10 + k * 11 + l * 12;\n"
+    "}\n"
+    "long tier1_other16(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, long k, long l, long m, long n, long o, long p)\n"
+    "{\n"
+    "    return ((((a * 31 + b) * 31 + c - d) * 31 + e * f - g) * 31 + h ^ i) + j * 3 + k * 5 + l * 7 + m * 11 + n * 13 + o * 17 + p * 19;\n"
+    "}\n"
+    "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x)\n"
+    "{\n"
+    "    return seven(x, x + 1, x - 2, x * 3, x ^ 4, ~x, x * x) + twelve(x, 2, 3, x, 5, 6, (int)(x * 7), 8, x - 9, 10, (short)(x * 11), x + 12);\n"
+    "}\n";
+
+// The floating values' fixture (#141): F32 and F64 parameters, results and arguments interleaved with integers, past
+// xmm7 onto the stack, to clang -O2's code and from it through a pointer, a variadic call of doubles (printf's and the
+// other unit's: al their count), every comparison against NaNs, infinities and signed zeros, the conversions between
+// the precisions and to and from integers of every width, signed and unsigned (an unsigned 64-bit one's past 2^63 both
+// ways among them), a negation, loops of doubles and floats through arrays and a struct's members, and a conditional
+// expression of doubles.
+static const char check_test_tier1_float_source[] =
+    "#include <stdio.h>\n"
+    "double tier1_other_mix(double a, int b, float c, double d, long e, double f, double g, double h, double i, double j, float k, double l);\n"
+    "float tier1_other_scale(float x, double y);\n"
+    "double tier1_other_sum(int count, ...);\n"
+    "double tier1_drive_float(double (*f)(double, float, long, double), double x);\n"
+    "struct tier1_point\n"
+    "{\n"
+    "    double x;\n"
+    "    float y;\n"
+    "    int k;\n"
+    "};\n"
+    "double tier1_float_take(double a, float b, long c, double d)\n"
+    "{\n"
+    "    double product = a * b;\n"
+    "    return product - c / d;\n"
+    "}\n"
+    "static double tier1_pass_float(double x, long n)\n"
+    "{\n"
+    "    float f = (float)x;\n"
+    "    double r = tier1_other_mix(x, (int)n, f, x * 2.0, n * 3, x + 1.0, x - 1.0, -x, x * x, 0.5, f * 2.0f, (double)n);\n"
+    "    r = r + tier1_other_scale(f, r);\n"
+    "    r = r + tier1_other_sum(3, x, r, (double)n);\n"
+    "    r = r + tier1_drive_float(tier1_float_take, x);\n"
+    "    return r;\n"
+    "}\n"
+    "static int tier1_classify(double x, double y)\n"
+    "{\n"
+    "    int r = 0;\n"
+    "    r = r * 2 + (x == y);\n"
+    "    r = r * 2 + (x != y);\n"
+    "    r = r * 2 + (x < y);\n"
+    "    r = r * 2 + (x <= y);\n"
+    "    r = r * 2 + (x > y);\n"
+    "    r = r * 2 + (x >= y);\n"
+    "    if (x < y)\n"
+    "    {\n"
+    "        r += 100;\n"
+    "    }\n"
+    "    if (!(x >= y))\n"
+    "    {\n"
+    "        r += 1000;\n"
+    "    }\n"
+    "    if (x != x)\n"
+    "    {\n"
+    "        r += 10000;\n"
+    "    }\n"
+    "    if (x == y)\n"
+    "    {\n"
+    "        r += 100000;\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
+    "static long tier1_convert(double x, float f, unsigned u, short s, unsigned char c)\n"
+    "{\n"
+    "    long a = (long)x;\n"
+    "    int b = (int)(x * 0.5);\n"
+    "    float g = (float)u + (float)s;\n"
+    "    double h = (double)c - (double)u;\n"
+    "    float k = -f;\n"
+    "    unsigned w = (unsigned)(x * x);\n"
+    "    return a * 7 + b * 5 + (long)(g * 3.0f) + (long)h + (long)(k * 100.0f) + (long)w + (long)(signed char)(int)(f * 0.25f);\n"
+    "}\n"
+    "static double tier1_accumulate(double* values, int n, float* weights)\n"
+    "{\n"
+    "    double s = 0.0;\n"
+    "    float w = 0.0f;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        s += values[i] * weights[i];\n"
+    "        w += weights[i];\n"
+    "        values[i] = s;\n"
+    "    }\n"
+    "    return s / w;\n"
+    "}\n"
+    "static double tier1_points(struct tier1_point* p, int n)\n"
+    "{\n"
+    "    double t = 0;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        t += p[i].x * p[i].y + p[i].k;\n"
+    "        p[i].y = (float)t;\n"
+    "    }\n"
+    "    return t;\n"
+    "}\n"
+    "static void tier1_print(double x, float f, long n)\n"
+    "{\n"
+    "    printf(\"%.17g %.9g %ld\\n\", x, (double)f, n);\n"
+    "}\n"
+    "unsigned long tier1_wide_hash(unsigned long seed)\n"
+    "{\n"
+    "    static const unsigned long edges[] = { 0, 1, 3, 0x7fffffffUL, 0xffffffffUL, (1UL << 53) + 1, 0x7fffffffffffffffUL, 0x8000000000000000UL, 0x8000000000000401UL, 0x8000000000000c00UL,\n"
+    "                                           0xfffffffffffffbffUL, 0xfffffffffffffc00UL, 0xffffffffffffffffUL, 0x9000017fffffffffUL };\n"
+    "    unsigned long h = 0;\n"
+    "    for (int i = 0; i < 14; i += 1)\n"
+    "    {\n"
+    "        const double d = (double)edges[i];\n"
+    "        const float f = (float)edges[i];\n"
+    "        h = h * 1000003 + (unsigned long)(d * 0.75) + (unsigned long)(f * 0.5f);\n"
+    "    }\n"
+    "    unsigned long r = seed;\n"
+    "    for (int i = 0; i < 4096; i += 1)\n"
+    "    {\n"
+    "        r ^= r << 13;\n"
+    "        r ^= r >> 7;\n"
+    "        r ^= r << 17;\n"
+    "        const double d = (double)r;\n"
+    "        h = h * 31 + (unsigned long)(d * 0.875) + (unsigned long)((float)(r >> (i & 63)) * 0.5f);\n"
+    "    }\n"
+    "    return h;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    volatile double zero = 0.0;\n"
+    "    const double nan = zero / zero;\n"
+    "    const double inf = 1.0 / zero;\n"
+    "    const double samples[] = { 0.0, -0.0, 1.5, -2.25, 3.0e10, -7.5e-3, 1.0e300, 123.456, nan, inf, -inf };\n"
+    "    unsigned long total = 0;\n"
+    "    for (int i = 0; i < 11; i += 1)\n"
+    "    {\n"
+    "        for (int j = 0; j < 11; j += 1)\n"
+    "        {\n"
+    "            total = total * 31 + (unsigned long)tier1_classify(samples[i], samples[j]);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", total);\n"
+    "    for (int i = 0; i < 8; i += 1)\n"
+    "    {\n"
+    "        const double x = samples[i] < 1.0e20 && samples[i] > -1.0e20 ? samples[i] : 4.0;\n"
+    "        printf(\"%.17g %ld\\n\", tier1_pass_float(x * 0.001, i * 3 - 7), tier1_convert(x * 0.01, (float)(x * 0.5), (unsigned)(i * 1000), (short)(i * -77), (unsigned char)(i * 33)));\n"
+    "        tier1_print(x, (float)x, i);\n"
+    "    }\n"
+    "    double values[6] = { 1.0, 2.5, -3.0, 4.25, 0.5, 6.0 };\n"
+    "    float weights[6] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f };\n"
+    "    printf(\"%.17g\", tier1_accumulate(values, 6, weights));\n"
+    "    for (int i = 0; i < 6; i += 1)\n"
+    "    {\n"
+    "        printf(\" %.17g\", values[i]);\n"
+    "    }\n"
+    "    struct tier1_point points[4] = { { 1.5, 2.0f, 3 }, { -0.5, 4.0f, -1 }, { 10.0, 0.25f, 7 }, { 2.0, -1.0f, 0 } };\n"
+    "    printf(\" %.17g %.9g %.9g\\n\", tier1_points(points, 4), (double)points[0].y, (double)points[3].y);\n"
+    "    printf(\"%lx\\n\", tier1_wide_hash(0x243f6a8885a308d3UL));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_float_other_source[] =
+    "#include <stdarg.h>\n"
+    "double tier1_other_mix(double a, int b, float c, double d, long e, double f, double g, double h, double i, double j, float k, double l)\n"
+    "{\n"
+    "    return a + b * 2.0 + c * 3.0 + d * 4.0 + e * 5.0 + f * 6.0 + g * 7.0 + h * 8.0 + i * 9.0 + j * 10.0 + k * 11.0 + l * 12.0;\n"
+    "}\n"
+    "float tier1_other_scale(float x, double y)\n"
+    "{\n"
+    "    return x * (float)y + 1.0f;\n"
+    "}\n"
+    "double tier1_other_sum(int count, ...)\n"
+    "{\n"
+    "    va_list arguments;\n"
+    "    va_start(arguments, count);\n"
+    "    double s = 0;\n"
+    "    for (int i = 0; i < count; i += 1)\n"
+    "    {\n"
+    "        s += va_arg(arguments, double) * (i + 1);\n"
+    "    }\n"
+    "    va_end(arguments);\n"
+    "    return s;\n"
+    "}\n"
+    "double tier1_drive_float(double (*f)(double, float, long, double), double x)\n"
+    "{\n"
+    "    return f(x, (float)x * 0.5f, (long)x + 3, x + 2.5);\n"
+    "}\n";
+
+// The by-value aggregates' fixture (#789): 19 shapes without padding, of 1 to 24 bytes (general and xmm parts of every
+// size, a part of each class in one aggregate, _Float16's odd xmm part, and the memory class's on the stack and through
+// the hidden pointer), each made, hashed and passed back by the other unit (clang -O2's) and twisted and returned by this
+// one (Tier 1's), so that aggregates cross between the compilers both ways as arguments and as results; a call of nine
+// arguments whose aggregates run past the registers, each way; and a variadic call of three aggregates.
+static const char check_test_tier1_records_header[] =
+    "#include <stdio.h>\n"
+    "typedef struct { char c[1]; } S1;\n"
+    "typedef struct { char c[2]; } S2;\n"
+    "typedef struct { char c[3]; } S3;\n"
+    "typedef struct { char c[5]; } S5;\n"
+    "typedef struct { short s[3]; } S6;\n"
+    "typedef struct { char c[7]; } S7;\n"
+    "typedef struct { int a, b; } S8;\n"
+    "typedef struct { char c[9]; } S9;\n"
+    "typedef struct { int i[3]; } S12;\n"
+    "typedef struct { char c[15]; } S15;\n"
+    "typedef struct { long a, b; } S16;\n"
+    "typedef struct { char c[17]; } S17;\n"
+    "typedef struct { float f; } F1;\n"
+    "typedef struct { float a, b, c; } F3;\n"
+    "typedef struct { double a, b; } D2;\n"
+    "typedef struct { double d; int i[2]; } DI;\n"
+    "typedef struct { int i[2]; double d; } ID;\n"
+    "typedef struct { _Float16 h[3]; } H3;\n"
+    "typedef struct { long a, b, c; } Big;\n"
+    "#define SHAPES(X) X(S1) X(S2) X(S3) X(S5) X(S6) X(S7) X(S8) X(S9) X(S12) X(S15) X(S16) X(S17) X(F1) X(F3) X(D2) X(DI) X(ID) X(H3) X(Big)\n"
+    "#define DECLARE(S) S b_make_##S(int seed); long b_hash_##S(S s); long b_back_##S(int seed); S a_twist_##S(S s, int k);\n"
+    "SHAPES(DECLARE)\n"
+    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "long b_call_many(int seed);\n"
+    "long b_vsum(int n, ...);\n";
+
+static const char check_test_tier1_records_other_source[] =
+    "#include \"tier1-records.h\"\n"
+    "#include <stdarg.h>\n"
+    "#define DEFINE(S) \\\n"
+    "S b_make_##S(int seed) { S s; unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(seed * 7 + i * 13 + 1); return s; } \\\n"
+    "long b_hash_##S(S s) { const unsigned char* p = (const unsigned char*)&s; long h = 0; for (unsigned i = 0; i < sizeof s; i += 1) h = h * 31 + p[i]; return h; } \\\n"
+    "long b_back_##S(int seed) { S s = b_make_##S(seed); S t = a_twist_##S(s, seed); return b_hash_##S(t) * 3 + b_hash_##S(s); }\n"
+    "SHAPES(DEFINE)\n"
+    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return a + b * 2 + c * 3 + d * 4 + b_hash_S16(t) + b_hash_Big(x) * 5 + b_hash_DI(y) * 7 + b_hash_S6(z) * 11 + b_hash_S1(w) * 13; }\n"
+    "long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
+    "long b_vsum(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
+
+// The dynamic stack's fixture (#141): variable-length arrays in a loop's body (a save and a restore per iteration), beside
+// calls with stack arguments (each with its outgoing area at its own rsp), in a frame realigned by an object aligned to 64
+// (its base r15), with values live across calls in callee-saved registers, in a variadic definition, and alloca's; and a
+// loop's variable-length array beside by-value aggregates (#1117's review): a 24-byte one passed on the stack, 16-byte
+// ones returned in a general and an xmm register, and a call of ten integers and two doubles, so that the outgoing
+// area from rsp, the aggregates' staging below it and the result's object meet in one dynamic frame. Each callee's
+// backtrace() walks through the dynamic frames' unwind tables to the C runtime's: the frames' total it prints is
+// clang's build's only where none of them stops the walk.
+static const char check_test_tier1_dynamic_source[] =
+    "#include <alloca.h>\n#include <execinfo.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n"
+    "static long unwound;\n"
+    "__attribute__((noinline)) static void probe(void) { void* frames[64]; unwound += backtrace(frames, 64); }\n"
+    "__attribute__((noinline)) static long sum8(long a, long b, long c, long d, long e, long f, long g, long h) { return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h; }\n"
+    "__attribute__((noinline)) static long touch(long* p, long n) { probe(); long s = 0; for (long i = 0; i < n; i += 1) s += p[i] * (i + 1); return s; }\n"
+    "long tier1_vla_loop(long n) { long total = 0; for (long k = 1; k <= n; k += 1) { long a[k]; for (long i = 0; i < k; i += 1) a[i] = i * k + 1; total += touch(a, k); } return total; }\n"
+    "long tier1_vla_calls(long n) { long a[n + 1]; for (long i = 0; i <= n; i += 1) a[i] = i + 3; long s = sum8(a[0], a[1], a[2 % (n + 1)], n, 5, 6, a[n], 8); char b[n * 3 + 1];\n"
+    "    memset(b, 'x', n * 3); b[n * 3] = 0; return s + (long)strlen(b) + sum8(1, 2, 3, 4, 5, 6, a[n / 2], s); }\n"
+    "long tier1_vla_aligned(long n) { _Alignas(64) char wide[64]; for (int i = 0; i < 64; i += 1) wide[i] = (char)i; long a[n];\n"
+    "    for (long i = 0; i < n; i += 1) a[i] = wide[i % 64] + (long)((uintptr_t)wide & 63); long s = touch(a, n); double d[n];\n"
+    "    for (long i = 0; i < n; i += 1) d[i] = (double)i / 2; for (long i = 0; i < n; i += 1) s += (long)(d[i] * 4);\n"
+    "    return s + sum8(s, n, 3, 4, 5, 6, 7, (long)((uintptr_t)a & 15)); }\n"
+    "long tier1_alloca(long n) { long* p = alloca(n * sizeof(long)); long* q = __builtin_alloca(32); for (long i = 0; i < n; i += 1) p[i] = i * i;\n"
+    "    q[0] = 1; q[1] = 2; q[2] = 3; q[3] = (long)(((uintptr_t)p | (uintptr_t)q) & 15); return touch(p, n) + touch(q, 4); }\n"
+    "long tier1_vla_live(long n, long m) { long kept = n * 7 + m; long other = m * 13; long r = 0; for (long k = 0; k < 3; k += 1) { long a[n + k];\n"
+    "    for (long i = 0; i < n + k; i += 1) a[i] = kept + i; r += touch(a, n + k) + other + sum8(kept, other, r, k, n, m, 7, 8); if (r > 1000000) break; }\n"
+    "    return r + kept + other; }\n"
+    "long tier1_vla_variadic(int n, ...) { va_list list; va_start(list, n); long a[n]; for (int i = 0; i < n; i += 1) a[i] = va_arg(list, long); va_end(list);\n"
+    "    return touch(a, n) + sum8(n, a[0], a[n - 1], 4, 5, 6, 7, 8); }\n"
+    "typedef struct { long a, b, c; } Agg24;\n"
+    "typedef struct { double x; long y; } Agg16;\n"
+    "__attribute__((noinline)) static long take24(Agg24 s, long k) { probe(); return s.a * 3 + s.b * 5 + s.c * 7 + k; }\n"
+    "__attribute__((noinline)) static Agg16 make16(long i, double d) { Agg16 r = { d * 2 + (double)i, i * 9 }; return r; }\n"
+    "__attribute__((noinline)) static long many10(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, double x, double y)\n"
+    "    { return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10 + (long)(x * 4) + (long)(y * 8); }\n"
+    "long tier1_vla_records(long n) { long total = 0; for (long k = 1; k <= n; k += 1) { long a[k + 2]; for (long i = 0; i < k + 2; i += 1) a[i] = i * k + 3;\n"
+    "    Agg24 s = { a[0], a[k], a[k + 1] }; total += take24(s, k); Agg16 r = make16(k, (double)a[1] / 4); total += r.y + (long)(r.x * 2);\n"
+    "    total += many10(a[0], a[1], k, n, 5, 6, 7, 8, 9, a[k + 1], r.x, (double)k / 2) + touch(a, k + 2); } return total; }\n"
+    "int main(void) {\n"
+    "    printf(\"%ld %ld %ld %ld %ld %ld\\n\", tier1_vla_loop(9), tier1_vla_calls(10), tier1_vla_aligned(70), tier1_alloca(12), tier1_vla_live(5, 3),\n"
+    "           tier1_vla_variadic(9, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));\n"
+    "    printf(\"%ld %ld %ld %ld %ld %ld\\n\", tier1_vla_loop(1), tier1_vla_calls(1), tier1_vla_aligned(1), tier1_alloca(1), tier1_vla_live(1, 0), tier1_vla_variadic(1, 11L));\n"
+    "    printf(\"%ld %ld\\n\", tier1_vla_records(9), tier1_vla_records(1));\n"
+    "    printf(\"%ld\\n\", unwound);\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_records_source[] =
+    "#include \"tier1-records.h\"\n"
+    "#define TWIST(S) S a_twist_##S(S s, int k) { unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(p[i] + k + i); return s; }\n"
+    "SHAPES(TWIST)\n"
+    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return b_many(a + 1, b, c, d, t, x, y, z, w) + b_hash_S1(w); }\n"
+    "#define PRINT(S) printf(\"%s %ld %ld %ld\\n\", #S, b_hash_##S(b_make_##S(5)), b_hash_##S(a_twist_##S(b_make_##S(9), 3)), b_back_##S(11));\n"
+    "int main(void)\n"
+    "{\n"
+    "    SHAPES(PRINT)\n"
+    "    printf(\"%ld %ld\\n\", b_call_many(4), a_many(1, 2, 3, 4, b_make_S16(1), b_make_Big(2), b_make_DI(3), b_make_S6(4), b_make_S1(5)));\n"
+    "    printf(\"%ld\\n\", b_vsum(3, b_make_S12(1), b_make_S12(2), b_make_S12(3)));\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -1629,5 +1970,376 @@ static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang
     }
     check_test_expect(test, !ran || (frames[1][0] == frames[1][1] && frames[0][0] == frames[0][1]), "both paths' frames take the same bytes");
     unlink(source);
+    unlink(reference);
+}
+
+// The scopes' fixture (#141): an interpreter loop shaped as Lua's luaV_execute, its handlers reached through a computed
+// goto, each declaring `double n1, n2` (or `long long i1`) in its block and assigning them on some paths only, as Lua's
+// tonumberns does, then calling C. Without the blocks' lifetimes, promotion carries every handler's locals around the
+// dispatch loop, and each call saves the floating ones; with them, a block's start ends its locals' liveness. Both
+// builds, by each path, print clang -O0's output; with lifetimes, Tier 1 saves fewer values around calls.
+static const char check_test_tier1_scopes_source[] =
+    "#include <stdio.h>\n"
+    "\n"
+    "typedef struct Value { int tag; union { double number; long long integer; } u; } Value;\n"
+    "\n"
+    "static __attribute__((noinline)) double scale(double x) { return x * 0.5; }\n"
+    "static __attribute__((noinline)) long long step(long long x) { return x * 3 + 1; }\n"
+    "\n"
+    "#define TONUMBER(v, n) ((v)->tag == 1 ? ((n) = (v)->u.number, 1) : ((v)->tag == 2 ? ((n) = (double)(v)->u.integer, 1) : 0))\n"
+    "\n"
+    "double run(const unsigned char* code, Value* registers, int count)\n"
+    "{\n"
+    "    static void* dispatch[] = { &&op_add, &&op_multiply, &&op_subtract, &&op_step, &&op_halt };\n"
+    "    int pc = 0;\n"
+    "    double total = 0.0;\n"
+    "    goto *dispatch[code[pc]];\n"
+    "op_add:\n"
+    "    {\n"
+    "        double n1;\n"
+    "        double n2;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        Value* b = &registers[code[pc + 2] % count];\n"
+    "        if (TONUMBER(a, n1) && TONUMBER(b, n2)) { total += scale(n1 + n2); a->tag = 1; a->u.number = n1 + n2; }\n"
+    "        pc += 3;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_multiply:\n"
+    "    {\n"
+    "        double n1;\n"
+    "        double n2;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        Value* b = &registers[code[pc + 2] % count];\n"
+    "        if (TONUMBER(a, n1) && TONUMBER(b, n2)) { total += scale(n1 * n2); }\n"
+    "        pc += 3;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_subtract:\n"
+    "    {\n"
+    "        double n1;\n"
+    "        double n2;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        Value* b = &registers[code[pc + 2] % count];\n"
+    "        if (TONUMBER(a, n1) && TONUMBER(b, n2)) { total -= scale(n1 - n2); b->tag = 1; b->u.number = n2 - n1; }\n"
+    "        pc += 3;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_step:\n"
+    "    {\n"
+    "        long long i1;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        if (a->tag == 2) { i1 = a->u.integer; }\n"
+    "        if (a->tag == 2) { a->u.integer = step(i1); total += (double)a->u.integer; }\n"
+    "        pc += 2;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_halt:\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned char code[400];\n"
+    "    int length = 0;\n"
+    "    for (int k = 0; k < 60; k += 1)\n"
+    "    {\n"
+    "        const int op = (k * 7 + 3) % 4;\n"
+    "        code[length++] = (unsigned char)op;\n"
+    "        code[length++] = (unsigned char)(k * 5 + 1);\n"
+    "        if (op != 3) { code[length++] = (unsigned char)(k * 11 + 2); }\n"
+    "    }\n"
+    "    code[length++] = 4;\n"
+    "    for (int round = 0; round < 4; round += 1)\n"
+    "    {\n"
+    "        Value registers[7];\n"
+    "        for (int r = 0; r < 7; r += 1)\n"
+    "        {\n"
+    "            registers[r].tag = (r + round) % 3;\n"
+    "            if (registers[r].tag == 1) { registers[r].u.number = 0.25 * (r + 1) + round; } else { registers[r].u.integer = r * 2 + round; }\n"
+    "        }\n"
+    "        printf(\"%.17g\\n\", run(code, registers, 7));\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// The scopes' fixture by --tier1 (`lifetimes` or not, by each path) into `output`, its report's values saved around calls
+// into *saves: whether it compiled with run Tier 1's.
+static bool check_test_tier1_scopes_build(const char* executable, const char* source, const char* output, bool lifetimes, bool scalar, uint64_t* saves)
+{
+    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
+    uint32_t count = 5;
+    if (!lifetimes)
+    {
+        arguments[count++] = "--tier1-no-lifetimes";
+    }
+    if (scalar)
+    {
+        arguments[count++] = "--scalar";
+    }
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)output;
+    arguments[count++] = (char*)source;
+    arguments[count] = NULL;
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    *saves = 0;
+    const bool reported = check_test_tier1_field(text, "call_stores", saves);
+    const bool taken = text != NULL && strstr(text, "tier1-refused\trun\t") == NULL;
+    if (status != 0 && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    return status == 0 && reported && taken;
+}
+
+static void check_test_driver_tier1_scopes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-scopes.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-scopes-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_scopes_source, sizeof(check_test_tier1_scopes_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the scopes' fixture runs");
+    uint64_t saves[2][2] = { { 0 } };
+    for (uint32_t lifetimes = 0; ran && lifetimes < 2; lifetimes += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            snprintf(output, sizeof(output), "%s/tier1-scopes-%u-%u", directory, lifetimes, path);
+            const bool built = check_test_tier1_scopes_build(executable, source, output, lifetimes != 0, path != 0, &saves[lifetimes][path]);
+            check_test_expect(test, built, "the scopes' fixture compiles by --tier1, its interpreter Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0, "the scopes' fixture prints clang's build's output");
+            unlink(output);
+        }
+    }
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        check_test_expect(test, saves[1][path] < saves[0][path], "a block's start ends its locals' liveness: fewer values saved around calls");
+        printf("  Tier 1's saves around calls in the scopes' fixture, %s path: %" PRIu64 " with lifetimes, %" PRIu64 " without\n", path == 0 ? "vector" : "scalar", saves[1][path], saves[0][path]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
+// The floating values' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
+// function Tier 1's (main's conditional expression of doubles among them), linked with its other unit compiled by clang
+// -O2, prints what clang -O0's build of both prints, bit for bit in its %.17g digits.
+static void check_test_driver_tier1_float(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-float.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-float-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-float-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-float-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_float_source, sizeof(check_test_tier1_float_source) - 1) &&
+                         parse_test_write(other, check_test_tier1_float_other_source, sizeof(check_test_tier1_float_other_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    char expected[2048] = { 0 };
+    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the floating values' fixture run");
+    static const char* const names[9] = { "tier1_float_take", "tier1_pass_float", "tier1_classify", "tier1_convert", "tier1_accumulate", "tier1_points", "tier1_print", "tier1_wide_hash", "main" };
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-float-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-float-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build_names(executable, unit, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the floating values' unit compiles by --tier1, every function Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[2048] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's floating values meet clang -O2's code and print clang -O0's build's output");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
+    unlink(reference);
+}
+
+// The dynamic stack's fixture (#141), compiled by --tier1 into an executable by each path, with and without
+// rematerialization, with no function refused: it must print what clang -O0's build prints.
+static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-dynamic.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-dynamic-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_dynamic_source, sizeof(check_test_tier1_dynamic_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the dynamic stack's fixture runs");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-dynamic-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", program, rematerialize != 0, path != 0, false, false, NULL, &build);
+            check_test_expect(test, compiled, "the dynamic stack's fixture compiles by --tier1, every function Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's variable-length arrays, allocas and their calls print clang -O0's build's output");
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(reference);
+}
+
+// The by-value aggregates' fixture (#789): its unit by --tier1 -c, by each path with and without rematerialization, every
+// function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both prints; and
+// both units by --tier1, every function of both Tier 1's (the other unit's va_arg of an aggregate among them), print it too.
+static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char header[512];
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    char reference[512];
+    char both[512];
+    snprintf(header, sizeof(header), "%s/tier1-records.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-records.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-records-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-records-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-records-clang", directory);
+    snprintf(both, sizeof(both), "%s/tier1-records-both", directory);
+    const bool written = parse_test_write(header, check_test_tier1_records_header, sizeof(check_test_tier1_records_header) - 1) &&
+                         parse_test_write(unit, check_test_tier1_records_source, sizeof(check_test_tier1_records_source) - 1) &&
+                         parse_test_write(other, check_test_tier1_records_other_source, sizeof(check_test_tier1_records_other_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the by-value aggregates' fixture run");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-records-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-records-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the by-value aggregates' unit compiles by --tier1, every function Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[4096] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's aggregates pass to and from clang -O2's code as arguments and results");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    char* both_arguments[] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", "-o", both, unit, other, NULL };
+    text = NULL;
+    const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+    free(text);
+    char actual[4096] = { 0 };
+    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                      "both units of the by-value aggregates' fixture by --tier1, every function Tier 1's, print clang's build's output");
+    unlink(header);
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
+    unlink(reference);
+    unlink(both);
+}
+
+// The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
+// function but main Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both
+// prints: the arguments past the registers reach clang's callees in their stack slots, and the parameters past them
+// arrive from clang's callers.
+static void check_test_driver_tier1_stack(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char caller[512];
+    char callee[512];
+    char callee_object[512];
+    char reference[512];
+    snprintf(caller, sizeof(caller), "%s/tier1-stack.c", directory);
+    snprintf(callee, sizeof(callee), "%s/tier1-stack-other.c", directory);
+    snprintf(callee_object, sizeof(callee_object), "%s/tier1-stack-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-stack-clang", directory);
+    const bool written = parse_test_write(caller, check_test_tier1_stack_caller_source, sizeof(check_test_tier1_stack_caller_source) - 1) &&
+                         parse_test_write(callee, check_test_tier1_stack_callee_source, sizeof(check_test_tier1_stack_callee_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, caller, callee, NULL };
+    char* callee_arguments[] = { (char*)clang, "-O2", "-c", "-o", callee_object, callee, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool callee_built = written && check_test_driver_spawn(callee_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && callee_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the stack arguments' fixture run");
+    static const char* const names[3] = { "tier1_pass", "tier1_take7", "tier1_take12" };
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-stack-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-stack-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build_names(executable, caller, names, BUSTER_ARRAY_LENGTH(names), object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the stack arguments' unit compiles by --tier1, every function but main Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, callee_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[256] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's stack arguments and parameters meet clang -O2's code");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(caller);
+    unlink(callee);
+    unlink(callee_object);
     unlink(reference);
 }

@@ -101,6 +101,9 @@ These are the only departures from `-c`'s preparation, and each is explicit:
   options. Either one sets `PPOptions.scalar`, which the preprocessor's twins
   read, and `CheckSource.scalar`, which every later stage takes, and so does
   each client's emission after them, as the driver's `-c --scalar` does;
+- the blocks' objects' lifetimes (`CheckSourceRequest.lifetimes`), which
+  `ir_source_prepare` asks for when its IR carries them as lifetime markers
+  (#141), as the driver's `--tier1` asks for them (#177);
 - the tests' injected failures (`CheckSourceRequest.fault`);
 - what each client does after the preparation: its selection mode
   (`benchmark-lowering-source` also lowers everything), forced lane counts,

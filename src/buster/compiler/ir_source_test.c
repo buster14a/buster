@@ -102,8 +102,9 @@ static IrType ir_source_result(const Tier0Function* function, const CheckProgram
 // `*result`: its functions' streams in `lowered`, their table and names in `arena`. Both arenas keep what they hold
 // for the caller; everything else the file needed is released. With `keep_program`, the program is kept for a run of
 // it too: the emission's link and its symbols' sizes (IrSourceFile.link and .sizes), and its functions' labels
-// (IrSourceFunction.labels).
-BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena, bool keep_program)
+// (IrSourceFunction.labels). With `lifetimes`, the program gives its blocks' objects' lifetimes, as the C driver's
+// --tier1 asks for them (#177), and the IR carries them as lifetime markers, which promotion reads (#141).
+BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena, bool keep_program, bool lifetimes)
 {
     memset(result, 0, sizeof(*result));
     // The file prepared as -c prepares it (c_check_source_prepare.c, #1057), as the source benchmarks prepare theirs:
@@ -113,7 +114,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     // selected and their target features checked. The source's state lives in an arena of its own that the file's end
     // releases: an entry point, which main.c's other units see as an inline definition, holds no static object.
     CheckSource source;
-    const bool chosen = check_source_prepare(&source, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true });
+    const bool chosen = check_source_prepare(&source, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true, .lifetimes = lifetimes });
     const bool allocated = source.pp != 0;
     const bool valid = source.stage != CHECK_SOURCE_OPTIONS;
     const bool preprocessed = valid && source.stage != CHECK_SOURCE_PREPROCESS;
@@ -515,7 +516,7 @@ static bool ir_source_exhausted(const char* file, char** options, uint32_t optio
         IrSourceFile prepared = { 0 };
         if (limited)
         {
-            ir_source_prepare(&prepared, file, options, option_count, lowered, arena, false);
+            ir_source_prepare(&prepared, file, options, option_count, lowered, arena, false, false);
         }
         _exit(limited && prepared.status == IR_SOURCE_FAILED && strstr(prepared.reason, "memory") != 0 ? 0 : 1);
     }
@@ -631,7 +632,7 @@ static int run_ir_source_tests(int count, char** arguments)
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         IrSourceFile file;
-        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
+        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
             ir_source_check(&totals, &file, files[i], print, simd, dominators, graphs, &output, &twin_output, &promoted, &text_output, &scratch, benchmark_dataflow, counters);

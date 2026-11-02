@@ -347,6 +347,7 @@ static void ir_stack_test_invalid(IrLowerTestTally* tally, IrFunction* function,
     }
 }
 
+// Tier 1 selects the dynamic stack (#141): each operation's node takes its rule, by both paths.
 static void ir_stack_test_native_boundary(IrLowerTestTally* tally, Arena* input, Arena* output, Arena* scratch)
 {
     static const char* const sources[] = {
@@ -354,6 +355,7 @@ static void ir_stack_test_native_boundary(IrLowerTestTally* tally, Arena* input,
         "function (i64) -> void {\nb0:\n  %0 = param.i64 0\n  %1 = alloca.ptr %0\n  %2 = ret.void\n}\n",
         "function (i64) -> void {\nb0:\n  %0 = param.i64 0\n  %1 = stack_restore.void %0\n  %2 = ret.void\n}\n",
     };
+    static const uint8_t rules[] = { TIER1_RULE_STACK_SAVE, TIER1_RULE_ALLOCA, TIER1_RULE_STACK_RESTORE };
     const uint64_t input_mark = input->length;
     for (uint32_t op = 0; op < 3; op += 1)
     {
@@ -362,13 +364,13 @@ static void ir_stack_test_native_boundary(IrLowerTestTally* tally, Arena* input,
         {
             for (uint32_t vector = 0; vector < 2; vector += 1)
             {
-                Tier1SelectPlan plan = { .estimated_cost = 123 };
-                const Tier1SelectPlan preserved = plan;
+                Tier1SelectPlan plan = { 0 };
                 const uint64_t mark = output->length;
-                const uint64_t scratch_mark = scratch->length;
                 uint32_t node = BUSTER_IR_NONE;
                 const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, vector != 0, &plan, &node);
-                ir_lower_test_expect(tally, error == TIER1_SELECT_ERROR_UNSUPPORTED && node == (op == 0 ? 0u : 1u) && memcmp(&plan, &preserved, sizeof(plan)) == 0 && output->length == mark && scratch->length == scratch_mark, "native dynamic stack refused transactionally", vector, op);
+                const uint32_t at = op == 0 ? 0u : 1u;
+                ir_lower_test_expect(tally, error == TIER1_SELECT_OK && plan.patterns[at].rule == rules[op], "native dynamic stack selected by its rule", vector, op);
+                arena_pop_to(output, mark);
             }
         }
         arena_pop_to(input, input_mark);
