@@ -1,0 +1,27 @@
+name: Issue 1118 workbench
+
+# Temporary source-transfer workbench; not part of the implementation PR.
+on:
+  push:
+    branches: [agent/1118-address-space-workbench]
+    paths: [.github/workflows/issue-1118-workbench.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Export the source snapshot
+        run: git archive --format=tar.gz -o "$RUNNER_TEMP/buster-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1118-source
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
