@@ -19729,7 +19729,7 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
 // costs less from about 10 ranges up. With `prefetch`, a prefetch of each of those tokens' spellings, whose bytes nothing
 // may have read since their file was prepared: with -P, the copies would wait for them (#649: on the 9700X, without the
 // two bytes of every token step 1 used to read, -P printed main.c and sqlite3.c 9-13% slower than with them, and with the
-// prefetches 2-4% faster); with line markers, pp_print_place_lines counts the lines up to each line start by reading
+// prefetches 2-5% faster); with line markers, pp_print_place_lines counts the lines up to each line start by reading
 // those bytes, and the prefetches cost 2-3%. Then, into all 64 lanes of `firsts` and `lasts` (64-byte aligned), a character
 // of the class of each token's first and last: by its kind (pp_print_kind_firsts, pp_print_kind_lasts), and the bytes
 // themselves of the kinds the table doesn't fix, of a bracket or a brace longer than one byte (a digraph) and, where

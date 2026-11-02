@@ -2441,7 +2441,12 @@ printed the same bytes, but 5–7% slower than the printer above (39.6–40.2
 against 37.5–37.8 ms on `main.c`, 3.40–3.62 against 3.18–3.42 ms on
 `sqlite3.c`, in one process, two processes), though it took only the 22% and
 14% of their chunks that qualify: marking a chunk's ends costs more than the
-copies it saves.
+copies it saves. On the 9700X the copies are now a masked load and store and a
+lookup a token (14 instructions with the loop's), about what marking a token's
+two ends costs, and compaction would add a load, a prefix XOR and a
+`vpcompressb` for each 64 bytes of the source, comments and blank lines
+included, which the copies never read. It stays unbuilt (#649's third
+direction).
 
 The 9700X job times the printer with `pp_print_spellings` against its general
 loop for every chunk (`benchmark-preprocessor --spelling-cost`), on `main.c`
@@ -2489,6 +2494,46 @@ and 23% off it, against 54% and 56%: the line markers' copies, which went a
 token at a time, were what was left of `-E`'s printing, which the line markers'
 batches took: at this head printing is 27% of `main.c`'s whole run and 25% of
 `sqlite3.c`'s (27.07 and 3.51 ms of 100.7 and 13.9).
+
+**Classes by kind and leaner copies (#649).** On the 9700X at `3ce71ec3`,
+`-P`'s printing of `main.c` took 53.2 instructions and 14.3 cycles an output
+token, 3.7 a cycle, and with line markers 80.4 and 22.2 (a harness printing
+one run 88 times, to `/dev/null`): the printer is bound by its instructions.
+In a cycles profile of `-P`, step 1's loop reading each token's first and last
+bytes took 57% of `pp_print_spellings`' samples, and step 2's load of the 64
+bytes those 128 byte stores had written, which store-to-load forwarding can't
+serve, 21% of the rest of printing's; the copies took 17 instructions a token,
+writing each gap a byte at a time. Taking the classes from the kinds alone cut
+the instructions to 47.4 a token, and with line markers printed 3% (`main.c`)
+and 5% (`sqlite3.c`) faster; but with `-P` 9% and 13% slower, at 3.15
+instructions a cycle: those byte loads had been the first to read the source,
+and now the copies were, and waited for it. Prefetching the spellings of the
+tokens that aren't identifiers gave that back with `-P` (prefetching the
+identifiers' interned spellings instead made it slower, and prefetching each
+range's span of source a line at a time gained 1% and cost line markers 9%),
+and cost 2–3% with line markers, whose line counts read those bytes first; so
+only `-P` prefetches. The leaner copies and batches that end at a spelling past 64 bytes
+came last.
+
+On the 9700X (`benchmark-preprocessor --only vectorized`, `taskset -c 2`,
+seven rounds of interleaved processes in one lock hold each, the medians of
+each run's 21 passes and of the runs; `main.c` frozen at `3ce71ec3`, the
+pinned `sqlite3.c`), this change against `3ce71ec3`:
+
+| | `main.c` printing | `main.c` whole run | `sqlite3.c` printing | `sqlite3.c` whole run |
+| --- | --- | --- | --- | --- |
+| `-E -P` | 17.94 against 18.36 ms | 103.1 against 103.9 ms | 1.685 against 1.776 ms | 12.27 against 12.58 ms |
+| `-E` (line markers) | 24.81 against 27.70 ms | 97.6 against 102.2 ms | 3.294 against 3.509 ms | 13.60 against 14.05 ms |
+
+With line markers, as ccache's preprocessor mode and `-save-temps` run, printing
+is 10.4% and 6.1% faster and the whole run 4.5% and 3.2%; with `-P` 2.3% and
+5.1%, and 0.8% and 2.5%. In the harness above, `-P` now takes 44.2
+instructions and 13.9 cycles a token and line markers 60.6 and 19.3, 17% and
+25% fewer instructions at 3.2 and 3.1 a cycle: what limits the printer now is
+as much the source bytes it waits for as its instructions. Unrolling the
+copies' loop by two printed `main.c` with `-P` 1% faster and the rest within
+noise, and in the harness retired 5% fewer instructions in 1% more cycles; it
+was left out.
 
 `test-preprocessor` checks every 0–64-token prefix size with guarded input,
 gap and output tails, arbitrary inactive gap bits, gaps of a byte and of counts
