@@ -118,19 +118,6 @@ static bool check_input_musttail_record(CheckInputReader* reader, CheckInputMust
     return valid;
 }
 
-// Whether attributes from `first` to `after` name clang's musttail, by their names alone, without reading them: the one
-// attribute a statement other than a null one or a return has here (check_input_statement_attributes).
-static bool check_input_names_musttail(CheckInputReader* reader, uint32_t first, uint32_t after)
-{
-    const Parser* parser = reader->parser;
-    bool found = false;
-    for (uint32_t token = first; !found && token < after; token += 1)
-    {
-        found = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && check_input_attribute_equal(check_input_attribute_name(reader, parser->tokens.names[token]), "musttail");
-    }
-    return found;
-}
-
 // Whether the token after a block item's attributes starts a declaration, as the parser read it: a specifier's keyword,
 // or a typedef's name (the parser's specifier role), rather than a statement's.
 static bool check_input_declaration_after(const Parser* parser, uint32_t token)
@@ -142,14 +129,128 @@ static bool check_input_declaration_after(const Parser* parser, uint32_t token)
            (kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
 }
 
-// A block item's attributes before a statement rather than a declaration, read as the statement's, which check_input's
-// walk then takes no declaration for (their tokens ignored):
-//   - a null statement's: fallthrough's, which its consumer checks, and musttail's, clang's error;
-//   - a return's: musttail's alone (#147), recorded for c_check_musttail.c and check_program, the return's other
-//     attributes refused (clang's error, that they don't apply to a statement);
-//   - another statement's with musttail among them: clang's error.
-// GNU attributes right after a named label are the label's, as clang reads them, which their reading as a
-// declaration's (check_input_declaration) refuses musttail on; C23's there are the statement's.
+// GNU attributes right after a named label's colon (#147): the label's, as clang's parser takes every GNU attribute there
+// in C, whatever follows it (a null statement, another statement, a declaration, C23's attributes, which are the next
+// item's). Each is read as a declaration's are; clang's error is reported for the first that clang refuses on a label
+// (check_input_label_refusal; musttail's by its reading, check_input_attribute_musttail), and clang takes the others,
+// which mean nothing for a label here. Their tokens are then the label's, which no declaration or statement reads again.
+static void check_input_label_attributes(CheckInputReader* reader, uint32_t first)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t after = first;
+    while (after + 1 < count && parser->tokens.kinds[after] == PARSE_KIND_ATTRIBUTE && parser->tree.roles[after + 1] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER)
+    {
+        const uint32_t close = parser->tree.parents[after + 1];
+        after = close > after + 1 && close < count ? close + 1 : count;
+    }
+    uint32_t cursor = first;
+    CheckInputAttributes* attributes = 0;
+    bool valid = after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
+    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        valid = attribute->keyword || check_input_label_refusal(check_input_attribute_name(reader, attribute->name)) == NULL;
+        if (!valid)
+        {
+            check_input_report(reader, attribute->name_token, CHECK_INPUT_LABEL_ATTRIBUTE);
+        }
+    }
+    for (uint32_t token = first; token < after; token += 1)
+    {
+        reader->ignored[token] = true;
+    }
+}
+
+// The GNU spellings clang 23's parser takes as statement attributes (c_parser.c's parse_scalar_statement_attribute): a
+// block item whose GNU attributes are all of them, before an expression, is a statement, as the parser reads it.
+static bool check_input_statement_attribute_name(String8 name)
+{
+    static const char* const names[] = {
+        "always_inline", "atomic", "assume", "code_align", "fallthrough", "musttail", "noinline", "nomerge", "no_outline", "opencl_unroll_hint", "suppress",
+    };
+    bool result = false;
+    for (uint32_t i = 0; !result && i < sizeof(names) / sizeof(names[0]); i += 1)
+    {
+        result = check_input_attribute_equal(name, names[i]);
+    }
+    return result;
+}
+
+// Whether the attributes from `first` to `after` are GNU ones of clang's statement attributes alone, by their names: each
+// item of a list starts right after its opener or after a comma among its items.
+static bool check_input_statement_attribute_names(CheckInputReader* reader, uint32_t first, uint32_t after)
+{
+    const Parser* parser = reader->parser;
+    bool result = true;
+    uint32_t items = BUSTER_CHECK_NONE;
+    for (uint32_t token = first; result && token < after; token += 1)
+    {
+        const uint8_t role = parser->tree.roles[token];
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool item = token > first && (parser->tree.roles[token - 1] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ||
+                                            (parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA && parser->tree.depths[token - 1] == items));
+        items = role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ? parser->tree.depths[token] + 1 : items;
+        result = kind != PARSE_KIND_L_SQUARE && kind != PARSE_KIND_ALIGNAS && kind != PARSE_KIND_ASM;
+        if (result && item && kind != PARSE_KIND_COMMA && role != PARSE_ROLE_CLOSE_ATTRIBUTE_LIST)
+        {
+            result = parser->tokens.names[token] != 0 && check_input_statement_attribute_name(check_input_attribute_name(reader, parser->tokens.names[token]));
+        }
+    }
+    return result;
+}
+
+// A statement's attributes, as clang's Sema takes them, after their reading (check_input_read_attributes) took each: a null
+// statement's fallthrough (`empty`), and a return's musttail (`returns`) are the statement's; GNU's noinline and
+// always_inline clang ignores on a statement (with a warning, which isn't modeled); musttail elsewhere, fallthrough on a
+// statement that isn't empty, and every other attribute are clang's errors, the first one's reported. The musttail's
+// first token, or BUSTER_CHECK_NONE, in `*musttail`. Whether they are valid.
+static bool check_input_statement_attribute_kinds(CheckInputReader* reader, CheckInputAttributes* attributes, bool empty, bool returns, uint32_t* musttail)
+{
+    bool valid = true;
+    *musttail = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    {
+        CheckInputAttribute* attribute = attributes->records + i;
+        const CheckInputAttributeKind kind = attribute->kind;
+        if (kind == CHECK_ATTRIBUTE_MUSTTAIL)
+        {
+            *musttail = *musttail == BUSTER_CHECK_NONE ? attribute->first : *musttail;
+            valid = returns;
+            if (!valid)
+            {
+                check_input_report(reader, attribute->first, CHECK_INPUT_MUSTTAIL_STATEMENT);
+            }
+        }
+        else if (kind == CHECK_ATTRIBUTE_FALLTHROUGH)
+        {
+            valid = empty;
+            if (!valid)
+            {
+                check_input_report(reader, attribute->name_token, CHECK_INPUT_FALLTHROUGH_STATEMENT);
+            }
+        }
+        else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->standard && !attribute->keyword)
+        {
+            attribute->ignored = true;
+        }
+        else
+        {
+            valid = false;
+            check_input_report(reader, attribute->name_token, CHECK_INPUT_STATEMENT_ATTRIBUTE);
+        }
+    }
+    return valid;
+}
+
+// A block item's attributes before a statement rather than a declaration, read as the statement's (their tokens then
+// ignored, so that check_input's walk takes no declaration for them), with clang's rules
+// (check_input_statement_attribute_kinds): before a null statement, a statement's keyword or brace, or an expression when
+// they are GNU ones of clang's statement attributes alone, which the parser then reads as a statement's
+// (check_input_statement_attribute_names). A null statement's are recorded at its `;` for fallthrough's consumer, and a
+// return's musttail for c_check_musttail.c and check_program. GNU attributes right after a named label are the label's
+// (check_input_label_attributes); C23's there are the statement's. Outside a function a null statement's attributes are
+// refused as a declaration's.
 static void check_input_statement_attributes(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -157,73 +258,46 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     const uint32_t after = check_input_skip_attributes(parser, first, count);
     const uint8_t next = after < count ? parser->tokens.kinds[after] : PARSE_KIND_SEMI;
     const bool label = first != 0 && parser->tree.roles[first - 1] == PARSE_ROLE_LABEL && parser->tokens.kinds[first] == PARSE_KIND_ATTRIBUTE;
-    const bool returns = after < count && next == PARSE_KIND_RETURN && !label;
-    const bool named = after < count && !returns && !label && check_input_names_musttail(reader, first, after);
-    const bool other = named && next != PARSE_KIND_SEMI && !check_input_declaration_after(parser, after);
-    if (after < count && next == PARSE_KIND_SEMI)
+    const bool body = reader->function_body < count;
+    const bool returns = after < count && next == PARSE_KIND_RETURN;
+    const bool keyword = after < count && (returns || next == PARSE_KIND_IF || next == PARSE_KIND_SWITCH || next == PARSE_KIND_WHILE || next == PARSE_KIND_DO ||
+                                           next == PARSE_KIND_FOR || next == PARSE_KIND_GOTO || next == PARSE_KIND_CONTINUE || next == PARSE_KIND_BREAK ||
+                                           next == PARSE_KIND_CASE || next == PARSE_KIND_DEFAULT || next == PARSE_KIND_L_BRACE);
+    const bool empty = after < count && next == PARSE_KIND_SEMI;
+    const bool expression = after < count && !empty && !keyword && !check_input_declaration_after(parser, after) &&
+                            check_input_statement_attribute_names(reader, first, after);
+    if (label)
     {
-        uint32_t cursor = first;
-        CheckInputAttributes* attributes = 0;
-        reader->statement_attributes = true;
-        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after && attributes != 0 &&
-                     reader->function_body < count;
-        reader->statement_attributes = false;
-        uint32_t musttail = BUSTER_CHECK_NONE;
-        for (uint32_t i = 0; valid && i < attributes->count; i += 1)
-        {
-            musttail = attributes->records[i].kind == CHECK_ATTRIBUTE_MUSTTAIL ? attributes->records[i].first : BUSTER_CHECK_NONE;
-            valid = attributes->records[i].kind == CHECK_ATTRIBUTE_FALLTHROUGH;
-        }
-        if (valid)
-        {
-            reader->output->attributes[after] = attributes->count != 0 ? attributes : 0;
-        }
-        else if (named)
-        {
-            // musttail's, which no declaration then reads again: clang's error at it, unless its reading reported one.
-            if (musttail != BUSTER_CHECK_NONE)
-            {
-                check_input_report(reader, musttail, CHECK_INPUT_MUSTTAIL_STATEMENT);
-            }
-            for (uint32_t token = first; token < after; token += 1)
-            {
-                reader->ignored[token] = true;
-            }
-        }
-        else
-        {
-            check_input_report(reader, first, CHECK_INPUT_DECLARATION);
-        }
+        check_input_label_attributes(reader, first);
     }
-    else if (returns || other)
+    else if (empty && !body)
+    {
+        check_input_report(reader, first, CHECK_INPUT_DECLARATION);
+    }
+    else if (body && (empty || keyword || expression))
     {
         uint32_t cursor = first;
         CheckInputAttributes* attributes = 0;
         reader->statement_attributes = true;
-        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after && attributes != 0 &&
-                     reader->function_body < count;
+        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
         reader->statement_attributes = false;
         uint32_t musttail = BUSTER_CHECK_NONE;
-        for (uint32_t i = 0; valid && i < attributes->count; i += 1)
+        valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, &musttail);
+        bool fallthrough = false;
+        for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
         {
-            const CheckInputAttribute* attribute = attributes->records + i;
-            musttail = musttail == BUSTER_CHECK_NONE && attribute->kind == CHECK_ATTRIBUTE_MUSTTAIL ? attribute->first : musttail;
-            valid = attribute->kind == CHECK_ATTRIBUTE_MUSTTAIL;
-            if (!valid)
-            {
-                check_input_report(reader, attribute->first, CHECK_INPUT_UNSUPPORTED);
-            }
+            fallthrough |= attributes->records[i].kind == CHECK_ATTRIBUTE_FALLTHROUGH;
         }
-        if (valid && returns)
+        if (valid && empty && fallthrough)
+        {
+            reader->output->attributes[after] = attributes;
+        }
+        if (valid && returns && musttail != BUSTER_CHECK_NONE)
         {
             const CheckInputMusttail record = { .statement = after, .attributes = first, .name = musttail, .body = reader->function_body };
             valid = check_input_musttail_record(reader, record);
             // Its function's own type and its scopes' cleanups, which the check reads, are source order's.
             check_input_lane_refuse(reader, reader->lane, "a body has a musttail return");
-        }
-        else if (valid)
-        {
-            check_input_report(reader, musttail, CHECK_INPUT_MUSTTAIL_STATEMENT);
         }
         for (uint32_t token = first; token < after; token += 1)
         {
@@ -772,9 +846,17 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                     enclosed = parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_CONDITION && keyword < count &&
                                parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
                 }
+                // clang's error at the fallthrough's name (check_input_statement_attributes records a null statement's
+                // attributes for it alone).
+                const CheckInputAttributes* attributes = reader->output->attributes[token];
+                uint32_t at = token;
+                for (uint32_t i = attributes->count; i-- > 0;)
+                {
+                    at = attributes->records[i].kind == CHECK_ATTRIBUTE_FALLTHROUGH ? attributes->records[i].name_token : at;
+                }
                 if (!enclosed)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                    check_input_report(reader, at, CHECK_INPUT_FALLTHROUGH_SWITCH);
                 }
             }
         }

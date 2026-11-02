@@ -110,6 +110,10 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
         case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
+        case CHECK_INPUT_LABEL_ATTRIBUTE: result = "attribute cannot be applied to a label"; break;
+        case CHECK_INPUT_STATEMENT_ATTRIBUTE: result = "attribute cannot be applied to a statement"; break;
+        case CHECK_INPUT_FALLTHROUGH_STATEMENT: result = "'fallthrough' attribute only applies to empty statements"; break;
+        case CHECK_INPUT_FALLTHROUGH_SWITCH: result = "fallthrough annotation is outside switch statement"; break;
     }
     return result;
 }
@@ -1024,6 +1028,31 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' attribute %s", spelling,
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
+                        }
+                        else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT) && named)
+                        {
+                            // An attribute on a label or a statement that clang refuses there (#147), spelled as written
+                            // (a scope's `gnu::` too) and worded as clang's: a label's subjects by its name without a GNU
+                            // keyword's underscores (check_input_label_refusal).
+                            // `::` is one token in C23 and two colons before it.
+                            const bool scoped = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
+                            const uint32_t at = !scoped ? token : parser->tokens.kinds[token + 2] == PARSE_KIND_COLON && token + 3 < count ? token + 3 : token + 2;
+                            const uint32_t scope = scoped ? parser->tokens.names[token] : 0;
+                            const uint32_t name = parser->tokens.names[at];
+                            const InternSpan span = pp->table->spans[name];
+                            String8 bare = { (char*)pp->table->records + span.offset, span.length };
+                            if (bare.length >= 4 && bare.pointer[0] == '_' && bare.pointer[1] == '_' && bare.pointer[bare.length - 1] == '_' && bare.pointer[bare.length - 2] == '_')
+                            {
+                                bare.pointer += 2;
+                                bare.length -= 4;
+                            }
+                            const char* refusal = kind == CHECK_INPUT_LABEL_ATTRIBUTE ? check_input_label_refusal(bare) : NULL;
+                            const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
+                                                 kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
+                                                 refusal != NULL ? refusal : "cannot be applied to a label";
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", scope != 0 ? (int)intern_length(pp->table, scope) : 0,
+                                                 scope != 0 ? (const char*)intern_bytes(pp->table, scope) : "", scope != 0 ? "::" : "", (int)intern_length(pp->table, name),
+                                                 (const char*)intern_bytes(pp->table, name), ending);
                         }
                         else if (kind == CHECK_INPUT_UNDECLARED && named)
                         {

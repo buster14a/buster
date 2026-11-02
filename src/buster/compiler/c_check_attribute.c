@@ -872,6 +872,50 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
     return valid;
 }
 
+// The GNU attributes clang 23's Sema refuses on a label (#147), each with the end of its message, "'name' attribute ...":
+// those whose subjects clang lists without a label among them, and fallthrough, which can't be applied to a declaration.
+// clang takes the others there: unused, the ones it ignores without a word (aligned, deprecated, vector_size and the
+// like), and those it ignores with a warning that they apply to other subjects (hot, cold, noreturn and the like), which
+// the checker doesn't model. musttail's error is its own (check_input_attribute_musttail).
+typedef struct CheckInputLabelRefusal CheckInputLabelRefusal;
+struct CheckInputLabelRefusal
+{
+    const char* name;
+    const char* message;
+};
+
+static const CheckInputLabelRefusal check_input_label_refusals[] = {
+    { "alias", "only applies to functions and global variables" },
+    { "error", "only applies to functions" },
+    { "fallthrough", "cannot be applied to a declaration" },
+    { "flatten", "only applies to functions" },
+    { "min_vector_width", "only applies to functions" },
+    { "mode", "only applies to variables, enums, typedefs, and non-static data members" },
+    { "no_address_safety_analysis", "only applies to functions and global variables" },
+    { "no_sanitize", "only applies to functions, Objective-C methods, and global variables" },
+    { "no_sanitize_address", "only applies to functions and global variables" },
+    { "no_sanitize_thread", "only applies to functions" },
+    { "overloadable", "only applies to functions" },
+    { "section", "only applies to functions, global variables, Objective-C methods, and Objective-C properties" },
+    { "target", "only applies to functions" },
+    { "target_clones", "only applies to functions" },
+    { "tls_model", "only applies to thread-local variables" },
+    { "warning", "only applies to functions" },
+    { "weakref", "only applies to variables and functions" },
+};
+
+// The end of clang's error for attribute `name` (its spelling without a GNU keyword's underscores) on a label, or null for
+// an attribute clang takes there.
+static const char* check_input_label_refusal(String8 name)
+{
+    const char* result = NULL;
+    for (uint32_t i = 0; result == NULL && i < sizeof(check_input_label_refusals) / sizeof(check_input_label_refusals[0]); i += 1)
+    {
+        result = check_input_attribute_equal(name, check_input_label_refusals[i].name) ? check_input_label_refusals[i].message : NULL;
+    }
+    return result;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;

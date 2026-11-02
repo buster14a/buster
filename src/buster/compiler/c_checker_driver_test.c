@@ -4545,6 +4545,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
 #include "c_check_musttail_driver_test.c"
+#include "c_check_label_attribute_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -5924,6 +5925,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_musttail_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_label_attributes(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

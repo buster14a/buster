@@ -16,7 +16,7 @@ Issue #147 stays open until the rows that say so are done.
 | Construct | Implemented here or already available | Remaining source integration |
 | --- | --- | --- |
 | GNU attribute lists | Generic names and argument trees; structured bounded records, including unknown names and empty lists | Attribute-specific argument checking and application to declarations/types |
-| Statement and label attributes | Clang's grammar at block boundaries, after control heads and after labels; clang's `musttail` on a return checked by clang 23's rules and lowered to a tail call ([the checker guide](c-checker.md)'s "Tail calls (#147)") | The other statement attributes' applicability, warnings and effects; a label's attributes |
+| Statement and label attributes | Clang's grammar at block boundaries, after control heads and after labels; clang's `musttail` on a return checked by clang 23's rules and lowered to a tail call ([the checker guide](c-checker.md)'s "Tail calls (#147)"); a statement's attributes as clang's Sema takes them: fallthrough on a null statement in a switch, GNU's `noinline` and `always_inline` ignored, and clang's errors for the others, worded and placed as clang's (`check_input_statement_attributes`); GNU attributes after a label's colon the label's, whatever follows, with clang's errors for those whose subjects have no label (`section`, `alias`, `weakref`, `fallthrough` and the rest: `check_input_label_attributes`) | clang's warnings for the attributes it ignores (`-Wignored-attributes`), which the checker doesn't give for any declaration's either |
 | Asm labels | Separate records for declarator labels, retaining adjacent string tokens and source identity | Literal decoding, redeclaration consistency and actual linker-symbol renaming |
 | `mode` | `type_machine_mode` transforms supported target types with Clang-checked results | Attribute argument resolution and declaration elaboration |
 | `packed`, `aligned`, `vector_size` | Existing type/layout actions and scalar/vector layout | Applying parsed attributes to those actions |
@@ -35,7 +35,7 @@ Issue #147 stays open until the rows that say so are done.
 | `retain` | An emitted definition keeps its section with `SHF_GNU_RETAIN`: its named section's, or one of its own, `.data.name` and the like as LLVM names it (#716's section descriptors); retain alone emits nothing, as clang 23 emits no unreferenced static with it; `__has_attribute` answers 1 ([the checker guide](c-checker.md)'s "GNU's `retain` attribute") | None |
 | `common` | Parsed and retained | Refused by name at emission: its symbols are `SHN_COMMON`'s, which neither the link representation nor the object writer has |
 | `section` | Parsed and retained | Custom named-section representation and source emission |
-| Inline assembly statements | Existing parser grammar, kept distinct from asm labels; the checker's operands; constraints, operand substitution, clobbers and assembly into per-unit helpers ([the inline assembly guide](c-inline-assembly.md)) | `asm goto`, naked functions, and templates that refer to symbols |
+| Inline assembly statements | Existing parser grammar, kept distinct from asm labels; the checker's operands; constraints, operand substitution, clobbers and assembly into per-unit helpers, flag outputs and `asm goto` among them, naked functions, and templates that refer to symbols ([the inline assembly guide](c-inline-assembly.md)) | The guide's "Pending" list |
 
 The in-progress checker in #133 and declaration processing in #129 must own
 their semantic decisions. This change neither duplicates those implementations
@@ -44,7 +44,7 @@ nor advertises support through `__has_attribute` based on syntax acceptance.
 ## Parser corrections
 
 A GNU attribute after a named label does not require a null statement before
-the label's statement:
+the label's statement, and is the label's in C, as clang's parser takes it:
 
 ```c
 void f(void)

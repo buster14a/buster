@@ -97,6 +97,14 @@ typedef enum CheckInputMessage
     CHECK_INPUT_MUSTTAIL_ARGUMENTS,
     CHECK_INPUT_MUSTTAIL_DECLARATION,
     CHECK_INPUT_MUSTTAIL_STATEMENT,
+    // A GNU attribute on a label that clang refuses there (check_input_label_refusal), at its name (#147).
+    CHECK_INPUT_LABEL_ATTRIBUTE,
+    // A statement's attribute that clang refuses on a statement, and fallthrough on one that isn't empty, at its name
+    // (#147, check_input_statement_attribute_kinds).
+    CHECK_INPUT_STATEMENT_ATTRIBUTE,
+    CHECK_INPUT_FALLTHROUGH_STATEMENT,
+    // A fallthrough null statement outside a switch, at the attribute's name.
+    CHECK_INPUT_FALLTHROUGH_SWITCH,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -161,6 +169,10 @@ static const char* const check_input_messages[] =
     "'musttail' attribute takes no arguments",
     "'musttail' attribute cannot be applied to a declaration",
     "'musttail' attribute only applies to return statements",
+    "attribute cannot be applied to a label",
+    "attribute cannot be applied to a statement",
+    "'fallthrough' attribute only applies to empty statements",
+    "fallthrough annotation is outside switch statement",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
