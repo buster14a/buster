@@ -41,7 +41,7 @@ new_repository()
 signed()
 {
     git log -1 --format=%B > actual-message
-    [ "$(grep -Fxc "$trailer" actual-message || :)" ] = 1 || fail 'expected exactly one maintainer trailer'
+    [ "$(grep -Fxc "$trailer" actual-message || :)" = 1 ] || fail 'expected exactly one maintainer trailer'
     [ "$(sed '/^$/d' actual-message | tail -n 1)" = "$trailer" ] || fail 'maintainer trailer must be last'
     [ "$(git log -1 --format=%ae)" = agent@example.invalid ] || fail 'author identity changed'
 }
