@@ -63,14 +63,28 @@ capacity; `committed` is an offset from its original mapping address. A zero
 `mapping_bytes` denotes borrowed writable memory, including the measuring
 arena. Such views do not change protections or unmap their owner's storage.
 
-A pooled arena is reprotected inaccessible and discarded with `MADV_DONTNEED`;
-reuse starts with zero length/peak and a zero-filled prefix on its first push.
-A failed reprotection/discard unmaps the arena instead. Tests that deliberately
+A pooled arena (`arena_pool`, which only the C driver's units lanes set) is
+discarded with `MADV_DONTNEED`, and its committed prefix stays writable for the
+next reservation that takes it (#1128): every `mprotect` takes the address
+space's lock for writing, which the other lanes' reservations, commits and
+page faults then wait for, while the discard takes it only for reading. Where
+commit charge is bounded, under strict overcommit (`vm.overcommit_memory` 2)
+or a finite `RLIMIT_DATA`, release reprotects the prefix inaccessible first,
+returning its charge. The pool reads both once, with the `RLIMIT_AS` share its
+thread's reservations admit (`arena_pool_limits`), and again after
+`arena_pool_release`. A reservation takes the pooled arena with the smallest
+mapping that holds its capacity with the same base pages and page layout (huge
+pages past `small`, or none; `Arena.reserved` is what the mapping was laid out
+for), and gets the capacity it asked for, as from a fresh mapping. Reuse starts
+with zero length and peak and zero-filled pages. A failed reprotection or
+discard unmaps the arena instead. Tests that deliberately
 poison unused logical capacity explicitly commit that test memory first; a raw
 `base` pointer no longer authorizes touching an owned reservation.
 
 `tests/arena/resources.c` checks inaccessible tails, growth and stable pointers,
-zero-filled pool reuse, borrowed/measuring arenas, overflow rollback, a real
+zero-filled pool reuse (its prefix writable, and inaccessible again in a child
+under a finite `RLIMIT_DATA`), the pool's choice of mapping by layout and room,
+borrowed/measuring arenas, overflow rollback, a real
 `mprotect` refusal injected with a child-only seccomp filter, and 32 simultaneous
 large logical requests under a 2 GiB address-space limit. Another isolated child
 refuses large inaccessible mappings with `EINVAL`, exercising the compact retry

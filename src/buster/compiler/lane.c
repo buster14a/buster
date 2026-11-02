@@ -137,6 +137,9 @@ struct Arena
     bool unaccounted;
     // The requested ceiling can exceed capacity after a constrained-address-space reservation.
     uint64_t requested_capacity;
+    // The capacity its mapping was laid out for, at least capacity: its pages past `small` are huge only if this is past
+    // it, and a reservation from the pool takes the arena for any capacity up to it (arena_reserve_policy).
+    uint64_t reserved;
 };
 
 // Reserves up to `capacity` bytes (less under address-space constraints), initially inaccessible. Pushes make their
@@ -164,15 +167,23 @@ _Thread_local uint64_t arena_small_floor;
 static _Thread_local uint64_t arena_small_floor;
 #endif
 // The arenas a thread keeps, emptied, for its next reservations (#152). Reusing a mapping avoids repeating its
-// allocation, alignment and page advice. Release reprotects the committed prefix before MADV_DONTNEED, returning
-// commit charge as well as physical pages; reuse starts inaccessible and zero-filled. These protection changes
-// still take the VM write lock, unlike discard alone. A full pool evicts its oldest arena; reserve takes the latest
-// arena matching the requested capacity and base-page extent.
+// allocation, alignment and page advice, and keeping its committed prefix writable avoids repeating its commits (#1128):
+// each of those calls takes the address space's lock for writing, which the other lanes' reservations, commits and
+// faults wait for. Release frees the pages with MADV_DONTNEED, which takes the lock only for reading, so that reuse finds
+// them zero. Where commit charge is bounded (arena_commit_unbounded), release reprotects the prefix first, returning its
+// charge, and reuse starts inaccessible. A reservation takes the arena of the smallest mapping that holds its capacity
+// with the same base pages and page layout, the latest released of those; a full pool evicts its oldest arena.
 #define BUSTER_ARENA_POOL_SLOTS 256
 typedef struct ArenaPool ArenaPool;
 struct ArenaPool
 {
     uint32_t count;
+    // Read at the pool's first reservation or release, and again after arena_pool_release (arena_pool_limits): the
+    // RLIMIT_AS share each reservation admits (arena_reservation_limit), and whether its arenas keep their committed
+    // prefixes writable.
+    bool limits;
+    bool keeps_commits;
+    uint64_t address_share;
     // The releases so far, and the one that put each arena here.
     uint64_t clock;
     uint64_t released[BUSTER_ARENA_POOL_SLOTS];
@@ -256,15 +267,63 @@ static _Thread_local bool arena_compact;
 static _Thread_local ArenaFailure arena_failure;
 #endif
 
-static uint64_t arena_reservation_limit(void)
+// The share of a finite RLIMIT_AS that one arena admits, or BUSTER_ARENA_MAX_CAPACITY.
+static uint64_t arena_address_share(void)
 {
     struct rlimit limit;
-    uint64_t result = arena_compact ? BUSTER_ARENA_COMPACT_BYTES : BUSTER_ARENA_MAX_CAPACITY;
+    uint64_t result = BUSTER_ARENA_MAX_CAPACITY;
     if (getrlimit(RLIMIT_AS, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
     {
         const uint64_t share = (uint64_t)limit.rlim_cur / BUSTER_ARENA_LIMIT_SHARE;
         result = share < result ? share : result;
     }
+    return result;
+}
+
+// Whether the writable pages a pooled arena keeps take nothing another reservation may need: the kernel charges a
+// private mapping's writable pages against a limit only under strict overcommit (vm.overcommit_memory 2) or a finite
+// RLIMIT_DATA. False if the mode can't be read.
+static bool arena_commit_unbounded(void)
+{
+    struct rlimit data;
+    char mode = 0;
+    bool result = getrlimit(RLIMIT_DATA, &data) == 0 && data.rlim_cur == RLIM_INFINITY;
+    const int file = result ? open("/proc/sys/vm/overcommit_memory", O_RDONLY | O_CLOEXEC) : -1;
+    result = file >= 0 && read(file, &mode, 1) == 1 && mode != '2';
+    if (file >= 0)
+    {
+        close(file);
+    }
+    return result;
+}
+
+// What the pool's thread reads once rather than at each of its units' reservations and releases (about 66 a unit of
+// Lua's, #1128): only a setrlimit, or a change of the kernel's policy, changes them while the pool's owner runs.
+static void arena_pool_limits(ArenaPool* pool)
+{
+    if (!pool->limits)
+    {
+        pool->address_share = arena_address_share();
+        pool->keeps_commits = arena_commit_unbounded();
+        pool->limits = true;
+    }
+}
+
+static uint64_t arena_reservation_limit(void)
+{
+    ArenaPool* pool = arena_pool;
+    uint64_t share = BUSTER_ARENA_MAX_CAPACITY;
+    if (pool != 0)
+    {
+        arena_pool_limits(pool);
+        share = pool->address_share;
+    }
+    else
+    {
+        share = arena_address_share();
+    }
+    uint64_t result = arena_compact ? BUSTER_ARENA_COMPACT_BYTES : BUSTER_ARENA_MAX_CAPACITY;
+    result = share < result ? share : result;
     return result & ~(BUSTER_ARENA_PAGE_BYTES - 1);
 }
 
@@ -287,15 +346,24 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
     small = arena_small_floor > small ? arena_small_floor : small;
     ArenaPool* pool = arena_pool;
     const uint32_t count = pool != 0 ? pool->count : 0;
+    // A pooled arena holds the reservation if it has the same base pages and page layout, huge pages past `small` or
+    // none, and room for the capacity: of those, the smallest, released last. Its capacity is then the reservation's, as
+    // a fresh arena's would be, whatever its mapping holds.
+    const bool huge = capacity > small;
     uint32_t slot = BUSTER_ARENA_POOL_SLOTS;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        const bool match = pool->arenas[i].capacity == capacity && pool->arenas[i].small == small;
-        slot = match && (slot == BUSTER_ARENA_POOL_SLOTS || pool->released[i] > pool->released[slot]) ? i : slot;
+        const Arena* pooled = pool->arenas + i;
+        const Arena* best = pool->arenas + (slot != BUSTER_ARENA_POOL_SLOTS ? slot : i);
+        const bool match = pooled->small == small && (pooled->reserved > small) == huge && pooled->reserved >= capacity;
+        const bool better = slot == BUSTER_ARENA_POOL_SLOTS || pooled->reserved < best->reserved ||
+                            (pooled->reserved == best->reserved && pool->released[i] > pool->released[slot]);
+        slot = match && better ? i : slot;
     }
-    if (requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY && slot != BUSTER_ARENA_POOL_SLOTS)
+    if (requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY && capacity != 0 && slot != BUSTER_ARENA_POOL_SLOTS)
     {
         result = pool->arenas[slot];
+        result.capacity = capacity;
         result.requested_capacity = requested;
         pool->count -= 1;
         pool->arenas[slot] = pool->arenas[pool->count];
@@ -340,6 +408,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
             result.mapping_bytes = mapping_bytes;
             result.committed = offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
             result.requested_capacity = requested;
+            result.reserved = capacity;
         }
         else
         {
@@ -395,8 +464,15 @@ static void arena_release(Arena* arena)
         uint8_t* mapping = arena->base - arena->mapping_offset;
         const uint64_t bytes = arena->mapping_bytes;
         const uint64_t begin = arena->mapping_offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        // What stays writable for the arena's next user: its committed prefix, or none where commit charge is bounded.
+        uint64_t committed = begin;
+        if (pool != 0)
+        {
+            arena_pool_limits(pool);
+            committed = pool->keeps_commits ? arena->committed : begin;
+        }
         const bool protected = pool != 0 && !arena->unaccounted &&
-                               (arena->committed == begin || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
+                               (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
         const bool pooled = protected && madvise(mapping, bytes, MADV_DONTNEED) == 0;
         if (pooled)
         {
@@ -424,8 +500,9 @@ static void arena_release(Arena* arena)
                 .mapping_offset = arena->mapping_offset,
                 .small = arena->small,
                 .mapping_bytes = bytes,
-                .committed = begin,
+                .committed = committed,
                 .requested_capacity = arena->requested_capacity,
+                .reserved = arena->reserved,
             };
         }
         else
@@ -443,6 +520,7 @@ static void arena_pool_release(ArenaPool* pool)
         munmap(pool->arenas[i].base - pool->arenas[i].mapping_offset, pool->arenas[i].mapping_bytes);
     }
     pool->count = 0;
+    pool->limits = false;
 }
 
 // Undoes a commit attempt that may have applied to a leading part of [committed, target) before refusing across a

@@ -290,11 +290,36 @@ So a units lane does four things:
 - **It pools the arenas its units release** (`arena_pool`, which only the
   units' lanes set): `arena_release` frees an arena's pages with
   `MADV_DONTNEED`, which takes the address space's lock for reading and leaves
-  the mapping and its advice in place, and keeps the arena; the next
-  reservation of its capacity and base pages takes it, its pages zero again as
-  in a fresh arena, so that nothing depends on what the units before left. A
-  full pool (256 arenas) unmaps the one released longest ago: some arenas'
-  capacities follow their unit's size, and no later reservation takes them.
+  the mapping, its advice and its writable prefix in place, and keeps the
+  arena; the next reservation that it holds takes it (the smallest pooled
+  mapping with room for its capacity, its base pages and its page layout),
+  with the capacity it asked for and its pages zero again as in a fresh
+  arena, so that nothing depends on what the units before left. A full pool
+  (256 arenas) unmaps the one released longest ago.
+
+  The writable prefix and the closest fit are #1128's. Since #802 an arena
+  commits its pages with `mprotect` as pushes reach them, and release made
+  them inaccessible again, so that each unit committed its arenas anew:
+  5,122 `mprotect` calls for Lua's link on one lane, each taking the lock for
+  writing, and 4 lanes no faster than 8. Pooling by exact capacity also
+  missed every arena whose capacity follows its unit's size (624 `mmap`
+  calls). Now Lua's link on one lane makes 195 `mprotect`, 149 `mmap` and
+  129 `munmap` calls, and on the 9700X (CPUs 0 to 7, the medians of 11 runs,
+  main interleaved, in two rounds) it takes 77.3 and 77.8 ms where main took
+  82.0 and 82.4 (1 lane), 47.5 and 47.9 against 52.4 and 52.8 (2), 35.3 and
+  35.2 against 41.4 and 41.3 (4), and 32.8 and 33.2 against 41.9 and 41.8 (8):
+  5.6, 9.3, 14.7 and 21% less. Its system time on 8 lanes went from 110 to
+  78 ms, and synth's link on 8 lanes took 514 ms where main took 627 (1,669
+  and 1,725 on one), with 875 ms of system time rather than 1,433. A command
+  of one file reserves without a pool, as before: `-c` of the frozen
+  `sqlite3.c` on CPU 2 ran 5,201 more instructions of 1,257 million, in the
+  same time. Under strict overcommit or a finite `RLIMIT_DATA` release still
+  makes the prefix inaccessible, returning its commit charge
+  ([the arenas' guide](arena-memory.md)). Clearing a pooled arena's pushed
+  bytes with `memset` on reuse, rather than discarding its pages, where they
+  were at most 1 MB, was slower on 2 to 8 lanes (10.4% rather than 14.7% less
+  on 4, with 6% more user cycles): the clears cost more than the faults and
+  the TLB flushes they saved.
   On the laptop (Zen 4), c-testsuite's programs five times over (1,100 units,
   `-c`) took 0.81 s on one lane and 0.65 s on 8 without the pool, and 0.51 s
   and 0.33 s with it; on 8 lanes, its `mmap` calls fell from 74,446 to 12,686
