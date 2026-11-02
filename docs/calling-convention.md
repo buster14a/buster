@@ -1622,6 +1622,16 @@ and doubles, vectors, `__float128`, `bool` and long double); against GCC, 107
 and 13 `_Float16`s, 116 and 15 `__bf16`s, 129 and 18 `_Complex _Float16`s, 302
 and 45 vectors of 4 bytes and 662 and 65 of 8.
 
+On the 9700X (2026-11-02, clang 23.1.1 and GCC 16.2.1), once the compiled
+worlds at 16 bytes took every vector (`AbiTestWorld.narrow_vectors`, with
+Tier 0's results split over several vector registers) and the producer took
+an `_Atomic` `<1 x i128>` result in rax and rdx, which stopped the compiled
+clang run at 64 bytes at seed 8, every run passes at seeds 1 to 12. The
+compiled runs make, against clang at 16 bytes, 4,800 signatures of 28,253
+arguments and 88,733 checks; against GCC at 16, 4,800 of 28,849 and 90,863;
+against clang at 64, 4,800 of 29,242 and 91,609; and against GCC at 64, 4,800
+of 28,388 and 89,309.
+
 With the defaults (seed 1), each run of random signatures has 400 of 2,100 to
 2,600 arguments, and the ten make about 55,000 checks, besides the two
 extension runs' 1,004 each; on the 9700X the six record runs took 4.8 s, about
