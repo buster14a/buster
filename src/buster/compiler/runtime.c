@@ -378,9 +378,10 @@ static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
 
 // The shared libraries a link names with -l, which it binds after the program and before the C runtime's libraries,
 // where GCC's driver puts them on the link line (bind.c). -l NAME is lib<NAME>.so, or else lib<NAME>.a, in the first of
-// the -L directories, then the library directories (runtime_library_directories), that has one, as GNU ld searches; an
-// archive found first is refused, since the direct path doesn't link one yet. A file that is a linker script (glibc's
-// libm.so, in libc.so's subset: import_script) stands for the shared libraries it names, each an absolute path. Each
+// the -L directories, then the selected GCC installation and the native prefix's lib64, then the system library
+// directories (runtime_library_directories), that has one. A nonempty archive found first is refused. A linker script
+// names shared libraries by absolute or relative path or -l; its already-imported libgcc.a is reused by file identity
+// (runtime_library_search.c). Other archives and nested scripts are refused. Each
 // library is imported as libc.so.6 is (import_library), with an index of the names it refers to, and its version
 // indices are moved past the runtime's and the libraries' before it, so that an index names one library's version, as
 // runtime_move_versions moves the loader's and libgcc_s.so.1's. A link needs a library only for a strong reference that
@@ -444,9 +445,9 @@ struct RuntimeLibraries
 // Imports the libraries that `name_count` -l names find, in their order, through `directory_count` -L directories, for
 // a link against `runtime`, into an arena of their own that runtime_libraries_release frees. On failure,
 // RUNTIME_ERROR_MISSING for a name no directory has, RUNTIME_ERROR_ARCHIVE for one found as an archive first,
-// RUNTIME_ERROR_IMPORT for a file that is neither a shared library nor a script the reader takes, or for a script that
-// names another script, an archive or a path that isn't absolute, RUNTIME_ERROR_FILE or RUNTIME_ERROR_MEMORY, with
-// `failed` saying where.
+// RUNTIME_ERROR_IMPORT for a file that is neither a shared library nor a script the reader takes, or for a nested
+// script; RUNTIME_ERROR_ARCHIVE for a script's archive other than the selected libgcc.a; RUNTIME_ERROR_FILE or
+// RUNTIME_ERROR_MEMORY, with `failed` saying where. A missing relative script input is RUNTIME_ERROR_MISSING.
 BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
                                                                     uint32_t name_count, const String8* directories, uint32_t directory_count);
 static __attribute__((unused)) void runtime_libraries_release(RuntimeLibraries* libraries);
@@ -2015,32 +2016,6 @@ static String8 runtime_libraries_read(RuntimeLibraries* libraries, const char* p
     return result;
 }
 
-// Finds -l `name` into `path`: lib<name>.so, or else lib<name>.a, in the first directory that has one, the -L ones in
-// order, then the library directories. Static output considers only archives, never a .so fallback. Whether one
-// was found, and in *archive whether it is the archive.
-static bool runtime_libraries_find(String8 name, const String8* directories, uint32_t directory_count, char* path, bool* archive, bool static_only)
-{
-    const uint32_t total = directory_count + (uint32_t)BUSTER_ARRAY_LENGTH(runtime_library_directories);
-    bool found = false;
-    *archive = false;
-    for (uint32_t d = 0; !found && d < total; d += 1)
-    {
-        const String8 directory = d < directory_count ? directories[d] : (String8){
-            .pointer = (char*)runtime_library_directories[d - directory_count],
-            .length = strlen(runtime_library_directories[d - directory_count]),
-        };
-        for (uint32_t kind = static_only ? 1 : 0; !found && kind < 2; kind += 1)
-        {
-            const int length = snprintf(path, BUSTER_RUNTIME_PATH_BYTES, "%.*s/lib%.*s%s", (int)directory.length, directory.pointer, (int)name.length,
-                                        name.pointer, kind == 0 ? ".so" : ".a");
-            struct stat status;
-            found = length > 0 && length < BUSTER_RUNTIME_PATH_BYTES && stat(path, &status) == 0 && S_ISREG(status.st_mode);
-            *archive = found && kind == 1;
-        }
-    }
-    return found;
-}
-
 // The largest version index of `library`'s definitions (0 for a library without versions).
 static uint16_t runtime_libraries_top(const ImportLibrary* library)
 {
@@ -2349,6 +2324,8 @@ static bool runtime_libraries_elf(String8 bytes)
     return bytes.length >= SELFMAG && memcmp(bytes.pointer, ELFMAG, SELFMAG) == 0;
 }
 
+#include "runtime_library_search.c"
+
 BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
                                              const String8* directories, uint32_t directory_count)
 {
@@ -2358,11 +2335,12 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
     // Past libc.so.6's, the loader's and libgcc_s.so.1's indices, which runtime_move_versions made apart.
     const ImportLibrary* const runtime_libraries[] = { &runtime->libc, &runtime->loader, &runtime->gcc_s };
     uint16_t base = runtime_versions_top(runtime_libraries, BUSTER_ARRAY_LENGTH(runtime_libraries));
+    const bool static_only = runtime->kind == RUNTIME_KIND_STATIC || runtime->kind == RUNTIME_KIND_STATIC_PIE;
     for (uint32_t n = 0; result == RUNTIME_ERROR_NONE && n < name_count; n += 1)
     {
         char path[BUSTER_RUNTIME_PATH_BYTES];
         bool archive = false;
-        if (!runtime_libraries_find(names[n], directories, directory_count, path, &archive, runtime->kind == RUNTIME_KIND_STATIC || runtime->kind == RUNTIME_KIND_STATIC_PIE))
+        if (!runtime_libraries_find(runtime, names[n], directories, directory_count, path, &archive, static_only))
         {
             result = RUNTIME_ERROR_MISSING;
             snprintf(libraries->failed, sizeof(libraries->failed), "-l%.*s", (int)names[n].length, names[n].pointer);
@@ -2387,35 +2365,7 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
         }
         else if (result == RUNTIME_ERROR_NONE)
         {
-            // A script's inputs, each an absolute path to a shared library (glibc's name them so).
-            ImportScript script = { 0 };
-            libraries->import = import_script(&script, bytes, &libraries->arena);
-            result = libraries->import.error == IMPORT_ERROR_NONE ? result : RUNTIME_ERROR_IMPORT;
-            if (result != RUNTIME_ERROR_NONE)
-            {
-                snprintf(libraries->failed, sizeof(libraries->failed), "%s", path);
-            }
-            for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < script.input_count; i += 1)
-            {
-                const ImportScriptInput* input = &script.inputs[i];
-                const uint64_t length = input->name.length;
-                char input_path[BUSTER_RUNTIME_PATH_BYTES];
-                snprintf(input_path, sizeof(input_path), "%.*s", (int)length, input->name.pointer);
-                const bool absolute = !input->library && length > 0 && length < sizeof(input_path) && input->name.pointer[0] == '/';
-                const bool input_archive = length > 2 && memcmp(input->name.pointer + length - 2, ".a", 2) == 0;
-                if (!absolute || input_archive)
-                {
-                    result = input_archive ? RUNTIME_ERROR_ARCHIVE : RUNTIME_ERROR_IMPORT;
-                    snprintf(libraries->failed, sizeof(libraries->failed), "%s, which %s names", input_path, path);
-                }
-                const String8 input_bytes = result == RUNTIME_ERROR_NONE ? runtime_libraries_read(libraries, input_path, &result) : (String8){ 0 };
-                if (result == RUNTIME_ERROR_NONE && !runtime_libraries_elf(input_bytes))
-                {
-                    result = RUNTIME_ERROR_IMPORT;
-                    snprintf(libraries->failed, sizeof(libraries->failed), "%s, a script that %s names", input_path, path);
-                }
-                result = result == RUNTIME_ERROR_NONE ? runtime_libraries_add(libraries, input_path, false, input_bytes, &base) : result;
-            }
+            result = runtime_libraries_script(libraries, runtime, path, bytes, directories, directory_count, static_only, &base);
         }
     }
     return result;
