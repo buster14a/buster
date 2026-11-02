@@ -47,8 +47,14 @@
 #define BUSTER_SSA_SOURCE_FORMS 3
 // A run's time limit by default, in seconds, and its interpreter's steps, which bound a run first: c-testsuite's 8
 // queens (00040.c), 0.05 s natively at -O0, takes 1.35 billion steps with every local in memory, 27 s on a Zen 4
-// laptop, and a sanitizer's build (CI's) is several times slower. And a generated program's text's room.
+// laptop. A detector's build is many times slower: MSan's, which tracks origins, took from 226 s to past 600 s for that
+// run on CI's hosted runners, whose speed varies, so a detector's build waits three times as long. And a generated
+// program's text's room.
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define BUSTER_SSA_SOURCE_TIMEOUT 1800
+#else
 #define BUSTER_SSA_SOURCE_TIMEOUT 600
+#endif
 #define BUSTER_SSA_SOURCE_STEPS (UINT64_C(1) << 32)
 #define BUSTER_SSA_SOURCE_TEXT (UINT64_C(1) << 20)
 

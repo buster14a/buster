@@ -283,6 +283,13 @@ static void dependency_test_fixtures(void)
     rule.include_system = true;
     dependency_test_invalid(rule);
     rule.file_count = 0;
+    rule.omit_source = true;
+    rule.source = (String8){ 0 };
+    dependency_test_rule(rule, "a.o:\n");
+    rule.files = files;
+    rule.file_count = 1;
+    dependency_test_rule(rule, "a.o: first.h\n\nfirst.h:\n");
+    rule.file_count = 0;
     uint64_t needed = 99;
     dependency_test_check(dependency_rule(NULL, NULL, 0, &needed) == DEPENDENCY_INVALID_INPUT && needed == 0, "null rule");
     dependency_test_check(dependency_rule(&rule, NULL, 1, &needed) == DEPENDENCY_INVALID_INPUT, "invalid query capacity");
