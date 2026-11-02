@@ -657,6 +657,132 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     }
 }
 
+// The coded walk's identifiers' leaves (check_input_expression_identifiers, #1038) by both paths: random chunks of up to
+// 200 acting tokens, an identifier's class among others, over random columns of up to 200 tokens and 40 types, which
+// both paths must turn into the same entries, the identifiers in their order. Every column ends at a PROT_NONE page, the
+// byte columns at every alignment of their ends, so a gather past a column's last dword faults: the vector path reads
+// each byte as the aligned dword that holds it.
+static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    enum
+    {
+        TYPES,
+        DECLARATIONS,
+        HEADS,
+        OBJECTS,
+        KINDS,
+        STATICS,
+        LOCALS,
+        REGISTERS,
+        FLAGS,
+        TYPE_KINDS,
+        TOKENS,
+        CLASSES,
+        COLUMNS,
+    };
+    uint8_t* mappings[COLUMNS];
+    bool ready = true;
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        mappings[i] = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "guarded identifier columns' allocation");
+    const uint32_t identifier = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+    const uint8_t binding_kinds[] = { C_BINDING_ENUMERATOR, C_BINDING_FUNCTION, C_BINDING_ORDINARY, C_BINDING_TYPEDEF };
+    const uint8_t type_kinds[] = { BUSTER_TYPE_KIND_FUNCTION, BUSTER_TYPE_KIND_POINTER, BUSTER_TYPE_KIND_INTEGER, BUSTER_TYPE_KIND_STRUCT };
+    static CheckInputIdentifiers results[2];
+    uint32_t differences = 0;
+    uint32_t entries = 0;
+    for (uint32_t round = 0; ready && round < 400; round += 1)
+    {
+        const uint32_t count = 1 + check_test_random(test) % 200;
+        const uint32_t type_count = 1 + check_test_random(test) % 40;
+        const uint32_t acting = check_test_random(test) % (count + 1);
+        Parser parser = { 0 };
+        parser.tokens.count = count;
+        TypeTable table = { 0 };
+        table.types.count = type_count;
+        table.types.kind = check_test_scan_column(mappings[TYPE_KINDS] + page, type_count, 1);
+        CheckInput input = { 0 };
+        input.declarations = check_test_scan_column(mappings[DECLARATIONS] + page, count, 4);
+        input.thread_local = check_test_scan_column(mappings[LOCALS] + page, count, 1);
+        input.overload_heads = (round & 3) == 0 ? NULL : check_test_scan_column(mappings[HEADS] + page, count, 4);
+        input.kr_parameter_count = (round % 7) == 3;
+        CheckInputReader reader = { 0 };
+        reader.parser = &parser;
+        reader.output = &input;
+        reader.types = &table;
+        reader.declared_types = check_test_scan_column(mappings[TYPES] + page, count, 4);
+        reader.objects = check_test_scan_column(mappings[OBJECTS] + page, count, 4);
+        reader.declaration_kinds = check_test_scan_column(mappings[KINDS] + page, count, 1);
+        reader.static_objects = check_test_scan_column(mappings[STATICS] + page, count, 1);
+        reader.registers = check_test_scan_column(mappings[REGISTERS] + page, count, 1);
+        reader.declaration_flags = check_test_scan_column(mappings[FLAGS] + page, count, 1);
+        for (uint32_t t = 0; t < type_count; t += 1)
+        {
+            table.types.kind[t] = type_kinds[check_test_random(test) % BUSTER_ARRAY_LENGTH(type_kinds)];
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t random = check_test_random(test);
+            reader.declared_types[i] = random % 5 == 0 ? 0 : (check_test_random(test) % type_count) << BUSTER_TYPE_INDEX_SHIFT | (random >> 8) % 8;
+            input.declarations[i] = check_test_random(test) % count;
+            reader.objects[i] = check_test_random(test);
+            reader.declaration_kinds[i] = binding_kinds[check_test_random(test) % BUSTER_ARRAY_LENGTH(binding_kinds)];
+            reader.static_objects[i] = (uint8_t)(check_test_random(test) % 2);
+            input.thread_local[i] = (uint8_t)(check_test_random(test) % 2);
+            reader.registers[i] = (uint8_t)(check_test_random(test) % 2);
+            reader.declaration_flags[i] = (uint8_t)check_test_random(test);
+            if (input.overload_heads != NULL)
+            {
+                input.overload_heads[i] = check_test_random(test) % 3 == 0 ? check_test_random(test) : 0;
+            }
+        }
+        uint32_t* tokens = check_test_scan_column(mappings[TOKENS] + page, acting, 4);
+        uint32_t* classes = check_test_scan_column(mappings[CLASSES] + page, acting, 4);
+        for (uint32_t i = 0; i < acting; i += 1)
+        {
+            tokens[i] = check_test_random(test) % count;
+            classes[i] = check_test_random(test) % 3 != 0 ? identifier : BUSTER_CHECK_EXPRESSION_ACTS | (check_test_random(test) % BUSTER_CHECK_EXPRESSION_CODES) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+        }
+        uint32_t found[2];
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            memset(&results[scalar], 0xa5, sizeof(results[scalar]));
+            found[scalar] = check_input_expression_identifiers(&reader, tokens, classes, acting, &results[scalar], scalar != 0);
+        }
+        uint32_t expected = 0;
+        for (uint32_t i = 0; i < acting; i += 1)
+        {
+            expected += classes[i] == identifier;
+        }
+        differences += found[0] != expected || found[1] != expected;
+        for (uint32_t at = 0; at < expected && found[0] == expected && found[1] == expected; at += 1)
+        {
+            const CheckInputIdentifiers* x = &results[0];
+            const CheckInputIdentifiers* y = &results[1];
+            const bool node = (y->status[at] & BUSTER_CHECK_IDENTIFIER_NODE) != 0;
+            // A leaf without a node is never written: only its status counts.
+            differences += x->status[at] != y->status[at] ||
+                           (node && (x->types[at] != y->types[at] || x->flags[at] != y->flags[at] || x->objects[at] != y->objects[at] ||
+                                     ((y->status[at] & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 && x->declarations[at] != y->declarations[at])));
+            entries += 1;
+        }
+    }
+    char description[200];
+    snprintf(description, sizeof(description), "the coded walk's identifiers' leaves by both paths: %u of %u entries differ", differences, entries);
+    check_test_expect(test, ready && differences == 0 && entries != 0, description);
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], 2 * page);
+        }
+    }
+}
+
 // check_input_selection_positions (#877) by both paths, against the test's own reading of the tree: random forests of
 // up to 1,100 tokens, whose parents come before or after their children, with names drawn among the two selections',
 // another and none, and a random order of the tokens in which each comes after its children as their postorder. A

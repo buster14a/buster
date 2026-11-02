@@ -6312,6 +6312,10 @@ static int run_checker_tests(int argc, char** argv)
             }
             if (check_test_takes())
             {
+                check_test_identifier_leaves(&test);
+            }
+            if (check_test_takes())
+            {
                 check_test_selection_positions(&test);
             }
             if (check_test_takes())
