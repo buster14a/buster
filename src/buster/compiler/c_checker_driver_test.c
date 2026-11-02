@@ -5017,6 +5017,70 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 #include "c_check_alias_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 
+// #1132: standard -O options set preprocessor macros but must not implicitly enable Tier 1
+// before its code-quality and run-time gates pass. This source does not inspect optimization
+// macros, so every -O spelling must produce exactly the default Tier 0 .text. Conversely,
+// --tier1 requests Tier 1 even when -O0 is present, as reported by the real driver.
+static void check_test_driver_optimization_tier(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char code[] = "int optimization_mapping(int x) { return x * 17 + 3; }\\n";
+    static const char* const levels[] = { NULL, "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og", "-Ofast", "-O" };
+    char source[PATH_MAX], baseline[PATH_MAX], candidate[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/optimization-tier.c", directory);
+    snprintf(baseline, sizeof(baseline), "%s/optimization-tier-base.o", directory);
+    snprintf(candidate, sizeof(candidate), "%s/optimization-tier-test.o", directory);
+    const bool written = parse_test_write(source, code, sizeof(code) - 1);
+    check_test_expect(test, written, "optimization tier: source fixture is available");
+    const uint32_t routes = executable != NULL ? 2u : 1u;
+    for (uint32_t route = 0; written && route < routes; route += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const char* driver = route != 0 ? executable : NULL;
+            CheckCorpusOracle oracle = { 0 };
+            uint32_t warnings = 0;
+            const bool base = check_test_driver_run_with(driver, source, baseline, scalar != 0, false, true, false, NULL, 0, &oracle, &warnings) &&
+                              !oracle.rejected;
+            char description[256];
+            snprintf(description, sizeof(description), "optimization tier: route %u scalar %u compiles Tier 0 baseline", route, scalar);
+            check_test_expect(test, base, description);
+            for (uint32_t level = 0; base && level < BUSTER_ARRAY_LENGTH(levels); level += 1)
+            {
+                const char* const* options = levels[level] != NULL ? &levels[level] : NULL;
+                const uint32_t option_count = options != NULL ? 1u : 0u;
+                const bool built = check_test_driver_run_with(driver, source, candidate, scalar != 0, false, true, false, options, option_count, &oracle, &warnings) &&
+                                   !oracle.rejected;
+                char mismatch[512] = { 0 };
+                const bool same = built && check_test_driver_same_sections(baseline, candidate, ".text", true, mismatch, sizeof(mismatch));
+                snprintf(description, sizeof(description), "optimization tier: route %u scalar %u %s keeps Tier 0 .text", route, scalar,
+                         levels[level] != NULL ? levels[level] : "(no -O)");
+                check_test_expect(test, same, description);
+                unlink(candidate);
+            }
+            unlink(baseline);
+        }
+    }
+    if (written && executable != NULL)
+    {
+        const char* const levels_with_tier1[] = { "-O0", "-O2" };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(levels_with_tier1); i += 1)
+        {
+            char* const args[] = { (char*)executable, "-c", (char*)levels_with_tier1[i], "--tier1", "--tier1-report",
+                                   "-o", candidate, source, NULL };
+            char* report = NULL;
+            const int status = check_test_driver_spawn(args, &report);
+            uint64_t tier1 = 0;
+            const bool selected = status == 0 && check_test_tier1_field(report, "tier1", &tier1) && tier1 != 0;
+            char description[256];
+            snprintf(description, sizeof(description), "optimization tier: %s --tier1 selects Tier 1 explicitly", levels_with_tier1[i]);
+            check_test_expect(test, selected, description);
+            free(report);
+            unlink(candidate);
+        }
+    }
+    unlink(source);
+}
+
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
@@ -6048,6 +6112,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (check_test_driver_takes())
         {
             check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_optimization_tier(&test, executable, directory);
         }
         if (executable != NULL)
         {
