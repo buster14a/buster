@@ -102,6 +102,14 @@ that the link doesn't load isn't an object of the link, so a lazy or thin
 archive may hold LTO members nothing needs; a `--whole-archive` member is
 loaded and refused.
 
+Runtime search paths use `-rpath PATH`, `--rpath PATH`, either equals form,
+or `-R PATH` / `-RPATH`. Repeated paths are joined with `:` without expansion.
+Dynamic PIE and shared-library output record `DT_RUNPATH` by default;
+`--disable-new-dtags` selects `DT_RPATH`, and `--enable-new-dtags` restores
+RUNPATH. The last dtags option wins. Static output refuses runtime paths.
+See [the linker-option contract](linker-options.md) for forwarding from the C
+driver and the shared writer's ownership and validation rules.
+
 ## Input order and output boundary
 
 Driver options are removed without reordering paths, `-L`, `-l`, `-u`,

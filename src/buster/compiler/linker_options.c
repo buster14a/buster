@@ -39,7 +39,7 @@ static bool linker_options_parse(LinkerOptions* options, int count, char** argum
                       strncmp(argument, "-rpath=", 7) == 0 || strncmp(argument, "--rpath=", 8) == 0 ||
                       (argument[0] == '-' && argument[1] == 'R');
     const bool entry = strcmp(argument, "-e") == 0 || strcmp(argument, "--entry") == 0 || strncmp(argument, "--entry=", 8) == 0;
-    const bool keyword = strcmp(argument, "-z") == 0 || strncmp(argument, "-z", 2) == 0;
+    const bool keyword = strncmp(argument, "-z", 2) == 0;
     bool handled = true;
     if (path || entry || keyword)
     {
