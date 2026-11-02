@@ -170,9 +170,10 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered
-        // and promoted IR may borrow from each other, but neither is a dependency of the optimized function. Reuse
-        // their arenas for the plan and emitted records; retain optimized IR and analyses through emission.
+        // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered,
+        // GVN's rewritten function (steps[6], when enabled) and promoted IR may borrow from each other, but none is a
+        // dependency of the optimized function. Reuse lowered and promoted arenas for the plan and emitted records;
+        // retain optimized IR and analyses through emission.
         arena_pop_to(&lane->steps[0], 0);
         arena_pop_to(&lane->steps[1], 0);
     }

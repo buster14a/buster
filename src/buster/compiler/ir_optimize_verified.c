@@ -63,16 +63,15 @@ static __attribute__((unused)) bool ir_verified_current(const IrVerifiedAnalysis
 // The shared verifier's exact shape, row, phi, switch and SSA checks, with its CFG retained instead of rebuilt.
 // The first graph check preserves the structural boundary before dominance construction. The second checks full
 // dominance, including same-block order. Both use ir.c's verifier, not a weaker optimizer-specific substitute.
-// On failure neither result nor the analysis arena is published; scratch is restored on every path.
+// On failure neither result nor the analysis arena is published; scratch is restored on every path. The analysis
+// and scratch arenas must be distinct; aliasing them is an argument error, refused before either is touched.
 static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Arena* scratch, bool scalar, IrVerifiedAnalysis* result)
 {
-    (void)scalar;
-
-    const uint64_t output_mark = analyses->length;
+    const uint64_t analysis_mark = analyses->length;
     const uint64_t scratch_mark = scratch->length;
     IrVerifiedAnalysis candidate = { 0 };
-    IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
-    if (analyses != scratch)
+    IrCheck check = ir_check(analyses == scratch ? IR_ERROR_METADATA : IR_OK, BUSTER_IR_NONE, 0);
+    if (check.error == IR_OK)
     {
         candidate.shape_checks += 1;
         check = ir_check_shape(function);
@@ -129,12 +128,12 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
     {
         candidate.arena = analyses;
         candidate.arena_end = analyses->length;
-        candidate.arena_bytes = analyses->length - output_mark;
+        candidate.arena_bytes = analyses->length - analysis_mark;
         *result = candidate;
     }
     else
     {
-        arena_pop_to(analyses, output_mark);
+        arena_pop_to(analyses, analysis_mark);
     }
     arena_pop_to(scratch, scratch_mark);
     return check;

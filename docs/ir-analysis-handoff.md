@@ -96,8 +96,12 @@ caller-owned descriptors; they are not concurrent mutation APIs.
 
 ## Driver lifetime graph
 
-The lane's existing six arena reservations are retained; four are used for
-this path. No reservation policy or unrelated lane structure changes here.
+The lane's stage array has `BUSTER_CHECK_TIER1_STEPS` arenas. The default
+`--tier1` path reserves the six up to `steps[5]`; `--tier1-gvn` reserves the
+seventh (`steps[6]`) only when #866's solver runs. This path uses `steps[0]` to
+`steps[3]`; `steps[4]` and `steps[5]` are now unused, and `steps[6]` holds the
+solver's rewritten lowered IR. No reservation policy or unrelated lane
+structure changes here.
 
 | Storage | Initial contents | Last consumer / subsequent use |
 | --- | --- | --- |
@@ -105,16 +109,21 @@ this path. No reservation policy or unrelated lane structure changes here.
 | `steps[1]` | Promoted IR | Keep through optimization; then reuse for emitted code |
 | `steps[2]` | Optimized IR | Keep through selection and emission |
 | `steps[3]` | Verified CFG and dominators | Keep through selection and emission |
+| `steps[4]` | Unused by this path | The lane may leave it reserved or unallocated |
+| `steps[5]` | Unused by this path | The lane may leave it reserved or unallocated |
+| `steps[6]` | GVN's rewritten lowered IR (`--tier1-gvn` only) | Promotion; then unused by this path |
 | Caller output arena | Copied native records and metadata | Escapes the function call |
 
 Do not retire lowered IR immediately after promotion: that would need a
 separate audit of promotion's borrowed side tables. Instead, retire lowered and
-promoted storage together only after the optimizer rewrite succeeds. That
-rewrite allocates its own instruction and block columns, constants, slots,
-addresses, calls, call types, parameter types, labels, aggregate-call records
-and passed-value records. Incoming frame and return-ABI metadata are copied by
-value. Vector-valued functions remain outside this optimizer's admitted subset;
-mask values use its existing supported representation.
+promoted storage together only after the optimizer rewrite succeeds. When
+`--tier1-gvn` runs, `steps[6]` holds the solver's rewritten lowered IR and is
+live through promotion as well. That rewrite allocates its own instruction and
+block columns, constants, slots, addresses, calls, call types, parameter types,
+labels, aggregate-call records and passed-value records. Incoming frame and
+return-ABI metadata are copied by value. Vector-valued functions remain outside
+this optimizer's admitted subset; mask values use its existing supported
+representation.
 
 Selection and emission may continue borrowing optimized IR and derived
 analysis. Their owners therefore survive until native instruction records,
@@ -129,11 +138,13 @@ memory and throughput effects still require measurement.
 
 `ir_optimize_verified_test.c` is called by the existing `test-ir-optimize`
 command through `ir_optimize_text_test.c`. It adds comparison cases for all eight
-pass masks and AUTO/vector/scalar selection, forced sweep-limit fallback,
-diamonds, loops, empty IR, indirect labels, aggregate-call metadata and generated
-DAG lengths around batch boundaries. It compares every CFG column and every
-block-pair dominance relation with independently rebuilt analyses, and runs the
-public full SSA verifier with freshly rebuilt intervals.
+pass masks and AUTO/vector/scalar selection, forced sweep-limit fallback (asserted
+to take the worklist), diamonds, loops, empty IR, indirect labels,
+aggregate-call metadata and generated DAG lengths around batch boundaries. It
+compares every CFG column and every block-pair dominance relation with
+independently rebuilt analyses, and runs the public full SSA verifier with
+freshly rebuilt intervals and again with the retained intervals the driver
+consumes.
 
 The tests overwrite retired optimizer scratch and input storage, reject copied
 function descriptors and foreign scopes, recycle the exact arena addresses to

@@ -64,6 +64,16 @@ static void ir_verified_test_rebuild(IrOptimizeTest* test, const IrFunction* fun
             };
             const IrCheck check = ir_verify_scalar(function, scratch, &dominance);
             ir_optimize_test_expect(test, check.error == IR_OK && check.dominance_checked, "verified handoff: independent full SSA verification");
+            // The driver consumes the retained intervals themselves, not only a rebuild's; feed them to the same
+            // public verifier so a corrupted retained array cannot hide behind relation equality alone.
+            const IrDominance retained = {
+                .enter = analysis->dominators.preorder,
+                .leave = analysis->dominators.subtree_end,
+                .block_count = analysis->dominators.block_count,
+            };
+            const IrCheck retained_check = ir_verify_scalar(function, scratch, &retained);
+            ir_optimize_test_expect(test, retained_check.error == IR_OK && retained_check.dominance_checked,
+                                    "verified handoff: retained intervals pass full SSA verification");
         }
     }
     arena_pop_to(output, mark);
@@ -94,8 +104,14 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
         ir_optimize_test_expect(test, expected.folded == actual.folded && expected.removed_blocks == actual.removed_blocks &&
                                 expected.removed_instructions == actual.removed_instructions && expected.sccp_visits == actual.sccp_visits &&
                                 expected.sccp_sweeps == actual.sccp_sweeps && expected.dce_visits == actual.dce_visits &&
-                                expected.dce_sweeps == actual.dce_sweeps && expected.worklist_fallback == actual.worklist_fallback,
+                                expected.dce_sweeps == actual.dce_sweeps && expected.worklist_fallback == actual.worklist_fallback &&
+                                expected.scratch_bytes == actual.scratch_bytes,
                                 "verified handoff: unchanged transformation statistics");
+        if (fallback)
+        {
+            ir_optimize_test_expect(test, actual.worklist_fallback && actual.sccp_sweeps == 0,
+                                    "verified handoff: forced worklist fallback ran");
+        }
         ir_optimize_test_expect(test, ir_verified_current(&analysis, &revision, &actual.function), "verified handoff: exact owner and revision accepted");
         ir_optimize_test_expect(test, analysis.shape_checks == 1 && analysis.row_checks == 1 && analysis.graph_checks == 2 &&
                                 analysis.cfg_builds == 1 && analysis.dominator_builds == 1 && after.dominance_checked &&
@@ -258,6 +274,17 @@ static void ir_verified_test_failures(IrOptimizeTest* test, Arena* input, Arena*
             // The reference arena must also be distinct from the graph's scratch owner.
             const IrCheck alias = ir_verified_build(&function, reference, reference, true, &final);
             ir_optimize_test_expect(test, alias.error == IR_ERROR_METADATA && reference->length == 0, "verified handoff: aliased analysis/scratch refused");
+            // The public entry point refuses the same aliasing before preparing or publishing anything.
+            IrVerifiedRevision alias_revision = { 0 };
+            Arena alias_output = *analyses;
+            const IrCheck output_analysis = ir_optimize_verified(&function, &alias_output, &alias_output, scratch, options, &alias_revision, &result, &analysis);
+            ir_optimize_test_expect(test, output_analysis.error == IR_ERROR_METADATA && alias_output.length == 0 && alias_revision.function == 0,
+                                    "verified handoff: aliased output/analysis refused");
+            alias_revision = (IrVerifiedRevision){ 0 };
+            Arena alias_scratch = *scratch;
+            const IrCheck output_scratch = ir_optimize_verified(&function, &alias_scratch, analyses, &alias_scratch, options, &alias_revision, &result, &analysis);
+            ir_optimize_test_expect(test, output_scratch.error == IR_ERROR_METADATA && alias_scratch.length == 0 && alias_revision.function == 0,
+                                    "verified handoff: aliased output/scratch refused");
         }
         ir_verified_invalidate(&revision);
     }
