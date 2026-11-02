@@ -415,7 +415,7 @@ static CheckBuiltinMiscResult check_builtin_bits_test_action(TypeTable* table, C
         .arguments = arguments,
         .argument_count = count,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     CheckBuiltinMiscResult result;
     check_builtin_misc(table, &action, &result, 1);
