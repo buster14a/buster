@@ -2732,7 +2732,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             if (stage_clock != NULL)
             {
+                _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
                 stage_clock->expression_ticks += input.expression_ticks;
+                for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+                {
+                    stage_clock->expression_part_ticks[p] += input.expression_part_ticks[p];
+                }
+                stage_clock->expression_faults += input.expression_faults;
+                stage_clock->expression_system_us += input.expression_system_us;
             }
             if (input.resource)
             {

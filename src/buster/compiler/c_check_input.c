@@ -6,6 +6,8 @@
 // bracket depths and are never used as semantic dependency levels. Unsupported declarators and statements fail
 // explicitly; no unresolved name or unrecognized syntax acquires an invented int type.
 
+#include <sys/resource.h>
+
 // Parser token indices are below 1 << 30. The high bit distinguishes a source-only selection retained by a
 // declaration/type-query proof from an evaluated selection that may supply an expression graph operand.
 #define CHECK_INPUT_SOURCE_SELECTION 0x80000000u
@@ -212,6 +214,13 @@ struct CheckInputKrDiagnostic
 
 // The class codes the visits byte's bits 2 to 6 hold (CheckInputExpressionCode, BUSTER_CHECK_EXPRESSION_CODE_MASK).
 #define BUSTER_CHECK_EXPRESSION_CODES 32u
+// The expressions' walk's parts, whose TSC ticks --time-stages reports within its row (#1038): the classes' pass
+// (check_input_expression_classes), the coded walk's chunks' preparation (the compaction and the identifiers' leaves),
+// and the actions (every token's, the walk's own visits among them; on the scalar path, every visit).
+#define BUSTER_CHECK_EXPRESSION_PART_CLASSES 0u
+#define BUSTER_CHECK_EXPRESSION_PART_PREPARE 1u
+#define BUSTER_CHECK_EXPRESSION_PART_ACTIONS 2u
+#define BUSTER_CHECK_EXPRESSION_PARTS 3u
 
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
@@ -476,8 +485,13 @@ struct CheckInput
     uint32_t expression_acted[BUSTER_CHECK_EXPRESSION_CODES];
     uint32_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
     // The TSC's ticks the expressions' walk took (check_input_expressions), which --time-stages reports apart within the
-    // reader's stage (#1038).
+    // reader's stage (#1038), and its parts' (BUSTER_CHECK_EXPRESSION_PART_*); and the process's minor faults and system
+    // microseconds across it (getrusage, as the stages' clock reads them; the reader's own while the other lanes are
+    // parked, as in a unit's check), both 0 where a read failed: the graph's columns are first touched in the walk.
     uint64_t expression_ticks;
+    uint64_t expression_part_ticks[BUSTER_CHECK_EXPRESSION_PARTS];
+    uint64_t expression_faults;
+    uint64_t expression_system_us;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -7629,7 +7643,10 @@ static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
+    const uint64_t start = __rdtsc();
     const uint32_t acts = check_input_expression_classes(reader);
+    const uint64_t classed = __rdtsc();
+    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_CLASSES] = classed - start;
     reader->output->expression_visits = parser->options.scalar ? parser->tokens.count : acts;
     if (parser->options.scalar)
     {
@@ -7638,6 +7655,7 @@ static void check_input_expressions(CheckInputReader* reader)
             const uint32_t token = reader->postorder[order];
             check_input_expression_visit(reader, token, reader->visits[token]);
         }
+        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = __rdtsc() - classed;
     }
     else
     {
@@ -8822,9 +8840,18 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         check_input_sizeof_prepare(&reader);
                     }
+                    struct rusage before;
+                    const bool used = getrusage(RUSAGE_SELF, &before) == 0;
                     const uint64_t expressions_start = __rdtsc();
                     check_input_expressions(&reader);
                     input->expression_ticks = __rdtsc() - expressions_start;
+                    struct rusage after;
+                    if (used && getrusage(RUSAGE_SELF, &after) == 0)
+                    {
+                        input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
+                        input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
+                                                                 (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
+                    }
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {

@@ -2971,8 +2971,10 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     {
         valid = strstr(text, process[p]) != NULL;
     }
-    // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too.
-    valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL;
+    // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too. Its parts
+    // (check_clock_read_walk) are each there once, adding up to no more than the walk.
+    double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+    valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL && check_clock_read_walk(text, parts);
     const double stage_error = sum > total ? sum - total : total - sum;
     const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
     return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
@@ -3035,6 +3037,25 @@ static void check_test_driver_clock_reader(CheckTest* test)
                                         check_clock_read(text, stages, phases, &total, &walk, usage);
     check_test_expect(test, numeric && unavailable && false_available && mixed && numeric_without_status,
                       "--time-stages' reader accepts numeric and wholly unavailable system-time reports and refuses mixed or falsely available ones");
+    // The walk's parts (check_clock_read_walk): each once, nonnegative, within the walk's row, and its usage line.
+    const char* const walks[] = {
+        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
+        "time-check\texpressions.actions\t0.600\t0.6\ntime-check\texpressions.usage\t0.300\t12\n",
+        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
+        "time-check\texpressions.usage\t0.300\t12\n",
+        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
+        "time-check\texpressions.actions\t0.900\t0.9\ntime-check\texpressions.usage\t0.300\t12\n",
+        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.classes\t0.100\t0.1\n"
+        "time-check\texpressions.prepare\t0.200\t0.2\ntime-check\texpressions.actions\t0.600\t0.6\ntime-check\texpressions.usage\t0.300\t12\n",
+        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
+        "time-check\texpressions.actions\t0.600\t0.6\n",
+    };
+    double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+    const bool whole = check_clock_read_walk(walks[0], parts) && parts[0] == 0.1 && parts[1] == 0.2 && parts[2] == 0.6 && parts[3] == 0.3 && parts[4] == 12;
+    const bool refused = !check_clock_read_walk(walks[1], parts) && !check_clock_read_walk(walks[2], parts) && !check_clock_read_walk(walks[3], parts) &&
+                         !check_clock_read_walk(walks[4], parts);
+    check_test_expect(test, whole && refused,
+                      "--time-stages' walk reader takes each part once within the walk and refuses a missing, repeated or excess part or usage");
 }
 
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and

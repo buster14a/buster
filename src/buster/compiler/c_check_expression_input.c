@@ -737,20 +737,30 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
+    // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk.
+    uint64_t prepared = 0;
+    uint64_t acted = 0;
     for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
+        const uint64_t start = __rdtsc();
         const uint32_t end = count - first < BUSTER_CHECK_EXPRESSION_CHUNK ? count : first + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX, false);
         if (coded)
         {
             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
         }
+        const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
         for (uint32_t i = 0; i < acting && !reader->output->resource; i += 1)
         {
             check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier);
         }
+        const uint64_t done = __rdtsc();
+        prepared += ready - start;
+        acted += done - ready;
     }
+    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE] = prepared;
+    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = acted;
 }
 
 // The tokens the coded walk acted at by their classes' own actions: CheckInput.expression_acted's sum over the classes.

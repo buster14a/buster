@@ -1100,7 +1100,21 @@ report, on standard error after the command, a row per stage.
   `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
   #1038; two TSC reads a unit, with the option or without) and the driver adds
   up. It overlaps the stage, so it is no row of the stages' sum. The report's
-  reader (`check_clock_read`) requires it once, within its stage.
+  reader (`check_clock_read`) requires it once, within its stage. Its parts
+  follow, each a `time-check expressions.PART MILLISECONDS PERCENT` line
+  (`CheckInput.expression_part_ticks`, three TSC reads a chunk of the coded
+  walk):
+  - `classes`, the classes' pass;
+  - `prepare`, the coded walk's chunks' compaction and identifiers' leaves;
+  - `actions`, every token's action, the walk's own visits among them (on the
+    scalar path, every visit).
+
+  Then comes `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the
+  process's getrusage counters across the walk, in which the graph's columns
+  are first touched. They are low-confidence as the stages' are, and the
+  reader's own while the other lanes are parked. `check_clock_read_walk` reads
+  these lines, each once, the parts adding up to no more than the walk.
+  `measure-compile` prints their medians under `check-input.expressions`.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
