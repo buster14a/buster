@@ -131,7 +131,7 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
                 const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
                 gnu_inline |= check_program_attribute_gnu_inline(input->attributes[token]);
                 plain_inline |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE;
-                c99_inline_only &= !(function && input->declaration_bodies[token] == BUSTER_CHECK_NONE &&
+                c99_inline_only &= !(function && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE &&
                                      ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0));
             }
             else
@@ -151,24 +151,25 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
 }
 
 // The tokens a unit's post-checking stages visit for its declarations: those that declare (`declarations[t] == t`), and
-// with `nodes`, those whose nodes[t] is below `limit` too (the lowering's initializers), in token order into `tokens`,
+// with `nodes` (a sparse column: CheckInput.initializer_nodes), those whose node is below `limit` too (the lowering's
+// initializers), in token order into `tokens`,
 // which has room for `count` + 16: how many. The emission's attributes and the lowering's initializer pass visit these
 // rather than every token of the unit (#442). The selection reads check_data_prepare's static declarations instead
 // (#592). The scalar path is the vector path's exact twin.
-static uint32_t check_program_declaring_scalar(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
+static uint32_t check_program_declaring_scalar(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
 {
     uint32_t written = 0;
     for (uint32_t token = 0; token < count; token += 1)
     {
         tokens[written] = token;
-        written += declarations[token] == token || (nodes != 0 && nodes[token] < limit);
+        written += declarations[token] == token || (nodes != 0 && check_sparse_get(*nodes, token) < limit);
     }
     return written;
 }
 
 // The same, 16 tokens at a time, the loads masked to the columns and each block's tokens compressed in a register, then
 // stored whole (vpcompressd to memory is 8 µops on Zen 5, the register form 2).
-static uint32_t check_program_declaring_vector(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
+static uint32_t check_program_declaring_vector(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
 {
 #if !BUSTER_HOST_VECTOR
     return check_program_declaring_scalar(declarations, nodes, limit, count, tokens);
@@ -182,7 +183,7 @@ static uint32_t check_program_declaring_vector(const uint32_t* declarations, con
         __mmask16 keep = _mm512_mask_cmpeq_epi32_mask(live, _mm512_maskz_loadu_epi32(live, declarations + token), index);
         if (nodes != 0)
         {
-            keep |= _mm512_mask_cmplt_epu32_mask(live, _mm512_maskz_loadu_epi32(live, nodes + token), bound);
+            keep |= _mm512_mask_cmplt_epu32_mask(live, check_sparse_vector(*nodes, token), bound);
         }
         _mm512_storeu_si512(tokens + written, _mm512_maskz_compress_epi32(keep, index));
         written += (uint32_t)__builtin_popcount(keep);
@@ -192,7 +193,7 @@ static uint32_t check_program_declaring_vector(const uint32_t* declarations, con
 #endif
 }
 
-static uint32_t check_program_declaring(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens, bool scalar)
+static uint32_t check_program_declaring(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens, bool scalar)
 {
     (void)scalar;
 
@@ -405,7 +406,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself
             // spells extern inline. Clang applies this rule to declarations both before and after the definition.
             inline_rules[group] |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE ? 4 : 0;
-            if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
+            if (function && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
             {
                 if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
                 {
@@ -537,7 +538,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             // A block-scope static (declared in a body, without linkage, not a compound literal), from its body.
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
-            const uint32_t body = declaration < input->token_count && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE &&
+            const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
                                   input->linkage[declaration] == 0 && !input->compound_objects[declaration] ? check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {

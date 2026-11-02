@@ -401,7 +401,7 @@ static void check_function_print_step(CheckFunctionPrinter* output, TypePrintFra
 static String8 check_function_pretty(CheckInputReader* reader, uint32_t body)
 {
     const uint32_t first = reader->function_specifiers[body];
-    const uint32_t name_token = reader->output->body_declarations[body];
+    const uint32_t name_token = check_sparse_get(reader->output->body_declarations, body);
     const uint32_t name = reader->parser->tokens.names[name_token];
     const uint32_t capacity = first < body && body - first <= (UINT32_MAX - 16) / 8 ? (body - first) * 8 + 16 : 0;
     const uint64_t scratch_mark = reader->scratch->length;
@@ -467,7 +467,7 @@ static const CheckInitString* check_input_function_name(CheckInputReader* reader
     const CheckInitString* result = 0;
     if (check_input_function_name_token(parser, token))
     {
-        uint32_t index = reader->string_ids[token];
+        uint32_t index = check_sparse_get(reader->string_ids, token);
         if (index == BUSTER_CHECK_NONE)
         {
             const uint32_t body = reader->function_body;
@@ -495,7 +495,7 @@ static const CheckInitString* check_input_function_name(CheckInputReader* reader
                 }
                 else
                 {
-                    const uint32_t name_token = file ? BUSTER_CHECK_NONE : reader->output->body_declarations[body];
+                    const uint32_t name_token = file ? BUSTER_CHECK_NONE : check_sparse_get(reader->output->body_declarations, body);
                     const uint32_t name = file ? 0 : parser->tokens.names[name_token];
                     value.length = file ? (kind == 2 ? 9 : 0) : intern_length(reader->pp->table, name);
                     value.pointer = arena_push(reader->arena, value.length, 1);
@@ -541,7 +541,7 @@ static const CheckInitString* check_input_function_name(CheckInputReader* reader
             }
             if (index != BUSTER_CHECK_NONE)
             {
-                reader->string_ids[token] = index;
+                check_sparse_set(reader->output->sparse_pool, reader->string_ids, token, index);
                 reader->declared_types[token] = reader->output->strings[index].type;
             }
         }

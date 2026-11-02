@@ -56,7 +56,7 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
     }
     for (uint32_t token = 0; valid && token < input->token_count; token += 1)
     {
-        const uint32_t declaration = input->body_declarations[token];
+        const uint32_t declaration = check_sparse_get(input->body_declarations, token);
         if (declaration != BUSTER_CHECK_NONE)
         {
             const uint32_t identifier = parser->tokens.names[declaration];

@@ -56,7 +56,7 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
     for (uint32_t token = first; valid && token < end; token += 1)
     {
         const uint8_t declaration_kind = input->declaration_kinds[token];
-        if (input->declarations[token] == token && input->declaration_bodies[token] == body &&
+        if (input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) == body &&
             declaration_kind != C_BINDING_ENUMERATOR && declaration_kind != C_BINDING_TAG_KIND)
         {
             // The range also contains member names, prototype parameters and declarations in nested
@@ -78,7 +78,7 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
             }
             found = true;
             valid = input->declaration_kinds[token] == C_BINDING_OBJECT && label &&
-                    input->initializer_begins[token] == input->initializer_ends[token];
+                    check_sparse_get(input->initializer_begins, token) == check_sparse_get(input->initializer_ends, token);
         }
     }
     return found && valid;
@@ -193,7 +193,7 @@ static uint32_t check_input_naked_parameter(CheckInputReader* reader, const Chec
         else if (parser->tree.roles[token] == PARSE_ROLE_OPERAND)
         {
             const uint32_t declaration = input->declarations[token];
-            if (declaration < body && input->declaration_bodies[declaration] == body &&
+            if (declaration < body && check_sparse_get(input->declaration_bodies, declaration) == body &&
                 input->declaration_kinds[declaration] == C_BINDING_OBJECT)
             {
                 result = token;
@@ -213,7 +213,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
     uint32_t statement = 0;
     for (uint32_t body = 0; reader->naked_functions && !input->resource && body < reader->expression_limit && diagnostic.position == BUSTER_CHECK_NONE; body += 1)
     {
-        const uint32_t declaration = input->body_declarations[body];
+        const uint32_t declaration = check_sparse_get(input->body_declarations, body);
         if (parser->tree.roles[body] != PARSE_ROLE_OPEN_BODY || declaration == BUSTER_CHECK_NONE ||
             (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NAKED) == 0 ||
             (input->deferred_tokens != NULL && input->deferred_tokens[body] != 0))

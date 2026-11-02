@@ -2061,14 +2061,14 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->thread_local[token] == right->thread_local[token] && left->compound_objects[token] == right->compound_objects[token] &&
                 check_corpus_attributes_equal(left->attributes[token], right->attributes[token]) &&
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
-                left->tentative[token] == right->tentative[token] && left->initializer_nodes[token] == right->initializer_nodes[token] &&
-                left->initializer_begins[token] == right->initializer_begins[token] && left->initializer_ends[token] == right->initializer_ends[token] &&
-                left->token_nodes[token] == right->token_nodes[token] && left->evaluation_nodes[token] == right->evaluation_nodes[token] &&
-                left->string_ids[token] == right->string_ids[token] &&
-                left->body_declarations[token] == right->body_declarations[token] &&
-                left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
-                left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
-                left->label_targets[token] == right->label_targets[token] && left->case_ranges[token] == right->case_ranges[token] &&
+                left->tentative[token] == right->tentative[token] && check_sparse_get(left->initializer_nodes, token) == check_sparse_get(right->initializer_nodes, token) &&
+                check_sparse_get(left->initializer_begins, token) == check_sparse_get(right->initializer_begins, token) && check_sparse_get(left->initializer_ends, token) == check_sparse_get(right->initializer_ends, token) &&
+                left->token_nodes[token] == right->token_nodes[token] && check_sparse_get(left->evaluation_nodes, token) == check_sparse_get(right->evaluation_nodes, token) &&
+                check_sparse_get(left->string_ids, token) == check_sparse_get(right->string_ids, token) &&
+                check_sparse_get(left->body_declarations, token) == check_sparse_get(right->body_declarations, token) &&
+                check_sparse_get(left->declaration_bodies, token) == check_sparse_get(right->declaration_bodies, token) && check_sparse_get(left->parameters, token) == check_sparse_get(right->parameters, token) &&
+                check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) && check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
+                check_sparse_get(left->label_targets, token) == check_sparse_get(right->label_targets, token) && check_sparse_get(left->case_ranges, token) == check_sparse_get(right->case_ranges, token) &&
                 left->expression_regions[token] == right->expression_regions[token] && check_input_asm_id(left, token) == check_input_asm_id(right, token) &&
                 left->constant_warnings[token] == right->constant_warnings[token] &&
                 left->constant_warning_ignored[token] == right->constant_warning_ignored[token];
@@ -2301,11 +2301,11 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  x->registers[token] != y->registers[token] ? "registers" : x->thread_local[token] != y->thread_local[token] ? "thread_local" :
                  x->compound_objects[token] != y->compound_objects[token] ? "compound_objects" :
                  !check_corpus_attributes_equal(x->attributes[token], y->attributes[token]) ? "attributes" : x->tentative[token] != y->tentative[token] ? "tentative" :
-                 x->initializer_nodes[token] != y->initializer_nodes[token] ? "initializer_nodes" :
-                 x->initializer_begins[token] != y->initializer_begins[token] ? "initializer_begins" : x->initializer_ends[token] != y->initializer_ends[token] ? "initializer_ends" :
-                 x->body_declarations[token] != y->body_declarations[token] ? "body_declarations" : x->parameters[token] != y->parameters[token] ? "parameters" :
-                 x->parameter_next[token] != y->parameter_next[token] ? "parameter_next" : x->control_owners[token] != y->control_owners[token] ? "control_owners" :
-                 x->label_targets[token] != y->label_targets[token] ? "label_targets" : x->case_ranges[token] != y->case_ranges[token] ? "case_ranges" :
+                 check_sparse_get(x->initializer_nodes, token) != check_sparse_get(y->initializer_nodes, token) ? "initializer_nodes" :
+                 check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
+                 check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :
+                 check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" : check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
+                 check_sparse_get(x->label_targets, token) != check_sparse_get(y->label_targets, token) ? "label_targets" : check_sparse_get(x->case_ranges, token) != check_sparse_get(y->case_ranges, token) ? "case_ranges" :
                  x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : check_input_asm_id(x, token) != check_input_asm_id(y, token) ? "asm_ids" :
                  x->constant_warnings[token] != y->constant_warnings[token] ? "constant_warnings" :
                  x->constant_warning_ignored[token] != y->constant_warning_ignored[token] ? "constant_warning_ignored" : 0;
@@ -2379,8 +2379,8 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     }
     uint32_t token = 0;
     while (comparable && token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
-           x->objects[token] == y->objects[token] && x->declaration_bodies[token] == y->declaration_bodies[token] && x->token_nodes[token] == y->token_nodes[token] &&
-           x->evaluation_nodes[token] == y->evaluation_nodes[token] &&
+           x->objects[token] == y->objects[token] && check_sparse_get(x->declaration_bodies, token) == check_sparse_get(y->declaration_bodies, token) && x->token_nodes[token] == y->token_nodes[token] &&
+           check_sparse_get(x->evaluation_nodes, token) == check_sparse_get(y->evaluation_nodes, token) &&
            x->declaration_kinds[token] == y->declaration_kinds[token] && x->linkage[token] == y->linkage[token] && x->defined[token] == y->defined[token])
     {
         token += 1;
@@ -2429,8 +2429,8 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
         snprintf(text, capacity, "token %u: declaration %u against %u, type %#x against %#x, object %u against %u, body %u against %u, node %u against %u, "
                  "evaluation %u against %u",
                  token, x->declarations[token], y->declarations[token], x->declared_types[token], y->declared_types[token], x->objects[token], y->objects[token],
-                 x->declaration_bodies[token], y->declaration_bodies[token], x->token_nodes[token], y->token_nodes[token],
-                 x->evaluation_nodes[token], y->evaluation_nodes[token]);
+                 check_sparse_get(x->declaration_bodies, token), check_sparse_get(y->declaration_bodies, token), x->token_nodes[token], y->token_nodes[token],
+                 check_sparse_get(x->evaluation_nodes, token), check_sparse_get(y->evaluation_nodes, token));
     }
     else if (!check_corpus_environments_equal(&x->environment, &y->environment))
     {

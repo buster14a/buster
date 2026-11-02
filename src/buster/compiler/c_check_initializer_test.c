@@ -299,10 +299,16 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
     bool valid = strings != NULL && ids != NULL;
     for (uint32_t token = 0; valid && token < parser->tokens.count; token += 1)
     {
-        const uint32_t id = input->string_ids[token];
+        const uint32_t id = check_sparse_get(input->string_ids, token);
         valid = id == BUSTER_CHECK_NONE || id < input->string_count;
         ids[token] = id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE;
     }
+    if (valid)
+    {
+        ids[parser->tokens.count] = BUSTER_CHECK_NONE;
+    }
+    const CheckSparseColumn sparse_ids = valid ? check_sparse_from_values(scratch, ids, parser->tokens.count) : (CheckSparseColumn){ 0 };
+    valid &= check_sparse_present(sparse_ids);
     for (uint32_t i = 0; valid && i < input->string_count; i += 1)
     {
         strings[input->string_count - 1 - i] = input->strings[i];
@@ -318,7 +324,7 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
         .stream = &stream,
         .strings = strings,
         .string_count = input->string_count,
-        .string_ids = ids,
+        .string_ids = sparse_ids,
     };
     for (uint32_t i = 0; valid && i < input->string_count; i += 1)
     {
@@ -405,11 +411,11 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     const uint32_t declaration = initializers.declaration_tokens[i];
                     CheckInitializer strict = { 0 };
                     const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
-                                                                 input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                 input.declared_types[declaration], check_sparse_get(input.initializer_begins, declaration), check_sparse_get(input.initializer_ends, declaration),
                                                                  input.static_objects[declaration] != 0, &output, &scratch, &strict);
                     check_test_expect(test, !accepted && strict.status == CHECK_INIT_INVALID && strict.parts == 0 && strict.count == 0 && output.length == 0 && scratch.length == 0,
                                       "direct strict planner still rejects source-compatible excess elements transactionally");
-                    check_test_expect(test, initializers.warning_count != 0 && initializers.plans[i].warning_token < input.initializer_ends[declaration],
+                    check_test_expect(test, initializers.warning_count != 0 && initializers.plans[i].warning_token < check_sparse_get(input.initializer_ends, declaration),
                                       "source excess elements retain warning positions separately from successful plans");
                 }
             }
@@ -438,7 +444,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     tiny.capacity = sizeof(CheckInitPart);
                     CheckInitializer rejected = { 0 };
                     const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
-                                                                input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                input.declared_types[declaration], check_sparse_get(input.initializer_begins, declaration), check_sparse_get(input.initializer_ends, declaration),
                                                                 input.static_objects[declaration] != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
                     check_test_expect(test, !partial && rejected.status == CHECK_INIT_RESOURCE && rejected.parts == 0 && rejected.count == 0 && tiny.length == 0 && scratch.length == 0,
                                       "partially planned source initializer rolls back all parts on output exhaustion");

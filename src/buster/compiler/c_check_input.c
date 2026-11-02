@@ -394,14 +394,19 @@ struct CheckInput
     uint8_t* linkage;
     uint8_t* defined;
     uint8_t* tentative;
-    uint32_t* initializer_nodes;
-    uint32_t* initializer_begins;
-    uint32_t* initializer_ends;
+    // The pool of the sparse columns below (c_check_sparse.c, #628): initializer_nodes, initializer_begins,
+    // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next,
+    // control_owners, label_targets, case_ranges and string_ids, which few tokens have an entry in. In the arena, so that
+    // a lane's copy of the CheckInput writes the same pool (c_check_deferred.c).
+    CheckSparsePool* sparse_pool;
+    CheckSparseColumn initializer_nodes;
+    CheckSparseColumn initializer_begins;
+    CheckSparseColumn initializer_ends;
     uint32_t* token_nodes;
     // A variably modified typeof's evaluated operand, by its declaration's terminator token. The operand is not
     // otherwise a runtime root: the type query carries only its type, and its side effects run where the declaration
     // does, after the type's bounds and before its initializers.
-    uint32_t* evaluation_nodes;
+    CheckSparseColumn evaluation_nodes;
     // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
@@ -413,17 +418,17 @@ struct CheckInput
     uint32_t constant_warning_count;
     bool constant_warnings_prepared;
     uint8_t* constant_warning_ignored;
-    uint32_t* body_declarations;
-    uint32_t* declaration_bodies;
+    CheckSparseColumn body_declarations;
+    CheckSparseColumn declaration_bodies;
     // At a body opening: its first named parameter token. At a parameter name: its zero-based ordinal in the full
     // parameter list, including unnamed parameters. These token roles are disjoint; no additional column is needed.
-    uint32_t* parameters;
-    uint32_t* parameter_next;
-    uint32_t* control_owners;
-    uint32_t* label_targets;
+    CheckSparseColumn parameters;
+    CheckSparseColumn parameter_next;
+    CheckSparseColumn control_owners;
+    CheckSparseColumn label_targets;
     // Resolved &&label expressions, counted by check_input_controls; zero lets check_program omit its address table.
     uint32_t label_address_count;
-    uint32_t* case_ranges;
+    CheckSparseColumn case_ranges;
     CheckInputRegion* regions;
     uint32_t* expression_regions;
     uint32_t region_count;
@@ -446,7 +451,7 @@ struct CheckInput
     CheckInitString* strings;
     // Literal index by token, including every part of an adjacent literal sequence; NONE for other tokens.
     // Retained from the reader so initializer planning also resolves an array-valued literal by object - 1.
-    uint32_t* string_ids;
+    CheckSparseColumn string_ids;
     uint32_t string_count;
     uint32_t token_count;
     // Large, proven file-scope integer literal lists, in declaration order: one immutable bytes part per table.
@@ -912,7 +917,7 @@ struct CheckInputReader
     uint32_t* initializer_finish_next;
     TypeId* incomplete_array_types;
     uint32_t inference_end;
-    uint32_t* string_ids;
+    CheckSparseColumn string_ids;
     uint64_t* designator_indices;
     uint8_t* designator_valid;
     uint32_t* designator_tokens;
@@ -995,8 +1000,8 @@ struct CheckInputReader
     // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
     // columns take memory only where they're written (#628, #529). Lanes share it, as they do the columns.
     uint64_t* sparse_marks;
-    uint32_t* parameters;
-    uint32_t* parameter_next;
+    CheckSparseColumn parameters;
+    CheckSparseColumn parameter_next;
     uint32_t* parameter_seen;
     uint32_t* parameter_previous;
     uint8_t* parameter_shapes;
@@ -2758,7 +2763,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
     const CheckInitString* result = 0;
     if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STRING)
     {
-        const uint32_t cached = reader->string_ids[token];
+        const uint32_t cached = check_sparse_get(reader->string_ids, token);
         if (cached != BUSTER_CHECK_NONE)
         {
             result = &reader->output->strings[cached];
@@ -2802,7 +2807,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                 };
                 for (uint32_t i = token; i < end; i += 1)
                 {
-                    reader->string_ids[i] = index;
+                    check_sparse_set(reader->output->sparse_pool, reader->string_ids, i, index);
                     reader->ignored[i] |= i != token;
                 }
                 reader->declared_types[token] = type;
@@ -3396,7 +3401,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 valid = c_bindings_restore(&reader->bindings, frame->binding_mark, close);
                 reader->output->resource |= !valid;
                 reader->prototype_depth -= 1;
-                for (uint32_t parameter = function->names; parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+                for (uint32_t parameter = function->names; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
                 {
                     reader->parameter_seen[parser->tokens.names[parameter]] = reader->parameter_previous[parameter];
                 }
@@ -3437,11 +3442,11 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 reader->output->declarations[token] = token;
                 reader->output->explicit_abis[token] = 0;
                 reader->output->attributes[token] = 0;
-                reader->parameters[token] = function->last_name != BUSTER_CHECK_NONE ? reader->parameters[function->last_name] + 1 : 0;
-                reader->parameter_next[token] = BUSTER_CHECK_NONE;
+                check_sparse_set(reader->output->sparse_pool, reader->parameters, token, function->last_name != BUSTER_CHECK_NONE ? check_sparse_get(reader->parameters, function->last_name) + 1 : 0);
+                check_sparse_set(reader->output->sparse_pool, reader->parameter_next, token, BUSTER_CHECK_NONE);
                 if (function->last_name != BUSTER_CHECK_NONE)
                 {
-                    reader->parameter_next[function->last_name] = token;
+                    check_sparse_set(reader->output->sparse_pool, reader->parameter_next, function->last_name, token);
                 }
                 else
                 {
@@ -3745,11 +3750,11 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 {
                                     valid &= check_input_attribute_function(reader, reader->output->attributes[token], adjusted);
                                 }
-                                reader->parameters[token] = function->parameter_count - 1;
-                                reader->parameter_next[token] = BUSTER_CHECK_NONE;
+                                check_sparse_set(reader->output->sparse_pool, reader->parameters, token, function->parameter_count - 1);
+                                check_sparse_set(reader->output->sparse_pool, reader->parameter_next, token, BUSTER_CHECK_NONE);
                                 if (function->last_name != BUSTER_CHECK_NONE)
                                 {
-                                    reader->parameter_next[function->last_name] = token;
+                                    check_sparse_set(reader->output->sparse_pool, reader->parameter_next, function->last_name, token);
                                 }
                                 else
                                 {
@@ -4394,7 +4399,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             valid = type != 0 && name != BUSTER_CHECK_NONE && !reader->declarator_identifier_list && (next == PARSE_KIND_COMMA || next == PARSE_KIND_SEMI) &&
                     (attributes == 0 || !attributes->has_alignas);
             uint32_t listed = BUSTER_CHECK_NONE;
-            for (uint32_t parameter = names; valid && parameter != BUSTER_CHECK_NONE && listed == BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+            for (uint32_t parameter = names; valid && parameter != BUSTER_CHECK_NONE && listed == BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
             {
                 listed = parser->tokens.names[parameter] == parser->tokens.names[name] ? parameter : BUSTER_CHECK_NONE;
             }
@@ -4438,7 +4443,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             i += valid ? 1 : 0;
         }
     }
-    for (uint32_t parameter = names; valid && parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+    for (uint32_t parameter = names; valid && parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
     {
         if (reader->declared_types[parameter] == 0)
         {
@@ -4481,7 +4486,7 @@ static void check_input_schedule(CheckInputReader* reader, uint32_t token, uint3
     reader->ignored[token] = true;
     reader->output->declarations[token] = token;
     reader->objects[token] = token + 1;
-    reader->output->declaration_bodies[token] = reader->function_body;
+    check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, token, reader->function_body);
 }
 
 // Whether a parameter of main other than the first has clang's type for it: char ** with any qualifiers on the
@@ -4672,7 +4677,7 @@ static void check_input_static_local_warning(CheckInputReader* reader, uint32_t 
 {
     const CheckInput* input = reader->output;
     const uint32_t body = reader->function_body;
-    const uint32_t function = body < input->token_count ? input->body_declarations[body] : BUSTER_CHECK_NONE;
+    const uint32_t function = body < input->token_count ? check_sparse_get(input->body_declarations, body) : BUSTER_CHECK_NONE;
     bool constant = (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
     for (TypeId element = type; !constant && type_kind_is_array(type_kind(reader->types, element));)
     {
@@ -4985,7 +4990,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 valid = body < count && check_input_kr_declarations(reader, parameters, i, body);
                 uint32_t parameter_count = 0;
-                for (uint32_t parameter = parameters; parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+                for (uint32_t parameter = parameters; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
                 {
                     parameter_count += 1;
                 }
@@ -4994,7 +4999,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->output->resource |= valid && promoted == 0;
                 valid = valid && promoted != 0;
                 uint32_t k = 0;
-                for (uint32_t parameter = parameters; valid && parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+                for (uint32_t parameter = parameters; valid && parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
                 {
                     promoted[k++] = check_input_kr_parameter_type(reader->types, reader->declared_types[parameter]);
                 }
@@ -5213,9 +5218,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 {
                     reader->parameter_vla_begin = vla_begin;
                     reader->parameter_vla_end = reader->output->vla_count;
-                    reader->output->body_declarations[i] = name;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->body_declarations, i, name);
                     reader->function_specifiers[i] = first;
-                    reader->parameters[i] = parameters;
+                    check_sparse_set(reader->output->sparse_pool, reader->parameters, i, parameters);
                     reader->parameter_declarations[i] = parameter_declarations;
                     reader->query_types[i] = type_return(reader->types, type);
                     // A qualified void (const void, which clang only warns about) is void.
@@ -5224,7 +5229,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     {
                         check_input_report(reader, name, CHECK_INPUT_DECLARATION);
                     }
-                    for (uint32_t parameter = parameters; valid && parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
+                    for (uint32_t parameter = parameters; valid && parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
                     {
                         valid = type_is_complete(reader->types, reader->declared_types[parameter]);
                         if (!valid)
@@ -5252,8 +5257,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         right = reader->next_child[right];
                     }
                     valid &= right != BUSTER_CHECK_NONE;
-                    reader->output->initializer_begins[name] = i + 1;
-                    reader->output->initializer_ends[name] = valid ? reader->ends[right] + 1 : i + 1;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, name, i + 1);
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, name, valid ? reader->ends[right] + 1 : i + 1);
                     i = valid ? reader->ends[right] + 1 : i;
                 }
                 // A declarator that ends before the first setting or section attribute is no section event (a section
@@ -6062,7 +6067,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 && reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
-            if (reader->output->initializer_ends[declaration] > reader->resolve_limit)
+            if (check_sparse_get(reader->output->initializer_ends, declaration) > reader->resolve_limit)
             {
                 reader->expression_limit = i < reader->expression_limit ? i : reader->expression_limit;
                 check_input_pragma_report(reader);
@@ -6072,7 +6077,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             const CheckInputLiteralTable* table = reader->output->literal_tables_last;
             if (table != NULL && table->declaration == declaration)
             {
-                i = reader->output->initializer_ends[declaration] - 1;
+                i = check_sparse_get(reader->output->initializer_ends, declaration) - 1;
                 continue;
             }
         }
@@ -6111,7 +6116,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 // The tags and enumeration constants the parameter list declared are in the body's scope too, as its
                 // parameters are (C11 6.2.1p4): declared again in it, in their order and with their declarations'
                 // tokens, as clang does (Sema::ActOnStartOfFunctionDef).
-                const uint32_t first_declaration = reader->output->body_declarations[i] != BUSTER_CHECK_NONE ? reader->parameter_declarations[i] : BUSTER_CHECK_NONE;
+                const uint32_t first_declaration = check_sparse_get(reader->output->body_declarations, i) != BUSTER_CHECK_NONE ? reader->parameter_declarations[i] : BUSTER_CHECK_NONE;
                 for (uint32_t declaration = first_declaration; declaration != BUSTER_CHECK_NONE; declaration = reader->parameter_declaration_next[declaration])
                 {
                     const bool tag = reader->declaration_kinds[declaration] == C_BINDING_TAG_KIND;
@@ -6121,13 +6126,13 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         reader->output->resource = true;
                     }
                 }
-                for (uint32_t p = reader->parameters[i]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+                for (uint32_t p = check_sparse_get(reader->parameters, i); p != BUSTER_CHECK_NONE; p = check_sparse_get(reader->parameter_next, p))
                 {
                     if ((reader->parameter_shapes[p] & 2) != 0)
                     {
                         check_input_report(reader, p, CHECK_INPUT_DECLARATION);
                     }
-                    reader->output->declaration_bodies[p] = i;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, p, i);
                     check_input_bind(reader, p, i);
                 }
                 check_input_vla_parameters(reader, i);
@@ -6222,9 +6227,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         reader->static_objects[i] = reader->function_result == 0;
                         reader->defined[i] = true;
                         reader->output->compound_objects[i] = true;
-                        reader->output->declaration_bodies[i] = reader->function_body;
-                        reader->output->initializer_begins[i] = body;
-                        reader->output->initializer_ends[i] = body_end + 1;
+                        check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, i, reader->function_body);
+                        check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, i, body);
+                        check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, i, body_end + 1);
                         reader->initializer_declarations[i] = i;
                         reader->initializer_declarations[body_end] = i;
                         reader->query_types[i] = type;
@@ -6805,7 +6810,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         }
         if (statement < parser->tokens.count && parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR)
         {
-            reader->output->evaluation_nodes[statement] = a;
+            check_sparse_set(reader->output->sparse_pool, reader->output->evaluation_nodes, statement, a);
         }
     }
     uint32_t node = BUSTER_CHECK_NONE;
@@ -6988,7 +6993,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             {
                 // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the
                 // label's own object, its token plus one, which no declaration has.
-                const uint32_t label = reader->output->label_targets[token];
+                const uint32_t label = check_sparse_get(reader->output->label_targets, token);
                 const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
                 supported = label < parser->tokens.count && pointer != 0 && count == 0;
                 node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
@@ -7205,11 +7210,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     {
         const uint32_t keyword = reader->first_child[token];
         const bool fallback = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_DEFAULT;
-        supported = reader->output->control_owners[token] != BUSTER_CHECK_NONE && (fallback ? count == 0 : count == 1 || count == 2);
+        supported = check_sparse_get(reader->output->control_owners, token) != BUSTER_CHECK_NONE && (fallback ? count == 0 : count == 1 || count == 2);
         if (supported && !fallback)
         {
             reader->output->token_nodes[token] = a;
-            reader->output->case_ranges[token] = count == 2 ? b : BUSTER_CHECK_NONE;
+            check_sparse_set(reader->output->sparse_pool, reader->output->case_ranges, token, count == 2 ? b : BUSTER_CHECK_NONE);
             graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
             check_input_const_warning(reader, a, keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
             if (count == 2)
@@ -7467,7 +7472,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             }
             if (op == CHECK_OP_INITIALIZE)
             {
-                reader->output->initializer_nodes[reader->initializer_declarations[token]] = node;
+                check_sparse_set(reader->output->sparse_pool, reader->output->initializer_nodes, reader->initializer_declarations[token], node);
             }
         }
     }
@@ -7705,8 +7710,8 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
-    const uint32_t begin = input->initializer_begins[token];
-    const uint32_t end = input->initializer_ends[token];
+    const uint32_t begin = check_sparse_get(input->initializer_begins, token);
+    const uint32_t end = check_sparse_get(input->initializer_ends, token);
     if (input->static_objects[token] && begin < end && end <= count)
     {
         memset(reader->constant_contexts + begin, 1, end - begin);
@@ -7976,29 +7981,23 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     return result;
 }
 
-// Retained uint32 output columns all use UINT32_MAX as their empty value. Fill one bounded column at a time so
-// libc's vector stores replace the aliasing token-wise stores (#628). Dirty and borrowed output storage is cleared
-// explicitly; the scalar reader below retains its original interleaved initialization as the independent twin.
-// The caller has proved all these mandatory reservations. Even count zero owns one sentinel; optional zero-default
-// columns (notably asm_ids) are excluded and keep their existing guarded initialization.
-static void check_input_output_none(CheckInput* input, uint32_t count)
+// The columns of a value a token whose empty value is NONE (UINT32_MAX), filled one at a time so that libc's vector stores
+// replace the scalar twin's stores at each token of all of them, which clang doesn't vectorize across the columns'
+// pointers (#628, #529): the output's declarations and token_nodes, and the reader's own columns in the scratch, whose
+// pages may hold what something wrote before. The sparse output columns need no fill (c_check_sparse.c). Even count zero
+// owns one sentinel; optional zero-default columns (notably asm_ids) are excluded and keep their guarded initialization.
+static void check_input_output_none(CheckInput* input, CheckInputReader* reader, uint32_t count)
 {
-    _Static_assert(BUSTER_CHECK_NONE == UINT32_MAX, "NONE output columns use all-one bytes");
+    _Static_assert(BUSTER_CHECK_NONE == UINT32_MAX, "NONE columns use all-one bytes");
     const uint64_t bytes = ((uint64_t)count + 1) * sizeof(uint32_t);
     memset(input->declarations, 0xff, bytes);
-    memset(input->initializer_nodes, 0xff, bytes);
-    memset(input->initializer_begins, 0xff, bytes);
-    memset(input->initializer_ends, 0xff, bytes);
     memset(input->token_nodes, 0xff, bytes);
-    memset(input->evaluation_nodes, 0xff, bytes);
-    memset(input->body_declarations, 0xff, bytes);
-    memset(input->declaration_bodies, 0xff, bytes);
-    memset(input->parameter_next, 0xff, bytes);
-    memset(input->control_owners, 0xff, bytes);
-    memset(input->label_targets, 0xff, bytes);
-    memset(input->case_ranges, 0xff, bytes);
-    memset(input->string_ids, 0xff, bytes);
-    memset(input->parameters, 0xff, bytes);
+    memset(reader->initializer_declarations, 0xff, bytes);
+    memset(reader->initializer_finish_heads, 0xff, bytes);
+    memset(reader->selected_tokens, 0xff, bytes);
+    memset(reader->activate, 0xff, bytes);
+    memset(reader->first_value, 0xff, bytes);
+    memset(reader->last_value, 0xff, bytes);
 }
 
 #include "c_check_comma_input.c"
@@ -8170,20 +8169,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(linkage, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(defined, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(tentative, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(initializer_nodes, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(initializer_begins, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(initializer_ends, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(token_nodes, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(evaluation_nodes, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(constant_warnings, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(constant_warning_ignored, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(body_declarations, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(declaration_bodies, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(parameters, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(parameter_next, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(control_owners, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(label_targets, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(case_ranges, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(regions, CheckInputRegion);
     BUSTER_CHECK_OUTPUT_ARRAY(expression_regions, uint32_t);
     // Declaration asm labels need no statement IDs. Keep the scalar path's dense column as an exact oracle, and
@@ -8193,8 +8181,24 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
     }
     BUSTER_CHECK_OUTPUT_ARRAY(strings, CheckInitString);
-    BUSTER_CHECK_OUTPUT_ARRAY(string_ids, uint32_t);
 #undef BUSTER_CHECK_OUTPUT_ARRAY
+    // The columns few tokens have an entry in, sparse (c_check_sparse.c, #628): their directories, which a fresh arena
+    // holds zero, and their blocks' pool, of which they take as many pages as their entries' blocks. The deferred reader's
+    // lanes write them at once.
+    CheckSparseColumn sparse_columns[12] = { 0 };
+    valid = valid && check_sparse_reserve(arena, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), count, output_zero, deferred != 0);
+    input->initializer_nodes = sparse_columns[0];
+    input->initializer_begins = sparse_columns[1];
+    input->initializer_ends = sparse_columns[2];
+    input->evaluation_nodes = sparse_columns[3];
+    input->body_declarations = sparse_columns[4];
+    input->declaration_bodies = sparse_columns[5];
+    input->parameters = sparse_columns[6];
+    input->parameter_next = sparse_columns[7];
+    input->control_owners = sparse_columns[8];
+    input->label_targets = sparse_columns[9];
+    input->case_ranges = sparse_columns[10];
+    input->string_ids = sparse_columns[11];
     if (valid && deferred_tokens != 0)
     {
         uint8_t* retained = arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1);
@@ -8474,41 +8478,18 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             for (uint32_t i = 0; i <= count; i += 1)
             {
                 input->declarations[i] = BUSTER_CHECK_NONE;
-                input->initializer_nodes[i] = BUSTER_CHECK_NONE;
-                input->initializer_begins[i] = BUSTER_CHECK_NONE;
-                input->initializer_ends[i] = BUSTER_CHECK_NONE;
                 input->token_nodes[i] = BUSTER_CHECK_NONE;
-                input->evaluation_nodes[i] = BUSTER_CHECK_NONE;
-                input->body_declarations[i] = BUSTER_CHECK_NONE;
-                input->declaration_bodies[i] = BUSTER_CHECK_NONE;
-                input->parameter_next[i] = BUSTER_CHECK_NONE;
-                input->control_owners[i] = BUSTER_CHECK_NONE;
-                input->label_targets[i] = BUSTER_CHECK_NONE;
-                input->case_ranges[i] = BUSTER_CHECK_NONE;
-                reader.string_ids[i] = BUSTER_CHECK_NONE;
                 reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
                 reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
                 reader.selected_tokens[i] = BUSTER_CHECK_NONE;
                 reader.activate[i] = BUSTER_CHECK_NONE;
-                reader.parameters[i] = BUSTER_CHECK_NONE;
                 reader.first_value[i] = BUSTER_CHECK_NONE;
                 reader.last_value[i] = BUSTER_CHECK_NONE;
             }
         }
         else
         {
-            check_input_output_none(input, count);
-            // Reader-internal columns keep their token-wise initialization and ownership. Only retained output
-            // columns change their fill order; no reader arena format or walk is changed.
-            for (uint32_t i = 0; i <= count; i += 1)
-            {
-                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
-                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
-                reader.activate[i] = BUSTER_CHECK_NONE;
-                reader.first_value[i] = BUSTER_CHECK_NONE;
-                reader.last_value[i] = BUSTER_CHECK_NONE;
-            }
+            check_input_output_none(input, &reader, count);
         }
         if (traversal != 0)
         {
