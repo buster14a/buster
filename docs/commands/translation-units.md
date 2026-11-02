@@ -69,7 +69,9 @@ objects defines, and each of whose units' `-c` objects is the unit's alone
 (by `--lanes` 1, 2, 3 and 8, by default, by 8 poisoned, and by 8 with
 `--units-memory=1`, whose report must say that at most one lane held memory at
 once); the units' memory (#1109: the budget read from files of the test's own,
-two equal units by two lanes with a byte of memory, one of which must wait, and
+without `MemAvailable` the free pages, neither none nor unbounded; two equal
+units by two lanes with a byte of memory, one of which must wait unless the
+process may run on one CPU, where the command runs one lane; and
 a 16 MiB unit of comments beside a tiny one, by two lanes with a byte and with
 one unit's memory, which deadlocked before the lanes gave memory back before
 helping);

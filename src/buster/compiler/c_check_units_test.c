@@ -47,8 +47,9 @@
 //   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
 //   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
 // - The units' memory (#1109, check_units_test_memory): the budget read from files of the test's own for each branch of
-//   check_units_memory_read; two equal units by two lanes with a byte of memory, one of which must wait for the
-//   other's, each object its own alone; and a unit of 16 MiB of comments beside a tiny one, by two lanes with a byte and
+//   check_units_memory_read (without MemAvailable, the free pages: neither none nor unbounded); two equal units by two
+//   lanes with a byte of memory, one of which must wait for the other's (unless the process may run on one CPU, where
+//   the command runs one lane), each object its own alone; and a unit of 16 MiB of comments beside a tiny one, by two lanes with a byte and
 //   with one unit's memory, each object its own alone, where a lane that kept its memory while it helped on the board
 //   deadlocked with the slow unit's waiting for it (the children's alarm fails the run).
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
@@ -1263,7 +1264,20 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
             .expected = 1000000000u,
             .bounded = true,
         },
+        {
+            .name = "no MemAvailable and no limit: the free pages, not unbounded",
+            .meminfo = NULL,
+            .cgroup = "0::/\n",
+            .files = {
+                { "memory.max", "max\n" },
+            },
+            .expected = UINT64_MAX,
+            .bounded = true,
+        },
     };
+    // Without MemAvailable the read is the free pages, which change as the test runs: some (a running machine always has
+    // free pages), and no more than the machine's memory or the case's bound.
+    const uint64_t machine = (uint64_t)sysconf(_SC_PHYS_PAGES) * (uint64_t)sysconf(_SC_PAGESIZE);
     for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         char case_directory[PATH_MAX];
@@ -1282,7 +1296,7 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
             made = check_units_test_memory_file(root, cases[c].files[f][0], cases[c].files[f][1]);
         }
         const uint64_t read = made ? check_units_memory_read(meminfo_path, cgroup_path, root) : UINT64_MAX;
-        const bool right = cases[c].bounded ? read <= cases[c].expected : read == cases[c].expected;
+        const bool right = cases[c].bounded ? read != 0 && read <= cases[c].expected && read <= machine : read == cases[c].expected;
         check_units_test_expect(tally, made && right, "the units' memory read from the machine's files", cases[c].name);
     }
     // Two equal units, each with its object alone.
@@ -1314,8 +1328,10 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
     const unsigned long long waits = text != NULL && strncmp(text, prefix, strlen(prefix)) == 0 ? strtoull(text + strlen(prefix), &end, 10) : 0;
     const bool reported = end != NULL && strcmp(end, suffix) == 0;
     free(text);
-    check_units_test_expect(tally, equal_status == 0 && reported && waits != 0, "two equal units by two lanes with a byte of memory: one waits for the other's",
-                            memory_directory);
+    // One waits only when both lanes run: on one CPU the command runs one lane (check_driver_cpus), and none waits.
+    const bool one_cpu = check_driver_cpus() < 2;
+    check_units_test_expect(tally, equal_status == 0 && reported && (waits != 0 || one_cpu),
+                            "two equal units by two lanes with a byte of memory: one waits for the other's", memory_directory);
     for (uint32_t u = 0; equal_status == 0 && u < BUSTER_CHECK_UNITS_TEST_MEMORY_UNITS; u += 1)
     {
         char together[PATH_MAX];
@@ -1366,9 +1382,10 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
                                     "a slow unit beside a tiny one with little memory: each object its own alone", together_path);
         }
     }
-    printf("  memory: %u budgets read from the machine's files; %llu of two equal units waited for a byte of memory; a slow unit beside a "
-           "tiny one by %u budgets, each object its own alone\n",
-           (uint32_t)BUSTER_ARRAY_LENGTH(cases), waits, (uint32_t)BUSTER_ARRAY_LENGTH(budgets));
+    printf("  memory: %u budgets read from the machine's files; %llu of two equal units waited for a byte of memory%s; a slow unit "
+           "beside a tiny one by %u budgets, each object its own alone\n",
+           (uint32_t)BUSTER_ARRAY_LENGTH(cases), waits, one_cpu ? " (skipped: the process may run on one CPU, one lane)" : "",
+           (uint32_t)BUSTER_ARRAY_LENGTH(budgets));
 }
 
 // The most runs check_units_test_limits makes, past which its sweep has gone wrong.
