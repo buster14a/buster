@@ -767,8 +767,10 @@ static bool lane_test_arenas(void)
     arena_release(&wide);
     arena_pool_release(&pool);
 
-    // The executable's .bss in base pages (arena_static_base_pages): a static of this file's there, and its last page.
-    static uint8_t bss_probe[64];
+    // The executable's .bss in base pages (arena_static_base_pages): a static of this file's there, and its last page. The
+    // static is page-aligned so that its page is a whole page of .bss whatever the linker's layout; the advice leaves out
+    // .bss's first page when that holds .data's last bytes.
+    static uint8_t bss_probe[64] __attribute__((aligned(BUSTER_ARENA_PAGE_BYTES)));
     extern char _end[];
     arena_static_base_pages();
     const bool probe_advised = lane_test_vm_flag((uintptr_t)bss_probe, "nh", &found) && found;
