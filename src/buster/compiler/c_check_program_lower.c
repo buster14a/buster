@@ -6844,6 +6844,15 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_complex_builtin(writer, node);
     }
+    else if (runtime == CBUILTIN_ARITHMETIC_FENCE)
+    {
+        // Its operand's value, which clang -O0's code computes as it is: a fence keeps nothing apart there.
+        check_lower_operand(writer, node, 3, false, check_stream_type(stream, node));
+    }
+    else if (runtime == CBUILTIN_XRAY_CUSTOMEVENT || runtime == CBUILTIN_XRAY_TYPEDEVENT || runtime == CBUILTIN_WARN_MEMSET_ZERO_LEN)
+    {
+        // Nothing, as clang's code has them without -fxray-instrument: their arguments never run.
+    }
     else if (runtime == CBUILTIN_ANNOTATION)
     {
         // Its integer, which is its value; the string never runs.
@@ -6868,8 +6877,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
+        // trivially_relocate is memmove of its count times its element's size, whose value is its destination.
+        const bool relocate = runtime == CBUILTIN_TRIVIALLY_RELOCATE;
         *call = (CBuiltinMiscLowerCall){ .id = probability ? CBUILTIN_EXPECT : aligned ? CBUILTIN_ALLOCA_WITH_ALIGN :
-                                               runtime == CBUILTIN_ALLOCA_UNINITIALIZED ? CBUILTIN_ALLOCA : runtime,
+                                               runtime == CBUILTIN_ALLOCA_UNINITIALIZED ? CBUILTIN_ALLOCA : relocate ? CBUILTIN_MEMMOVE : runtime,
                                          .argument_count = evaluated };
         if (aligned)
         {
@@ -6917,7 +6928,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
                 call->result_object = check_lower_temporary(writer, check_lower_class(writer, result_type));
             }
         }
-        if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
+        if (count == 3 && !relocate && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
         {
             const uint32_t size_node = graph->argument_nodes[first + 2];
             const CheckOp size_op = graph->ops[size_node];
@@ -6950,6 +6961,12 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             // A frame object's value is its value class's (a 128-bit integer's), as SET_LOCAL writes it.
             const uint32_t local = call->arguments[i];
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->value_classes[local], local);
+            if (relocate && i == 2)
+            {
+                const TypeId pointer = type_strip_aligned(program->types, check_stream_type(stream, node));
+                check_lower_instruction(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, type_size(program->types, type_element(program->types, pointer)));
+            }
             check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
         }
     }

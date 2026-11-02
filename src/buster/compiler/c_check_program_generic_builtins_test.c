@@ -135,6 +135,38 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: complex of a const object in static data", .source =
           "static const double c = 1.0;\n_Complex double z = __builtin_complex(c, 2.0);\n" },
         { .name = "generic: complex in a static assertion", .source = "_Static_assert(__builtin_complex(1.0, 2.0) == 1.0 + 2.0i, \"\");\n" },
+        { .name = "generic: fence of an int", .source = "int f(int x)\n{\nreturn __arithmetic_fence(x);\n}\n", .rejected = true },
+        { .name = "generic: fence of a pointer", .source = "double* f(double* x)\n{\nreturn __arithmetic_fence(x);\n}\n", .rejected = true },
+        { .name = "generic: fence of an atomic", .source = "_Atomic double a;\ndouble f(void)\n{\nreturn __arithmetic_fence(a);\n}\n", .rejected = true },
+        { .name = "generic: fence of a complex integer", .source = "_Complex int f(_Complex int z)\n{\nreturn __arithmetic_fence(z);\n}\n", .rejected = true },
+        { .name = "generic: fence of an integer vector", .source = "typedef int V __attribute__((vector_size(16)));\nV f(V v)\n{\nreturn __arithmetic_fence(v);\n}\n", .rejected = true },
+        { .name = "generic: fence of two", .source = "double f(double x)\n{\nreturn __arithmetic_fence(x, x);\n}\n", .rejected = true },
+        { .name = "generic: fence in constant contexts", .source = "static const double c = 2.0;\nstatic double e = __arithmetic_fence(c);\n_Static_assert(__arithmetic_fence(1.0) == 1.0, \"\");\n" },
+        { .name = "generic: fence of float vectors and complex values", .source = "typedef float V __attribute__((vector_size(16)));\nV f(V v, _Complex float z)\n{\nreturn __arithmetic_fence(v) + __real__ __arithmetic_fence(z);\n}\n" },
+        { .name = "generic: xray of an integer for its string", .source = "void f(void)\n{\n__xray_customevent(1, 2);\n}\n", .rejected = true },
+        { .name = "generic: xray typed event of two", .source = "void f(void)\n{\n__xray_typedevent(1, \"x\");\n}\n", .rejected = true },
+        { .name = "generic: warn_memset_zero_len of one", .source = "void f(void)\n{\n__warn_memset_zero_len(1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of const", .source = "void f(const int* a, const int* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of a struct", .source = "struct S { int x; };\nvoid f(struct S* a, struct S* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of an atomic", .source = "void f(_Atomic int* a, _Atomic int* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of an array", .source = "int x[4], y[4];\nvoid f(void)\n{\n__builtin_trivially_relocate(x, y, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of two types", .source = "void f(int* a, long* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of a pointer and an array", .source = "void f(int* a)\n{\nint c[2];\n__builtin_trivially_relocate(a, c, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of void", .source = "void f(void* a, void* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },
+        { .name = "generic: relocate of a pointer size", .source = "void f(int* a, int* b)\n{\n__builtin_trivially_relocate(a, b, (void*)0);\n}\n", .rejected = true },
+        { .name = "generic: relocate of enums, arrays and vectors", .source = "enum E { X };\ntypedef int V __attribute__((vector_size(16)));\nvoid f(enum E* a, enum E* b, int (*c)[3], int (*d)[3], V* v, V* w)\n{\n__builtin_trivially_relocate(a, b, 1.5);\n__builtin_trivially_relocate(c, d, 1);\n__builtin_trivially_relocate(v, w, 1);\n}\n" },
+        { .name = "generic: operator_new in C", .source = "void* f(void)\n{\nreturn __builtin_operator_new(4);\n}\n", .rejected = true },
+        { .name = "generic: operator_delete in C", .source = "void f(void* p)\n{\n__builtin_operator_delete(p);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_auth", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth(p, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_auth_and_resign", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth_and_resign(p, 0, 0, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_auth_load_relative_and_sign", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth_load_relative_and_sign(p, 0, 0, 0, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_auth_with_pc_and_resign", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth_with_pc_and_resign(p, 0, 0, 0, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_blend_discriminator", .source = "long f(void* p)\n{\nreturn __builtin_ptrauth_blend_discriminator(p, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_sign_constant", .source = "void g(void);\nvoid* f(void)\n{\nreturn __builtin_ptrauth_sign_constant(&g, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_sign_generic_data", .source = "long f(void* p)\n{\nreturn __builtin_ptrauth_sign_generic_data(p, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_sign_unauthenticated", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_sign_unauthenticated(p, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: ptrauth_string_discriminator", .source = "static unsigned long x = __builtin_ptrauth_string_discriminator(\"abc\");\n", .rejected = true },
+        { .name = "generic: ptrauth_strip", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_strip(p, 0);\n}\n", .rejected = true },
         { .name = "generic: complex of qualified and aligned operands", .source =
           "typedef double D __attribute__((aligned(16)));\nvolatile D v;\nconst double c;\n_Complex double f(void)\n{\nreturn __builtin_complex(v, c);\n}\n" },
     };
@@ -286,6 +318,27 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "_Complex double s[2]={__builtin_complex(x,1.0),__builtin_complex(2.0,y)};mixd(__real__ s[1]);mixd(__imag__ s[0]);"
         "mixd(__imag__ (__builtin_complex(x,y)+1.0));return (int)(h^(h>>32));}",
         "generic-complex", clang);
+    // __arithmetic_fence's values of each floating type, a complex one and a vector, and in static data; the xray events
+    // and __warn_memset_zero_len, whose arguments never run; and
+    // trivially_relocate's moves, overlapping ones among them, of ints, doubles and arrays of ints, with its destination.
+    check_test_program_source(test,
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+        "static void mixd(double d){unsigned long long b;__builtin_memcpy(&b,&d,8);mix(b);}"
+        "static int counter;static int bump(void){return ++counter;}"
+        "static const double c=2.5;static double fenced=__arithmetic_fence(c)+__arithmetic_fence(0.5);"
+        "typedef float V __attribute__((vector_size(16)));"
+        "int tested(int n){h=(unsigned)n;mixd(fenced);double x=n*0.75;float y=(float)n/3;long double l=n*1.25L;_Float16 hf=(_Float16)n;"
+        "mixd(__arithmetic_fence(x+1.0));mixd(__arithmetic_fence(y));mixd((double)__arithmetic_fence(l));mixd((double)__arithmetic_fence(hf));"
+        "_Complex double z=__arithmetic_fence(x+2.0i);mixd(__real__ z);mixd(__imag__ z);V v={y,1,2,3};V w=__arithmetic_fence(v);mixd(w[0]);mixd(w[3]);"
+        "mix(_Generic(__arithmetic_fence(y),float:1,default:2));"
+        "counter=0;__xray_customevent((const char*)(long)bump(),(unsigned long)bump());__xray_typedevent(bump(),\"x\",bump());__warn_memset_zero_len();"
+        "mix((unsigned)counter);"
+        "int a[8];for(int i=0;i<8;i++)a[i]=i*n+1;int* pa=a;int* r=__builtin_trivially_relocate(pa+2,pa,(unsigned long)(n&3)+3);mix(r==a+2);for(int i=0;i<8;i++)mix((unsigned)a[i]);"
+        "double d[4]={1,2,3,4},e[4];double* pe=e;double* pd=d;double* q=__builtin_trivially_relocate(pe,pd,4.0);mix(q==e);for(int i=0;i<4;i++)mixd(e[i]);"
+        "int m[2][3]={{1,2,3},{4,5,n}},k[2][3];int (*pk)[3]=k;int (*pm)[3]=m;__builtin_trivially_relocate(pk,pm,2);for(int i=0;i<2;i++)for(int j=0;j<3;j++)mix((unsigned)k[i][j]);"
+        "long s[3]={n,2,3};long* t=s;__builtin_trivially_relocate(t+1,t,bump());mix((unsigned long)s[2]);mix((unsigned)counter);"
+        "return (int)(h^(h>>32));}"
+        , "generic-fence-events-and-relocate", clang);
 }
 
 static __attribute__((noinline)) void check_test_generic_builtins(CheckTest* test, const char* clang)

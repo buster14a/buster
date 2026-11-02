@@ -934,6 +934,126 @@ static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscA
     }
 }
 
+// The arity of a pointer authentication builtin (#148), which clang's Sema checks before it refuses the call: x86 has no
+// pointer authentication ("this target does not support pointer authentication").
+static uint32_t check_builtin_misc_ptrauth_arity(CBuiltinId id)
+{
+    uint32_t arity = 3;
+    switch (id)
+    {
+        case CBUILTIN_PTRAUTH_AUTH_AND_RESIGN: arity = 5; break;
+        case CBUILTIN_PTRAUTH_AUTH_LOAD_RELATIVE_AND_SIGN:
+        case CBUILTIN_PTRAUTH_AUTH_WITH_PC_AND_RESIGN: arity = 6; break;
+        case CBUILTIN_PTRAUTH_BLEND_DISCRIMINATOR:
+        case CBUILTIN_PTRAUTH_SIGN_GENERIC_DATA:
+        case CBUILTIN_PTRAUTH_STRIP: arity = 2; break;
+        case CBUILTIN_PTRAUTH_STRING_DISCRIMINATOR: arity = 1; break;
+        default: break;
+    }
+    return arity;
+}
+
+// Whether a type is one __builtin_trivially_relocate moves in C: an element (through arrays) that is a scalar, a complex
+// number or a vector, as clang's Sema has C's relocatable types; no struct or union, _Atomic or function.
+static bool check_builtin_misc_relocatable(const TypeTable* table, TypeId type)
+{
+    TypeId element = type_strip_aligned(table, type);
+    for (uint32_t depth = 0; depth < 64 && type_kind_is_array(type_kind(table, element)); depth += 1)
+    {
+        element = type_strip_aligned(table, type_element(table, element));
+    }
+    const uint8_t kind = type_kind(table, element);
+    return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ENUM ||
+           kind == BUSTER_TYPE_KIND_BIT_INT || kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
+           kind == BUSTER_TYPE_KIND_NULLPTR;
+}
+
+// The last of clang's generic builtins of #148 that its Sema checks itself:
+// - __arithmetic_fence(x): x, lvalue-converted, of a floating type, a complex one or a vector of either (its type before
+//   conversion: an _Atomic one is refused), a constant where x is; at -O0 a fence keeps nothing apart;
+// - __xray_customevent(p, n) and __xray_typedevent(t, p, n): nothing, their arguments converted to const char* and size_t
+//   as a call's but never evaluated, as clang's code has them without -fxray-instrument;
+// - __warn_memset_zero_len(): nothing;
+// - __builtin_trivially_relocate(d, s, n): memmove(d, s, n * sizeof *d), whose value is d, where d is a pointer to a
+//   relocatable type that isn't const and s of d's type, both as written (an array is no pointer), and n converted to
+//   size_t;
+// - __builtin_operator_new and __builtin_operator_delete, C++'s alone, and the pointer authentication builtins, which
+//   every call refuses (after the latter's arity, as clang's Sema checks it).
+static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
+{
+    const CBuiltinId id = input->id;
+    if (id == CBUILTIN_ARITHMETIC_FENCE)
+    {
+        const TypeId raw = type_strip_aligned(table, input->arguments[0].type);
+        const uint8_t kind = type_kind(table, raw);
+        const bool aggregate = kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        const uint8_t element = aggregate ? check_action_kind(table, type_element(table, raw)) : kind;
+        if (element != BUSTER_TYPE_KIND_FLOATING)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+        }
+        else
+        {
+            output->action.value = values[0];
+            output->action.value.category = CHECK_RVALUE;
+            output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
+        }
+    }
+    else if (id == CBUILTIN_XRAY_CUSTOMEVENT || id == CBUILTIN_XRAY_TYPEDEVENT)
+    {
+        const TypeId string = check_builtin_misc_pointer(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST);
+        const uint32_t text = id == CBUILTIN_XRAY_TYPEDEVENT ? 1 : 0;
+        bool accepted = string != 0;
+        for (uint32_t i = 0; accepted && i < input->argument_count; i += 1)
+        {
+            accepted = check_builtin_misc_convert(table, input, output, values + i, i, i == text ? string : BUSTER_TYPE_ULONG);
+        }
+        if (string == 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
+        }
+        output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+        output->evaluated_operands = 0;
+    }
+    else if (id == CBUILTIN_WARN_MEMSET_ZERO_LEN)
+    {
+        output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+    }
+    else if (id == CBUILTIN_TRIVIALLY_RELOCATE)
+    {
+        const TypeId raw = type_strip_aligned(table, input->arguments[0].type);
+        const TypeId element = type_kind(table, raw) == BUSTER_TYPE_KIND_POINTER ? type_element(table, raw) : 0;
+        // clang compares the two arguments' types as they are written, before any conversion (an array isn't a pointer).
+        const TypeId source = type_strip_aligned(table, input->arguments[1].type);
+        if (element == 0 || (type_qualifiers(type_strip_aligned(table, element)) & BUSTER_TYPE_CONST) != 0 || !check_builtin_misc_relocatable(table, element))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (!check_builtin_misc_source_complete(table, element, input))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPLETE, 0);
+        }
+        else if (raw != source)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else if (check_builtin_misc_convert(table, input, output, values + 2, 2, BUSTER_TYPE_ULONG))
+        {
+            output->action.value = values[0];
+            output->action.value.category = CHECK_RVALUE;
+            output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+            output->action.value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+            output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
+            output->reads_memory = true;
+            output->writes_memory = true;
+        }
+    }
+    else
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+    }
+}
+
 #include "c_check_builtin_bits.c"
 
 static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output)
@@ -972,8 +1092,15 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_ALLOCA_WITH_ALIGN:
         case CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED:
         case CBUILTIN_ANNOTATION:
-        case CBUILTIN_COMPLEX: minimum = maximum = 2; break;
-        case CBUILTIN_DWARF_CFA: minimum = maximum = 0; break;
+        case CBUILTIN_COMPLEX:
+        case CBUILTIN_XRAY_CUSTOMEVENT: minimum = maximum = 2; break;
+        case CBUILTIN_XRAY_TYPEDEVENT:
+        case CBUILTIN_TRIVIALLY_RELOCATE: minimum = maximum = 3; break;
+        case CBUILTIN_ARITHMETIC_FENCE: minimum = maximum = 1; break;
+        case CBUILTIN_DWARF_CFA:
+        case CBUILTIN_WARN_MEMSET_ZERO_LEN: minimum = maximum = 0; break;
+        case CBUILTIN_OPERATOR_NEW:
+        case CBUILTIN_OPERATOR_DELETE: minimum = 0; maximum = UINT32_MAX; break;
         default:
             if (cbuiltin_bits(input->id))
             {
@@ -982,6 +1109,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
             else if (cbuiltin_align(input->id))
             {
                 minimum = maximum = 2;
+            }
+            else if (input->id >= CBUILTIN_PTRAUTH_AUTH && input->id <= CBUILTIN_PTRAUTH_STRIP)
+            {
+                minimum = maximum = check_builtin_misc_ptrauth_arity(input->id);
             }
             else
             {
@@ -1005,9 +1136,13 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches, and
         // addressof's and function_start's are their designators. allow_runtime_check's and allow_sanitize_check's string
         // and annotation's second argument are their literals (CheckBuiltinMiscAction.string_known), never converted.
+        // Every call of a builtin x86 refuses (operator_new and operator_delete, pointer authentication's) is refused before
+        // its arguments are read. trivially_relocate's size and
+        // the xray events' arguments, lvalue-converted here, convert to their parameters (check_builtin_misc_last).
+        const bool refused = input->id >= CBUILTIN_OPERATOR_NEW && input->id <= CBUILTIN_PTRAUTH_STRIP;
         const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
-                              input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK;
-        if (classify && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
+                              input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || refused;
+        if (classify && !refused && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
         }
@@ -1055,6 +1190,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                 case CBUILTIN_FUNCTION_START: check_builtin_misc_more(table, input, output, values); break;
                 case CBUILTIN_COMPLEX: check_builtin_misc_complex(table, input, output, values); break;
                 default:
+                    if (input->id >= CBUILTIN_ARITHMETIC_FENCE && input->id <= CBUILTIN_PTRAUTH_STRIP)
+                    {
+                        check_builtin_misc_last(table, input, output, values);
+                    }
                     if (cbuiltin_bits(input->id))
                     {
                         check_builtin_bits(table, input, output, values);

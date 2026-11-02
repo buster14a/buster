@@ -7574,6 +7574,23 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ADDRESSOF, "__builtin_addressof", false, true, true },
         { CBUILTIN_FUNCTION_START, "__builtin_function_start", false, true, true },
         { CBUILTIN_COMPLEX, "__builtin_complex", false, true, true },
+        { CBUILTIN_ARITHMETIC_FENCE, "__arithmetic_fence", false, true, true },
+        { CBUILTIN_XRAY_CUSTOMEVENT, "__xray_customevent", false, true, false },
+        { CBUILTIN_XRAY_TYPEDEVENT, "__xray_typedevent", false, true, false },
+        { CBUILTIN_WARN_MEMSET_ZERO_LEN, "__warn_memset_zero_len", false, true, false },
+        { CBUILTIN_TRIVIALLY_RELOCATE, "__builtin_trivially_relocate", false, true, false },
+        { CBUILTIN_OPERATOR_NEW, "__builtin_operator_new", false, true, true },
+        { CBUILTIN_OPERATOR_DELETE, "__builtin_operator_delete", false, true, true },
+        { CBUILTIN_PTRAUTH_AUTH, "__builtin_ptrauth_auth", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_AND_RESIGN, "__builtin_ptrauth_auth_and_resign", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_LOAD_RELATIVE_AND_SIGN, "__builtin_ptrauth_auth_load_relative_and_sign", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_WITH_PC_AND_RESIGN, "__builtin_ptrauth_auth_with_pc_and_resign", false, true, false },
+        { CBUILTIN_PTRAUTH_BLEND_DISCRIMINATOR, "__builtin_ptrauth_blend_discriminator", false, true, false },
+        { CBUILTIN_PTRAUTH_SIGN_CONSTANT, "__builtin_ptrauth_sign_constant", false, true, true },
+        { CBUILTIN_PTRAUTH_SIGN_GENERIC_DATA, "__builtin_ptrauth_sign_generic_data", false, true, false },
+        { CBUILTIN_PTRAUTH_SIGN_UNAUTHENTICATED, "__builtin_ptrauth_sign_unauthenticated", false, true, false },
+        { CBUILTIN_PTRAUTH_STRING_DISCRIMINATOR, "__builtin_ptrauth_string_discriminator", false, true, true },
+        { CBUILTIN_PTRAUTH_STRIP, "__builtin_ptrauth_strip", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

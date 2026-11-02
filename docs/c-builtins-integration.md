@@ -1162,6 +1162,35 @@ them into a frame object of the two parts, whose address is its value, as every
 complex value's is (`check_lower_complex_builtin`: a `__float128` part's 16
 bytes copied 8 at a time).
 
+The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
+(`check_builtin_misc_last`):
+
+- `__arithmetic_fence(x)` is x, lvalue-converted, of a floating type, a complex
+  one or a vector of either, by its type before the conversion (an `_Atomic
+  double` is refused, and a complex integer); a constant where x is, as clang's
+  evaluator folds it. At -O0 clang's code computes x as it is, which the
+  lowering does;
+- `__xray_customevent(p, n)` and `__xray_typedevent(t, p, n)` are nothing, their
+  arguments converted to `const char *` and `size_t` as a call's and never
+  evaluated, as clang's code has them without `-fxray-instrument`, and
+  `__warn_memset_zero_len()` is nothing;
+- `__builtin_trivially_relocate(d, s, n)` is `memmove(d, s, n * sizeof *d)`,
+  whose value is d (the miscellaneous builtins' memmove recipe, its size
+  multiplied), where d is a pointer, as written, to a type C's relocation takes
+  (an element, through arrays, of a scalar, complex or vector type: no struct,
+  union, `_Atomic` or function), not const, s has d's type as written (an array
+  isn't its pointer), and n converts to `size_t`;
+- `__builtin_operator_new` and `__builtin_operator_delete` are C++'s alone, and
+  the ten pointer authentication builtins (`__builtin_ptrauth_auth` to
+  `__builtin_ptrauth_strip`) need a target x86 isn't: every call is an error, as
+  clang's is ("is only available in C++", "this target does not support pointer
+  authentication"), the latter's after their arity. `__has_builtin` answers 1
+  for them, as clang's does, and `__has_constexpr_builtin` as clang's.
+
+`__builtin_infer_alloc_token` stays out: clang's value is a hash of the type it
+infers from a `sizeof` among its arguments (0 without one), which its front end
+folds.
+
 `__builtin_stdarg_start` is the old name of `__builtin_va_start`, which clang's
 Sema checks as that: the catalogue resolves it to `va_start`'s entry
 (`cbuiltin_alias_entry`). In C23 it takes its second argument still, where
@@ -1235,7 +1264,10 @@ annotation's integer evaluated once, `addressof`'s and `function_start`'s
 addresses of a local, a member, an array, a function and in static data, and
 `complex`'s folds in static data and an enumerator and its values at run time of
 every real floating type, from qualified, aligned and volatile operands, each
-evaluated once in order (`c_check_program_generic_builtins_test.c`). `test-checker-driver` compares
+evaluated once in order, `__arithmetic_fence`'s values of each floating type, a
+complex one and a vector, the xray events' arguments, which never run, and
+`trivially_relocate`'s moves of ints, doubles and arrays of ints, overlapping
+ones among them (`c_check_program_generic_builtins_test.c`). `test-checker-driver` compares
 `verbose_trap`'s errors, their places and messages, with clang's by both paths
 (`c_check_generic_builtin_driver_test.c`).
 

@@ -60,7 +60,9 @@
 // isnormal to isfpclass, signbitf and signbitl, canonicalize and its __fp16 form) 0x3d0 to 0x3da, and the alignment builtins and
 // __builtin_expect_with_probability 0x3e0 to 0x3e3, the signaling NaNs and the _Float16 and __float128 constants 0x3e4 to
 // 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa, launder, the alloca variants, allow_runtime_check,
-// allow_sanitize_check, annotation, addressof, function_start and complex (c_check_builtin_misc.c's) 0x3f0 to 0x3fc. Those
+// allow_sanitize_check, annotation, addressof, function_start, complex, __arithmetic_fence and the xray events
+// (c_check_builtin_misc.c's) 0x3f0 to 0x3ff, and __warn_memset_zero_len, trivially_relocate,
+// operator_new and operator_delete and the pointer authentication builtins (its too) 0x440 to 0x44e. Those
 // last families are the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
 // least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
@@ -438,7 +440,24 @@
     X(ANNOTATION, 0x3f9u, "__builtin_annotation", BUSTER_CBUILTIN_SOURCE) \
     X(ADDRESSOF, 0x3fau, "__builtin_addressof", BUSTER_CBUILTIN_CONSTANT) \
     X(FUNCTION_START, 0x3fbu, "__builtin_function_start", BUSTER_CBUILTIN_CONSTANT) \
-    X(COMPLEX, 0x3fcu, "__builtin_complex", BUSTER_CBUILTIN_CONSTANT)
+    X(COMPLEX, 0x3fcu, "__builtin_complex", BUSTER_CBUILTIN_CONSTANT) \
+    X(ARITHMETIC_FENCE, 0x3fdu, "__arithmetic_fence", BUSTER_CBUILTIN_CONSTANT) \
+    X(XRAY_CUSTOMEVENT, 0x3feu, "__xray_customevent", BUSTER_CBUILTIN_SOURCE) \
+    X(XRAY_TYPEDEVENT, 0x3ffu, "__xray_typedevent", BUSTER_CBUILTIN_SOURCE) \
+    X(WARN_MEMSET_ZERO_LEN, 0x440u, "__warn_memset_zero_len", BUSTER_CBUILTIN_SOURCE) \
+    X(TRIVIALLY_RELOCATE, 0x442u, "__builtin_trivially_relocate", BUSTER_CBUILTIN_SOURCE) \
+    X(OPERATOR_NEW, 0x443u, "__builtin_operator_new", BUSTER_CBUILTIN_CONSTANT) \
+    X(OPERATOR_DELETE, 0x444u, "__builtin_operator_delete", BUSTER_CBUILTIN_CONSTANT) \
+    X(PTRAUTH_AUTH, 0x445u, "__builtin_ptrauth_auth", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_AUTH_AND_RESIGN, 0x446u, "__builtin_ptrauth_auth_and_resign", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_AUTH_LOAD_RELATIVE_AND_SIGN, 0x447u, "__builtin_ptrauth_auth_load_relative_and_sign", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_AUTH_WITH_PC_AND_RESIGN, 0x448u, "__builtin_ptrauth_auth_with_pc_and_resign", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_BLEND_DISCRIMINATOR, 0x449u, "__builtin_ptrauth_blend_discriminator", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_SIGN_CONSTANT, 0x44au, "__builtin_ptrauth_sign_constant", BUSTER_CBUILTIN_CONSTANT) \
+    X(PTRAUTH_SIGN_GENERIC_DATA, 0x44bu, "__builtin_ptrauth_sign_generic_data", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_SIGN_UNAUTHENTICATED, 0x44cu, "__builtin_ptrauth_sign_unauthenticated", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_STRING_DISCRIMINATOR, 0x44du, "__builtin_ptrauth_string_discriminator", BUSTER_CBUILTIN_CONSTANT) \
+    X(PTRAUTH_STRIP, 0x44eu, "__builtin_ptrauth_strip", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
