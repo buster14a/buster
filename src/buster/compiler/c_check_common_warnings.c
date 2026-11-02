@@ -2256,19 +2256,32 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             // A lone identifier in a brace initializer (`int x = { x };`) is a self-read the graph's value column does
             // not retain; the declaration's own token range finds it. An expression initializer's reads are the
             // graph's, so only a braced range is scanned, and not through a sizeof operand.
-            const bool braced = (initializer_begin < parser->tokens.count && parser->tokens.kinds[initializer_begin] == PARSE_KIND_L_BRACE) ||
-                                (declaration + 2 < parser->tokens.count && parser->tree.roles[declaration + 1] == PARSE_ROLE_ASSIGN &&
-                                 parser->tree.roles[declaration + 2] == PARSE_ROLE_OPEN_INITIALIZER);
-            uint32_t scan_begin = initializer_begin;
-            uint32_t scan_end = initializer_end;
-            if (braced && (scan_begin == BUSTER_CHECK_NONE || scan_end == BUSTER_CHECK_NONE) && declaration + 2 < parser->tokens.count)
+            uint32_t brace_open = BUSTER_CHECK_NONE;
+            for (uint32_t at = declaration + 1; at < parser->tokens.count; at += 1)
             {
-                scan_begin = declaration + 2;
-                const uint32_t close = parser->tree.parents[declaration + 2];
+                const uint8_t kind = parser->tokens.kinds[at];
+                if (kind == PARSE_KIND_EQUAL)
+                {
+                    if (at + 1 < parser->tokens.count && parser->tokens.kinds[at + 1] == PARSE_KIND_L_BRACE)
+                    {
+                        brace_open = at + 1;
+                    }
+                    break;
+                }
+                if (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE)
+                {
+                    break;
+                }
+            }
+            const bool braced = brace_open != BUSTER_CHECK_NONE;
+            const uint32_t scan_begin = braced ? brace_open : initializer_begin;
+            uint32_t scan_end = initializer_end;
+            if (braced)
+            {
+                const uint32_t close = parser->tree.parents[brace_open];
                 scan_end = close < parser->tokens.count ? close + 1 : parser->tokens.count;
             }
-            for (uint32_t at = scan_begin; braced && scan_end != BUSTER_CHECK_NONE &&
-                 at < scan_end && at < parser->tokens.count; at += 1)
+            for (uint32_t at = scan_begin; braced && at < scan_end && at < parser->tokens.count; at += 1)
             {
                 const bool member = at > 0 && (parser->tokens.kinds[at - 1] == PARSE_KIND_PERIOD ||
                                                parser->tokens.kinds[at - 1] == PARSE_KIND_ARROW);
@@ -2293,8 +2306,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     read_token = at;
                 }
             }
-            const bool self_initialization = initializer_begin != BUSTER_CHECK_NONE && initializer_end != BUSTER_CHECK_NONE &&
-                                             read_token != BUSTER_CHECK_NONE && read_token >= initializer_begin && read_token < initializer_end;
+            const uint32_t self_begin = braced ? scan_begin : initializer_begin;
+            const uint32_t self_end = braced ? scan_end : initializer_end;
+            const bool self_initialization = self_begin != BUSTER_CHECK_NONE && self_end != BUSTER_CHECK_NONE &&
+                                             read_token != BUSTER_CHECK_NONE && read_token >= self_begin && read_token < self_end;
             const bool has_read = first_read[declaration] != BUSTER_CHECK_NONE || read_token != BUSTER_CHECK_NONE;
             if (plain && scalar && has_read &&
                 (self_initialization || first_write[declaration] == BUSTER_CHECK_NONE ||
