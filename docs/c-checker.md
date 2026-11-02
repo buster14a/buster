@@ -1187,7 +1187,7 @@ contract. Diagnostic-only scans borrow complete checked roots, restore both
 arenas and never publish an initializer or a supposedly clean stream.
 
 String initializer lookup uses `CheckInput.string_ids`, the reader's token-to-literal
-index retained in the output arena. Every adjacent literal part names the same
+index retained in the output arena, a sparse column (`c_check_sparse.c`, #628). Every adjacent literal part names the same
 record. An array-valued expression also resolves its ordinary literal through
 its object identity (`token + 1`), preserving parenthesized string copies;
 predefined function-name arrays remain excluded from literal initialization.

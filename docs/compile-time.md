@@ -242,6 +242,8 @@ empty value is `UINT32_MAX` with bounded all-one byte fills,
 including each column's sentinel. Requested scalar parsing keeps the original
 interleaved initialization loop as an independent oracle, and the six
 reader-internal NONE stores keep their existing ownership and initialization.
+(Twelve of those columns are sparse since, and need no fill; the reader's six
+are filled a column at a time too: "The sparse output columns", below.)
 Optional zero-default columns retain their existing NULL guards. Dirty and
 borrowed output storage is always explicitly cleared; no fresh-page or arena
 high-water assumption is made. The column layout and allocated byte count do
@@ -629,12 +631,88 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   so that each takes its 2.8 MB whatever its pages: 33 MB. The walk reads most
   of them back by token (the initializers' and the parameters' 12 to 18 times),
   so that records in their place, written as the walk goes, need its lookups to
-  change, and #592's passes' too.
+  change, and #592's passes' too. They are sparse columns now (below).
 - **The graph's leaves.** Their 96-byte values take 14 MB for 144,720 leaves, of
   which the identifiers' carry little but a type and an object: columns and
   payload rows, as the stream's values have, would take about 8 MB less.
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
   8.3 MB, written at declarations, most of whose bits would fit one byte.
+
+### The sparse output columns (#628)
+
+On main `3ce71ec3`, `-c` of the frozen `sqlite3.c` (716,136 tokens) peaked at
+323.5 MB on the 9700X, at the end of `check-input`, which added 171 MB of it.
+Twelve of the reader's output columns took 34.4 MB of that, a value a token
+each, for 57,349 entries:
+
+| column | entries | 16-token blocks with one |
+| --- | ---: | ---: |
+| `declaration_bodies` | 16,655 | 8,917 |
+| `parameters` | 13,789 | 6,777 |
+| `parameter_next` | 5,934 | 3,837 |
+| `initializer_begins`, `initializer_ends` | 4,182 each | 3,502 each |
+| `initializer_nodes` | 3,982 | 3,318 |
+| `control_owners` | 3,012 | 1,285 |
+| `body_declarations` | 2,674 | 2,671 |
+| `string_ids` | 2,132 | 1,445 |
+| `label_targets` | 797 | 780 |
+| `evaluation_nodes`, `case_ranges` | none | none |
+
+The entries lie on most of each column's pages (on 155 to 604 of its 700
+base pages, but for the two empty ones), so neither base pages nor a value for
+NONE that a fresh page holds would have saved much of their memory. And the
+reader filled all twelve with NONE before the walk, 34.4 MB of stores.
+
+They are sparse columns now (`c_check_sparse.c`):
+- **The layout.** A column is a directory, an entry for each 16 tokens, of
+  blocks of 16 values in a pool that the unit's columns share. Block 0 holds
+  16 NONEs and is never written, so a directory's zero entry reads NONE for its
+  16 tokens. A fresh output arena's directories are as the kernel mapped them,
+  so the columns need no fill (`check_input_run`'s `output_zero`); otherwise
+  only the directories are cleared. On `sqlite3.c` the columns take 36,034
+  blocks, 2.3 MB, and the directories 2.1 MB: 4.5 MB in place of 34.4 MB.
+- **Reads and writes.** A read is two loads (`check_sparse_get`), and 16 tokens'
+  values two blocks' and a permute (`check_sparse_vector`), at any start, which
+  the program's and the lowering's scans of 16 tokens at a time take. A write at
+  a token whose 16 have no block takes the pool's next; a write of NONE there
+  takes none. The pool has a block for each directory entry of each column, which
+  a write takes once at most.
+- **Lanes.** The deferred reader's lanes write their own tokens of the same
+  columns at once, and two lanes' tokens can share 16. There a write claims the
+  empty directory entry, then takes, fills and publishes the block; another
+  lane's write waits for it. A read of a claimed entry reads block 0, which is
+  right, as the reading lane hasn't written its own token there yet.
+- **The deferred merge** maps `string_ids` at its entries by
+  `check_sparse_entries`, which skips 16 tokens without a block with one load.
+
+The reader's own six NONE columns (`activate`, `first_value` and the others), in
+the scratch, are filled a column at a time on the vector path too, as the
+output's two dense ones are (`check_input_output_none`); the scalar twin keeps
+its one loop over every token.
+
+`test-checker`'s scans test checks the columns against columns of a value a
+token at every count to 200: random writes, every token's value, every 16
+tokens' vector at every start, the masks and the entries' lists by both paths,
+with the directory ending at a `PROT_NONE` page. The tests that build a
+`CheckInput` by hand build its sparse columns from their values.
+
+On the 9700X, CPU 2 under the host's lock, main `3ce71ec3` against the change
+(`93f2085f`), with every object the same bytes, by both paths, on 8 lanes and
+with `-g`: 8 interleaved rounds of `perf stat -r 3`, and `measure-compile --runs
+11` of each with the other as its reference:
+
+| measure | main | sparse columns |
+| --- | ---: | ---: |
+| task clock | 117.43 ms | 115.43 ms |
+| user cycles | 557.7 M | 551.6 M |
+| user instructions | 1,274.2 M | 1,272.1 M |
+| kernel cycles | 93.4 M | 88.7 M |
+| peak RSS (`wait4`) | 323,508 KiB | 298,808 KiB |
+| `check-input` | 49.05 ms | 47.70 ms |
+| `check-input`'s peak added | 171,320 KiB | 144,632 KiB |
+
+Every round of the 8 has the change 1.7 to 2.7 ms faster. The peak is still
+the reader's end, 24.7 MB lower.
 
 ## The checker's graph and program passes (#530)
 
