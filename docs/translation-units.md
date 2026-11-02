@@ -326,6 +326,10 @@ So a units lane does five things:
 
 ### The units' memory
 
+[The record](https://github.com/buster14a/buster-performance/tree/49eac24cd07acdea5fdcb607e9595f7bc4c1a12a/docs/measurements/units-memory-1109-2026-11-02)
+has this section's and the next one's measurements, their scripts and their
+machines.
+
 A lane took one unit after another whatever their sizes, so the process's
 peak was about the sum of the lanes' largest units: each lane's three arenas
 keep the pages of its largest unit so far. A `main.c`-sized unit adds about
