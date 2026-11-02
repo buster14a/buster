@@ -676,7 +676,7 @@ static uint64_t lane_test_shared(LaneTest* test)
 {
     const uint32_t index = lane_index();
     const Lane lane = thread_context.lane;
-    test->shares[index] = lane.group != 0 && lane.group->shares_cpus;
+    test->shares[index] = lane.group != 0 && __atomic_load_n(&lane.group->shares_cpus, __ATOMIC_RELAXED);
     if (index == 0 && lane.count > 1)
     {
         lane_test_stall(BUSTER_LANE_TEST_SHORT_STALL_NANOSECONDS);
@@ -2480,7 +2480,7 @@ static void lane_test_session_round(LaneSessionTest* test, uint32_t kind)
     uint64_t failures = lane_broadcast(index + kind, lanes - 1) != lanes - 1 + kind ? 1 : 0;
     // The group a round narrows from the session's must read whether its lanes share CPUs as the session's do.
     const LaneGroup* group = thread_context.lane.group;
-    failures += group != 0 && group->shares_cpus != test->shares_cpus ? 1 : 0;
+    failures += group != 0 && __atomic_load_n(&group->shares_cpus, __ATOMIC_RELAXED) != test->shares_cpus ? 1 : 0;
     failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
     test->failures[index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += failures;
 }
@@ -2497,7 +2497,7 @@ static uint64_t lane_test_session_narrow(LaneSessionTest* test, uint32_t lanes)
         failures += lane_count() != expected || lane_index() != outer.index ? 1 : 0;
         // A narrowed group of several lanes shares the CPUs its session's lanes do.
         const LaneGroup* group = thread_context.lane.group;
-        failures += group != 0 && group->shares_cpus != test->shares_cpus ? 1 : 0;
+        failures += group != 0 && __atomic_load_n(&group->shares_cpus, __ATOMIC_RELAXED) != test->shares_cpus ? 1 : 0;
         lane_sync();
         failures += lane_broadcast(lane_index() * 3, expected - 1) != (expected - 1) * 3 ? 1 : 0;
         for (uint64_t part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS); part < BUSTER_LANE_TEST_SESSION_PARTS; part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS))

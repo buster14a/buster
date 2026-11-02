@@ -1969,7 +1969,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     for (uint32_t i = 0; equal && i < a->input.kr_diagnostic_count; i += 1)
     {
         equal = a->input.kr_diagnostics[i].token == b->input.kr_diagnostics[i].token &&
-                a->input.kr_diagnostics[i].warning == b->input.kr_diagnostics[i].warning;
+                a->input.kr_diagnostics[i].warning == b->input.kr_diagnostics[i].warning &&
+                a->input.kr_diagnostics[i].body == b->input.kr_diagnostics[i].body;
     }
     equal &= a->input.packed_member_count == b->input.packed_member_count;
     for (uint32_t i = 0; equal && i < a->input.packed_member_count; i += 1)

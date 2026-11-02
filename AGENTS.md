@@ -657,6 +657,19 @@ designs and the compilers already built this way.
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
   process.
+  Each executable it links then writes itself with the backend's tables built
+  (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
+  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize` and
+  `unwind_initialize` write is in a section of its own (`buster_baked`:
+  `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
+  module's statics, baked in the checker's unit, the C driver's), so a compile
+  starts with them built; the file's build ID is recomputed over the baked
+  bytes. A new table those initializers write goes there too: the bake fails
+  the build when they write anything outside it, including when its own
+  tracking arrays fill. PIEs (the sanitizers' builds) and
+  `BUSTER_BAKE=0` build them when they run; `test-baked-tables` checks either
+  kind and fails, rather than skips, when the section is missing (the
+  compile-time guide's "Baked tables").
   `./build.sh shifts DIRECTORY SOURCE SHIFT...` also links the same objects
   into `DIRECTORY/compiler-SHIFT` for each SHIFT, with that many bytes of
   padding in `.text` before SOURCE's code, for `time-runs` to compare builds
@@ -1226,27 +1239,37 @@ designs and the compilers already built this way.
   `CheckOptions.level_order`, in stable dependency levels), with scalar
   barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
-  `c_check_binding.c` publishes each use's retained answer from those events
+  its expression graph's walk has a vector path, the coded walk
+  (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
+  each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
+  "The coded walk"); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
   with each handoff ([the binding handoff](docs/c-check-bindings.md), #336). `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
-  `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
+  `test-checker-driver --executable ./build/compiler [--part K/N]
+  [--lazy-system-headers]` and `test-checker-asm`
   check the driver and inline assembly against Clang (but for named UCNs,
-  which clang accepts and the driver refuses at their places, #452); `test-checker-corpus`
+  which clang accepts and the driver refuses at their places, #452; with
+  `--lazy-system-headers`, only the checks that pass the driver
+  `-flazy-system-headers`, since the others run the same either way, and
+  `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
+  `CheckDriverPart`); `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
+  `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
+  to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
@@ -1506,6 +1529,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-preprocessor-fuzz --std c23
 ./build/compiler benchmark-preprocessor-fuzz
 ./build/compiler test-x86-encoder
+./build/compiler test-baked-tables
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-branch-sizing --cross-check
 ./build/compiler benchmark-branch-sizing
@@ -2034,14 +2058,27 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
   no mwaitx), test-foreign 28.3 s on 2 CPUs rather than 6.5 s, and test-link
   0.8 s rather than 0.02 s (#526's first run). They come first, where nothing
   runs before them to wait for;
-- 4 or 2 for those whose processes keep that many busy for much of their run:
-  the parts that follow `BUSTER_PARALLEL_CPUS` (`test_process_cpus`), the
+- 4, 3 or 2 for those whose processes keep that many busy for much of their
+  run: the parts that follow `BUSTER_PARALLEL_CPUS` (`test_process_cpus`), the
   `--jobs` the step passes from it (test-preprocessor's fuzz workers,
-  test-c-testsuite's), and gdb's and perf's beside test-unwind's own. The 4s
-  come next, while the pool is empty;
-- the rest follow in the order of their times run alone, the longest first.
-  c-testsuite's self-test, about 7 s of waiting out its timeouts, is a command
-  of its own on one CPU, apart from the subset's four.
+  test-c-testsuite's), and gdb's and perf's beside test-unwind's own. They come
+  next, the most CPUs first, while the pool is emptiest. test-preprocessor's
+  cases, its repository's units and the SSA promotion of c-testsuite's programs
+  declared 4, 4 and 3 and kept about 2 busy on every machine (hosted, baseline,
+  TSan and the 9700X): they declare 2, which frees the rest for the commands of
+  one CPU;
+- the commands of one CPU follow, the longest first by their times on the hosted
+  runners and the 9700X. A long command that checks independent things runs as
+  parts, each a command of its own that the runner packs beside the others
+  (`--part K/N`): test-checker-driver as 4 (the list's longest, 197 s on a hosted
+  runner and 48 s on the 9700X, whose start late in the list ended the step) and
+  test-checker as 4 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
+  busy). The parts together run each check once, with the whole command's
+  random samples: test-checker starts each unit's numbers afresh from the seed
+  and the unit's place (`check_test_part_random`), and no check of
+  test-checker-driver's draws from the shared stream. c-testsuite's self-test,
+  about 7 s of waiting out its timeouts, is a command of its own on one CPU,
+  apart from the subset's four.
 
 A heading declares the CPUs its command keeps busy for much of its run, which
 its CPU time over its time shows (the report gives both). Brief phases on more
@@ -5117,12 +5154,11 @@ vectorized kernels with the printer's spellings by `pp_print_spellings`
 (`spellings`) and by its general loop for every chunk (`per-token`,
 `PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
 warm-up print, with markers or without, must give the same bytes, whatever the
-implementation and the read limit. With line markers the
-general loop prints in the time the printer before #649 took; with `-P`, it
-printed 7–17% slower than that printer on an AVX-512 Xeon and 6% slower a
-token on the 9700X, so `main.c`'s `-P` history is `-P`'s before. The 9700X
-job runs both, with and without `--markers`, on `main.c` and the frozen
-`sqlite3.c` where it measures the preprocessor, about 13 s.
+implementation and the read limit. Both take the printer's own copies, its
+line markers' batches among them, so the two rows differ in the spellings
+alone, and each row's history in the job is its before. The 9700X job runs
+both, with and without `--markers`, on `main.c` and the frozen `sqlite3.c`
+where it measures the preprocessor, about 13 s.
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under

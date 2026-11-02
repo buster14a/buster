@@ -2137,7 +2137,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     const uint32_t warning = checked->warnings & CHECK_WARNING_KR_CALLS;
     if (warning != 0)
     {
-        check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning);
+        check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning, BUSTER_CHECK_NONE);
     }
     if (action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT)
     {
@@ -2159,6 +2159,15 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     CheckWarningEvent event;
     if (check_warning_ordered_event(reader->types, action, checked, action->node, reader->ends[action->node] + 1, &event))
     {
+        // Each operand's own spelling (#992): `__size_t` for a sizeof/alignof result, a typedef specifier's
+        // declaration where a named object's base was a typedef name — the same event the graph path emits.
+        const uint32_t node = action->node < reader->output->token_count && reader->output->token_nodes != 0 ?
+                              reader->output->token_nodes[action->node] : BUSTER_CHECK_NONE;
+        if (node < reader->output->graph.count)
+        {
+            event.payload.name = check_input_operand_spelling(reader, reader->output->graph.operand0[node]);
+            event.payload.data = check_input_operand_spelling(reader, reader->output->graph.operand1[node]);
+        }
         check_input_warning_once(reader, &event);
     }
 }
@@ -2764,7 +2773,14 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     }
                     if (source >= input->first && source < input->end)
                     {
-                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, begin, reader->ends[source] + 1, action.source_position);
+                        // The destination operand's own spelling (#992): the lvalue's last token names its
+                        // declaration — a member's for `x.y`, the object's for a plain name.
+                        uint32_t spelling = 0;
+                        const uint32_t lvalue = input->last_value[first - input->first];
+                        const TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser,
+                                                                           lvalue, 0, action.operands[0].type, &spelling);
+                        check_input_null_spelling(reader, action.operands[0].type, printed, spelling,
+                                                  action.operands + 1, begin, reader->ends[source] + 1, action.source_position);
                     }
                 }
                 check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
@@ -2978,7 +2994,15 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                     if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && operation.arity == 2)
                     {
                         const CheckConstantRange right = ranges[*value_count + 1];
-                        check_input_null_warning(reader, action.operands[0].type, action.operands + 1, right.first, right.end, range.end);
+                        // The destination operand's own spelling (#992): the lvalue's last token names its
+                        // declaration — a member's for `x.y`, the object's for a plain name.
+                        const CheckConstantRange left = ranges[*value_count];
+                        uint32_t spelling = 0;
+                        const TypeId printed = left.first < left.end ?
+                            check_input_object_spelling(reader->types, reader->output, reader->parser, left.end - 1,
+                                                        0, action.operands[0].type, &spelling) : action.operands[0].type;
+                        check_input_null_spelling(reader, action.operands[0].type, printed, spelling,
+                                                  action.operands + 1, right.first, right.end, range.end);
                     }
                     if (checked.diagnostic == CHECK_DIAG_NONE && proofs != 0 && input->proof_active[operation.token - input->first])
                     {

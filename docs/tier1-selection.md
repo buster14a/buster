@@ -141,15 +141,18 @@ patterns are:
   16 bytes past RBP where the frame has a frame pointer, and otherwise past
   RSP's reservation, the callee-saved registers the prologue pushed and the
   return address, plus the named arguments' stack bytes
-  (`tier1_emit_cfg_incoming`). Every variadic definition goes to the CFG
-  consumer. A function with its own ABI records is still refused whole.
+  (`tier1_emit_cfg_incoming`). Every variadic definition that selection
+  accepts goes to the CFG consumer. A function with its own ABI records is
+  still refused whole.
 
 `I8` and `I16` values occupy canonical zero-extended 32-bit registers and
 four-byte spill slots. Their logical memory widths remain one/two bytes.
 Signed extension interprets the source sign bit, then normalizes a narrow
 destination again; for example, `I8(-1)` to `I16` has register bits `0xffff`.
-Narrow arithmetic/comparisons and byte/word parameter, return and call ABI
-forms remain unsupported. `i1` memory and signed-extension forms are also
+Narrow arithmetic/comparisons remain unsupported, as do raw `i8`/`i16`
+parameter, return and call ABI forms; the C lowering gives a call's narrow
+arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
+"Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and

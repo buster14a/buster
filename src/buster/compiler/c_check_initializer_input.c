@@ -254,7 +254,9 @@ struct CheckInitDiagnostic
     uint32_t warning_token;
 };
 
-// Diagnose complete roots strictly before the earliest existing input/graph report and before_token (exclusive).
+// Diagnose complete roots before before_token (exclusive). A report elsewhere in the unit no longer cuts the
+// scan: the declaration that holds it is excluded by its nodes' completeness instead, so a later declaration's
+// independent warnings survive (#992).
 // BUSTER_CHECK_NONE supplies no additional cutoff. The real stream is never edited or relabeled successful.
 // Each selected root's mapped nodes must have a checked dependency closure within the cutoff. Missing structural
 // nodes are normal; a missing value/designator root makes the planner decline that root without inventing a
@@ -298,19 +300,14 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         result->status = input != 0 && input->resource ? CHECK_INIT_RESOURCE :
                          stream != 0 && stream->status == CHECK_STATUS_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_CHECK_FAILED;
     }
+    // Not the first report's token: an unrelated expression or type error earlier in the unit must not keep
+    // a later declaration's independent warnings (many-braces, initializer-overrides, non-literal-null) from
+    // being collected, as clang still reports them (#992). The declaration that holds the error is excluded
+    // by `complete` instead: its nodes are diagnosed or incomplete there.
     uint32_t cutoff = valid ? input->token_count : 0;
     if (before_token < cutoff)
     {
         cutoff = before_token;
-    }
-    for (uint32_t i = valid ? input->diagnostic_report_count : 0; valid && i < input->report_count; i += 1)
-    {
-        const uint32_t position = input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
-        cutoff = position < cutoff ? position : cutoff;
-    }
-    for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
-    {
-        cutoff = stream->reports[i].token < cutoff ? stream->reports[i].token : cutoff;
     }
     uint8_t* complete = valid && stream->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stream->count) : 0;
     if (valid && stream->count != 0 && complete == 0)

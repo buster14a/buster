@@ -839,6 +839,53 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .rejected = true,
         },
         {
+            // #990: clang's evaluator reads a const object's constant initializer inside a builtin call, so the folded
+            // call is an integer constant expression in every context.
+            .name = "declaration builtin calls of a const integer object",
+            .source = "static const int x=5; _Static_assert(__builtin_popcount(x)==2, \"const object\"); static int s=__builtin_popcount(x); int bound[__builtin_popcount(x)]; enum { F=__builtin_ffs(x) }; struct W { int field:__builtin_popcount(x); }; int f(void) { const int y=6; switch (0) { case __builtin_popcount(y)-2: return 1; } return bound[0]+s; }\n",
+        },
+        {
+            // #990: the same const-object read at block scope, for the generic bit and floating builtin families and a
+            // static local's initializer.
+            .name = "block-scope builtin calls of const objects in other families",
+            .source = "int g(void) { const unsigned u=7u; const unsigned short h=0x1234; const double d=4.0; _Static_assert(__builtin_popcountg(u)==3 && __builtin_bswapg(h)==0x3412, \"generic bits\"); _Static_assert(__builtin_signbit(d)==0 && __builtin_ctz((int)d)==2, \"floating object\"); enum { G=__builtin_stdc_bit_width(u) }; struct V { unsigned field:__builtin_stdc_bit_floor(u); }; static int t=__builtin_stdc_count_ones(u); switch (0) { case __builtin_clzg(u,99)-29: return t+G+(int)sizeof(struct V); } return 0; }\n",
+        },
+        {
+            .name = "declaration builtin calls of const integer objects across families",
+            .source = "static const unsigned u=0xf0u; static const unsigned long ul=0x100000001ul; static const unsigned long long ull=0x8000000000000001ull; static const signed char c=-1; static const _Bool b=1; enum E { EA=7 }; static const enum E e=EA; static const unsigned short s=0x1234; _Static_assert(__builtin_clz(u)==24 && __builtin_ctz(u)==4 && __builtin_parity(u)==0, \"\"); _Static_assert(__builtin_popcountl(ul)==2 && __builtin_clzll(ull)==0 && __builtin_bswap16(s)==0x3412, \"\"); _Static_assert(__builtin_ffs(c)==1 && __builtin_clrsb(c)==31 && __builtin_popcount(e)==3 && __builtin_popcount(b)==1, \"\"); _Static_assert(__builtin_abs(-7)==7 && __builtin_expect(u,0xf0u)==0xf0u && __builtin_expect_with_probability(u,0xf0u,0.5)==0xf0u, \"\");\n",
+        },
+        {
+            .name = "declaration builtin calls of const member, element and floating objects",
+            .source = "static const int x=5; static const int pair[2]={5,6}; struct P { int v; }; static const struct P p={11}; static const double d=3.0; _Static_assert(__builtin_popcount(__builtin_bswap32(x))==2 && __builtin_popcount(x+0)==2, \"\"); _Static_assert(__builtin_popcount(x?x:0)==2 && __builtin_popcount((x))==2, \"\"); _Static_assert(__builtin_constant_p(__builtin_popcount(x))==1, \"\"); _Static_assert(__builtin_popcount(pair[0])==2 && __builtin_popcount(p.v)==3, \"\"); _Static_assert(__builtin_ctz((int)d)==0 && __builtin_signbit(d)==0, \"\"); int bound[__builtin_popcount((int)d)];\n",
+        },
+        {
+            .name = "declaration builtin call of a volatile object",
+            .source = "static const volatile int v=5; int bound[__builtin_popcount(v)];\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration builtin call of a mutable object",
+            .source = "static int n=5; _Static_assert(__builtin_popcount(n)==2, \"\");\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration builtin call of a runtime-initialized const object",
+            .source = "int f(int p) { const int w=p; switch (0) { case __builtin_popcount(w): return 1; } return 0; }\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration overflow builtin of a const object is not ICE",
+            .source = "static const int k=5; int sink; enum { E=__builtin_add_overflow(k,1,&sink) };\n",
+            .rejected = true,
+        },
+        {
+            // #990: the atomic action's operand conversions read const objects in constant contexts too, so clang's
+            // folded lock-free query of a const size object is an integer constant expression. Its answer 1 is a
+            // lock-free size the pointee's alignment covers; no fixture value or memory is executed.
+            .name = "declaration atomic lock-free query of const objects",
+            .source = "static const int x=5; static const int *const p=&x; static const unsigned long size=sizeof x; enum { E=__atomic_always_lock_free(size,p) }; _Static_assert(E==1 && __atomic_always_lock_free(size,p), \"atomic const objects\");\n",
+        },
+        {
             .name = "C23 raw attribute arithmetic",
             .source = "typedef int T [[gnu::aligned(1 << 4)]]; _Static_assert(_Alignof(T)==16, \"raw arithmetic\");\n",
         },

@@ -128,90 +128,94 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         check_test_expect(test, made, "original diagnostic recovery source can be written");
         for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
         {
-            for (uint32_t policy = 0; policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
+            if (check_test_driver_takes())
             {
-                if (policy == 1 || policy == 2)
+                for (uint32_t policy = 0; policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
                 {
-                    char pragma[128];
-                    const int length = snprintf(pragma, sizeof(pragma), "#pragma clang diagnostic %s \"-Wshift-count-overflow\"\n", policies[policy]);
-                    made = length > 0 && (uint32_t)length < sizeof(pragma) && parse_test_write(policy_header, pragma, (uint64_t)(uint32_t)length);
-                    check_test_expect(test, made, "source warning policy is available for recovery");
-                }
-                char* arguments[12] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
-                uint32_t count = 4;
-                if (limits[limit] != NULL)
-                {
-                    arguments[count++] = (char*)limits[limit];
-                }
-                if (policy == 1 || policy == 2)
-                {
-                    arguments[count++] = "-include";
-                    arguments[count++] = policy_header;
-                }
-                else if (policies[policy] != NULL)
-                {
-                    arguments[count++] = (char*)policies[policy];
-                }
-                arguments[count++] = source;
-                char* reference = NULL;
-                const int oracle = check_test_driver_spawn(arguments, &reference);
-                char expected_groups[32768];
-                const bool expected_valid = check_test_driver_recovery_groups(reference, expected_groups, sizeof(expected_groups));
-                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(reference);
-                check_test_expect(test, expected_valid && oracle == 1, "Clang rejects each diagnostic recovery fixture");
-                free(reference);
-                for (uint32_t route = 0; route < 4; route += 1)
-                {
-                    static const char sentinel[] = "keep-rejected-output";
-                    const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
-                    char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
-                    uint32_t used = 2;
-                    if ((route & 1) != 0)
+                    if (policy == 1 || policy == 2)
                     {
-                        checked[used++] = "--scalar";
+                        char pragma[128];
+                        const int length = snprintf(pragma, sizeof(pragma), "#pragma clang diagnostic %s \"-Wshift-count-overflow\"\n", policies[policy]);
+                        // Its own result, not `made`: which cases come next mustn't depend on a case another part ran.
+                        const bool written = length > 0 && (uint32_t)length < sizeof(pragma) && parse_test_write(policy_header, pragma, (uint64_t)(uint32_t)length);
+                        check_test_expect(test, written, "source warning policy is available for recovery");
                     }
-                    checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
-                    if (route >= 2)
-                    {
-                        checked[used++] = "-o";
-                        checked[used++] = object;
-                    }
+                    char* arguments[12] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
+                    uint32_t count = 4;
                     if (limits[limit] != NULL)
                     {
-                        checked[used++] = (char*)limits[limit];
+                        arguments[count++] = (char*)limits[limit];
                     }
                     if (policy == 1 || policy == 2)
                     {
-                        checked[used++] = "-include";
-                        checked[used++] = policy_header;
+                        arguments[count++] = "-include";
+                        arguments[count++] = policy_header;
                     }
                     else if (policies[policy] != NULL)
                     {
-                        checked[used++] = (char*)policies[policy];
+                        arguments[count++] = (char*)policies[policy];
                     }
-                    checked[used++] = source;
-                    char* text = NULL;
-                    const int status = check_test_driver_spawn(checked, &text);
-                    char actual_groups[32768];
-                    const bool actual_valid = check_test_driver_recovery_groups(text, actual_groups, sizeof(actual_groups));
-                    const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-                    char description[160];
-                    snprintf(description, sizeof(description), "recovery groups fixture=%u limit=%u policy=%u route=%u", fixture, limit, policy, route);
-                    check_test_expect(test, expected_valid && actual_valid && strcmp(expected_groups, actual_groups) == 0, description);
-                    snprintf(description, sizeof(description), "recovery budget/counts fixture=%u limit=%u policy=%u route=%u", fixture, limit, policy, route);
-                    check_test_expect(test, status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
-                                           actual.notes == expected.notes && actual.fatal == expected.fatal && !actual.after_fatal &&
-                                           strcmp(actual.summary, expected.summary) == 0, description);
-                    FILE* preserved = fopen(object, "r");
-                    char bytes[sizeof(sentinel)] = { 0 };
-                    const bool unchanged = preserved != NULL && fread(bytes, 1, sizeof(bytes), preserved) == sizeof(bytes) &&
-                                           memcmp(bytes, sentinel, sizeof(bytes)) == 0 && fgetc(preserved) == EOF;
-                    check_test_expect(test, prior && unchanged, "rejected diagnostic recovery never replaces an output file");
-                    if (preserved != NULL)
+                    arguments[count++] = source;
+                    char* reference = NULL;
+                    const int oracle = check_test_driver_spawn(arguments, &reference);
+                    char expected_groups[32768];
+                    const bool expected_valid = check_test_driver_recovery_groups(reference, expected_groups, sizeof(expected_groups));
+                    const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(reference);
+                    check_test_expect(test, expected_valid && oracle == 1, "Clang rejects each diagnostic recovery fixture");
+                    free(reference);
+                    for (uint32_t route = 0; route < 4; route += 1)
                     {
-                        fclose(preserved);
+                        static const char sentinel[] = "keep-rejected-output";
+                        const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
+                        char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
+                        uint32_t used = 2;
+                        if ((route & 1) != 0)
+                        {
+                            checked[used++] = "--scalar";
+                        }
+                        checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
+                        if (route >= 2)
+                        {
+                            checked[used++] = "-o";
+                            checked[used++] = object;
+                        }
+                        if (limits[limit] != NULL)
+                        {
+                            checked[used++] = (char*)limits[limit];
+                        }
+                        if (policy == 1 || policy == 2)
+                        {
+                            checked[used++] = "-include";
+                            checked[used++] = policy_header;
+                        }
+                        else if (policies[policy] != NULL)
+                        {
+                            checked[used++] = (char*)policies[policy];
+                        }
+                        checked[used++] = source;
+                        char* text = NULL;
+                        const int status = check_test_driver_spawn(checked, &text);
+                        char actual_groups[32768];
+                        const bool actual_valid = check_test_driver_recovery_groups(text, actual_groups, sizeof(actual_groups));
+                        const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                        char description[160];
+                        snprintf(description, sizeof(description), "recovery groups fixture=%u limit=%u policy=%u route=%u", fixture, limit, policy, route);
+                        check_test_expect(test, expected_valid && actual_valid && strcmp(expected_groups, actual_groups) == 0, description);
+                        snprintf(description, sizeof(description), "recovery budget/counts fixture=%u limit=%u policy=%u route=%u", fixture, limit, policy, route);
+                        check_test_expect(test, status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
+                                               actual.notes == expected.notes && actual.fatal == expected.fatal && !actual.after_fatal &&
+                                               strcmp(actual.summary, expected.summary) == 0, description);
+                        FILE* preserved = fopen(object, "r");
+                        char bytes[sizeof(sentinel)] = { 0 };
+                        const bool unchanged = preserved != NULL && fread(bytes, 1, sizeof(bytes), preserved) == sizeof(bytes) &&
+                                               memcmp(bytes, sentinel, sizeof(bytes)) == 0 && fgetc(preserved) == EOF;
+                        check_test_expect(test, prior && unchanged, "rejected diagnostic recovery never replaces an output file");
+                        if (preserved != NULL)
+                        {
+                            fclose(preserved);
+                        }
+                        free(text);
                     }
-                    free(text);
                 }
             }
         }
@@ -232,45 +236,48 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         check_test_expect(test, made, "independent completed constraint source can be written");
         for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
         {
-            char* arguments[10] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
-            uint32_t used = 4;
-            if (limits[limit] != NULL)
+            if (check_test_driver_takes())
             {
-                arguments[used++] = (char*)limits[limit];
-            }
-            arguments[used++] = source;
-            char* text = NULL;
-            const int oracle = check_test_driver_spawn(arguments, &text);
-            const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
-            free(text);
-            for (uint32_t route = 0; route < 4; route += 1)
-            {
-                char* checked[12] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
-                used = 2;
-                if ((route & 1) != 0)
-                {
-                    checked[used++] = "--scalar";
-                }
-                checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
-                if (route >= 2)
-                {
-                    checked[used++] = "-o";
-                    checked[used++] = object;
-                }
+                char* arguments[10] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
+                uint32_t used = 4;
                 if (limits[limit] != NULL)
                 {
-                    checked[used++] = (char*)limits[limit];
+                    arguments[used++] = (char*)limits[limit];
                 }
-                checked[used++] = source;
-                text = NULL;
-                const int status = check_test_driver_spawn(checked, &text);
-                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-                char description[160];
-                snprintf(description, sizeof(description), "independent constraint=%u limit=%u route=%u keeps Clang counts, order and budget", constraint, limit, route);
-                check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
-                                       actual.fatal == expected.fatal && actual.last_error_line == expected.last_error_line && !actual.after_fatal &&
-                                       strcmp(actual.summary, expected.summary) == 0, description);
+                arguments[used++] = source;
+                char* text = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &text);
+                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
                 free(text);
+                for (uint32_t route = 0; route < 4; route += 1)
+                {
+                    char* checked[12] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
+                    used = 2;
+                    if ((route & 1) != 0)
+                    {
+                        checked[used++] = "--scalar";
+                    }
+                    checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
+                    if (route >= 2)
+                    {
+                        checked[used++] = "-o";
+                        checked[used++] = object;
+                    }
+                    if (limits[limit] != NULL)
+                    {
+                        checked[used++] = (char*)limits[limit];
+                    }
+                    checked[used++] = source;
+                    text = NULL;
+                    const int status = check_test_driver_spawn(checked, &text);
+                    const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                    char description[160];
+                    snprintf(description, sizeof(description), "independent constraint=%u limit=%u route=%u keeps Clang counts, order and budget", constraint, limit, route);
+                    check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
+                                           actual.fatal == expected.fatal && actual.last_error_line == expected.last_error_line && !actual.after_fatal &&
+                                           strcmp(actual.summary, expected.summary) == 0, description);
+                    free(text);
+                }
             }
         }
     }
@@ -309,75 +316,78 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         check_test_expect(test, made, "return publication and system-header source is available");
         for (uint32_t limit = 0; made && limit < 3; limit += 1)
         {
-            char* arguments[16] = { (char*)clang, (char*)returns[fixture].standard, "-fsyntax-only", "-fno-color-diagnostics" };
-            uint32_t used = 4;
-            if (limit != 0)
+            if (check_test_driver_takes())
             {
-                arguments[used++] = (char*)limits[limit];
-            }
-            if (returns[fixture].first != NULL)
-            {
-                arguments[used++] = (char*)returns[fixture].first;
-            }
-            if (returns[fixture].second != NULL)
-            {
-                arguments[used++] = (char*)returns[fixture].second;
-            }
-            arguments[used++] = source;
-            char* reference = NULL;
-            const int oracle = check_test_driver_spawn(arguments, &reference);
-            char expected_groups[32768];
-            const bool expected_valid = check_test_driver_recovery_groups(reference, expected_groups, sizeof(expected_groups));
-            const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(reference);
-            free(reference);
-            for (uint32_t route = 0; route < 4; route += 1)
-            {
-                static const char sentinel[] = "keep-return-rejected-output";
-                const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
-                char* checked[20] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), (char*)returns[fixture].standard };
-                used = 2;
-                if ((route & 1) != 0)
-                {
-                    checked[used++] = "--scalar";
-                }
-                checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
-                checked[used++] = "-o";
-                checked[used++] = object;
+                char* arguments[16] = { (char*)clang, (char*)returns[fixture].standard, "-fsyntax-only", "-fno-color-diagnostics" };
+                uint32_t used = 4;
                 if (limit != 0)
                 {
-                    checked[used++] = (char*)limits[limit];
+                    arguments[used++] = (char*)limits[limit];
                 }
                 if (returns[fixture].first != NULL)
                 {
-                    checked[used++] = (char*)returns[fixture].first;
+                    arguments[used++] = (char*)returns[fixture].first;
                 }
                 if (returns[fixture].second != NULL)
                 {
-                    checked[used++] = (char*)returns[fixture].second;
+                    arguments[used++] = (char*)returns[fixture].second;
                 }
-                checked[used++] = source;
-                char* text = NULL;
-                const int status = check_test_driver_spawn(checked, &text);
-                char actual_groups[32768];
-                const bool actual_valid = check_test_driver_recovery_groups(text, actual_groups, sizeof(actual_groups));
-                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-                char description[160];
-                snprintf(description, sizeof(description), "return publication fixture=%u limit=%u route=%u keeps exact Clang groups and status", fixture, limit, route);
-                check_test_expect(test, expected_valid && actual_valid && status == oracle && strcmp(expected_groups, actual_groups) == 0, description);
-                check_test_expect(test, actual.errors == expected.errors && actual.warnings == expected.warnings && actual.fatal == expected.fatal &&
-                                       !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0,
-                                  "return warning class, suppression and budget match the independent oracle");
-                FILE* emitted = fopen(object, "rb");
-                char bytes[sizeof(sentinel)] = { 0 };
-                const uint64_t taken = emitted != NULL ? fread(bytes, 1, sizeof(bytes), emitted) : 0;
-                const bool unchanged = taken == sizeof(bytes) && memcmp(bytes, sentinel, sizeof(bytes)) == 0 && emitted != NULL && fgetc(emitted) == EOF;
-                const bool elf = taken >= 4 && memcmp(bytes, "\177ELF", 4) == 0;
-                check_test_expect(test, prior && (oracle != 0 || route < 2 ? unchanged : elf), "return diagnostic-only work never publishes a rejected object");
-                if (emitted != NULL)
+                arguments[used++] = source;
+                char* reference = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &reference);
+                char expected_groups[32768];
+                const bool expected_valid = check_test_driver_recovery_groups(reference, expected_groups, sizeof(expected_groups));
+                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(reference);
+                free(reference);
+                for (uint32_t route = 0; route < 4; route += 1)
                 {
-                    fclose(emitted);
+                    static const char sentinel[] = "keep-return-rejected-output";
+                    const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
+                    char* checked[20] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), (char*)returns[fixture].standard };
+                    used = 2;
+                    if ((route & 1) != 0)
+                    {
+                        checked[used++] = "--scalar";
+                    }
+                    checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
+                    checked[used++] = "-o";
+                    checked[used++] = object;
+                    if (limit != 0)
+                    {
+                        checked[used++] = (char*)limits[limit];
+                    }
+                    if (returns[fixture].first != NULL)
+                    {
+                        checked[used++] = (char*)returns[fixture].first;
+                    }
+                    if (returns[fixture].second != NULL)
+                    {
+                        checked[used++] = (char*)returns[fixture].second;
+                    }
+                    checked[used++] = source;
+                    char* text = NULL;
+                    const int status = check_test_driver_spawn(checked, &text);
+                    char actual_groups[32768];
+                    const bool actual_valid = check_test_driver_recovery_groups(text, actual_groups, sizeof(actual_groups));
+                    const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                    char description[160];
+                    snprintf(description, sizeof(description), "return publication fixture=%u limit=%u route=%u keeps exact Clang groups and status", fixture, limit, route);
+                    check_test_expect(test, expected_valid && actual_valid && status == oracle && strcmp(expected_groups, actual_groups) == 0, description);
+                    check_test_expect(test, actual.errors == expected.errors && actual.warnings == expected.warnings && actual.fatal == expected.fatal &&
+                                           !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0,
+                                      "return warning class, suppression and budget match the independent oracle");
+                    FILE* emitted = fopen(object, "rb");
+                    char bytes[sizeof(sentinel)] = { 0 };
+                    const uint64_t taken = emitted != NULL ? fread(bytes, 1, sizeof(bytes), emitted) : 0;
+                    const bool unchanged = taken == sizeof(bytes) && memcmp(bytes, sentinel, sizeof(bytes)) == 0 && emitted != NULL && fgetc(emitted) == EOF;
+                    const bool elf = taken >= 4 && memcmp(bytes, "\177ELF", 4) == 0;
+                    check_test_expect(test, prior && (oracle != 0 || route < 2 ? unchanged : elf), "return diagnostic-only work never publishes a rejected object");
+                    if (emitted != NULL)
+                    {
+                        fclose(emitted);
+                    }
+                    free(text);
                 }
-                free(text);
             }
         }
     }

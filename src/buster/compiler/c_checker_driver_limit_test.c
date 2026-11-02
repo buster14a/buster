@@ -208,66 +208,69 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
             check_test_expect(test, made, "error-limit original fixture can be written");
             for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
             {
-                // The extra modes distinguish suppressed warnings from quiet diagnostic counting, and preserve
-                // Clang's explicit no-caret option, which suppresses its summary even while errors remain visible.
-                const uint32_t policies = shape == 3 || shape == 5 ? 3 : 1;
-                for (uint32_t policy = 0; policy < policies; policy += 1)
+                if (check_test_driver_takes())
                 {
-                    char* arguments[16] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
-                    uint32_t count = 4;
-                    if (limits[limit] != NULL)
+                    // The extra modes distinguish suppressed warnings from quiet diagnostic counting, and preserve
+                    // Clang's explicit no-caret option, which suppresses its summary even while errors remain visible.
+                    const uint32_t policies = shape == 3 || shape == 5 ? 3 : 1;
+                    for (uint32_t policy = 0; policy < policies; policy += 1)
                     {
-                        arguments[count++] = (char*)limits[limit];
-                    }
-                    if (policy != 0)
-                    {
-                        arguments[count++] = policy == 1 ? "-w" : "-fno-caret-diagnostics";
-                    }
-                    arguments[count++] = source;
-                    char* text = NULL;
-                    const int oracle = check_test_driver_spawn(arguments, &text);
-                    const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
-                    free(text);
-                    char description[256];
-                    snprintf(description, sizeof(description), "Clang error-limit oracle shape=%u errors=%u limit=%u policy=%u", shape, sizes[size], limit, policy);
-                    check_test_expect(test, oracle == (sizes[size] != 0 && !(shape == 5 && policy == 1)), description);
-                    for (uint32_t route = 0; route < 4; route += 1)
-                    {
-                        char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
-                        uint32_t used = 2;
-                        if ((route & 1) != 0)
-                        {
-                            checked[used++] = "--scalar";
-                        }
-                        if (route < 2)
-                        {
-                            checked[used++] = "-fsyntax-only";
-                        }
-                        else
-                        {
-                            checked[used++] = "-c";
-                            checked[used++] = "-o";
-                            checked[used++] = object;
-                        }
+                        char* arguments[16] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
+                        uint32_t count = 4;
                         if (limits[limit] != NULL)
                         {
-                            checked[used++] = (char*)limits[limit];
+                            arguments[count++] = (char*)limits[limit];
                         }
                         if (policy != 0)
                         {
-                            checked[used++] = policy == 1 ? "-w" : "-fno-caret-diagnostics";
+                            arguments[count++] = policy == 1 ? "-w" : "-fno-caret-diagnostics";
                         }
-                        checked[used++] = source;
-                        text = NULL;
-                        const int status = check_test_driver_spawn(checked, &text);
-                        const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-                        snprintf(description, sizeof(description), "error-limit shape=%u errors=%u limit=%u policy=%u route=%u: warning/error/note %u/%u/%u vs Clang %u/%u/%u", shape, sizes[size], limit, policy, route,
-                                 actual.warnings, actual.errors, actual.notes, expected.warnings, expected.errors, expected.notes);
-                        check_test_expect(test, status == oracle && actual.warnings == expected.warnings && actual.errors == expected.errors &&
-                                          actual.fatal == expected.fatal && actual.notes == expected.notes && actual.last_error_line == expected.last_error_line &&
-                                          !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0, description);
+                        arguments[count++] = source;
+                        char* text = NULL;
+                        const int oracle = check_test_driver_spawn(arguments, &text);
+                        const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
                         free(text);
-                        unlink(object);
+                        char description[256];
+                        snprintf(description, sizeof(description), "Clang error-limit oracle shape=%u errors=%u limit=%u policy=%u", shape, sizes[size], limit, policy);
+                        check_test_expect(test, oracle == (sizes[size] != 0 && !(shape == 5 && policy == 1)), description);
+                        for (uint32_t route = 0; route < 4; route += 1)
+                        {
+                            char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
+                            uint32_t used = 2;
+                            if ((route & 1) != 0)
+                            {
+                                checked[used++] = "--scalar";
+                            }
+                            if (route < 2)
+                            {
+                                checked[used++] = "-fsyntax-only";
+                            }
+                            else
+                            {
+                                checked[used++] = "-c";
+                                checked[used++] = "-o";
+                                checked[used++] = object;
+                            }
+                            if (limits[limit] != NULL)
+                            {
+                                checked[used++] = (char*)limits[limit];
+                            }
+                            if (policy != 0)
+                            {
+                                checked[used++] = policy == 1 ? "-w" : "-fno-caret-diagnostics";
+                            }
+                            checked[used++] = source;
+                            text = NULL;
+                            const int status = check_test_driver_spawn(checked, &text);
+                            const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                            snprintf(description, sizeof(description), "error-limit shape=%u errors=%u limit=%u policy=%u route=%u: warning/error/note %u/%u/%u vs Clang %u/%u/%u", shape, sizes[size], limit, policy, route,
+                                     actual.warnings, actual.errors, actual.notes, expected.warnings, expected.errors, expected.notes);
+                            check_test_expect(test, status == oracle && actual.warnings == expected.warnings && actual.errors == expected.errors &&
+                                              actual.fatal == expected.fatal && actual.notes == expected.notes && actual.last_error_line == expected.last_error_line &&
+                                              !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0, description);
+                            free(text);
+                            unlink(object);
+                        }
                     }
                 }
             }
@@ -287,76 +290,82 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
         check_test_expect(test, made, "attached-note limit fixture can be written");
         for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(noted_limits); limit += 1)
         {
-            for (uint32_t route = 0; route < 6; route += 1)
+            if (check_test_driver_takes())
             {
-                char* arguments[12] = { (char*)clang, "-std=gnu17", route < 4 ? "-fsyntax-only" : "-E", "-fno-color-diagnostics" };
-                uint32_t count = 4;
-                if (noted_limits[limit] != NULL)
+                for (uint32_t route = 0; route < 6; route += 1)
                 {
-                    arguments[count++] = (char*)noted_limits[limit];
+                    char* arguments[12] = { (char*)clang, "-std=gnu17", route < 4 ? "-fsyntax-only" : "-E", "-fno-color-diagnostics" };
+                    uint32_t count = 4;
+                    if (noted_limits[limit] != NULL)
+                    {
+                        arguments[count++] = (char*)noted_limits[limit];
+                    }
+                    arguments[count++] = source;
+                    char* text = NULL;
+                    const int oracle = check_test_driver_spawn(arguments, &text);
+                    const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
+                    free(text);
+                    char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe") };
+                    uint32_t used = 1;
+                    // The standalone preprocessor command is selected by its leading -E.
+                    if (route >= 4)
+                    {
+                        checked[used++] = "-E";
+                    }
+                    checked[used++] = "-std=gnu17";
+                    if ((route & 1) != 0)
+                    {
+                        checked[used++] = "--scalar";
+                    }
+                    if (route < 2)
+                    {
+                        checked[used++] = "-fsyntax-only";
+                    }
+                    else if (route < 4)
+                    {
+                        checked[used++] = "-c";
+                        checked[used++] = "-o";
+                        checked[used++] = object;
+                    }
+                    if (noted_limits[limit] != NULL)
+                    {
+                        checked[used++] = (char*)noted_limits[limit];
+                    }
+                    checked[used++] = source;
+                    text = NULL;
+                    const int status = check_test_driver_spawn(checked, &text);
+                    const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                    char description[160];
+                    snprintf(description, sizeof(description), "attached-note cutoff, totals and group order fixture=%u limit=%u route=%u", fixture, limit, route);
+                    check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.fatal == expected.fatal &&
+                                      actual.warnings == expected.warnings && actual.notes == expected.notes && actual.last_error_line == expected.last_error_line &&
+                                      !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0, description);
+                    free(text);
+                    unlink(object);
                 }
-                arguments[count++] = source;
-                char* text = NULL;
-                const int oracle = check_test_driver_spawn(arguments, &text);
-                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
-                free(text);
-                char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe") };
-                uint32_t used = 1;
-                // The standalone preprocessor command is selected by its leading -E.
-                if (route >= 4)
-                {
-                    checked[used++] = "-E";
-                }
-                checked[used++] = "-std=gnu17";
-                if ((route & 1) != 0)
-                {
-                    checked[used++] = "--scalar";
-                }
-                if (route < 2)
-                {
-                    checked[used++] = "-fsyntax-only";
-                }
-                else if (route < 4)
-                {
-                    checked[used++] = "-c";
-                    checked[used++] = "-o";
-                    checked[used++] = object;
-                }
-                if (noted_limits[limit] != NULL)
-                {
-                    checked[used++] = (char*)noted_limits[limit];
-                }
-                checked[used++] = source;
-                text = NULL;
-                const int status = check_test_driver_spawn(checked, &text);
-                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-                char description[160];
-                snprintf(description, sizeof(description), "attached-note cutoff, totals and group order fixture=%u limit=%u route=%u", fixture, limit, route);
-                check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.fatal == expected.fatal &&
-                                  actual.warnings == expected.warnings && actual.notes == expected.notes && actual.last_error_line == expected.last_error_line &&
-                                  !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0, description);
-                free(text);
-                unlink(object);
             }
         }
     }
     const char* values[] = { "", "-1", "+1", "word", "1x", "4294967296", "08", "0x", "0b", "0o" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
     {
-        char option[64];
-        snprintf(option, sizeof(option), "-ferror-limit=%s", values[i]);
-        char* arguments[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-fsyntax-only", option, source, NULL };
-        char* text = NULL;
-        const int status = check_test_driver_spawn(arguments, &text);
-        check_test_expect(test, status == 1 && text != NULL && strstr(text, "invalid integral value") != NULL,
-                          "error limit rejects malformed and overflowing values");
-        free(text);
-        char* reference[] = { (char*)clang, "-fsyntax-only", option, source, NULL };
-        text = NULL;
-        const int oracle = check_test_driver_spawn(reference, &text);
-        check_test_expect(test, oracle == 1 && text != NULL && strstr(text, "invalid integral value") != NULL,
-                          "Clang independently rejects the same malformed and overflowing integral values");
-        free(text);
+        if (check_test_driver_takes())
+        {
+            char option[64];
+            snprintf(option, sizeof(option), "-ferror-limit=%s", values[i]);
+            char* arguments[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-fsyntax-only", option, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(arguments, &text);
+            check_test_expect(test, status == 1 && text != NULL && strstr(text, "invalid integral value") != NULL,
+                              "error limit rejects malformed and overflowing values");
+            free(text);
+            char* reference[] = { (char*)clang, "-fsyntax-only", option, source, NULL };
+            text = NULL;
+            const int oracle = check_test_driver_spawn(reference, &text);
+            check_test_expect(test, oracle == 1 && text != NULL && strstr(text, "invalid integral value") != NULL,
+                              "Clang independently rejects the same malformed and overflowing integral values");
+            free(text);
+        }
     }
     const char* warnings[] =
     {
@@ -369,22 +378,25 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
         check_test_expect(test, made, "warning-note summary fixture can be written");
         for (uint32_t quiet = 0; made && quiet < 2; quiet += 1)
         {
-            char* arguments[] = { (char*)clang, "-fsyntax-only", "-fno-color-diagnostics", quiet != 0 ? "-w" : "-std=gnu17", source, NULL };
-            char* text = NULL;
-            const int oracle = check_test_driver_spawn(arguments, &text);
-            const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
-            free(text);
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            if (check_test_driver_takes())
             {
-                char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-fsyntax-only", scalar != 0 ? "--scalar" : "-std=gnu17",
-                                    quiet != 0 ? "-w" : "-std=gnu17", source, NULL };
-                text = NULL;
-                const int status = check_test_driver_spawn(checked, &text);
-                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-                check_test_expect(test, status == 0 && oracle == 0 && actual.warnings == expected.warnings && actual.errors == 0 &&
-                                  actual.notes == expected.notes && strcmp(actual.summary, expected.summary) == 0,
-                                  "suppressed macro-redefinition notes and ignored semantic warnings do not enter the summary");
+                char* arguments[] = { (char*)clang, "-fsyntax-only", "-fno-color-diagnostics", quiet != 0 ? "-w" : "-std=gnu17", source, NULL };
+                char* text = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &text);
+                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
                 free(text);
+                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                {
+                    char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-fsyntax-only", scalar != 0 ? "--scalar" : "-std=gnu17",
+                                        quiet != 0 ? "-w" : "-std=gnu17", source, NULL };
+                    text = NULL;
+                    const int status = check_test_driver_spawn(checked, &text);
+                    const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                    check_test_expect(test, status == 0 && oracle == 0 && actual.warnings == expected.warnings && actual.errors == 0 &&
+                                      actual.notes == expected.notes && strcmp(actual.summary, expected.summary) == 0,
+                                      "suppressed macro-redefinition notes and ignored semantic warnings do not enter the summary");
+                    free(text);
+                }
             }
         }
     }
@@ -400,25 +412,31 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
     check_test_expect(test, repeated_made, "last error-limit option fixture can be written");
     for (uint32_t fixture = 0; repeated_made && fixture < BUSTER_ARRAY_LENGTH(repeated); fixture += 1)
     {
-        char* arguments[] = { (char*)clang, "-fsyntax-only", "-fno-color-diagnostics", (char*)repeated[fixture][0], (char*)repeated[fixture][1], source, NULL };
-        char* text = NULL;
-        const int oracle = check_test_driver_spawn(arguments, &text);
-        const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
-        free(text);
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        if (check_test_driver_takes())
         {
-            char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-fsyntax-only", scalar != 0 ? "--scalar" : "-std=gnu17",
-                                (char*)repeated[fixture][0], (char*)repeated[fixture][1], source, NULL };
-            text = NULL;
-            const int status = check_test_driver_spawn(checked, &text);
-            const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-            check_test_expect(test, status == oracle && actual.errors == expected.errors && actual.fatal == expected.fatal &&
-                              actual.last_error_line == expected.last_error_line && strcmp(actual.summary, expected.summary) == 0,
-                              "only the last error-limit option is interpreted, including after a malformed earlier value");
+            char* arguments[] = { (char*)clang, "-fsyntax-only", "-fno-color-diagnostics", (char*)repeated[fixture][0], (char*)repeated[fixture][1], source, NULL };
+            char* text = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &text);
+            const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
             free(text);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-fsyntax-only", scalar != 0 ? "--scalar" : "-std=gnu17",
+                                    (char*)repeated[fixture][0], (char*)repeated[fixture][1], source, NULL };
+                text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                check_test_expect(test, status == oracle && actual.errors == expected.errors && actual.fatal == expected.fatal &&
+                                  actual.last_error_line == expected.last_error_line && strcmp(actual.summary, expected.summary) == 0,
+                                  "only the last error-limit option is interpreted, including after a malformed earlier value");
+                free(text);
+            }
         }
     }
     unlink(source);
     unlink(object);
-    check_test_driver_system_error_limits(test, clang, executable, directory);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_system_error_limits(test, clang, executable, directory);
+    }
 }

@@ -171,3 +171,26 @@ compile-time, emitted-code or default C-driver effect is claimed here. Those
 remain #139's integration work. The source-derived rows qualify the pass on
 real IR; the synthetic rows measure the whole public stage.
 
+## Tier 1's measurement (#866's last question)
+
+`--tier1-gvn` (docs/tier1.md, "The C driver's `--tier1`") runs this pass on the
+lowered IR before promotion, which is where Tier 1 can exercise it. Measured on
+a local `sqlite3.c` of 2,604 functions and on c-testsuite's 430 functions, it
+should stay off: the congruence classes it merges lengthen live ranges across
+blocks, and Tier 1's allocation pays for that in moves and spills. The object's
+text grows by 12.1% on that file and its compile time by 33.0% and 21.2% across
+two pairs of five-run sets (525 to 698 ms and 751 to 910 ms, on a Ryzen 9
+7940HS); on c-testsuite the objects are
+1.2% smaller but carry 13.9% more instructions and 25 spill stores and 25
+reloads where there were none, with Tier 1's coverage unchanged (350 functions
+either way). On the 9700X, at the reviewed head, the same pair is 1,440,195 to
+1,613,155 bytes (+12.0%) and 363 to 487 ms (+34.2%, the median of four clean
+compiles). After `ir_optimize` the same pass is worse (text +15.8%,
+instructions +40%, 2.5 times the spill traffic), and a cleanup pass after it
+does not recover the regression (205,229 against 205,269 instructions), so it
+is the merge, not dead values, that costs. Routing C source through GVN by
+default therefore waits for a variant that accounts for allocation cost; the
+option stays as the reproducible measurement, and [the measurement
+record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
+has the commands, the host and the raw logs.
+

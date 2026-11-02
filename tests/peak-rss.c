@@ -107,7 +107,8 @@ static bool rss_report_read(const char* text, RssReport* report)
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double usage[3 * CHECK_STAGE_COUNT] = { 0 };
     double total = 0;
-    bool valid = text != NULL && check_clock_read(text, stages, phases, &total, usage);
+    double walk = 0;
+    bool valid = text != NULL && check_clock_read(text, stages, phases, &total, &walk, usage);
     valid = valid && strstr(text, "time-process\tpeak-rss-status\tavailable\n") != NULL &&
             strstr(text, "time-process\tpeak-rss-source\tproc-self-status-vmhwm\n") != NULL &&
             strstr(text, "time-process\tpeak-rss-scope\tpost-exec-through-last-mark\n") != NULL &&
@@ -307,7 +308,8 @@ static bool rss_reader_accepts(const char* text)
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double usage[3 * CHECK_STAGE_COUNT] = { 0 };
     double total = 0;
-    return check_clock_read(text, stages, phases, &total, usage);
+    double walk = 0;
+    return check_clock_read(text, stages, phases, &total, &walk, usage);
 }
 
 static bool rss_unavailable_report(const char* text)
@@ -316,7 +318,8 @@ static bool rss_unavailable_report(const char* text)
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double usage[3 * CHECK_STAGE_COUNT] = { 0 };
     double total = 0;
-    bool valid = text != NULL && check_clock_read(text, stages, phases, &total, usage) &&
+    double walk = 0;
+    bool valid = text != NULL && check_clock_read(text, stages, phases, &total, &walk, usage) &&
                  strstr(text, "time-process\tpeak-rss-kb\t-1\n") != NULL &&
                  strstr(text, "time-process\tpeak-rss-status\tunavailable\n") != NULL;
     for (uint32_t s = 0; valid && s < CHECK_STAGE_COUNT; s += 1)

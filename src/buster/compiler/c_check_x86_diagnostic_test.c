@@ -27,8 +27,8 @@ static CheckX86TestDiagnostic check_test_x86_diagnostic_read(const char* path, b
             result.count += 1;
             result.error = strstr(line, "error: ") != NULL;
             sscanf(line, "%*[^:]:%u:%u:", &result.line, &result.column);
-            const char* end = strstr(message, " [-W");
-            end = end != NULL ? end : strchr(message, '\n');
+            // The whole message, its option's suffix too (#1079).
+            const char* end = strchr(message, '\n');
             const uint32_t length = end != NULL ? (uint32_t)(end - message) : (uint32_t)strlen(message);
             snprintf(result.message, sizeof(result.message), "%.*s", (int)length, message);
         }
@@ -55,6 +55,136 @@ static void check_test_x86_hard_diagnostic(CheckTest* test, const char* path, co
     check_test_expect(test, diagnostic.count == 1 && diagnostic.error && diagnostic.line == 4 && diagnostic.column == column &&
                            strcmp(diagnostic.message, "argument to '__builtin_ia32_cmpb128_mask' must be a constant integer") == 0, description);
 }
+
+// A run's diagnostics: the lines of the file `path` that start with `source` and a colon (`FILE:LINE:COLUMN: ...`: errors,
+// warnings and their notes, not clang's source lines or either compiler's counts), each without `source` and its colon,
+// joined into `text`, `capacity` bytes, at least 1. Returns false where the file can't be read or the lines don't fit.
+static bool check_test_x86_range_lines(const char* path, const char* source, char* text, size_t capacity)
+{
+    size_t used = 0;
+    const size_t name = strlen(source);
+    FILE* file = fopen(path, "r");
+    bool result = file != NULL;
+    char line[1024];
+    while (result && fgets(line, sizeof(line), file) != NULL)
+    {
+        if (strncmp(line, source, name) == 0 && line[name] == ':')
+        {
+            const size_t length = strlen(line + name + 1);
+            result = used + length < capacity;
+            if (result)
+            {
+                memcpy(text + used, line + name + 1, length);
+                used += length;
+            }
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    text[used] = 0;
+    return result;
+}
+
+#define BUSTER_X86_RANGE_8 "argument value 8 is outside the valid range [0, 7] [-Wargument-outside-range]\n3:13: note: expanded from macro 'BAD'\n"
+
+// The x86 range diagnostic under each of clang's mappings of `-Wargument-outside-range` (#1079): by default, with `-Werror`
+// and `-Werror=argument-outside-range`, by clang's and GCC's warning, error and fatal pragmas (a warning, which `-Werror`
+// leaves a warning), across a push and a pop, and deferred to the end of its function's body. The warning is an error by
+// default, so clang prints its option alone after each, never `-Werror,`. Each fixture's text is clang 23's, every
+// diagnostic and its notes line for line without the path, which clang and both of the driver's paths must give, with its
+// exit status.
+static void check_test_x86_range_mappings(CheckTest* test, const char* clang)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* option;
+        int status;
+        const char* expected;
+    } fixtures[] =
+    {
+        { "default", "unsigned f(V a){return BAD;}", NULL, 1, "4:24: error: " BUSTER_X86_RANGE_8 },
+        { "-Werror", "unsigned f(V a){return BAD;}", "-Werror", 1, "4:24: error: " BUSTER_X86_RANGE_8 },
+        { "-Werror=argument-outside-range", "unsigned f(V a){return BAD;}", "-Werror=argument-outside-range", 1,
+          "4:24: error: " BUSTER_X86_RANGE_8 },
+        { "pragma warning", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 0,
+          "5:24: warning: " BUSTER_X86_RANGE_8 },
+        { "pragma warning with -Werror", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", "-Werror", 0,
+          "5:24: warning: " BUSTER_X86_RANGE_8 },
+        { "GCC pragma warning", "#pragma GCC diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 0,
+          "5:24: warning: " BUSTER_X86_RANGE_8 },
+        { "pragma error", "#pragma clang diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 1,
+          "5:24: error: " BUSTER_X86_RANGE_8 },
+        { "GCC pragma error", "#pragma GCC diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", NULL, 1,
+          "5:24: error: " BUSTER_X86_RANGE_8 },
+        { "pragma fatal", "#pragma clang diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\nunsigned g(V a){return BAD;}",
+          NULL, 1, "5:24: fatal error: " BUSTER_X86_RANGE_8 },
+        { "GCC pragma fatal", "#pragma GCC diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\nunsigned g(V a){return BAD;}",
+          NULL, 1, "5:24: fatal error: " BUSTER_X86_RANGE_8 },
+        { "push and pop",
+          "#pragma clang diagnostic push\n#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\n"
+          "#pragma clang diagnostic pop\nunsigned g(V a){return __builtin_ia32_cmpb128_mask(a,a,-1,65535);}",
+          NULL, 1, "6:24: warning: " BUSTER_X86_RANGE_8 "8:24: error: argument value -1 is outside the valid range [0, 7] [-Wargument-outside-range]\n" },
+        { "deferred", "unsigned f(V a){if(0)return __builtin_choose_expr(1,0,BAD);return 0;}", NULL, 1, "4:55: error: " BUSTER_X86_RANGE_8 },
+        { "deferred with -Werror", "unsigned f(V a){if(0)return __builtin_choose_expr(1,0,BAD);return 0;}", "-Werror", 1,
+          "4:55: error: " BUSTER_X86_RANGE_8 },
+        { "deferred pragma warning",
+          "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){if(0)return __builtin_choose_expr(1,0,BAD);return 0;}",
+          NULL, 0, "5:55: warning: " BUSTER_X86_RANGE_8 },
+        { "deferred pragma fatal",
+          "#pragma clang diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){if(0)return __builtin_choose_expr(1,0,BAD);return 0;}\n"
+          "unsigned g(V a){return BAD;}",
+          NULL, 1, "5:55: fatal error: " BUSTER_X86_RANGE_8 },
+    };
+    char directory[] = "/tmp/buster-x86-range-XXXXXX";
+    const bool ready = mkdtemp(directory) != NULL;
+    check_test_expect(test, ready, "x86 range mapping directory");
+    char path[256];
+    char output[256];
+    char errors[256];
+    snprintf(path, sizeof(path), "%s/source.c", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
+    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    const char prefix[] = "typedef char V __attribute__((vector_size(16)));\n"
+                          "typedef char W __attribute__((vector_size(64)));\n"
+                          "#define BAD __builtin_ia32_cmpb128_mask(a,a,8,65535)\n";
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[1024];
+        const int length = snprintf(source, sizeof(source), "%s%s\n", prefix, fixtures[i].source);
+        const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-fno-color-diagnostics",
+                              (char*)(fixtures[i].option != NULL ? fixtures[i].option : "-fsyntax-only"), path, NULL };
+        const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
+        char text[1024];
+        bool same = check_test_x86_range_lines(errors, path, text, sizeof(text)) && oracle_status == fixtures[i].status &&
+                    strcmp(text, fixtures[i].expected) == 0;
+        char description[768];
+        snprintf(description, sizeof(description), "x86 range mapping %s: Clang status %d, expected %d: %.600s", fixtures[i].name, oracle_status,
+                 fixtures[i].status, text);
+        check_test_expect(test, same, description);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].option) : -1;
+            same = check_test_x86_range_lines(errors, path, text, sizeof(text)) && status == fixtures[i].status && strcmp(text, fixtures[i].expected) == 0;
+            snprintf(description, sizeof(description), "x86 range mapping %s, scalar %u: status %d, Clang's %d: %.600s", fixtures[i].name, scalar, status,
+                     fixtures[i].status, text);
+            check_test_expect(test, same, description);
+        }
+    }
+    if (ready)
+    {
+        unlink(path);
+        unlink(output);
+        unlink(errors);
+        rmdir(directory);
+    }
+}
+
+#undef BUSTER_X86_RANGE_8
 
 static void check_test_x86_diagnostic_storage(CheckTest* test)
 {
@@ -744,6 +874,7 @@ static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const 
     check_test_target_feature_builtins(test);
     check_test_x86_diagnostic_storage(test);
     check_test_x86_context_storage(test);
+    check_test_x86_range_mappings(test, clang);
     static const struct
     {
         const char* name;
@@ -873,7 +1004,7 @@ static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const 
         }
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
-            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet) : -1;
+            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet ? "-w" : NULL) : -1;
             const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors, true);
             const bool same = status == oracle_status && actual.count == oracle.count &&
                               (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&
