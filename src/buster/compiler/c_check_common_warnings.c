@@ -2310,6 +2310,17 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             const uint32_t self_end = braced ? scan_end : initializer_end;
             const bool self_initialization = self_begin != BUSTER_CHECK_NONE && self_end != BUSTER_CHECK_NONE &&
                                              read_token != BUSTER_CHECK_NONE && read_token >= self_begin && read_token < self_end;
+            // A brace initializer's own read is reported directly: its object is initialized even though no value
+            // column wrote it before the read, and the normal path's write ordering would hide the warning.
+            if (local && scalar && braced && self_initialization)
+            {
+                const char* message = check_warning_text(scratch, "variable '%.*s' is uninitialized when used within its own initialization",
+                                                          (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                const uint32_t body = input->declaration_bodies[declaration];
+                const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : read_token;
+                check_common_report_at(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message, NULL, 0, scratch);
+                continue;
+            }
             const bool has_read = first_read[declaration] != BUSTER_CHECK_NONE || read_token != BUSTER_CHECK_NONE;
             if (plain && scalar && has_read &&
                 (self_initialization || first_write[declaration] == BUSTER_CHECK_NONE ||
