@@ -2721,9 +2721,16 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // reports share source order with declaration reports, but this fragment can never be emitted.
             if (input_valid || input.diagnostic_graph)
             {
-                const CheckOptions check_options = { .scalar = scalar, .verify = verify };
+                const CheckOptions check_options = { .scalar = scalar, .verify = verify, .verify_transitions = verify };
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
+                if (stage_clock != NULL)
+                {
+                    stage_clock->transition_hits += stream.statistics.transition_hits;
+                    stage_clock->transition_misses += stream.statistics.transition_misses;
+                    stage_clock->transition_folds += stream.statistics.transition_folds;
+                    stage_clock->transition_entries += stream.statistics.transition_entries;
+                }
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);

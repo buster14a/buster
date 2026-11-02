@@ -2945,6 +2945,9 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     }
     // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too.
     valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL;
+    // The graph run's memoized transitions' counts (#1050), each on a line of its own.
+    valid = valid && strstr(text, "\ntime-check\ttransition-hits\t") != NULL && strstr(text, "\ntime-check\ttransition-misses\t") != NULL &&
+            strstr(text, "\ntime-check\ttransition-folds\t") != NULL && strstr(text, "\ntime-check\ttransition-entries\t") != NULL;
     const double stage_error = sum > total ? sum - total : total - sum;
     const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
     return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);

@@ -60,7 +60,7 @@ static void buster_fuzz_check(Parser* parser, Preprocessor* pp)
         if (type_initialize(&types, &types_arena, &index_arena, capacity) && input_arena.base != 0 && output_arena.base != 0 && scratch.base != 0 &&
             check_input(&input, parser, pp, &types, &input_arena, &scratch))
         {
-            const CheckOptions options = { .verify = true };
+            const CheckOptions options = { .verify = true, .verify_transitions = true };
             CheckStream stream = { 0 };
             if (check_graph_run(&types, &input.graph, &output_arena, &scratch, &options, &stream) && stream.report_count == 0 &&
                 check_input_packed_finalize(&input, parser, &types, &stream, &scratch))

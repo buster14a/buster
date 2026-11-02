@@ -294,6 +294,16 @@ struct CheckStatistics
     uint64_t query_replay_nodes;
     uint64_t output_bytes;
     uint64_t scratch_bytes;
+    // The vector path's memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
+    // (hits), those probed and not found (misses), those whose operator memoizes but an operand or argument of which holds
+    // a payload, most often a constant to fold (folds), the entries inserted and the table's entries at the end, and with
+    // CheckOptions.verify_transitions, the hits whose action gave another answer.
+    uint32_t transition_hits;
+    uint32_t transition_misses;
+    uint32_t transition_folds;
+    uint32_t transition_inserts;
+    uint32_t transition_entries;
+    uint32_t transition_mismatches;
 };
 
 typedef struct CheckStoreEffect CheckStoreEffect;
@@ -573,6 +583,15 @@ struct CheckOptions
     // (check_graph_region_postorder), its default since the benchmark measured the two on the same actions and
     // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
     bool level_order;
+    // The vector path without its memoized transitions (#1050, c_check_transitions.c): its regions in postorder batches and
+    // every other node's action, as it ran before them, which the benchmark compares. Level order takes none either.
+    bool no_transitions;
+    // The memoized transitions' alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
+    // (check_graph_transition_windows), rather than node by node, which the benchmark compares.
+    bool transition_windows;
+    // Each transition hit's action run as well, its result stored and compared with the transition's
+    // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
+    bool verify_transitions;
 };
 
 // A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628).
@@ -2284,7 +2303,10 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
 #include "c_check_overload_graph.c"
 #include "c_check_region_graph.c"
 
-static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
+// A node's action, its result stored, with `guards` receiving what it read of its source position (CheckAction.guards),
+// or null.
+static void check_graph_guarded_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar,
+                                     CheckActionGuards* guards)
 {
     (void)scalar;
 
@@ -2292,6 +2314,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
     action.scalar = scalar;
+    action.guards = guards;
     // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
     // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
     const bool overloads = graph->overload_candidate_count != 0;
@@ -2417,6 +2440,11 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     }
     check_graph_store(stream, node, &result);
     stream->statistics.scalar_nodes += 1;
+}
+
+static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
+{
+    check_graph_guarded_node(types, graph, stream, node, arguments, scratch, scalar, NULL);
 }
 
 // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
@@ -2584,6 +2612,8 @@ static void check_graph_region_postorder(TypeTable* types, const CheckGraph* gra
         stream->statistics.batches += count != 0;
     }
 }
+
+#include "c_check_transitions.c"
 
 static void check_graph_report(const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckMessage message, CheckDiagnostic diagnostic, CheckFault fault)
 {
@@ -3075,9 +3105,24 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
-        // In node order: the vector path's impure leaves without their actions, its other impure nodes one at a time, and each
-        // run of pure nodes as a region; the scalar path's nodes one at a time.
-        uint32_t node = 0;
+        // The vector path's memoized transitions (#1050, c_check_transitions.c), unless the options ask for its regions,
+        // overload sets make operands contextual, a column its keys read is absent (as check_graph_validate_vector's blocks
+        // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's impure
+        // leaves without their actions, its other impure nodes one at a time, and each run of pure nodes as a region; the scalar
+        // path's nodes one at a time.
+        const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
+        const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && !options->no_transitions &&
+                                 graph->overload_candidate_count == 0 && columns &&
+                                 (options->transition_windows ?
+                                  check_graph_transition_windows(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions) :
+                                  check_graph_transitions(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions));
+        // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
+        if (transitions && stream->statistics.transition_mismatches != 0)
+        {
+            result = false;
+            stream->status = CHECK_STATUS_INVALID_GRAPH;
+        }
+        uint32_t node = transitions ? count : 0;
         while (node < count)
         {
             if (!BUSTER_SCALAR_PATH(options->scalar) && pure[node] == 0 && check_graph_is_leaf(graph, node))

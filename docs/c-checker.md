@@ -916,7 +916,11 @@ bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
 The scalar schedule processes graph nodes in postorder, one at a time. The
-vector schedule finds contiguous regions whose type behavior is known to stay
+vector schedule checks most nodes by memoized type transitions (#1050,
+"Memoized transitions" below): a node whose inputs repeat an earlier node's
+writes that node's answer without running its action. Without them
+(`CheckOptions.no_transitions`, and for graphs with overload sets), it finds
+contiguous regions whose type behavior is known to stay
 within builtin arithmetic types, and checks each region in postorder batches
 (`check_graph_region_postorder`). From the first node not yet done, a batch
 takes consecutive nodes that read none of each other, up to the batch size.
@@ -1041,6 +1045,131 @@ instruction delta. The first build's other changes (the
 catalogue's fixes, the comparison builtins, K&R definitions) cost 0.78M on
 `-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
 the commands, the trees and the logs.
+
+### Memoized transitions
+
+#1050 found that a non-leaf node's action is, most of the time, a repeat: of
+`sqlite3.c`'s 128,459 non-leaf nodes without a constant to fold, 14,973 keys
+were distinct. The vector path (`check_graph_transitions`,
+`c_check_transitions.c`) checks those nodes by memoized transitions.
+
+When no operand or argument of a node holds a payload
+(`check_stream_value_rest`: a constant's value, an address constant's offset, a
+bit-field's place, a fault), the action is a function of a key. The key holds
+the node's operator, member, requested type, extensions (with the
+system-header bit) and floating environment, and each operand's and a call's
+arguments' type, flags, category and constant kind. It also holds the objects'
+pattern: which operands have an object and which share one.
+
+The key holds no object and no node. An action copies an object from an
+operand, and reads one only for zero and for equality between operands, which
+the pattern holds. It reads a node only as a new fault's place, and an answer
+with a fault isn't memoized.
+
+The first node of a key runs its action (a miss) and inserts its answer into a
+per-run table in the scratch arena. The answer is the value but its object, its
+conversions, diagnostic and its operand, warnings and a member's offset, a
+call's argument conversions, and its whole value as a template where it holds
+a payload: a static object's member, `&s.f`. It also names the operand whose
+object the value takes. A later node of the key (a hit) writes that answer with
+no `CheckAction` and no `CheckActionResult`.
+
+A hit interns no type: every type the answer names was interned by its first
+node. The misses run in node order, so a fresh table's `TypeId`s are the
+scalar path's, which is what the regions' purity rule protected. Folds (an
+operand with a payload, most often a constant) and the operators the table
+doesn't take run their actions as before: the builtins, varargs, the
+variable-length arrays' operators, statement values, constant evaluations,
+vector members and plain library builtins' folds. Consecutive pure misses and
+folds that read none of each other go as one batch of `check_actions`, as the
+regions' batches did, so the integer folds still go 8 lanes at a time.
+
+An answer that read the source position keeps what it read. Each tag whose
+completion `check_action_source_complete` asked about, with its answer, is a
+guard (`CheckAction.guards`), and a hit asks it again at its own position. A
+tag read before its completion and after it thus takes two misses, the second
+writing over the first's entry. An answer that read a transparent union's
+activation, or more than four tags, isn't memoized.
+
+An entry is 128 bytes: its key's 64, compared whole by one AVX-512 compare,
+and its answer packed in the next cache line. A template, a call's arguments
+and a second guard go in side arrays. The slots are open-addressed, each an
+entry's index and its hash. The table grows by doubling within a quarter of the
+room the run's scratch had left. Where even its first 1,024 entries don't fit,
+the run takes the regions; where it can't grow, it stops inserting.
+
+`CheckOptions.verify_transitions` runs each hit's action too, keeps its answer
+and counts a difference (`CheckStatistics.transition_mismatches`), which fails
+the run. The driver's `--verify`, `test-checker`'s fixtures and graphs, the
+corpus comparison and the fuzz harness all verify. `CheckStatistics` counts
+hits, misses, folds, inserts and the table's entries, and `--time-stages`
+reports them as `time-check transition-*` lines. `benchmark-checker-source`
+prints them with each path's time.
+
+`test-checker --transitions` runs the section alone. Each fixture is checked by
+the scalar path, the oracle, and by the vector path's transitions in node
+order, in windows (below) and without them, and every stream must be the
+oracle's. Each fixture's hits, misses, folds and entries are pinned. The
+windows' keys and hashes must be `check_transition_key`'s and
+`check_transition_hash`'s for every node. A source of 1,500 structs runs in a
+sweep of scratch arenas from too small for the run, through too small for the
+table and too small for its growth, to room enough, each run that checks
+giving the oracle's stream.
+
+#### Node order or windows
+
+The issue proposed keying 16 nodes at a time in postorder windows, resolving
+operands within a window in rounds. `CheckOptions.transition_windows`
+(`check_graph_transition_windows`) does that for windows of 64 nodes. A round
+keys the window's ready nodes 16 lanes at a time in AVX-512: gathering their
+operands' columns, building the objects' pattern, the header and the hash. Each
+lane then probes the table and compares its key whole. The misses run in node
+order as their turn comes.
+
+The rounds starve the lanes. On `sqlite3.c`'s bodies a window took 11.7 rounds
+and a batch held 2.97 nodes: a postorder's chains (`l->next->next->v`, a
+conversion over a call over a member) and the misses, each of whose dependents
+waits for the next round, leave most lanes empty. Building and probing a lane
+then cost as much as its action.
+
+Node order keys each node from its operands' columns as it comes, one probe and
+one compare. It keeps no round state, and a hit's operands are the nodes just
+written, in the caches. `benchmark-checker-source` times both (`vector`, node
+order, the default; `windows`) beside the regions (`regions`,
+`CheckOptions.no_transitions`).
+
+On a 4-CPU Xeon (Emerald Rapids, 2.1 GHz) VM, pinned to one CPU: `sqlite3.c`'s
+2,608 bodies and 311,601 body nodes, each path a median of 21 interleaved
+passes, over six processes:
+
+| Path | ns a node |
+| --- | --- |
+| scalar | 132.4–137.2 |
+| vector: transitions in node order | 92.9–98.4 |
+| regions, the vector path before #1050 | 97.1–102.6 |
+| levels | 100.6–108.4 |
+| windows | 119.0–129.9 |
+
+In each process the transitions took 0.8 to 9.3% less time a node than the
+regions, 3.9% at the median.
+
+Node order made 128,081 hits, 16,218 misses (each inserted) and 27,822 folds.
+The windows made 126,495 hits and 17,804 misses, as a round probes nodes of one
+key before the first's insertion.
+
+Whole compiles (`-c --lanes 1 --time-stages`, 15 of each build in turn):
+`check-expressions` took 37.43 ms against the base's 38.03 at the median, and
+the compile 304.1 ms against 313.2, with the same peak resident set. The table
+takes scratch pages the reader has already touched.
+
+The hits are concentrated: in a compile of `sqlite3.c`, 64 entries took 43.9%
+of them, 1,024 entries (128 KB) 77.7% and 4,096 entries 94.6%. So a hit's
+entry is mostly in the caches. On that VM, what a hit costs beyond a leaf is
+reading its operands' columns and writing the stream's ten output columns,
+which the actions it replaces wrote too; those common nodes' actions were
+cheap. The 9700X job times all five paths in the pull request's run, and those
+numbers decide the default there, as level order's and the postorder batches'
+did.
 
 ## Constant evaluation
 
