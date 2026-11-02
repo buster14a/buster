@@ -3510,6 +3510,274 @@ static uint32_t executable_linker_index(const Link* link, SymbolId symbol)
     return found;
 }
 
+// Exchanges two atoms' records, every column of LinkAtoms together.
+static void executable_swap_atoms(Link* link, AtomId a, AtomId b)
+{
+    LinkAtoms* atoms = &link->atoms;
+    const uint8_t class = atoms->class[a];
+    const uint8_t alignment = atoms->alignment_log2[a];
+    const uint32_t unit = atoms->unit[a];
+    const uint64_t size = atoms->size[a];
+    const String8 section = atoms->section[a];
+    uint8_t* bytes = atoms->bytes[a];
+    const FixupId fixup_begin = atoms->fixup_begin[a];
+    const uint32_t fixup_count = atoms->fixup_count[a];
+    const uint64_t address = atoms->address[a];
+    atoms->class[a] = atoms->class[b];
+    atoms->alignment_log2[a] = atoms->alignment_log2[b];
+    atoms->unit[a] = atoms->unit[b];
+    atoms->size[a] = atoms->size[b];
+    atoms->section[a] = atoms->section[b];
+    atoms->bytes[a] = atoms->bytes[b];
+    atoms->fixup_begin[a] = atoms->fixup_begin[b];
+    atoms->fixup_count[a] = atoms->fixup_count[b];
+    atoms->address[a] = atoms->address[b];
+    atoms->class[b] = class;
+    atoms->alignment_log2[b] = alignment;
+    atoms->unit[b] = unit;
+    atoms->size[b] = size;
+    atoms->section[b] = section;
+    atoms->bytes[b] = bytes;
+    atoms->fixup_begin[b] = fixup_begin;
+    atoms->fixup_count[b] = fixup_count;
+    atoms->address[b] = address;
+}
+
+// The distinct input sections that the link's __start_ and __stop_ references bound (link_bound_suffix), at most
+// `capacity`: a suffix that no atom has isn't one, and neither is a name of the linker's own (executable_linker_names).
+static uint32_t executable_bound_groups(const Link* link, String8* groups, uint32_t capacity)
+{
+    uint32_t count = 0;
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        const bool bound = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER &&
+                           executable_linker_index(link, symbol) == BUSTER_ARRAY_LENGTH(executable_linker_names);
+        const String8 suffix = bound ? link_bound_suffix(link, link->symbols.name[symbol], 0) : (String8){ 0 };
+        bool seen = suffix.length == 0 || !link_section_exists(link, suffix);
+        for (uint32_t g = 0; !seen && g < count; g += 1)
+        {
+            seen = groups[g].length == suffix.length && memcmp(groups[g].pointer, suffix.pointer, suffix.length) == 0;
+        }
+        if (!seen && count < capacity)
+        {
+            groups[count] = suffix;
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// The atoms' bucket in the layout: their class and alignment's, with the largest alignment the placement takes.
+static uint32_t executable_bound_bucket(const LinkAtoms* atoms, AtomId atom, bool crt)
+{
+    const uint32_t log2 = executable_alignment_log2(atoms->class[atom], atoms->alignment_log2[atom], atoms->size[atom], crt);
+    return log2 < BUSTER_EXECUTABLE_ALIGNMENTS ? executable_bucket_for(atoms->class[atom], log2, atoms->size[atom]) : BUSTER_EXECUTABLE_BUCKETS;
+}
+
+// Lane 0 before the counts: makes each input section a __start_ or __stop_ reference bounds one run of the layout, so
+// that the two names bracket exactly its atoms, as one output section's do in GNU ld and lld; without this, the atoms
+// of a named section of a class and alignment would be one bucket's, but a non-section atom of the same bucket between
+// them would fall inside the bounds. Its atoms take the section's largest alignment, and the atoms are then sorted by
+// bucket and section (executable_swap_atoms), each bucket keeping its other atoms' order and then each section's, so
+// that every section is contiguous within its bucket and no other atom is between its atoms. This is idempotent: a
+// second write makes the same order from the same records. False without scratch room; an atom the layout will refuse
+// leaves the order as it is, for the count to report it.
+static bool executable_bound_sections(Link* link, bool crt, Arena* arena)
+{
+    LinkAtoms* atoms = &link->atoms;
+    uint32_t candidates = 0;
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        const bool bound = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER &&
+                           executable_linker_index(link, symbol) == BUSTER_ARRAY_LENGTH(executable_linker_names);
+        const String8 suffix = bound ? link_bound_suffix(link, link->symbols.name[symbol], 0) : (String8){ 0 };
+        candidates += suffix.length != 0 && link_section_exists(link, suffix) ? 1 : 0;
+    }
+    String8* groups = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, candidates) : 0;
+    uint32_t* group_of = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count) : 0;
+    uint32_t* group_atoms = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, candidates) : 0;
+    uint8_t* group_alignment = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, candidates) : 0;
+    bool result = candidates == 0 || (groups != 0 && group_of != 0 && group_atoms != 0 && group_alignment != 0);
+    const uint32_t group_count = result && candidates != 0 ? executable_bound_groups(link, groups, candidates) : 0;
+    bool runs = false;
+    if (result && group_count != 0)
+    {
+        memset(group_of, 0, (uint64_t)atoms->count * sizeof(*group_of));
+        memset(group_atoms, 0, (uint64_t)group_count * sizeof(*group_atoms));
+        memset(group_alignment, 0, group_count * sizeof(*group_alignment));
+        for (AtomId atom = 1; result && atom < atoms->count; atom += 1)
+        {
+            const String8 section = atoms->section[atom];
+            for (uint32_t g = 0; section.length != 0 && g < group_count; g += 1)
+            {
+                if (section.length == groups[g].length && memcmp(section.pointer, groups[g].pointer, section.length) == 0)
+                {
+                    const uint8_t class = atoms->class[atom];
+                    const bool known = class != BUSTER_LINK_CLASS_NONE && class < BUSTER_LINK_CLASS_COUNT;
+                    const uint32_t log2 = known ? executable_alignment_log2(class, atoms->alignment_log2[atom], atoms->size[atom], crt) : BUSTER_EXECUTABLE_ALIGNMENTS;
+                    group_of[atom] = g + 1;
+                    group_atoms[g] += 1;
+                    group_alignment[g] = log2 < BUSTER_EXECUTABLE_ALIGNMENTS && log2 > group_alignment[g] ? (uint8_t)log2 : group_alignment[g];
+                }
+            }
+        }
+        for (uint32_t g = 0; result && g < group_count; g += 1)
+        {
+            runs = runs || group_atoms[g] > 1;
+        }
+    }
+    if (result && runs)
+    {
+        // An atom the layout refuses isn't one of these buckets: report it there rather than sort past it.
+        for (AtomId atom = 1; result && atom < atoms->count; atom += 1)
+        {
+            const uint8_t class = atoms->class[atom];
+            const bool known = class != BUSTER_LINK_CLASS_NONE && class < BUSTER_LINK_CLASS_COUNT;
+            const uint32_t log2 = known ? executable_alignment_log2(class, atoms->alignment_log2[atom], atoms->size[atom], crt) : BUSTER_EXECUTABLE_ALIGNMENTS;
+            result = known && log2 < BUSTER_EXECUTABLE_ALIGNMENTS && atoms->size[atom] <= executable_atom_limit(class);
+        }
+    }
+    if (result && runs)
+    {
+        for (AtomId atom = 1; atom < atoms->count; atom += 1)
+        {
+            if (group_of[atom] != 0)
+            {
+                atoms->alignment_log2[atom] = group_alignment[group_of[atom] - 1];
+            }
+        }
+        const uint32_t keys = group_count + 1 > BUSTER_EXECUTABLE_BUCKETS ? group_count + 1 : BUSTER_EXECUTABLE_BUCKETS;
+        uint32_t* by_group = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count);
+        uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count);
+        uint32_t* current = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count);
+        uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, keys);
+        result = by_group != 0 && order != 0 && current != 0 && starts != 0;
+        if (result)
+        {
+            // A stable counting sort by section, then one by bucket: each bucket's atoms are its others' in id order,
+            // then each section's in the sections' order.
+            memset(starts, 0, (uint64_t)keys * sizeof(*starts));
+            for (AtomId atom = 1; atom < atoms->count; atom += 1)
+            {
+                starts[group_of[atom]] += 1;
+            }
+            uint32_t position = 1;
+            for (uint32_t g = 0; g <= group_count; g += 1)
+            {
+                const uint32_t count = starts[g];
+                starts[g] = position;
+                position += count;
+            }
+            for (AtomId atom = 1; atom < atoms->count; atom += 1)
+            {
+                by_group[starts[group_of[atom]]++] = atom;
+            }
+            memset(starts, 0, (uint64_t)BUSTER_EXECUTABLE_BUCKETS * sizeof(*starts));
+            for (AtomId i = 1; i < atoms->count; i += 1)
+            {
+                starts[executable_bound_bucket(atoms, by_group[i], crt)] += 1;
+            }
+            position = 1;
+            for (uint32_t b = 0; b < BUSTER_EXECUTABLE_BUCKETS; b += 1)
+            {
+                const uint32_t count = starts[b];
+                starts[b] = position;
+                position += count;
+            }
+            for (AtomId i = 1; i < atoms->count; i += 1)
+            {
+                const AtomId atom = by_group[i];
+                order[starts[executable_bound_bucket(atoms, atom, crt)]++] = atom;
+            }
+            // order[p] is the atom that comes to place p; by_group is the atom's place, current the place's atom.
+            for (AtomId p = 0; p < atoms->count; p += 1)
+            {
+                by_group[p] = p;
+                current[p] = p;
+            }
+            for (AtomId p = 1; p < atoms->count; p += 1)
+            {
+                const AtomId old = order[p];
+                const AtomId q = by_group[old];
+                if (q != p)
+                {
+                    const AtomId other = current[p];
+                    executable_swap_atoms(link, p, q);
+                    current[p] = old;
+                    current[q] = other;
+                    by_group[old] = p;
+                    by_group[other] = q;
+                }
+            }
+            for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+            {
+                const AtomId old = link->symbols.atom[symbol];
+                link->symbols.atom[symbol] = old != 0 ? by_group[old] : 0;
+            }
+            // The entries stay by atom in id order, as link_check and the layout's scan of them require.
+            LinkPriorities* priorities = &link->priorities;
+            for (uint32_t p = 1; p < priorities->count; p += 1)
+            {
+                priorities->atom[p] = by_group[priorities->atom[p]];
+            }
+            for (uint32_t i = 2; i < priorities->count; i += 1)
+            {
+                const AtomId atom = priorities->atom[i];
+                const uint16_t priority = priorities->priority[i];
+                uint32_t j = i;
+                while (j > 1 && priorities->atom[j - 1] > atom)
+                {
+                    priorities->atom[j] = priorities->atom[j - 1];
+                    priorities->priority[j] = priorities->priority[j - 1];
+                    j -= 1;
+                }
+                priorities->atom[j] = atom;
+                priorities->priority[j] = priority;
+            }
+        }
+    }
+    return result;
+}
+
+// The image offset of a __start_NAME or __stop_NAME the linker defines at the bounds of the atoms whose input section
+// is NAME (link_bound_suffix), from the layout's addresses: the lowest atom's, or the highest one's end. The section's
+// atoms are one run of the layout (executable_bound_sections), so the lowest and highest bracket exactly them.
+static bool executable_bound_value(const Link* link, SymbolId symbol, uint64_t* value)
+{
+    bool stop = false;
+    const String8 suffix = link_bound_suffix(link, link->symbols.name[symbol], &stop);
+    uint64_t first = UINT64_MAX;
+    uint64_t last = 0;
+    for (AtomId atom = 1; suffix.length != 0 && atom < link->atoms.count; atom += 1)
+    {
+        const String8 section = link->atoms.section[atom];
+        if (section.length == suffix.length && memcmp(section.pointer, suffix.pointer, suffix.length) == 0)
+        {
+            const uint64_t begin = link->atoms.address[atom];
+            const uint64_t end = begin + link->atoms.size[atom];
+            first = begin < first ? begin : first;
+            last = end > last ? end : last;
+        }
+    }
+    const bool found = first != UINT64_MAX;
+    *value = stop ? last : first;
+    return found;
+}
+
+// A name of the linker's image offset: one of executable_linker_names' (from the layout), or a section bound's.
+static bool executable_linker_value(const Link* link, const ExecutableLayout* layout, SymbolId symbol, uint64_t* value)
+{
+    uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
+    executable_linker_values(layout, values);
+    const uint32_t found = executable_linker_index(link, symbol);
+    const bool named = found < BUSTER_ARRAY_LENGTH(executable_linker_names);
+    if (named)
+    {
+        *value = values[found];
+    }
+    return named || executable_bound_value(link, symbol, value);
+}
+
 // A symbol's reference (see the orientation comment), or the error it gets. A dynamic PIE's imports, and the symbols
 // that its stubs stand for, get theirs from executable_resolve and executable_place, and so do a static executable's
 // IFUNCs with stubs.
@@ -3538,11 +3806,10 @@ static ExecutableError executable_reference(const Link* link, const ExecutableLa
     }
     else if (source == BUSTER_LINK_SOURCE_LINKER)
     {
-        uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
-        executable_linker_values(layout, values);
-        const uint32_t found = executable_linker_index(link, symbol);
-        *reference = found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? (uint32_t)values[found] : 0;
-        result = found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_UNSUPPORTED;
+        uint64_t value = 0;
+        const bool named = executable_linker_value(link, layout, symbol, &value);
+        *reference = named ? (uint32_t)value : 0;
+        result = named ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_UNSUPPORTED;
     }
     else if (source == BUSTER_LINK_SOURCE_NONE && weak)
     {
@@ -5579,8 +5846,6 @@ static void executable_check_far(const Link* link, ExecutableShared* shared, con
     }
     const LinkAtoms* atoms = &link->atoms;
     const LinkSymbols* symbols = &link->symbols;
-    uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
-    executable_linker_values(layout, values);
     for (AtomId atom = 1; atom < atoms->count; atom += 1)
     {
         const FixupId begin = atoms->fixup_begin[atom];
@@ -5598,9 +5863,9 @@ static void executable_check_far(const Link* link, ExecutableShared* shared, con
             }
             else if (target_atom == 0 && source == BUSTER_LINK_SOURCE_LINKER)
             {
-                const uint32_t found = executable_linker_index(link, target);
-                address = layout->base + (found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? values[found] : 0);
-                named = found < BUSTER_ARRAY_LENGTH(executable_linker_names);
+                uint64_t value = 0;
+                named = executable_linker_value(link, layout, target, &value);
+                address = layout->base + value;
             }
             if (!named || address <= (uint64_t)INT32_MAX)
             {
@@ -7066,12 +7331,10 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
         }
         else if (source == BUSTER_LINK_SOURCE_LINKER)
         {
-            uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
-            executable_linker_values(layout, values);
-            const uint32_t found = executable_linker_index(link, symbol);
-            const uint64_t offset = found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? values[found] : 0;
-            address = layout->base + offset;
-            section = executable_boundary_section(layout, offset);
+            uint64_t offset = 0;
+            const bool named = executable_linker_value(link, layout, symbol, &offset);
+            address = layout->base + (named ? offset : 0);
+            section = named ? executable_boundary_section(layout, offset) : SHN_UNDEF;
         }
         const uint8_t flags = link->symbols.flags[symbol];
         const bool is_local = executable_symbol_is_local(flags);
@@ -7159,10 +7422,9 @@ static bool executable_debug_value(const Link* link, const ExecutableLayout* lay
     }
     else if (valid && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER)
     {
-        uint64_t values[BUSTER_ARRAY_LENGTH(executable_linker_names)];
-        executable_linker_values(layout, values);
-        const uint32_t found = executable_linker_index(link, symbol);
-        result = layout->base + (found < BUSTER_ARRAY_LENGTH(executable_linker_names) ? values[found] : 0) + (uint64_t)addend;
+        uint64_t offset = 0;
+        valid = executable_linker_value(link, layout, symbol, &offset);
+        result = layout->base + offset + (uint64_t)addend;
     }
     else if (valid)
     {
@@ -7243,8 +7505,9 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         *result = (ExecutableResult){ 0 };
         result->start_time = executable_now();
         const bool valid = executable_dynamic_valid(link, dynamic_options);
-        result->error = valid ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_UNSUPPORTED;
-        allocated = valid ? executable_allocate(scratch.arena, link, lanes, options) : 0;
+        const bool sections = valid && executable_bound_sections(link, dynamic_options != 0 || options->runtime != 0, scratch.arena);
+        result->error = !valid ? EXECUTABLE_ERROR_UNSUPPORTED : !sections ? EXECUTABLE_ERROR_MEMORY : EXECUTABLE_ERROR_NONE;
+        allocated = sections ? executable_allocate(scratch.arena, link, lanes, options) : 0;
     }
     ExecutableShared* shared = (ExecutableShared*)lane_broadcast((uint64_t)allocated, 0);
     bool ok = shared != 0;

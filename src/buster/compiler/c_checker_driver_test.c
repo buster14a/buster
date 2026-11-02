@@ -1529,6 +1529,157 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
     unlink(direct_path);
 }
 
+// #1122: __start_SEC and __stop_SEC over the sections of C identifiers, which GNU ld and lld define: a registry of
+// three entries with an alignment, a section of one, and a weak reference to a missing one, by -c's object that cc
+// links, by the direct path and by --tier1, each printing clang's build's output.
+static void check_test_driver_section_bounds(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "struct entry { long value; const char* name; };\n"
+                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e0 = { 11, \"a\" };\n"
+                                  "__attribute__((aligned(16))) long between = 99;\n"
+                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e1 = { 22, \"b\" };\n"
+                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e2 = { 33, \"c\" };\n"
+                                  "__attribute__((section(\"bst_one\"))) int one = 5;\n"
+                                  "extern struct entry __start_bst_sec[], __stop_bst_sec[];\n"
+                                  "extern int __start_bst_one[], __stop_bst_one[];\n"
+                                  "extern int __start_bst_missing[] __attribute__((weak));\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    long total = 0;\n"
+                                  "    for (struct entry* e = __start_bst_sec; e < __stop_bst_sec; e += 1) total += e->value;\n"
+                                  "    printf(\"%ld %ld %d %d %ld %d\\n\", total, (long)(__stop_bst_sec - __start_bst_sec), one, (int)(__stop_bst_one - __start_bst_one),\n"
+                                  "           between, __start_bst_missing == 0);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the section bounds fixture is written");
+    char reference[256];
+    char expected[64] = { 0 };
+    char* text = NULL;
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool oracle = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, oracle, "clang's build of the section bounds fixture runs");
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the object, linked by cc, prints clang's build's output");
+    static const char* const option_names[] = { "the direct path", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0, option_names[path]);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+    unlink(reference);
+}
+
+// #1122's own program, one atom in the section, whose count is 1: by clang, by -c's object that cc links, by the direct
+// path and by --tier1 with and without its scalar twin, each printing "5 1"; and a strong reference to a section that
+// doesn't exist, which stays undefined, as GNU ld and lld leave it.
+static void check_test_driver_section_bounds_exact(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "__attribute__((section(\"mysec\"))) int in_sec = 5;\n"
+                                  "extern int __start_mysec[], __stop_mysec[];\n"
+                                  "int main(void) { printf(\"%d %d\\n\", in_sec, (int)(__stop_mysec - __start_mysec)); return 0; }\n";
+    static const char missing_program[] = "extern int __start_bst_absent[];\n"
+                                          "int main(void) { return __start_bst_absent != 0; }\n";
+    static const char expected[] = "5 1\n";
+    char source[256];
+    char missing_source[256];
+    char object[256];
+    char reference[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds-exact.c", directory);
+    snprintf(missing_source, sizeof(missing_source), "%s/section-bounds-missing.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds-exact.o", directory);
+    snprintf(reference, sizeof(reference), "%s/section-bounds-exact-clang", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-exact-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-exact-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "#1122's fixture is written");
+    char* text = NULL;
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    char captured[64] = { 0 };
+    const bool oracle = referenced && check_test_driver_capture(reference, captured, sizeof(captured)) && strcmp(captured, expected) == 0;
+    check_test_expect(test, oracle, "clang's build prints 5 1");
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the object, linked by cc, prints 5 1");
+    static const char* const option_names[] = { "the direct path prints 5 1", "--tier1 prints 5 1", "--tier1 --scalar prints 5 1" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          option_names[path]);
+        unlink(direct_path[path]);
+    }
+    const bool missing_written = parse_test_write(missing_source, missing_program, sizeof(missing_program) - 1);
+    check_test_expect(test, missing_written, "the missing section's fixture is written");
+    char* missing_arguments[] = { (char*)executable, "-o", direct_path[0], missing_source, NULL };
+    const int missing_status = missing_written ? check_test_driver_spawn(missing_arguments, &text) : -1;
+    const bool undefined = missing_status != 0 && text != NULL && strstr(text, "undefined reference to '__start_bst_absent'") != NULL;
+    check_test_expect(test, undefined, "a strong reference to a missing section stays undefined");
+    free(text);
+    unlink(direct_path[0]);
+    unlink(source);
+    unlink(missing_source);
+    unlink(object);
+    unlink(reference);
+    unlink(linked_path);
+}
+
 // #591: member accesses whose lookups take every kind of record's: a struct of 2,000 members, with an anonymous union
 // every 40th and an anonymous struct of two bit-fields every 60th, written, read and their offsets taken; and 300 small
 // structs each read by a function of its own. Both paths must write the same object, which clang links into a program
@@ -6328,6 +6479,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_switch_tables(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_section_bounds(&test, clang, executable, directory);
+                check_test_driver_section_bounds_exact(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

@@ -39,6 +39,11 @@ requirements. [Command index](README.md).
   DTPMOD64/DTPOFF64 relocations and module offsets are emitted as appropriate.
   Regular shared-library outputs use a new file and rename, preserving any
   old inode that a process still maps.
+  A `__start_NAME` or `__stop_NAME` reference that binding gave the linker
+  (#1122) is the section's lowest atom's image offset or its highest end.
+  Before the layout, a referenced section's atoms take its largest alignment
+  and become one run of their bucket, so that no other atom falls inside the
+  bounds.
   Local-exec accesses and undefined DTPOFF32 module offsets in shared
   libraries are refused. Distinct general-/initial-exec slot columns allow
   both models to reference the same symbol. TLSGD target bitsets are reduced
@@ -131,6 +136,12 @@ requirements. [Command index](README.md).
   and a lane with no scratch memory to spare, then 64 bytes more at a time,
   until the link succeeds: every failure must be `EXECUTABLE_ERROR_MEMORY` and
   leave no output;
+- section bounds (#1122): hand-made atoms of three `__start_`/`__stop_`
+  sections, two sharing a bucket with plain atoms between them and one whose
+  atoms' alignments differ, and a weak `__start_` of a missing section: each
+  section's atoms must be one run, the names at its first atom and last end,
+  the weak reference 0, every lane count writing the same file, and the
+  program running;
 - the unwind scanner: `.eh_frame` atoms of each CIE `.eh_frame_hdr` indexes
   (GCC's in versions 1 and 3, with a personality, an LSDA and a signal frame,
   and with a personality's pointer absolute or a LEB128) and of seven it
@@ -208,6 +219,9 @@ alone and run alike. The checks:
   workers (2,000 by default) whose table of pointers has targets that the
   writer's filter takes for symbols outside the image. Each must run under
   the system's loader, without stand-ins, and print what its model predicts;
+- section bounds (#1122): a PIE whose `__start_`/`__stop_` registry's entries
+  are separated by a plain atom of the same bucket, whose weak missing-section
+  reference is 0, and which runs its checks;
 - cases: test-bind's atexit and libgcc programs and linkers' cases, each bound or refused
   as GNU ld and lld link it, and run with their links' status; the loader's
   cases with `DT_NEEDED` the loader after `libc.so.6` exactly when a strong
@@ -284,9 +298,10 @@ the library's exported symbols and initial-exec TLS, and the corresponding
 dynamic relocations. Compiled fixtures verify that the executable's definitions
 preempt the library's calls, data and pointer tables, and one whose 128-bit
 division, remainder and conversions call seven of `libgcc.a`'s functions, whose
-members join it, checks their results, and one whose code walks its stack with
+members join it, checks their results, one whose code walks its stack with
 `_Unwind_Backtrace`, which needs `libgcc_s.so.1` where the program that loads
-it doesn't. Then the unwinder (#489, `dynamic_test_libgcc_s`): test-bind's
+it doesn't, and one whose `__start_`/`__stop_` registry's entries are
+separated by a plain atom of the same bucket (#1122). Then the unwinder (#489, `dynamic_test_libgcc_s`): test-bind's
 split-stack code as a library, and a PIE whose `main` calls
 `_Unwind_Backtrace`, compiled by `cc`, bound with an import of
 `libgcc_s.so.1`'s, written by every lane count with `DT_NEEDED`
@@ -398,7 +413,9 @@ The checks:
   and the comparison fails: 52), and the weak IFUNC's and the absolute symbols'
   programs, whose `lea` of address 0 and of an absolute symbol a static PIE
   refuses (`EXECUTABLE_ERROR_RELOCATION`, by every write), as `cc -static-pie`
-  refuses them;
+  refuses them; and a `__start_`/`__stop_` registry (#1122), whose entries are
+  separated by a plain atom of the same bucket and whose weak missing-section
+  reference is 0, as a static executable and a static PIE;
 - refusals: assembly with a call of `__tls_get_addr` outside an access
   (refused naming the symbol), a general-dynamic access without its prefixes
   (its fixup), a pointer to an absolute symbol farther than int32 from the

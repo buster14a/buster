@@ -805,6 +805,20 @@ static bool bind_test_define(BindTestLink* test, SymbolId symbol)
     return atom != 0 && link_define_symbol(&test->link, symbol, atom, 0, 8);
 }
 
+// A data atom of `size` bytes at `alignment_log2` in unit 0, in the input section `name`: whether it was added. It
+// defines no symbol (a section's entries need none), only its input section, which __start_ and __stop_ bound.
+static bool bind_test_define_section(BindTestLink* test, const char* name, uint8_t alignment_log2, uint64_t size)
+{
+    uint8_t* bytes = arena_push(&test->bytes, size != 0 ? size : 1, 1ull << alignment_log2);
+    const AtomId atom = bytes != 0 ? link_add_atom(&test->link, BUSTER_LINK_CLASS_DATA, alignment_log2, size, bytes, 0) : 0;
+    const String8 section = { .pointer = (char*)name, .length = strlen(name) };
+    if (bytes != 0)
+    {
+        memset(bytes, 0, size);
+    }
+    return atom != 0 && link_set_atom_section(&test->link, atom, section);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The rules
 
@@ -883,6 +897,8 @@ typedef enum BindTestRule
     BIND_TEST_RULE_MORESTACK,
     BIND_TEST_RULE_SPLITSTACK,
     BIND_TEST_RULE_MORESTACK_UNWINDER,
+    BIND_TEST_RULE_SECTION_BOUNDS,
+    BIND_TEST_RULE_SECTION_MISSING,
     BIND_TEST_RULE_NO_ROOM,
     BIND_TEST_RULES,
 } BindTestRule;
@@ -915,6 +931,8 @@ static const char* const bind_test_rule_names[] = {
     "a reference to __morestack, whose member refers to the unwinder that only libgcc_s.so.1 defines",
     "a reference to __splitstack_getcontext, whose member makes morestack.o join",
     "a reference to __morestack beside the program's own _Unwind_Resume and __gcc_personality_v0",
+    "__start_ and __stop_ over a section's atoms, and a weak one of a missing section",
+    "a strong reference to __start_ of a missing section",
     "a link without room for the crt objects' symbols",
 };
 
@@ -1055,6 +1073,18 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
     {
         symbols[0] = bind_test_symbol(test, "__splitstack_getcontext", global_reference, none);
     }
+    else if (which == BIND_TEST_RULE_SECTION_BOUNDS)
+    {
+        symbols[0] = bind_test_symbol(test, "__start_buster_sec", global_reference, none);
+        symbols[1] = bind_test_symbol(test, "__stop_buster_sec", global_reference, none);
+        symbols[2] = bind_test_symbol(test, "__start_buster_absent", weak_reference, none);
+        // An invalid C identifier's suffix names no output section, though an input section has its name.
+        symbols[3] = bind_test_symbol(test, "__start_3buster", weak_reference, none);
+    }
+    else if (which == BIND_TEST_RULE_SECTION_MISSING)
+    {
+        symbols[0] = bind_test_symbol(test, "__start_buster_absent", global_reference, none);
+    }
     rule->begun = built && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
     // The program's atoms, and the symbols it adds after bind_begin.
     rule->begun = rule->begun && bind_test_define(test, rule->main);
@@ -1065,6 +1095,11 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
         {
             rule->begun = symbols[i] == 0 || bind_test_define(test, symbols[i]);
         }
+    }
+    else if (which == BIND_TEST_RULE_SECTION_BOUNDS)
+    {
+        rule->begun = rule->begun && bind_test_define_section(test, "buster_sec", 2, 4) && bind_test_define_section(test, "buster_sec", 4, 16) &&
+                      bind_test_define_section(test, "3buster", 2, 4);
     }
     else if (which == BIND_TEST_RULE_LATE_RUNTIME_NAME)
     {
@@ -1233,6 +1268,26 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
         {
             result = result && rule->symbols[i] != 0 && symbols->atom[rule->symbols[i]] == 0 && symbols->source[rule->symbols[i]] == BUSTER_LINK_SOURCE_LINKER;
         }
+    }
+    else if (which == BIND_TEST_RULE_SECTION_BOUNDS)
+    {
+        // The two names are the linker's, and the weak references to a missing section and to an invalid name are
+        // left to nothing. The link has its section's atoms, one with every alignment, and still passes link_check.
+        result = rule->ended;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            result = result && rule->symbols[i] != 0 && symbols->atom[rule->symbols[i]] == 0 && symbols->source[rule->symbols[i]] == BUSTER_LINK_SOURCE_LINKER;
+        }
+        for (uint32_t i = 2; i < 4; i += 1)
+        {
+            result = result && rule->symbols[i] != 0 && symbols->atom[rule->symbols[i]] == 0 && symbols->source[rule->symbols[i]] == BUSTER_LINK_SOURCE_NONE;
+        }
+        result = result && link_section_exists(link, (String8){ .pointer = (char*)"buster_sec", .length = 10 }) &&
+                 !link_section_exists(link, (String8){ .pointer = (char*)"buster_absent", .length = 13 });
+    }
+    else if (which == BIND_TEST_RULE_SECTION_MISSING)
+    {
+        result = rule->begun && !rule->ended && bind->error == BIND_ERROR_UNDEFINED && bind->name == symbols->name[first];
     }
     else if (which == BIND_TEST_RULE_MORESTACK || which == BIND_TEST_RULE_SPLITSTACK)
     {

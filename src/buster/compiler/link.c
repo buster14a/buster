@@ -401,6 +401,9 @@ struct LinkAtoms
     uint8_t* alignment_log2;
     uint32_t* unit;
     uint64_t* size;
+    // The input section the atom came from (an object's section name, or the name check_program_sections gave its
+    // definition), or none for its class's: what a __start_ or __stop_ reference bounds (link_bound_suffix).
+    String8* section;
     // Mutable, so that an executable's chunks can be patched where they are.
     uint8_t** bytes;
     // The atom's fixups: fixup_count of them from fixup_begin, or none (both 0).
@@ -519,6 +522,14 @@ static __attribute__((unused)) NameId link_add_name_hashed(Link* link, const uin
 // An atom: its id, or 0. Its fixups are added after it, with link_add_fixup or link_add_code_fixups, and its address
 // starts at 0.
 static __attribute__((unused)) AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, uint64_t size, uint8_t* bytes, uint32_t unit);
+// Gives `atom` the input section it came from, as a __start_ and __stop_ reference bounds it: false for an atom that
+// doesn't exist, or section bytes without a pointer or a length.
+static __attribute__((unused)) bool link_set_atom_section(Link* link, AtomId atom, String8 section);
+// The suffix of `name` after __start_ or __stop_, and whether it is __stop_'s: an empty String8 for another name, or
+// one whose suffix isn't a C identifier, which no output section name in C can be.
+static __attribute__((unused)) String8 link_bound_suffix(const Link* link, NameId name, bool* stop);
+// Whether an atom's input section is `name`.
+static __attribute__((unused)) bool link_section_exists(const Link* link, String8 name);
 // A symbol, defined in `atom` at `value` or (atom 0) defined later with link_define_symbol, elsewhere or nowhere: its id,
 // or 0. The linker's columns start at 0.
 static __attribute__((unused)) SymbolId link_add_symbol(Link* link, NameId name, AtomId atom, uint64_t value, uint64_t size, uint8_t flags, uint8_t source);
@@ -748,8 +759,8 @@ static NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t le
 // Each table's bytes per record, over its columns, and its number of columns.
 #define BUSTER_LINK_NAME_BYTES (sizeof(const uint8_t*) + sizeof(uint32_t) + sizeof(uint64_t))
 #define BUSTER_LINK_NAME_COLUMNS 3
-#define BUSTER_LINK_ATOM_BYTES (2 * sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint8_t*) + sizeof(FixupId) + sizeof(uint32_t) + sizeof(uint64_t))
-#define BUSTER_LINK_ATOM_COLUMNS 8
+#define BUSTER_LINK_ATOM_BYTES (2 * sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(String8) + sizeof(uint8_t*) + sizeof(FixupId) + sizeof(uint32_t) + sizeof(uint64_t))
+#define BUSTER_LINK_ATOM_COLUMNS 9
 #define BUSTER_LINK_SYMBOL_BYTES (sizeof(NameId) + sizeof(AtomId) + 2 * sizeof(uint64_t) + 2 * sizeof(uint8_t) + 2 * sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define BUSTER_LINK_SYMBOL_COLUMNS 10
 #define BUSTER_LINK_FIXUP_BYTES (sizeof(uint32_t) + sizeof(SymbolId) + sizeof(int32_t) + sizeof(uint8_t))
@@ -809,6 +820,7 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
         result.atoms.alignment_log2 = link_push_column(arena, atoms, sizeof(*result.atoms.alignment_log2), &fits);
         result.atoms.unit = link_push_column(arena, atoms, sizeof(*result.atoms.unit), &fits);
         result.atoms.size = link_push_column(arena, atoms, sizeof(*result.atoms.size), &fits);
+        result.atoms.section = link_push_column(arena, atoms, sizeof(*result.atoms.section), &fits);
         result.atoms.bytes = link_push_column(arena, atoms, sizeof(*result.atoms.bytes), &fits);
         result.atoms.fixup_begin = link_push_column(arena, atoms, sizeof(*result.atoms.fixup_begin), &fits);
         result.atoms.fixup_count = link_push_column(arena, atoms, sizeof(*result.atoms.fixup_count), &fits);
@@ -889,11 +901,66 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
         atoms->alignment_log2[result] = alignment_log2;
         atoms->unit[result] = unit;
         atoms->size[result] = size;
+        atoms->section[result] = (String8){ 0 };
         atoms->bytes[result] = bytes;
         atoms->fixup_begin[result] = 0;
         atoms->fixup_count[result] = 0;
         atoms->address[result] = 0;
         atoms->count += 1;
+    }
+    return result;
+}
+
+static bool link_set_atom_section(Link* link, AtomId atom, String8 section)
+{
+    const bool result = atom != 0 && atom < link->atoms.count && (section.length == 0 || section.pointer != 0);
+    if (result)
+    {
+        link->atoms.section[atom] = section;
+    }
+    return result;
+}
+
+// Whether `bytes` of `length` are a C identifier: a letter or '_' first, then letters, digits and '_'.
+static bool link_c_identifier(const uint8_t* bytes, uint64_t length)
+{
+    bool result = length != 0 && !(bytes[0] >= '0' && bytes[0] <= '9');
+    for (uint64_t i = 0; result && i < length; i += 1)
+    {
+        const uint8_t c = bytes[i];
+        result = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    }
+    return result;
+}
+
+static String8 link_bound_suffix(const Link* link, NameId name, bool* stop)
+{
+    String8 result = { 0 };
+    bool is_stop = false;
+    if (name != 0 && name < link->names.count)
+    {
+        const uint8_t* bytes = link->names.bytes[name];
+        const uint32_t length = link->names.length[name];
+        const bool start_prefix = length > 8 && memcmp(bytes, "__start_", 8) == 0;
+        is_stop = length > 7 && memcmp(bytes, "__stop_", 7) == 0;
+        const uint32_t prefix = start_prefix ? 8 : is_stop ? 7 : length;
+        const String8 suffix = { .pointer = (char*)bytes + prefix, .length = length - prefix };
+        result = link_c_identifier((const uint8_t*)suffix.pointer, suffix.length) ? suffix : (String8){ 0 };
+    }
+    if (stop != 0)
+    {
+        *stop = is_stop;
+    }
+    return result;
+}
+
+static bool link_section_exists(const Link* link, String8 name)
+{
+    bool result = false;
+    for (AtomId atom = 1; !result && atom < link->atoms.count; atom += 1)
+    {
+        const String8 section = link->atoms.section[atom];
+        result = section.length == name.length && section.length != 0 && memcmp(section.pointer, name.pointer, name.length) == 0;
     }
     return result;
 }

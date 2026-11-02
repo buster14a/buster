@@ -588,6 +588,9 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     memcpy(atoms->alignment_log2 + atom_first, from->atoms.alignment_log2 + begin.atoms, atom_count);
     memcpy(atoms->size + atom_first, from->atoms.size + begin.atoms, atom_count * sizeof(uint64_t));
     memcpy(atoms->fixup_count + atom_first, from->atoms.fixup_count + begin.atoms, atom_count * sizeof(uint32_t));
+    // A runtime atom's section isn't one of the program's, and the snapshot doesn't keep its name: no __start_ or
+    // __stop_ reference can bound it (the runtime's sections' names aren't C identifiers).
+    memset(atoms->section + atom_first, 0, atom_count * sizeof(*atoms->section));
     memset(atoms->address + atom_first, 0, atom_count * sizeof(uint64_t));
     for (uint32_t i = 0; i < atom_count; i += 16)
     {
@@ -956,6 +959,15 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const RuntimeNames* names = &runtime->global_names;
     LinkSymbols* symbols = &link->symbols;
     const NameId name = symbols->name[symbol];
+    // A __start_NAME or __stop_NAME whose NAME is a section of the link's atoms: the linker defines it at that
+    // section's bounds (executable_reference), as GNU ld and lld define them. One whose section is missing is an
+    // ordinary name: a weak reference to nothing, or an undefined reference.
+    const String8 suffix = link_bound_suffix(link, name, 0);
+    if (suffix.length != 0 && link_section_exists(link, suffix))
+    {
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_LINKER;
+        return;
+    }
     const uint32_t entry = runtime_find_global_name(names, link->names.bytes[name], link->names.length[name], link->names.hash[name]);
     const SymbolId definition = entry != 0 ? names->definition[entry - 1] : 0;
     // A definition in an atom of crtendS.o or crtn.o (crtend.o or crtn.o), whose pieces bind_begin found current: the

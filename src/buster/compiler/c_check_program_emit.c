@@ -3260,6 +3260,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             for (uint32_t a = 0; a < code->asm_atom_count; a += 1)
             {
                 descriptors[code->asm_atoms[a]] = code->asm_sections[a];
+                valid = valid && link_set_atom_section(link, code->asm_atoms[a], code->asm_sections[a].name);
             }
             // A prioritized constructor's or destructor's entry (#147) is in .init_array.N or .fini_array.N, as clang's
             // object has it (TargetLoweringObjectFileELF's getStaticCtorSection), of its array's type and flags.
@@ -3272,11 +3273,13 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 const int length = valid ? snprintf(name, 24, "%s.%u", object_class_sections[class].name, (unsigned)link->priorities.priority[p]) : 0;
                 descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = name, .length = (uint64_t)length }, .type = object_class_sections[class].type,
                                                          .flags = object_class_sections[class].flags };
+                valid = valid && link_set_atom_section(link, atom, descriptors[atom].name);
             }
             code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
             for (uint32_t a = 0; a < code->unit_atom_count; a += 1)
             {
                 descriptors[code->unit_atoms[a]] = code->unit_sections[a];
+                valid = valid && link_set_atom_section(link, code->unit_atoms[a], code->unit_sections[a].name);
             }
             *table = descriptors;
         }
@@ -3350,6 +3353,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                     }
                 }
                 descriptors[atom] = descriptor;
+                valid = valid && link_set_atom_section(link, atom, descriptor.name);
             }
         }
         // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
@@ -3372,6 +3376,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 memcpy(spelled + prefix + 1, link->names.bytes[name], link->names.length[name]);
                 descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = spelled, .length = prefix + 1 + link->names.length[name] }, .type = format->type,
                                                          .flags = format->flags, .entry_size = format->entry_size };
+                valid = valid && link_set_atom_section(link, atom, descriptors[atom].name);
             }
             if (valid && format != NULL)
             {
