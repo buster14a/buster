@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-parser: c_parser.c's checks (AGENTS.md, "Parser tests"). Every unit goes through both paths, the vector path
 // (with its fallback) and the scalar parser alone, which must agree: on a valid unit the same tree, which must keep the
@@ -22,6 +23,7 @@
 // file, K6's failures on valid code (--explain), a look at a tree (--print-tree), the files and the mutations, the
 // generated inputs, the driver, then run_parser_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -3865,8 +3867,8 @@ static int run_parser_tests(int argument_count, char** arguments)
     clang_arguments[clang_argument_count] = standard;
     clang_argument_count += valid;
     char directory[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-test-parser-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-test-parser-XXXXXX", temporary);
     valid = valid && mkdtemp(directory) != 0;
     if (!valid)
     {

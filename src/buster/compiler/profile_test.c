@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The profiling tools' tests, for the test-profile command:
 //
@@ -32,6 +33,7 @@
 //
 // The exit status is 1 if a case fails.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -875,9 +877,9 @@ static void profile_test_program(ProfileTest* test)
                                  "    (void)argv;\n"
                                  "    return selected((float)argc) != (float)argc;\n"
                                  "}\n";
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char directory[512];
-    snprintf(directory, sizeof(directory), "%s/buster-test-profile-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    snprintf(directory, sizeof(directory), "%s/buster-test-profile-XXXXXX", temporary);
     char paths[7][600];
     static const char* const names[7] = { "func.c", "func.s", "labeled.s", "original", "instrumented", "original.txt", "instrumented.txt" };
     const bool made = mkdtemp(directory) != 0;
@@ -956,9 +958,9 @@ static void profile_test_entry_program(ProfileTest* test)
                                  "    (void)argv;\n"
                                  "    return f((float)argc) != (float)argc;\n"
                                  "}\n";
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char directory[512];
-    snprintf(directory, sizeof(directory), "%s/buster-test-profile-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    snprintf(directory, sizeof(directory), "%s/buster-test-profile-XXXXXX", temporary);
     char paths[6][600];
     static const char* const names[6] = { "entry.c", "entry.s", "labeled.s", "entry", "entry.dis", "samples.txt" };
     const bool made = mkdtemp(directory) != 0;

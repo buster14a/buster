@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Independent source-corpus qualification. External files stay external: the harness records every input and
 // compares acceptance and the first diagnostic line with Clang, and the complete scalar/vector parser, binding,
@@ -10,6 +11,8 @@
 // objects were compared, so that a corpus whose files the backend comes to refuse can't pass by comparing none.
 // --id-order N checks each file with its identifiers' ids in another order, as the driver's --id-order gives them (#153).
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
+
+#include "buster/compiler/test_paths.h"
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
 
@@ -3461,8 +3464,8 @@ static int run_checker_corpus(int count, char** arguments)
         selected = selected < limit ? selected : (uint32_t)limit;
     }
     char directory[4096] = { 0 };
-    const char* temporary = getenv("TMPDIR");
-    const int written = snprintf(directory, sizeof(directory), "%s/buster-check-corpus-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    const int written = snprintf(directory, sizeof(directory), "%s/buster-check-corpus-XXXXXX", temporary);
     const bool made_directory = valid && written > 0 && written < (int)sizeof(directory) && mkdtemp(directory) != 0;
     valid = valid && made_directory;
     valid = valid && check_corpus_oracle_controls(directory, clang);

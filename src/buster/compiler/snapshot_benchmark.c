@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The runtime snapshot's benchmark: what a link pays for the C runtime with the snapshot (snapshot.c) and without it
 // (runtime_import, runtime_import_static, runtime_import_static_pie), phase by phase, for each kind's runtime, and what
@@ -27,6 +28,7 @@
 // The exit status is 1 if the arguments are invalid, a runtime doesn't import, or a snapshot can't be written or
 // loaded.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -488,7 +490,7 @@ int run_snapshot_benchmark(int argc, char** argv);
 
 int run_snapshot_benchmark(int argc, char** argv)
 {
-    const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* parent = oracle_temporary_directory();
     uint64_t runs = BUSTER_SNAPSHOT_BENCHMARK_DEFAULT_RUNS;
     bool kinds[RUNTIME_KINDS] = {
         [RUNTIME_KIND_DYNAMIC] = true,

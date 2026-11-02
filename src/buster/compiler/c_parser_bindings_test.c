@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Source-level checks for #128. Include after the parser tests and c_parser_bindings.c. The handwritten fixtures
 // name declaration tokens by their occurrence in the source; the random generator keeps a separate lexical scope
 // stack while writing C. Neither expected answer reads the adapter's events. Every successful source also compares
 // the producer's immediate answers, fresh scalar replay and the batch on every token, including unresolved names.
 
+#include "buster/compiler/test_paths.h"
 #include <stdarg.h>
 
 typedef struct ParseBindingTest ParseBindingTest;
@@ -887,8 +889,8 @@ static int run_parser_bindings_tests(int argc, char** argv)
         valid = pp_parse_options(arguments.option_count + 1, arguments.options, &options, &arena, &input, &output, &markers);
     }
     char directory[4096] = { 0 };
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-test-parser-bindings-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-test-parser-bindings-XXXXXX", temporary);
     valid = valid && mkdtemp(directory) != 0;
     if (valid)
     {
