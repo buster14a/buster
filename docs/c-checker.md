@@ -2805,7 +2805,11 @@ graph's construction. `-Wfatal-errors` publishes the first command-line or defau
 to one by `-Werror`, as Clang's fatal error and stops publication there; warnings that remain warnings are unaffected.
 A source pragma's `error` mapping stays an ordinary error, while its `fatal` mapping is fatal, as in Clang.
 `-Wno-fatal-errors` restores the ordinary budget, and the last of the two options on the command line decides. The
-standalone `-E` command and the source driver's preprocessing, parsing and semantic groups all read the option.
+standalone `-E` command and the source driver's preprocessing, parsing and semantic groups all read the option; the
+standalone `parse` command reads it too, but keeps its generated-prefix behavior after a preprocessing fatal rather
+than parsing the prefix the source driver checks. The preprocessing warnings' own `-Werror` promotion (`#warning`,
+macro redefinition and `#pragma message`) and the stream warnings' option suffix are separate policies and are
+unchanged here.
 
 The source driver collects preprocessing, parser and checker groups before
 publication (#698). Their order follows expansion-output boundaries and proven
