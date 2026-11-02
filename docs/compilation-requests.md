@@ -29,8 +29,11 @@ extends the existing contracts (`PPOptions`, `CheckProgramOptions`,
   loop calls it, and so does every other client.
 - `check_request_refusal` says what the request asks for that the driver
   doesn't implement, and which option asked for it. In the driver's order:
-  code generation, position-independent code when the request emits code
-  (#811), a layout, then a language or target the checker doesn't take
+  code generation (the hardening families of #1125 among them), then, when
+  the request emits code, instrumentation (#1112: a sanitizer, coverage or
+  OpenMP, from the resolved predefines, which a later `-fno-` option may
+  have cancelled) and position-independent code (#811), a layout, then a
+  language or target the checker doesn't take
   (`check_input_target_supported`). `check_request_describe` writes the
   driver's message for the refusal. The driver prints it after `error: `, and
   the other clients print it in their own reports.

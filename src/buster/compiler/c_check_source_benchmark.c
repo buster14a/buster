@@ -629,7 +629,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");
-        check_request_describe(stderr, refusal);
+        check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
     static InternTable identifiers;

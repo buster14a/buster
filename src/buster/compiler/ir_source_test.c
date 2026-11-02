@@ -245,7 +245,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     }
     else if (!valid && source.refusal.error != CHECK_REQUEST_ACCEPTED)
     {
-        check_request_describe_text(source.refusal, result->reason, sizeof(result->reason));
+        check_request_describe_text(&source.refusal, result->reason, sizeof(result->reason));
     }
     else if (!valid)
     {

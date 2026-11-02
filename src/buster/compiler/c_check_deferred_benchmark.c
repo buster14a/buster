@@ -140,7 +140,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");
-        check_request_describe(stderr, refusal);
+        check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
     valid = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);

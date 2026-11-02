@@ -214,7 +214,7 @@ static void check_source_report(FILE* stream, const char* prefix, const char* fi
             if (source->refusal.error != CHECK_REQUEST_ACCEPTED)
             {
                 fprintf(stream, "%s: file=%s refused=\"", prefix, file);
-                check_request_describe(stream, source->refusal);
+                check_request_describe(stream, &source->refusal);
                 fprintf(stream, "\"\n");
             }
             else

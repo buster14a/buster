@@ -30,6 +30,9 @@
 
 // The receipt's text's room, with its terminator.
 #define BUSTER_CHECK_REQUEST_RECEIPT_BYTES 512
+// A refused instrumentation option's spelling's room, with its terminator: the driver's (predefines_sanitizer_last's
+// buffer).
+#define BUSTER_CHECK_REQUEST_SPELLING_BYTES 1024
 
 // The command line's code generation and ABI layout options that no PPOptions field decides, as the driver reads them
 // (check_request_scan): each family's option that decides, or null for none. Zero is a command line without any.
@@ -62,6 +65,12 @@ typedef enum CheckRequestError
     // Code generation the driver doesn't implement: the first option of check_request_codegen_option's, else the stack
     // protector's or -fcf-protection's that decides.
     CHECK_REQUEST_CODEGEN,
+    // Instrumentation the driver doesn't implement, for a request that emits code, from the resolved predefines rather
+    // than from an enabling option, which a later -fno-sanitize= or -fno-openmp may have cancelled (#1112): a sanitizer,
+    // else coverage, else OpenMP (libgomp's too, which defines no _OPENMP).
+    CHECK_REQUEST_SANITIZER,
+    CHECK_REQUEST_COVERAGE,
+    CHECK_REQUEST_OPENMP,
     // Position-independent code for shared libraries (-fPIC, -fpic), for a request that emits code: Tier 0 can't yet
     // emit shared-library-safe symbol and TLS accesses (#811).
     CHECK_REQUEST_PIC,
@@ -75,8 +84,13 @@ typedef struct CheckRequestRefusal CheckRequestRefusal;
 struct CheckRequestRefusal
 {
     CheckRequestError error;
-    // The option that asked for it (the command line's own string), or null for CHECK_REQUEST_TARGET.
+    // The option that asked for it (the command line's own string), or null for CHECK_REQUEST_TARGET and the
+    // instrumentation's refusals, whose option is `spelling` (check_request_named).
     const char* option;
+    // The instrumentation's refused option as the driver names it: the last -fsanitize= or -fsanitize-coverage= that
+    // turns it on, as clang describes it (predefines_sanitizer_last, predefines_coverage_last), the family's bare
+    // option when none does, or -fopenmp with its runtime; empty for every other refusal.
+    char spelling[BUSTER_CHECK_REQUEST_SPELLING_BYTES];
 };
 
 // A resolved configuration's description for a measurement's report (check_request_receipt).
@@ -94,7 +108,9 @@ struct CheckRequestReceipt
 
 // The options that require code generation or ABI behavior the C driver doesn't yet implement. The preprocessor may
 // still take them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
-// differently instrumented object. Negative and default forms that don't request those behaviors are left alone.
+// differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values and
+// their auxiliary options; only the exact inactive or default requests below are admitted. This doesn't yet audit every
+// -f or -m option. Negative options outside these families keep their existing handling.
 static bool check_request_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
@@ -103,9 +119,22 @@ static bool check_request_codegen_option(const char* argument)
         "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
         "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
     };
-    static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
-                                            "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
-                                            "-fprofile-generate-cold-function-coverage=" };
+    static const char* const prefixes[] = {
+        "-fstack-protector",
+        "-fstack-check=",
+        "-ftls-model=",
+        "-fwide-exec-charset=",
+        "-fprofile-generate=",
+        "-fprofile-instr-generate=",
+        "-fcs-profile-generate=",
+        "-fprofile-generate-cold-function-coverage=",
+        "-ftrivial-auto-var-init",
+        "-ftrapv",
+        "-fzero-call-used-regs",
+        "-fsanitize-coverage",
+        "-fsplit-stack",
+        "-mcmodel",
+    };
     bool unsupported = false;
     for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
     {
@@ -114,6 +143,20 @@ static bool check_request_codegen_option(const char* argument)
     for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
     {
         unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
+    }
+    // These complete spellings request the behavior already emitted. Exemptions are never prefixes: -mcmodel=small-bogus
+    // and -fzero-call-used-regs=skip,all are still refused by name. Within these families, an earlier unsupported
+    // request isn't cancelled by a later inactive spelling; the stack protector's and CET's families are resolved
+    // separately (check_request_scan) and do honor a later disabling spelling.
+    static const char* const inactive[] = {
+        "-ftrivial-auto-var-init=uninitialized",
+        "-fzero-call-used-regs=skip",
+        "-fsanitize-coverage=0",
+        "-mcmodel=small",
+    };
+    for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
+    {
+        unsupported = strcmp(argument, inactive[i]) != 0;
     }
     return unsupported;
 }
@@ -187,13 +230,16 @@ static bool check_request_scan(CheckRequestScan* scan, const char* argument)
 }
 
 // What the request scanned into `scan` asks for that the driver doesn't implement: with `options` (null before they
-// are parsed: then only code generation's options, which the driver reports before a usage error), its position-
-// independent code when `emits` (-c, or a link), its layout and its language and target too, the first that applies in
-// that order.
+// are parsed: then only code generation's options, which the driver reports before a usage error), its instrumentation
+// and its position-independent code when `emits` (-c, or a link), its layout and its language and target too, the
+// first that applies in that order.
 static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, const PPOptions* options, bool emits)
 {
     CheckRequestRefusal result = { .error = CHECK_REQUEST_ACCEPTED };
     const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector : scan->cf_protection;
+    const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
+    const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
+    const bool parallel = options != NULL && emits && options->predefines.openmp_enabled;
     const char* pic = options != NULL && emits ? (options->predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
                                                   options->predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
     const char* packed = scan->pack_value ? scan->packed_value : scan->packed_bare;
@@ -201,6 +247,21 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
     if (codegen != NULL)
     {
         result = (CheckRequestRefusal){ .error = CHECK_REQUEST_CODEGEN, .option = codegen };
+    }
+    else if (sanitized || covered || parallel)
+    {
+        // The option the driver names: the last that turns the instrumentation on, as clang describes it, else the
+        // family's bare option; OpenMP's with its runtime, if one was named.
+        result.error = sanitized ? CHECK_REQUEST_SANITIZER : covered ? CHECK_REQUEST_COVERAGE : CHECK_REQUEST_OPENMP;
+        const PredefinesOptions* predefines = &options->predefines;
+        const char* named = sanitized ? predefines_sanitizer_last(predefines, predefines->sanitizers, result.spelling, sizeof(result.spelling)) :
+                            covered ? predefines_coverage_last(predefines, predefines->coverage_features, result.spelling, sizeof(result.spelling)) : "";
+        const char* runtime = parallel && !sanitized && !covered ? predefines->openmp_runtime : NULL;
+        if (named[0] == 0)
+        {
+            snprintf(result.spelling, sizeof(result.spelling), "%s%s%s", sanitized ? "-fsanitize" : covered ? "-fsanitize-coverage" : "-fopenmp",
+                     runtime != NULL ? "=" : "", runtime != NULL ? runtime : "");
+        }
     }
     else if (pic != NULL)
     {
@@ -217,20 +278,37 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
     return result;
 }
 
+// The option `refusal` names: the command line's, the instrumentation's spelling, or null for an accepted request and
+// CHECK_REQUEST_TARGET.
+static const char* check_request_named(const CheckRequestRefusal* refusal)
+{
+    return refusal->option != NULL ? refusal->option : refusal->spelling[0] != 0 ? refusal->spelling : NULL;
+}
+
 // Writes the driver's message for `refusal` (after "error: ", without a newline) to `stream`; nothing for an accepted
 // request. The option is written whole, however long its value.
-static void check_request_describe(FILE* stream, CheckRequestRefusal refusal)
+static void check_request_describe(FILE* stream, const CheckRequestRefusal* refusal)
 {
-    switch (refusal.error)
+    const char* named = check_request_named(refusal);
+    switch (refusal->error)
     {
         case CHECK_REQUEST_CODEGEN:
-            fprintf(stream, "unsupported code generation option '%s'", refusal.option);
+            fprintf(stream, "unsupported code generation option '%s'", named);
+            break;
+        case CHECK_REQUEST_SANITIZER:
+            fprintf(stream, "unsupported code generation option '%s' (sanitizer instrumentation is not implemented)", named);
+            break;
+        case CHECK_REQUEST_COVERAGE:
+            fprintf(stream, "unsupported code generation option '%s' (coverage instrumentation is not implemented)", named);
+            break;
+        case CHECK_REQUEST_OPENMP:
+            fprintf(stream, "unsupported code generation option '%s' (OpenMP code generation is not implemented)", named);
             break;
         case CHECK_REQUEST_PIC:
-            fprintf(stream, "unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)", refusal.option);
+            fprintf(stream, "unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)", named);
             break;
         case CHECK_REQUEST_LAYOUT:
-            fprintf(stream, "unsupported option '%s' (the checker does not implement its ABI layout)", refusal.option);
+            fprintf(stream, "unsupported option '%s' (the checker does not implement its ABI layout)", named);
             break;
         case CHECK_REQUEST_TARGET:
             fprintf(stream, "checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation");
@@ -242,7 +320,7 @@ static void check_request_describe(FILE* stream, CheckRequestRefusal refusal)
 
 // check_request_describe's message in `text`, `size` bytes with its terminator, cut short past them: a client's
 // report's field. Nothing is written for a size of 0.
-static void check_request_describe_text(CheckRequestRefusal refusal, char* text, size_t size)
+static void check_request_describe_text(const CheckRequestRefusal* refusal, char* text, size_t size)
 {
     if (size != 0)
     {

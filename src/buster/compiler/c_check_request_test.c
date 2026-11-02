@@ -4,12 +4,12 @@
 // #1057's tests: one request's configuration (c_check_request.c) and the shared source preparation
 // (c_check_source_prepare.c) against the C driver, in this process and in children that run the driver's command.
 //
-// - refusals: option lists of each code generation, PIC, layout and target family, in the orders where the last or the
-//   first decides, read by check_request_parse as a client reads them: the refusal and its option, the arguments that
-//   go on to the preprocessor, an option's value or an input after -- never read as an option, and a refused or
-//   unreadable request (an arena without room, an option without its value after pp_parse_options filled the fields of
-//   the options before it) leaving its configuration all zero; then the driver on each list, by -c and by
-//   -fsyntax-only, whose exit status and first line of errors must be check_request_describe's;
+// - refusals: option lists of each code generation (hardening among them), instrumentation, PIC, layout and target
+//   family, in the orders where the last or the first decides, read by check_request_parse as a client reads them: the
+//   refusal and its option, the arguments that go on to the preprocessor, an option's value or an input after -- never
+//   read as an option, and a refused or unreadable request (an arena without room, an option without its value after
+//   pp_parse_options filled the fields of the options before it) leaving its configuration all zero; then the driver on
+//   each list, by -c and by -fsyntax-only, whose exit status and first line of errors must be check_request_describe's;
 // - the program's options: check_request_program_options takes the identifiers, the target and the predefines from
 //   the preprocessor and keeps the unit's own fields;
 // - receipts: one file prepared twice gives the same digest and text; another -march, -D, -funsigned-char, --scalar,
@@ -148,6 +148,24 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         { .label = "a layout before a target", .options = { "-fshort-wchar", "-fshort-enums", 0 }, .emits = true, .error = CHECK_REQUEST_LAYOUT,
           .option = "-fshort-enums", .passed = 2 },
         { .label = "an option's value isn't an option", .options = { "-I", "-pg", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 2 },
+        { .label = "-ftrapv, a hardening family", .options = { "-ftrapv", 0 }, .emits = false, .error = CHECK_REQUEST_CODEGEN, .option = "-ftrapv" },
+        { .label = "-mcmodel=small, the default", .options = { "-mcmodel=small", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
+        { .label = "a later default doesn't cancel a hardening request", .options = { "-mcmodel=large", "-mcmodel=small", 0 }, .emits = true,
+          .error = CHECK_REQUEST_CODEGEN, .option = "-mcmodel=large", .passed = 1 },
+        { .label = "a sanitizer for code", .options = { "-fsanitize=address", 0 }, .emits = true, .error = CHECK_REQUEST_SANITIZER, .option = "-fsanitize=address",
+          .passed = 1 },
+        { .label = "a sanitizer without code", .options = { "-fsanitize=address", 0 }, .emits = false, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
+        { .label = "a sanitizer turned off again", .options = { "-fsanitize=address", "-fno-sanitize=address", 0 }, .emits = true,
+          .error = CHECK_REQUEST_ACCEPTED, .passed = 2 },
+        { .label = "OpenMP for code", .options = { "-fopenmp", 0 }, .emits = true, .error = CHECK_REQUEST_OPENMP, .option = "-fopenmp", .passed = 1 },
+        { .label = "OpenMP's runtime", .options = { "-fopenmp=libgomp", 0 }, .emits = true, .error = CHECK_REQUEST_OPENMP, .option = "-fopenmp=libgomp",
+          .passed = 1 },
+        { .label = "a sanitizer before OpenMP", .options = { "-fopenmp", "-fsanitize=address", 0 }, .emits = true, .error = CHECK_REQUEST_SANITIZER,
+          .option = "-fsanitize=address", .passed = 2 },
+        { .label = "instrumentation before PIC", .options = { "-fPIC", "-fopenmp", 0 }, .emits = true, .error = CHECK_REQUEST_OPENMP, .option = "-fopenmp",
+          .passed = 2 },
+        { .label = "code generation before instrumentation", .options = { "-fsanitize=address", "-pg", 0 }, .emits = true, .error = CHECK_REQUEST_CODEGEN,
+          .option = "-pg", .passed = 1 },
     };
     char errors_path[PATH_MAX];
     char object_path[PATH_MAX];
@@ -178,7 +196,8 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         CheckRequestRefusal refusal = { 0 };
         const char* input = "poisoned";
         const bool accepted = arena.base != 0 && check_request_parse(&parsed, &refusal, &input, file, options, count, item->emits, &arena);
-        const bool option = item->option == 0 ? refusal.option == 0 : refusal.option != 0 && strcmp(refusal.option, item->option) == 0;
+        const char* named = check_request_named(&refusal);
+        const bool option = item->option == 0 ? named == 0 : named != 0 && strcmp(named, item->option) == 0;
         const bool zero = accepted ? parsed.semantic_pragmas && input == file : check_request_test_zero(&parsed, sizeof(parsed)) && input == 0;
         char label[256];
         snprintf(label, sizeof(label), "request: %s: %s, %u of its options for the preprocessor", item->label,
@@ -211,7 +230,7 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
             if (item->error != CHECK_REQUEST_ACCEPTED)
             {
                 fprintf(stream, "error: ");
-                check_request_describe(stream, refusal);
+                check_request_describe(stream, &refusal);
                 fprintf(stream, "\n");
             }
             fclose(stream);
@@ -302,6 +321,9 @@ static void check_test_request_read(CheckTest* test, const char* file)
         const char* text;
     } messages[] = {
         { { CHECK_REQUEST_CODEGEN, "-pg" }, "unsupported code generation option '-pg'" },
+        { { CHECK_REQUEST_SANITIZER, NULL, "-fsanitize=address" }, "unsupported code generation option '-fsanitize=address' (sanitizer instrumentation is not implemented)" },
+        { { CHECK_REQUEST_COVERAGE, NULL, "-fsanitize-coverage" }, "unsupported code generation option '-fsanitize-coverage' (coverage instrumentation is not implemented)" },
+        { { CHECK_REQUEST_OPENMP, NULL, "-fopenmp=libgomp" }, "unsupported code generation option '-fopenmp=libgomp' (OpenMP code generation is not implemented)" },
         { { CHECK_REQUEST_PIC, "-fPIC" }, "unsupported code generation option '-fPIC' (position-independent code for shared libraries is not implemented)" },
         { { CHECK_REQUEST_LAYOUT, "-fshort-enums" }, "unsupported option '-fshort-enums' (the checker does not implement its ABI layout)" },
         { { CHECK_REQUEST_TARGET, NULL }, "checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation" },
@@ -311,12 +333,12 @@ static void check_test_request_read(CheckTest* test, const char* file)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(messages); i += 1)
     {
         char text[256];
-        check_request_describe_text(messages[i].refusal, text, sizeof(text));
+        check_request_describe_text(&messages[i].refusal, text, sizeof(text));
         literal &= strcmp(text, messages[i].text) == 0;
     }
     // Cut short: a prefix of the message, terminated within the buffer.
     char short_text[8];
-    check_request_describe_text(messages[0].refusal, short_text, sizeof(short_text));
+    check_request_describe_text(&messages[0].refusal, short_text, sizeof(short_text));
     const size_t cut = strnlen(short_text, sizeof(short_text));
     literal &= cut != 0 && cut < sizeof(short_text) && strncmp(short_text, messages[0].text, cut) == 0;
     check_test_expect(test, literal, "request: each refusal's message is the driver's literal text, cut short in a short buffer");

@@ -3542,6 +3542,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
     // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested.
     const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, false);
+    // Syntax-only takes precedence over -c, whichever came first.
+    emit_object = emit_object && !syntax_only;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
@@ -3628,7 +3630,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (codegen.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");
-        check_request_describe(stderr, codegen);
+        check_request_describe(stderr, &codegen);
         fprintf(stderr, "\n");
     }
     else if (!parsed)
@@ -3636,10 +3638,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
+    // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
+    // opened: the instrumentation's, decided from the resolved predefines rather than from an enabling option, which a
+    // later -fno-sanitize= or -fno-openmp may have cancelled, then position-independent code, the layouts and the
+    // language and target.
     else if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");
-        check_request_describe(stderr, refusal);
+        check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
     else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
