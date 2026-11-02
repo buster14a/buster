@@ -144,6 +144,8 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_program.c"
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
+// The tier-neutral emission metadata protocol's tests, for test-emission-metadata.
+int run_emission_metadata_tests(int argc, char** argv);
 
 // Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
 #include "buster/compiler/dominators.c"
@@ -159,8 +161,13 @@ int run_dominator_benchmark(int argc, char** argv);
 
 #include "buster/compiler/tier1_allocate.c"
 #include "buster/compiler/tier1_rematerialize.c"
+// #939's allocation certificates: the checker of a source/stream program, the interval allocator's fragment adapter and
+// the CFG allocator's producer, which Tier 1's consumers run when their options ask for it.
+#include "buster/compiler/tier1_certificate.c"
+#include "buster/compiler/tier1_certificate_interval.c"
 #include "buster/compiler/tier1_allocate_test.c"
 #include "buster/compiler/tier1_cfg.c"
+#include "buster/compiler/tier1_certificate_cfg.c"
 #include "buster/compiler/tier1_cfg_test.c"
 int run_tier1_allocate_benchmark(int argc, char** argv);
 
@@ -555,6 +562,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_cfg_ir.c"
 #include "buster/compiler/tier1_cfg_source_test.c"
 #include "buster/compiler/tier1_cfg_source_benchmark.c"
+#include "buster/compiler/tier1_certificate_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -993,6 +1001,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_tier1_schedule_benchmark(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-emission-metadata") == 0)
+    {
+        result = run_emission_metadata_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
     {
         result = run_dataflow_tests(argc - 2, argv + 2);
@@ -1328,6 +1340,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-cfg-source") == 0)
     {
         result = run_tier1_cfg_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-certificate") == 0)
+    {
+        result = run_tier1_certificate_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select-source") == 0)
     {

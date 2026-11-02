@@ -425,10 +425,12 @@ static bool check_tier1_ready = false;
 // Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
 // branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns
-// an explicit success, unsupported, resource or internal outcome. A failed attempt leaves output unchanged and
-// clears code/counts, retaining its cause and location by value.
+// an explicit success, unsupported, resource or internal outcome. With `certify` (--verify), each allocation must
+// pass its certificate (#939, Tier1EmitOptions.certify): a refusal is an internal failure, and the checker's capacity a
+// resource failure. A failed attempt leaves output unchanged and clears code/counts, retaining its cause and location
+// by value.
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
+                                           bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
@@ -573,12 +575,10 @@ static uint8_t check_program_result_class(const Tier0Function* function, const C
 
 // Body `b`'s raw source rows (c_check_debug.c), from where each entry's code starts now that the branches are sized: the
 // record count's offset is the end. Only -g reaches it, out of line so that the plain emission carries none of it.
-static __attribute__((noinline)) void check_program_emit_body_rows(CheckEmitBody* body, const CheckProgram* program, const Parser* parser,
+static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody* body, const CheckProgram* program, const Parser* parser,
                                                                    const uint32_t* tokens, const Tier0Code* code, uint32_t b, uint32_t* offsets, uint32_t length,
-                                                                   bool scalar)
+                                                                   bool scalar, Arena* scratch)
 {
-    (void)scalar;
-
     offsets[code->count] = length;
     const uint32_t declaration = program->bodies[b].declaration;
     const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
@@ -587,6 +587,21 @@ static __attribute__((noinline)) void check_program_emit_body_rows(CheckEmitBody
                                check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing, body->row_offsets,
                                                 body->row_tokens);
     body->body_offset = offsets[code->entry_records[0]];
+    EmissionSourceEvent* events = BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionSourceEvent, (uint64_t)code->entry_count + 1);
+    EmissionSourceRow* resolved = BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionSourceRow, (uint64_t)code->entry_count + 1);
+    bool valid = events != 0 && resolved != 0;
+    body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
+    body->reason = valid ? 0 : "no room for the source metadata protocol's rows";
+    body->token = valid ? body->token : declaration;
+    if (valid)
+    {
+        valid = check_debug_rows_protocol(code->entry_records, tokens, code->entry_count, offsets, code->count, length, declaration, closing, body->row_offsets,
+                                          body->row_tokens, body->row_count, scalar, events, resolved);
+        body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+        body->reason = valid ? 0 : "internal compiler error: source metadata disagrees with the raw rows";
+        body->token = valid ? body->token : declaration;
+    }
+    return valid;
 }
 
 // Body `b`'s code after Tier 0, on its lane (`lane`): branch sizing, encoding into the lane's bytes, its unwind frame, its
@@ -643,7 +658,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         valid = length >= 0;
         if (valid && run->sources)
         {
-            check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar);
+            valid = check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar, scratch);
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
         if (valid && run->unwind && naked != 0)
@@ -712,7 +727,7 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     fault = fault != NULL && fault->body == b + 1 ? fault : NULL;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                            !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
+                                                            !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
     outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
     run->tier1_outcomes[b] = outcome;
     return outcome;
