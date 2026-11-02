@@ -3219,6 +3219,8 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
     paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
     free(pages_copy);
+    printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
+                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES");
     check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
                                                      "on this virtual machine they are off without it" :
                                                      "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
