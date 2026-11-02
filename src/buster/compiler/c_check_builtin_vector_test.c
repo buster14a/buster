@@ -482,11 +482,11 @@ static void check_builtin_vector_test_math(CheckBuiltinVectorTest* test, TypeTab
     arguments[0].type = type_atomic(table, enumeration);
     arguments[0].category = CHECK_LVALUE;
     action = (CheckBuiltinVectorAction){ .id = CBUILTIN_ELEMENTWISE_POPCOUNT, .arguments = arguments, .argument_count = 1,
-        .tag_completions = history, .tag_completion_count = BUSTER_ARRAY_LENGTH(history), .source_position = 49 };
+        .context.tag_completions = history, .context.tag_completion_count = BUSTER_ARRAY_LENGTH(history), .context.source_position = 49 };
     check_builtin_vector_one(table, &action, &result);
     check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE,
         "lvalue conversion cannot expose an atomic enum's future completion");
-    action.source_position = 50;
+    action.context.source_position = 50;
     check_builtin_vector_one(table, &action, &result);
     check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == enumeration,
         "the same converted enum becomes usable at its exact completion position");
@@ -772,10 +772,10 @@ static void check_builtin_vector_test_memory(CheckBuiltinVectorTest* test, TypeT
     history[tag] = 50;
     values[0] = check_builtin_vector_test_value(type_pointer(table, enumeration));
     action = (CheckBuiltinVectorAction){ .id = CBUILTIN_NONTEMPORAL_LOAD, .arguments = values, .argument_count = 1,
-        .tag_completions = history, .tag_completion_count = BUSTER_ARRAY_LENGTH(history), .source_position = 49 };
+        .context.tag_completions = history, .context.tag_completion_count = BUSTER_ARRAY_LENGTH(history), .context.source_position = 49 };
     check_builtin_vector_one(table, &action, &result);
     check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "later enum completion cannot leak backward into a pointed memory type");
-    action.source_position = 50;
+    action.context.source_position = 50;
     check_builtin_vector_one(table, &action, &result);
     check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "pointed enum is usable at its exact source completion position");
 }

@@ -102,20 +102,30 @@ compiles each function the pipeline takes by Tier 1 and every other function by
 Tier 0, as without the option, into one System V program
 (`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
 lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code and CFG
-cleanup), its CFG and dominators analyzed, selected and emitted, the CFG
-consumer allocating it over its CFG (`tier1_cfg.c`); with `--scalar`, every step
+cleanup), whose final verification retains the CFG and dominators for selection
+(#1055), selected and emitted, the CFG consumer allocating it over its CFG
+(`tier1_cfg.c`); with `--scalar`, every step
 by its scalar twin. Its records, branch columns and references take Tier 0's
 place in the emission (`check_program_emit_tier1`), on the emission's lanes,
 each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
 standard error after the command, how many functions each tier compiled and the
 step, and for the selector the IR operation, that refused each of the others,
-and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
-that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
-1's code: its records, its spills' stores and reloads, the saves and restores
+and `--tier1-refusals` a line for each function Tier 0 compiled, with its name,
+stage, category, cause, original error and instruction/detail, refused
+operation and fallback disposition. `--tier1-strict` requires `--tier1`: an
+unsupported body that ordinary `--tier1` compiles with Tier 0 then fails
+qualification, while resource and internal failures fail either mode. [Tier 1
+failure outcomes](tier1-outcomes.md) has the policy, fields and rollback
+contract. The report also sums Tier 1's code: its records, its spills' stores
+and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
 definitions of them it left out, its edges' moves, its spill slots, its
 frames' bytes, and its unwind tables' shapes: open frames, returns published as
-tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`). `--tier1-no-rematerialize` compiles Tier 1's functions spilling
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`).
+Its `requested`, `admitted`, `compiled`, `unsupported`, `resource_failures`,
+`resource_retries`, `internal_failures` and `fallbacks` fields count the
+selected, admitted and compiled bodies and the disposition of the rest.
+`--tier1-no-rematerialize` compiles Tier 1's functions spilling
 what they would recompute (#178's comparison: [the allocation
 guide](tier1-allocation.md)'s "Rematerialization"), and `--tier1-no-lifetimes`
 without their objects' lifetimes, every object a slot of its own (#177's

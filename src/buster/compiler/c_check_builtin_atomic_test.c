@@ -48,7 +48,7 @@ static CheckBuiltinAtomicResult check_builtin_atomic_test_action(TypeTable* tabl
         .arguments = arguments,
         .argument_count = count,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .minimum_alignment = 16,
         .alignment_known = true,
     };
@@ -320,9 +320,9 @@ static void check_builtin_atomic_test_enum_pointers(CheckBuiltinAtomicTest* test
                 .arguments = arguments,
                 .argument_count = BUSTER_ARRAY_LENGTH(arguments),
                 .node = 9999,
-                .tag_completions = completions,
-                .tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
-                .source_position = cases[i].source_position,
+                .context.tag_completions = completions,
+                .context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
+                .context.source_position = cases[i].source_position,
                 .minimum_alignment = 8,
                 .alignment_known = true,
             };
@@ -475,7 +475,7 @@ static void check_builtin_atomic_test_constraints(CheckBuiltinAtomicTest* test, 
         .id = CBUILTIN_ATOMIC_LOAD_N,
         .arguments = arguments,
         .argument_count = 2,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     check_builtin_atomic_one(table, &action, &result);
     check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.alignment_known && result.minimum_alignment == 0 &&
@@ -507,14 +507,14 @@ static void check_builtin_atomic_test_constraints(CheckBuiltinAtomicTest* test, 
         const uint32_t tag = table->types.index[type_index(enumeration)];
         completions[tag] = 20;
         arguments[0].type = type_pointer(table, enumeration);
-        action.tag_completions = completions;
-        action.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
-        action.source_position = 19;
+        action.context.tag_completions = completions;
+        action.context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+        action.context.source_position = 19;
         action.node = 999;
         check_builtin_atomic_one(table, &action, &result);
         check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE,
                                         "later enum completion is hidden from an earlier atomic object access");
-        action.source_position = 20;
+        action.context.source_position = 20;
         check_builtin_atomic_one(table, &action, &result);
         check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.value_type == enumeration,
                                         "source completion positions remain distinct from diagnostic node IDs");
@@ -571,7 +571,7 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
                 .arguments = arguments + cursor,
                 .argument_count = arities[kind],
                 .node = i,
-                .source_position = UINT32_MAX,
+                .context.source_position = UINT32_MAX,
                 .minimum_alignment = 4,
                 .alignment_known = i % 2 == 0,
             };
@@ -607,8 +607,8 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
             const CheckBuiltinAtomicAction* x = input_copy + i;
             const CheckBuiltinAtomicAction* y = actions + i;
             unchanged &= x->id == y->id && x->arguments == y->arguments && x->argument_count == y->argument_count && x->node == y->node &&
-                x->tag_completions == y->tag_completions && x->tag_completion_count == y->tag_completion_count && x->source_position == y->source_position &&
-                x->extensions == y->extensions && x->minimum_alignment == y->minimum_alignment && x->alignment_known == y->alignment_known;
+                x->context.tag_completions == y->context.tag_completions && x->context.tag_completion_count == y->context.tag_completion_count && x->context.source_position == y->context.source_position &&
+                x->context.extensions == y->context.extensions && x->minimum_alignment == y->minimum_alignment && x->alignment_known == y->alignment_known;
         }
         for (uint32_t i = 0; i < total_arguments; i += 1)
         {
@@ -877,7 +877,7 @@ static CheckBuiltinAtomicResult check_builtin_atomic_test_family(TypeTable* tabl
         .arguments = arguments,
         .argument_count = count,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .minimum_alignment = alignment,
         .alignment_known = true,
     };

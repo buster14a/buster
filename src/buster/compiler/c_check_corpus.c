@@ -733,7 +733,7 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
         for (uint32_t i = 0; i < views[v].count; i += 1)
         {
             const CheckWarningEvent* event = views[v].events + i;
-            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0);
+            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
             if (command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0)
             {
                 continue;

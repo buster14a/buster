@@ -761,6 +761,29 @@ struct ForeignDriverRun
 };
 
 // The link, on lane 0 of its session, whose other lanes serve the stages' lane_run regions.
+// The executable writer's error and cause as names, for link-foreign's diagnostic (the C driver's has the full
+// per-error text; this command has no source-level names for the atoms or symbols of foreign objects).
+static const char* foreign_driver_executable_error_name(ExecutableError error)
+{
+    static const char* const names[] = {
+        "none", "scratch memory exhausted", "unsupported layout", "undefined symbol", "unsupported symbol", "invalid entry point", "unrelocatable fixup",
+        "fixup value does not fit", "output file error", "unwind table error",
+    };
+    return (uint32_t)error < BUSTER_ARRAY_LENGTH(names) ? names[error] : "unknown error";
+}
+
+static const char* foreign_driver_executable_cause_name(ExecutableCause cause)
+{
+    static const char* const names[] = {
+        "none", "shared state allocation", "count allocation", "layout allocation", "dynamic-section allocation", "open allocation", "chunk allocation",
+        "atom too large", "atom alignment", "array entry", "unsupported atom class", "ordered atom placement", "far atom", "atom sizes overflow", "far symbol", "far GOT target without a slot",
+        "image too large", "TLS block too large", "section names too large", "unwind atom too large", "unwind atom malformed", "unwind range",
+        "entry undefined", "entry not code", "unsupported version", "debug information", "debug symbol", "symbol table", "TLS call", "TLS section",
+        "string table", "text relocation", "absolute 32-bit relocation", "dynamic relocation", "relocation to address 0", "absolute relocation", "shared-library relocation",
+    };
+    return (uint32_t)cause < BUSTER_ARRAY_LENGTH(names) ? names[cause] : "unknown cause";
+}
+
 static int foreign_driver_link(ForeignDriverRun* run)
 {
     const uint64_t begin = run->begin;
@@ -948,11 +971,21 @@ static int foreign_driver_link(ForeignDriverRun* run)
         written = write.result;
         if (!succeeded)
         {
-            fprintf(stderr, "link-foreign: executable writing failed (%u, atom %u, symbol %u, fixup %u)",
-                    (unsigned)write.result.error, write.result.atom, write.result.symbol, write.result.fixup);
-            if (write.result.system_error != 0)
+            const ExecutableResult* failure = &write.result;
+            fprintf(stderr, "link-foreign: executable writing failed: %s", foreign_driver_executable_error_name(failure->error));
+            if (failure->cause != EXECUTABLE_CAUSE_NONE)
             {
-                fprintf(stderr, ": %s", strerror(write.result.system_error));
+                fprintf(stderr, " (%s)", foreign_driver_executable_cause_name(failure->cause));
+            }
+            fprintf(stderr, " (atom %u, symbol %u, fixup %u", failure->atom, failure->symbol, failure->fixup);
+            if (failure->cause != EXECUTABLE_CAUSE_NONE)
+            {
+                fprintf(stderr, ", value %llu, limit %llu", (unsigned long long)failure->value, (unsigned long long)failure->limit);
+            }
+            fprintf(stderr, ")");
+            if (failure->system_error != 0)
+            {
+                fprintf(stderr, ": %s", strerror(failure->system_error));
             }
             fprintf(stderr, "\n");
         }

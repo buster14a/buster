@@ -706,6 +706,19 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
 static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2);
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream);
 
+// A graph has room for every node its producer could add, and its columns fill from their starts: the C driver's reader
+// makes room for a node a token, of which sqlite3.c's graph holds 323,557 of 774,038. Pushed one after another, each
+// column's unused tail shared its huge pages with the next column's used start, so that every huge page of the columns
+// was touched: 39 MB of sqlite3.c's peak for 17 MB of nodes. A column of a huge page or more starts one instead, where
+// its tail takes no page (#628).
+static void* check_graph_column(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment)
+{
+    const bool large = count * element_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES;
+    return arena_push_array(arena, count, element_bytes, large ? BUSTER_ARENA_HUGE_PAGE_BYTES : alignment);
+}
+
+#define BUSTER_CHECK_GRAPH_COLUMN(arena, Type, count) ((Type*)check_graph_column((arena), (count), sizeof(Type), _Alignof(Type)))
+
 static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t capacity, uint32_t argument_capacity)
 {
     const uint64_t start = arena->length;
@@ -713,24 +726,25 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
     bool result = capacity <= (1u << 30) && argument_capacity <= (1u << 30);
     if (result && capacity != 0)
     {
-        graph->ops = BUSTER_ARENA_PUSH_ARRAY(arena, CheckOp, capacity);
-        graph->tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->operand0 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->operand1 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->operand2 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->leaves = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, capacity);
-        graph->leaf_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, capacity);
-        graph->members = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->contexts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity);
-        graph->source_positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->argument_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        graph->argument_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
+        // The byte column first, where it shares a huge page with what the arena holds before the graph.
+        graph->contexts = BUSTER_CHECK_GRAPH_COLUMN(arena, uint8_t, capacity);
+        graph->ops = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckOp, capacity);
+        graph->tokens = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->operand0 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->operand1 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->operand2 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->leaves = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckValue, capacity);
+        graph->leaf_slots = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->types = BUSTER_CHECK_GRAPH_COLUMN(arena, TypeId, capacity);
+        graph->members = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->source_positions = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->argument_offsets = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
+        graph->argument_counts = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         result = graph->ops != 0 && graph->tokens != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0 && graph->leaves != 0 && graph->leaf_slots != 0 && graph->types != 0 && graph->members != 0 && graph->contexts != 0 && graph->source_positions != 0 && graph->argument_offsets != 0 && graph->argument_counts != 0;
     }
     if (result && argument_capacity != 0)
     {
-        graph->argument_nodes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, argument_capacity);
+        graph->argument_nodes = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, argument_capacity);
         result = graph->argument_nodes != 0;
     }
     if (result)
@@ -1423,6 +1437,24 @@ static bool check_graph_system_token(const CheckGraph* graph, uint32_t token)
     return system;
 }
 
+// Construct one semantic view at the graph boundary. Diagnostic node ids and source ends are independent.
+// The stream authorizes receipt reads; branch selection and runtime effects stay in their own graph columns.
+static CheckContext check_graph_context(const CheckGraph* graph, uint32_t node, bool constant_evaluated)
+{
+    const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    const CheckContext context = {
+        .tag_completions = graph->tag_completions,
+        .transparent_unions = graph->transparent_unions,
+        .tag_completion_count = graph->tag_completion_count,
+        .source_position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE,
+        .extensions = graph->extensions | (check_graph_system_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
+        .fp_environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0,
+        .const_values = graph->const_values,
+        .constant_evaluated = constant_evaluated,
+    };
+    return context;
+}
+
 static void check_graph_action(const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckValue* arguments, CheckAction* action)
 {
     *action = (CheckAction){
@@ -1430,14 +1462,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         .type = graph->types != 0 ? graph->types[node] : 0,
         .member = graph->members != 0 ? graph->members[node] : 0,
         .node = node,
-        .tag_completions = graph->tag_completions,
-        .transparent_unions = graph->transparent_unions,
-        .tag_completion_count = graph->tag_completion_count,
-        .source_position = graph->source_positions != 0 ? graph->source_positions[node] : BUSTER_CHECK_NONE,
-        .extensions = graph->extensions | (check_graph_system_token(graph, graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
-        .fp_environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0,
-        .const_values = graph->const_values,
-        .constant_evaluated = stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0,
+        .context = check_graph_context(graph, node, stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0),
     };
     if (action->op == CHECK_OP_MEMBER && graph->vector_member_count != 0)
     {
@@ -1535,10 +1560,7 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
 static void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
     CheckValue value = result->value;
-    if (stream->graph->ops[node] != CHECK_OP_VALUE && stream->graph->ops[node] != CHECK_OP_SELECT)
-    {
-        value.flags &= ~BUSTER_CHECK_LITERAL_ZERO;
-    }
+    value.flags = check_value_source_flags((CheckOp)stream->graph->ops[node], value.flags);
     check_stream_set_value(stream, node, &value);
     memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
     stream->conversions[node].store = result->store_conversion;
@@ -1866,12 +1888,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .arguments = action->arguments,
             .argument_count = action->argument_count,
             .node = node,
-            .tag_completions = action->tag_completions,
-            .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
-            .extensions = action->extensions,
-            .const_values = action->const_values,
-            .constant_evaluated = action->constant_evaluated,
+            .context = action->context,
             .pointer_object = witness != NULL ? witness->base_object : 0,
             .pointer_alignment = witness != NULL ? witness->base_alignment : 0,
             .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
@@ -1919,12 +1936,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                 .arguments = action->arguments,
                 .argument_count = action->argument_count,
                 .node = node,
-                .tag_completions = action->tag_completions,
-                .tag_completion_count = action->tag_completion_count,
-                .source_position = action->source_position,
-                .extensions = action->extensions,
-                .const_values = action->const_values,
-                .constant_evaluated = action->constant_evaluated,
+                .context = action->context,
             };
             CheckBuiltinMathResult checked;
             check_builtin_math(types, &input, &checked, 1);
@@ -1938,7 +1950,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             for (uint32_t i = 0; i < action->argument_count && i < 2; i += 1)
             {
                 action->argument_conversions[i] = checked.argument_conversions[i];
-                fp_conversion |= (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
+                fp_conversion |= (action->context.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
                                  check_action_fp_conversion(types, action->arguments[i].type, checked.argument_conversions[i].type);
             }
             if (fp_conversion)
@@ -1991,12 +2003,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                 .arguments = action->arguments,
                 .argument_count = action->argument_count,
                 .node = node,
-                .tag_completions = action->tag_completions,
-                .tag_completion_count = action->tag_completion_count,
-                .source_position = action->source_position,
-                .extensions = action->extensions,
-                .const_values = action->const_values,
-                .constant_evaluated = action->constant_evaluated,
+                .context = action->context,
                 .nan_payload = witness != NULL ? witness->nan_payload : NULL,
                 .nan_payload_length = witness != NULL ? witness->nan_payload_length : 0,
                 .nan_payload_known = witness != NULL && witness->nan_payload_known,
@@ -2034,14 +2041,9 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .arguments = action->arguments,
             .argument_count = action->argument_count,
             .node = node,
-            .tag_completions = action->tag_completions,
-            .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
-            .extensions = action->extensions,
+            .context = action->context,
             .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
             .alignment_known = walked < 64,
-            .const_values = action->const_values,
-            .constant_evaluated = action->constant_evaluated,
         };
         // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what the
         // effect records.
@@ -2091,13 +2093,10 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .argument_count = action->argument_count,
             .destination_type = action->type,
             .node = node,
-            .tag_completions = action->tag_completions,
-            .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
-            .extensions = action->extensions,
+            .context = action->context,
             .shuffle_index_ice = witness != NULL ? witness->shuffle_index_ice : NULL,
             .shuffle_index_ice_count = witness != NULL ? witness->shuffle_index_ice_count : 0,
-            .allow_gnu_index_ice = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0,
+            .allow_gnu_index_ice = (action->context.extensions & BUSTER_CHECK_EXTENSION_GNU) != 0,
         };
         CheckBuiltinVectorResult checked;
         check_builtin_vector(types, &input, &checked, 1);
@@ -2138,8 +2137,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
     {
         const CheckBuiltinBitCastAction input = { .id = (CBuiltinId)action->member, .destination_type = action->type,
             .arguments = action->arguments, .argument_count = action->argument_count, .node = node,
-            .tag_completions = action->tag_completions, .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
+            .context = action->context,
             .source_proof = witness != NULL ? witness->bit_cast_proof : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
             .source_bytes = witness != NULL ? witness->bit_cast_bytes : NULL,
             .source_byte_count = witness != NULL ? witness->bit_cast_byte_count : 0 };
@@ -2172,16 +2170,13 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .arguments = action->arguments,
             .argument_count = action->argument_count,
             .node = node,
-            .tag_completions = action->tag_completions,
-            .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
-            .extensions = action->extensions,
+            .context = action->context,
             .string_literal_start = witness != NULL && witness->string_literal_start,
             .absolute_address_constant = witness != NULL && witness->absolute_address_constant,
             .complex_constant = witness != NULL && witness->complex_constant,
         };
         input.constant_p_context_sensitive = input.id == CBUILTIN_CONSTANT_P &&
-            (action->fp_environment != 0 || (action->argument_count == 1 && (action->arguments[0].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0));
+            (action->context.fp_environment != 0 || (action->argument_count == 1 && (action->arguments[0].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0));
         if (action->argument_count != 0)
         {
             const CheckValue* value = action->arguments;
@@ -2227,7 +2222,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                              action->op == CHECK_OP_BUILTIN_BIT_CAST ? stream->bit_casts[stream->bit_cast_count - 1].evaluated_operands :
                              stream->queries[stream->query_count - 1].evaluated_operands;
         const bool strict_comparison = action->op == CHECK_OP_BUILTIN_FLOAT &&
-                                       (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 && check_builtin_float_strict(action->member);
+                                       (action->context.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 && check_builtin_float_strict(action->member);
         if (strict_comparison)
         {
             result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
@@ -2249,7 +2244,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             if (action->op == CHECK_OP_BUILTIN_X86 || (i < 32 && (evaluated & (1u << i)) != 0))
             {
                 result->value.flags |= action->arguments[i].flags & BUSTER_CHECK_FP_ENVIRONMENT;
-                fp_conversion |= (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
+                fp_conversion |= (action->context.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
                                  check_action_fp_conversion(types, action->arguments[i].type, action->argument_conversions[i].type);
             }
         }
@@ -2319,12 +2314,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
             .operands = { action.operands[0], action.operands[1], action.operands[2] },
             .argument_count = count,
             .node = node,
-            .tag_completions = action.tag_completions,
-            .tag_completion_count = action.tag_completion_count,
-            .source_position = action.source_position,
-            .extensions = action.extensions,
-            .const_values = action.const_values,
-            .constant_evaluated = action.constant_evaluated,
+            .context = action.context,
         };
         CheckBuiltinResult checked;
         CheckBuiltinTypedOverflowResult typed = { 0 };
@@ -2339,7 +2329,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
             check_builtins(types, &builtin, &checked, 1, true);
         }
         result = checked.action;
-        if ((action.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
+        if ((action.context.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
         {
             check_action_fp_environment(types, &action, &result);
         }
@@ -2368,10 +2358,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
             .requested_type = action.type,
             .second_argument_declaration = call->second_argument_declaration,
             .node = node,
-            .tag_completions = action.tag_completions,
-            .tag_completion_count = action.tag_completion_count,
-            .source_position = action.source_position,
-            .extensions = action.extensions,
+            .context = action.context,
         };
         CheckVarargsResult checked;
         check_varargs(types, &call->context, &builtin, &checked, 1);

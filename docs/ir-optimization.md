@@ -32,6 +32,13 @@ The final output passes the IR verifier with freshly rebuilt dominator-tree
 intervals. The tests also invoke each pass separately and all eight pass-bit
 combinations, verifying each resulting function.
 
+`ir_optimize_verified` in `ir_optimize_verified.c` (#1055) is the Tier 1
+handoff: it runs the same preparation, SCCP, DCE and rewrite kernels, then
+retains the final CFG and dominators in a caller-owned analysis arena for
+`tier1_select_plan_verified`. Its invalidation and lifetime contract is in
+[the analysis-handoff guide](ir-analysis-handoff.md). `ir_optimize` remains the
+independent rebuilding control.
+
 SCCP tracks a state and two-word constant per instruction and an executable
 byte per deduplicated CFG edge. It sweeps executable blocks in reverse
 postorder, with 16-instruction transfer batches; the scalar solver queues

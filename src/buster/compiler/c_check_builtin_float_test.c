@@ -594,14 +594,14 @@ static void check_builtin_float_test_constraints(CheckBuiltinFloatTest* test, Ty
         .id = CBUILTIN_FPCLASSIFY,
         .arguments = arguments,
         .argument_count = 6,
-        .tag_completions = completions,
-        .tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
-        .source_position = 899,
+        .context.tag_completions = completions,
+        .context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
+        .context.source_position = 899,
     };
     check_builtin_float_one(table, &action, &result);
     check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE && result.action.diagnostic_operand == 0,
                                     "even an unselected selector is typechecked at its own source-time completeness cutoff");
-    action.source_position = 900;
+    action.context.source_position = 900;
     check_builtin_float_one(table, &action, &result);
     check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.folded, "completed selector enum becomes usable after its source cutoff");
 }

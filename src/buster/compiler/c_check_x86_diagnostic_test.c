@@ -331,6 +331,83 @@ static void check_test_target_feature_builtins(CheckTest* test)
     check_test_expect(test, builtins != 0 && wrong == 0, description);
 }
 
+// The range warning's command-line mappings and their interaction with source pragmas (#1080): clang's severity and
+// exit status must match both of the driver's paths, with and without an explicit source policy.
+static void check_test_x86_command_line_mappings(CheckTest* test, const char* clang, const char* path, const char* output, const char* errors, bool ready)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* options[4];
+        uint32_t option_count;
+    } fixtures[] =
+    {
+        { "default", "unsigned f(V a){return BAD;}" },
+        { "demoted", "unsigned f(V a){return BAD;}", { "-Wno-error=argument-outside-range" }, 1 },
+        { "error then demoted", "unsigned f(V a){return BAD;}", { "-Werror", "-Wno-error=argument-outside-range" }, 2 },
+        { "demoted then error", "unsigned f(V a){return BAD;}", { "-Wno-error=argument-outside-range", "-Werror" }, 2 },
+        { "disabled", "unsigned f(V a){return BAD;}", { "-Wno-argument-outside-range" }, 1 },
+        { "explicit error", "unsigned f(V a){return BAD;}", { "-Werror=argument-outside-range" }, 1 },
+        { "disabled then enabled", "unsigned f(V a){return BAD;}", { "-Wno-argument-outside-range", "-Wargument-outside-range" }, 2 },
+        { "everything disabled", "unsigned f(V a){return BAD;}", { "-Wno-everything" }, 1 },
+        { "everything", "unsigned f(V a){return BAD;}", { "-Weverything" }, 1 },
+        { "everything disabled then enabled", "unsigned f(V a){return BAD;}", { "-Wno-everything", "-Wargument-outside-range" }, 2 },
+        { "error then everything disabled", "unsigned f(V a){return BAD;}", { "-Werror", "-Wno-everything" }, 2 },
+        { "everything then demoted", "unsigned f(V a){return BAD;}", { "-Weverything", "-Wno-error=argument-outside-range" }, 2 },
+        { "disabled then error", "unsigned f(V a){return BAD;}", { "-Wno-argument-outside-range", "-Werror" }, 2 },
+        { "disabled then explicit error", "unsigned f(V a){return BAD;}", { "-Wno-argument-outside-range", "-Werror=argument-outside-range" }, 2 },
+        { "explicit error then no-error", "unsigned f(V a){return BAD;}", { "-Werror=argument-outside-range", "-Wno-error" }, 2 },
+        { "demoted then error then error", "unsigned f(V a){return BAD;}", { "-Werror", "-Wno-error=argument-outside-range", "-Werror" }, 3 },
+        { "unknown reachability demoted", "unsigned f(V a,int n){if(n)return BAD;return 0;}", { "-Wno-error=argument-outside-range" }, 1 },
+        { "unknown reachability disabled", "unsigned f(V a,int n){if(n)return BAD;return 0;}", { "-Wno-argument-outside-range" }, 1 },
+        { "disabled, warning pragma", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Wno-argument-outside-range" }, 1 },
+        { "demoted, error pragma", "#pragma clang diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Wno-error=argument-outside-range" }, 1 },
+        { "error, warning pragma", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Werror" }, 1 },
+        { "error, ignored pragma", "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Werror" }, 1 },
+        { "everything disabled, warning pragma", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Wno-everything" }, 1 },
+        { "-w, error pragma", "#pragma clang diagnostic error \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-w" }, 1 },
+        { "demoted, GCC fatal pragma", "#pragma GCC diagnostic fatal \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", { "-Wno-error=argument-outside-range" }, 1 },
+    };
+    const char prefix[] = "typedef char V __attribute__((vector_size(16)));\n"
+                          "typedef char W __attribute__((vector_size(64)));\n"
+                          "#define BAD __builtin_ia32_cmpb128_mask(a,a,8,65535)\n";
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[2048];
+        const int length = snprintf(source, sizeof(source), "%s%s\n", prefix, fixtures[i].source);
+        const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
+        char* arguments[16];
+        uint32_t count = 0;
+        arguments[count++] = (char*)clang;
+        arguments[count++] = "-std=gnu17";
+        arguments[count++] = "-fsyntax-only";
+        arguments[count++] = "-fno-color-diagnostics";
+        for (uint32_t o = 0; o < fixtures[i].option_count; o += 1)
+        {
+            arguments[count++] = (char*)fixtures[i].options[o];
+        }
+        arguments[count++] = (char*)path;
+        arguments[count] = NULL;
+        const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
+        const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors, true);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const int status = written ? check_test_packed_run_options(NULL, path, output, errors, scalar != 0, false,
+                                                                       fixtures[i].options, fixtures[i].option_count) : -1;
+            const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors, true);
+            const bool same = status == oracle_status && actual.count == oracle.count &&
+                              (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&
+                               actual.error == oracle.error && strcmp(actual.message, oracle.message) == 0));
+            char description[512];
+            snprintf(description, sizeof(description), "x86 command-line %s, scalar %u: status %d/ranges %u at %u:%u (%s), Clang %d/%u at %u:%u (%s): %.200s",
+                     fixtures[i].name, scalar, status, actual.count, actual.line, actual.column, actual.error ? "error" : "warning",
+                     oracle_status, oracle.count, oracle.line, oracle.column, oracle.error ? "error" : "warning", actual.message);
+            check_test_expect(test, same, description);
+        }
+    }
+}
+
 // The diagnostics of a run in `path`, each line that starts with the source's name and a colon (`FILE:LINE:COLUMN: ...`:
 // errors, warnings and notes, not the counts' line), the name left out, joined by newlines into `text`, `capacity` bytes.
 // Returns their count, or UINT32_MAX where the file can't be read or the lines don't fit. `capacity` is at least 1.
@@ -1019,6 +1096,7 @@ static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const 
             }
         }
     }
+    check_test_x86_command_line_mappings(test, clang, path, output, errors, ready);
     if (ready)
     {
         unlink(path);

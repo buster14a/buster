@@ -25,7 +25,7 @@ static const char* check_warning_text(Arena* arena, const char* format, ...)
 static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
     const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
-        (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0);
+        (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
     CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
         check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)

@@ -2563,6 +2563,46 @@ static uint64_t dynamic_test_filter_collisions(const Link* link)
     return result;
 }
 
+// An import whose version the writer's metadata doesn't have: the writer refuses it as UNSUPPORTED_VERSION, and the
+// result's value is the version (not the symbol's id).
+static bool dynamic_test_unknown_version(const ExecutableTestDirectory* directory, const Runtime* runtime)
+{
+    DynamicTestTally tally = {
+        .check = "unknown version",
+    };
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, 1, 1);
+    BindTestProgram bound = { 0 };
+    const bool bound_program = bind_test_program(&bound, runtime, options[5], BIND_PATH_VECTOR);
+    SymbolId import = 0;
+    for (SymbolId symbol = 1; bound_program && import == 0 && symbol < bound.program.link.symbols.count; symbol += 1)
+    {
+        import = bound.program.link.symbols.source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED ? symbol : import;
+    }
+    const uint16_t version = 0x7000;
+    if (import != 0)
+    {
+        bound.program.link.symbols.version[import] = version;
+    }
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "unknown-version", path_bytes);
+    unlink(path.pointer);
+    DynamicTestWrite write = { 0 };
+    ExecutableResult result = { 0 };
+    const bool written = bound_program && import != 0 && dynamic_test_write_with(&write, &bound.program.link, &bound.bind, runtime, path, 1, &result);
+    const bool refused = !written && result.error == EXECUTABLE_ERROR_UNSUPPORTED && result.cause == EXECUTABLE_CAUSE_UNSUPPORTED_VERSION && result.symbol == import &&
+                         result.value == version && access(path.pointer, F_OK) != 0;
+    dynamic_test_expect(&tally, refused, "an unavailable import version is refused with the version's value", 0);
+    if (!refused)
+    {
+        printf("  unknown version: written %d, error %u, cause %u, symbol %u, value %llu\n", written, (unsigned)result.error, (unsigned)result.cause, result.symbol,
+               (unsigned long long)result.value);
+    }
+    unlink(path.pointer);
+    bind_test_release(&bound);
+    return dynamic_test_report(&tally);
+}
+
 static bool dynamic_test_programs(const ExecutableTestDirectory* directory, const Runtime* runtime, uint64_t seed, uint32_t functions, bool cross_check)
 {
     DynamicTestTally tally = {
@@ -4618,6 +4658,7 @@ static int run_dynamic_tests(int argc, char** argv)
     else
     {
         bool passed = dynamic_test_programs(&directory, &runtime, seed, (uint32_t)functions, cross_check);
+        passed = dynamic_test_unknown_version(&directory, &runtime) && passed;
         passed = dynamic_test_cases(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_exports(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_imports(&directory, &runtime, cross_check) && passed;

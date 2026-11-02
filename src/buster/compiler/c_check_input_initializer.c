@@ -141,6 +141,7 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
         reader->designator_valid[token] = 1;
         check_input_rare_claim(reader, &reader->designator_tokens[range]);
         reader->designator_tokens[range] = token + 1;
+        check_input_sparse_mark(reader, range, true);
         if (range != close)
         {
             check_input_rare_claim(reader, &reader->designator_indices[range]);
@@ -149,6 +150,7 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
             reader->designator_valid[range] = 1;
             check_input_rare_claim(reader, &reader->designator_tokens[close]);
             reader->designator_tokens[close] = range + 1;
+            check_input_sparse_mark(reader, close, true);
         }
     }
     else
