@@ -2335,11 +2335,12 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
     // Past libc.so.6's, the loader's and libgcc_s.so.1's indices, which runtime_move_versions made apart.
     const ImportLibrary* const runtime_libraries[] = { &runtime->libc, &runtime->loader, &runtime->gcc_s };
     uint16_t base = runtime_versions_top(runtime_libraries, BUSTER_ARRAY_LENGTH(runtime_libraries));
+    const bool static_only = runtime->kind == RUNTIME_KIND_STATIC || runtime->kind == RUNTIME_KIND_STATIC_PIE;
     for (uint32_t n = 0; result == RUNTIME_ERROR_NONE && n < name_count; n += 1)
     {
         char path[BUSTER_RUNTIME_PATH_BYTES];
         bool archive = false;
-        if (!runtime_libraries_find(runtime, names[n], directories, directory_count, path, &archive))
+        if (!runtime_libraries_find(runtime, names[n], directories, directory_count, path, &archive, static_only))
         {
             result = RUNTIME_ERROR_MISSING;
             snprintf(libraries->failed, sizeof(libraries->failed), "-l%.*s", (int)names[n].length, names[n].pointer);
@@ -2364,7 +2365,7 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
         }
         else if (result == RUNTIME_ERROR_NONE)
         {
-            result = runtime_libraries_script(libraries, runtime, path, bytes, directories, directory_count, &base);
+            result = runtime_libraries_script(libraries, runtime, path, bytes, directories, directory_count, static_only, &base);
         }
     }
     return result;

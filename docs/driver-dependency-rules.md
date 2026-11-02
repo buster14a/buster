@@ -2,16 +2,16 @@
 
 ## Status
 
-`src/buster/compiler/c_dependency.c` provides the bounded Make-rule serializer
-needed by the dependency-output work in #805. It is **not yet called by the
-compiler driver**. This change does not make `-M`, `-MM`, `-MD`, `-MMD`, `-MF`,
-`-MT`, `-MQ`, or `-MP` accepted compiler options. It does not finish #805.
+`src/buster/compiler/c_dependency.c` provides the bounded Make-rule serializer.
+The C driver now calls it through `c_dependency_driver.c` and the preprocessor's
+consumed-file observations (#1113), for `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`,
+`-MQ` and `-MP`. [The CC driver guide](cc-driver.md) specifies output naming,
+standard input, parallel units, publication and the remaining compatibility gaps.
 
 The standalone C tests live in `tests/driver/dependency_rule.c`. They are
-registered in `tools/ci/correctness.tests`, which builds the scalar and native
-variants and runs both with `--oracle` against the environment's GCC and Clang;
-they are not in the compiler's command table. No existing driver, preprocessor,
-build script, or workflow step is changed by this prerequisite.
+registered in `tools/ci/correctness.tests`, which builds scalar and native variants
+and runs both with `--oracle`. End-to-end cases in `c_driver_compatibility_test.c`
+are called by `test-checker-driver`; they invoke the real compiler executable.
 
 ## Input ownership and collection contract
 
@@ -19,7 +19,8 @@ The caller supplies the project's bounded `String8` type before including the
 module. `dependency_rule` borrows a `DependencyRule` and its strings and arrays.
 The caller owns both the output allocation and the dependency collection.
 
-`source` is always the first prerequisite. `object` is the already-resolved
+`source` is the first prerequisite unless `omit_source` denotes standard input,
+which has no filesystem prerequisite. `object` is the already-resolved
 default target; the serializer does not derive object filenames. With explicit
 `targets`, their command-line order is retained and `object` is not read. An
 unquoted target is a verbatim Make expression, as with `-MT`; a quoted target
@@ -103,24 +104,19 @@ capacities, malformed early and late records, system filtering, phony rules,
 explicit target order, and size overflow. Standalone success is not a compiler
 build, a CLI regression pass, or a performance qualification.
 
-## Integration still required before #805 can close
+## Integration and remaining qualification
 
-1. Parse dependency actions and operands in the common driver dispatch without
-   mistaking `-MF`, `-MT`, `-MQ`, or `-Xlinker` operands for actions. Implement
-   compile-with-dependencies versus preprocessing-only modes, including `-E`.
-2. Collect actually consumed includes, forced includes and macro-only includes
-   with stable identity/order and inherited system provenance. Cover conditional
-   includes, include guards, pragma-once, and speculative-cache entries.
-3. Resolve default object/dependency names, explicit `-o`/`-MF`, stdout output,
-   repeated targets and multi-translation-unit ownership. Publish dependency
-   files without concurrent writes or destructive partial output on failure.
-4. Wire the serializer and its end-to-end tests into the real driver. Compare
-   emitted rules with GCC/Clang and consume them through Make/Ninja; test failure
-   paths and scalar/vector equality end to end. Validate whole-driver overhead
-   on the 9700X.
-5. Complete the remaining #805 diagnostic, verbosity and linker options, and
-   named, reasoned refusals for deliberately unsupported output/preprocessor
-   modes. The existing #854 identification/`-pipe` behavior must be preserved.
+The driver parses dependency options without reinterpreting operands as actions,
+collects semantic file observations with inherited system provenance, and publishes
+complete per-unit buffers in command-line order after successful compilation.
+Diagnostic replay and speculative cache opens do not publish dependencies.
+The CC guide records naming, aliases, publication failure behavior, feature limits
+and the broader #1113 work that remains. This does not implement `-imacros` or
+finish #805's entire diagnostic/linker compatibility wishlist.
+
+Full source-corpus and native 9700X qualification are distinct from the standalone
+serializer and bounded CLI tests. No performance conclusion follows from these
+functional checks.
 
 ## Provenance
 
