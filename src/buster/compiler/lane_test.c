@@ -394,8 +394,9 @@ static const char* lane_test_parse_hex(const char* text, const char* end, uint64
 }
 
 // Whether the VmFlags of the mapping that holds `address`, in /proc/self/smaps, include `flag` (two letters: "hg" for
-// MADV_HUGEPAGE, "nh" for MADV_NOHUGEPAGE). Sets *found if the mapping and its flags were found.
-static bool lane_test_vm_flag(uintptr_t address, const char* flag, bool* found)
+// MADV_HUGEPAGE, "nh" for MADV_NOHUGEPAGE, "wr" for writable). Sets *found if the mapping and its flags were found, and
+// *first and *last to the mapping's bounds.
+static bool lane_test_vm_flag_in(uintptr_t address, const char* flag, bool* found, uint64_t* first, uint64_t* last)
 {
     bool result = false;
     *found = false;
@@ -425,6 +426,8 @@ static bool lane_test_vm_flag(uintptr_t address, const char* flag, bool* found)
         if (header)
         {
             inside = begin <= address && address < stop;
+            *first = inside ? begin : *first;
+            *last = inside ? stop : *last;
         }
         else if (inside && line_end - line >= 8 && memcmp(line, "VmFlags:", 8) == 0)
         {
@@ -442,6 +445,25 @@ static bool lane_test_vm_flag(uintptr_t address, const char* flag, bool* found)
     }
     scratch_end(scratch);
     return result;
+}
+
+static bool lane_test_vm_flag(uintptr_t address, const char* flag, bool* found)
+{
+    uint64_t first = 0;
+    uint64_t last = 0;
+    return lane_test_vm_flag_in(address, flag, found, &first, &last);
+}
+
+// Whether the kernel may back the page at `address` with a huge page (#652): its mapping is writable, isn't advised
+// MADV_NOHUGEPAGE, and covers the whole huge page that holds it. Sets *found as lane_test_vm_flag does.
+static bool lane_test_huge_capable(uintptr_t address, bool* found)
+{
+    uint64_t first = 0;
+    uint64_t last = 0;
+    const bool writable = lane_test_vm_flag_in(address, "wr", found, &first, &last);
+    const bool refused = lane_test_vm_flag(address, "nh", found);
+    const uint64_t page = address & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+    return writable && !refused && page >= first && page + BUSTER_ARENA_HUGE_PAGE_BYTES <= last;
 }
 
 // Whether the page at `address` is resident.
@@ -650,14 +672,17 @@ static bool lane_test_arenas(void)
     lane_test_expect(&tally, alike, "a measuring arena's pushes take other room than a reserved arena's");
     lane_test_expect(&tally, (uintptr_t)measure.base >= BUSTER_ARENA_MAX_CAPACITY && arena_push(&measure, BUSTER_ARENA_MAX_CAPACITY, 1) == 0,
                      "a measuring arena's base is a user's address, or it takes more than its capacity");
+    // Its 8 MB of base pages could hold huge pages: advised against them.
+    bool found = false;
+    const bool advised = lane_test_vm_flag((uintptr_t)reserved.base, "nh", &found) && found;
+    lane_test_expect(&tally, advised && !lane_test_huge_capable((uintptr_t)reserved.base, &found) && found, "an arena of 8 MB of base pages may take huge pages");
     arena_release(&reserved);
 
     // pop_to frees what was pushed since, and the next push gets the same memory.
     arena_pop_to(&small, 10);
     const uint8_t* again = arena_push(&small, 100, 1);
     lane_test_expect(&tally, again == small.base + 10, "a push after pop_to doesn't reuse the memory");
-    bool found = false;
-    lane_test_expect(&tally, lane_test_vm_flag((uintptr_t)small.base, "nh", &found) && found, "a small arena isn't kept in base pages");
+    lane_test_expect(&tally, !lane_test_huge_capable((uintptr_t)small.base, &found) && found, "a small arena isn't kept in base pages");
     arena_release(&small);
 
     // Arenas that couldn't be reserved have no capacity, and every push fails.
@@ -670,7 +695,7 @@ static bool lane_test_arenas(void)
     arena_release(&enormous);
 
     // A large reservation: only touched pages are committed, base pages up to base + BUSTER_ARENA_SMALL_BYTES and huge
-    // pages from there.
+    // pages from there, which are advised so only once a commit reaches them (#652).
     Arena large = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
     lane_test_expect(&tally, large.base != 0 && large.capacity == BUSTER_LANE_TEST_LARGE_ARENA, "a 64 GB arena couldn't be reserved");
     if (large.base != 0)
@@ -685,15 +710,40 @@ static bool lane_test_arenas(void)
         lane_test_expect(&tally, !lane_test_resident(large.base + BUSTER_ARENA_SMALL_BYTES - BUSTER_ARENA_PAGE_BYTES), "the first touch committed more than its page");
         lane_test_expect(&tally, !lane_test_resident(large.base + (BUSTER_LANE_TEST_LARGE_ARENA / 2)), "an untouched page is committed");
         lane_test_expect(&tally, ((uintptr_t)large.base + BUSTER_ARENA_SMALL_BYTES) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0, "the huge pages don't start on a huge page boundary");
-        const bool head = lane_test_vm_flag((uintptr_t)large.base, "nh", &found) && found;
-        const bool head_end = lane_test_vm_flag((uintptr_t)large.base + BUSTER_ARENA_SMALL_BYTES - 1, "nh", &found) && found;
-        const bool head_huge = lane_test_vm_flag((uintptr_t)large.base, "hg", &found);
+        bool head = !lane_test_huge_capable((uintptr_t)large.base, &found) && found;
+        bool head_end = !lane_test_huge_capable((uintptr_t)large.base + BUSTER_ARENA_SMALL_BYTES - 1, &found) && found;
+        bool head_huge = lane_test_vm_flag((uintptr_t)large.base, "hg", &found);
         lane_test_expect(&tally, head && head_end && !head_huge, "the start of an arena isn't kept in base pages");
+        const bool early = lane_test_vm_flag((uintptr_t)large.base + BUSTER_ARENA_SMALL_BYTES, "hg", &found) || !found;
+        lane_test_expect(&tally, !early && !large.huge, "an arena asked for huge pages before a commit reached them");
+        // A push past the base pages commits the first huge page, and asks for huge pages from there to the end.
+        const uint8_t* past = arena_push(&large, BUSTER_ARENA_SMALL_BYTES, 1);
+        lane_test_expect(&tally, past == large.base + 1, "a large arena could not commit past its base pages");
         const bool tail = lane_test_vm_flag((uintptr_t)large.base + BUSTER_ARENA_SMALL_BYTES, "hg", &found) && found;
         const bool tail_end = lane_test_vm_flag((uintptr_t)large.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "hg", &found) && found;
-        lane_test_expect(&tally, tail && tail_end, "an arena doesn't ask for huge pages past its start");
+        lane_test_expect(&tally, tail && tail_end && large.huge, "an arena doesn't ask for huge pages past its start");
+        head = !lane_test_huge_capable((uintptr_t)large.base, &found) && found;
+        head_end = !lane_test_huge_capable((uintptr_t)large.base + BUSTER_ARENA_SMALL_BYTES - 1, &found) && found;
+        head_huge = lane_test_vm_flag((uintptr_t)large.base, "hg", &found);
+        lane_test_expect(&tally, head && head_end && !head_huge, "the start of an arena takes huge pages once its pushes go past it");
     }
     arena_release(&large);
+
+    // An arena with 2 MB or more of base pages (a units lane's floor, #152) is advised against huge pages there, and
+    // asks for them past.
+    const uint64_t wide_small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+    Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, wide_small);
+    lane_test_expect(&tally, wide.base != 0 && arena_push(&wide, wide_small, 1) == wide.base, "an arena with 8 MB of base pages couldn't be pushed");
+    if (wide.base != 0)
+    {
+        const bool wide_head = lane_test_vm_flag((uintptr_t)wide.base, "nh", &found) && found;
+        const bool wide_end = lane_test_vm_flag((uintptr_t)wide.base + wide_small - 1, "nh", &found) && found;
+        const bool wide_capable = lane_test_huge_capable((uintptr_t)wide.base + wide_small / 2, &found) || !found;
+        lane_test_expect(&tally, wide_head && wide_end && !wide_capable && !wide.huge, "an arena's 8 MB of base pages may take huge pages");
+        const bool wide_tail = arena_push(&wide, 1, 1) != 0 && lane_test_vm_flag((uintptr_t)wide.base + wide_small, "hg", &found) && found;
+        lane_test_expect(&tally, wide_tail && wide.huge, "an arena with 8 MB of base pages doesn't ask for huge pages past them");
+    }
+    arena_release(&wide);
 
     printf("arenas: %lu checks, %lu failed\n", (unsigned long)tally.checks, (unsigned long)tally.failures);
     return tally.failures == 0;

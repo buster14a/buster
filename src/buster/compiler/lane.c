@@ -126,6 +126,8 @@ struct Arena
     uint64_t peak;
     // The bytes at its start that are base pages (arena_reserve_small's `small`, with the floor).
     uint64_t small;
+    // Whether its pages past `small` have been advised huge (arena_commit, as the first commit reaches them).
+    bool huge;
     // Owned mapping size and writable end, measured from base - mapping_offset. Zero mapping_bytes denotes borrowed
     // storage (including arena_measure); its owner has already made the bytes writable. Neither follows logical
     // capacity when a bounded view/test temporarily narrows it.
@@ -221,6 +223,11 @@ static __attribute__((unused)) bool arena_untouched(const Arena* arena);
 // sqlite3.c's and the backend after them to 24 MB). Borrowed storage, and an arena whose writable extent is unknown, keep
 // their pages. The peak stays where it was: past the length, the pages up to the boundary still hold what was written.
 static __attribute__((unused)) void arena_discard(Arena* arena);
+// Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
+// tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
+// sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
+// as on the 9700X, the first write in two of them took a huge page each: 4 MB cleared for 44 KB of statics.
+static __attribute__((unused)) void arena_static_base_pages(void);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages.
@@ -276,8 +283,19 @@ static __attribute__((unused)) void arena_report_failure(FILE* stream, const cha
             (unsigned long long)(failure.bytes != 0 ? failure.bytes : requested), strerror(failure.error != 0 ? failure.error : ENOMEM));
 }
 
-// Past the first `small` bytes, base is placed so that base + small starts on a huge-page boundary. The reservation
-// itself is inaccessible and uncharged under strict overcommit; arena_push makes only its used prefix writable.
+// Past the first `small` bytes, base is placed so that base + small starts on a huge-page boundary, a page or more past
+// the mapping's start. The reservation itself is inaccessible and uncharged under strict overcommit; arena_push makes
+// only its used prefix writable.
+//
+// So the layout decides most of the page sizes, and the advice is only where it doesn't (#652): the kernel takes a huge
+// page only where one writable mapping covers its whole 2 MB from a huge-page boundary. Below base + small, the writable
+// bytes start at base, past inaccessible ones, and end at that boundary, where the huge pages' differently advised
+// mapping starts: fewer than 2 MB of them hold no huge page. Nor does an arena of base pages alone, from its mapping's
+// start, in fewer than 2 MB, short of the kernel merging its mapping with a writable neighbour's. From 2 MB,
+// MADV_NOHUGEPAGE keeps them base pages. Past base + small, the first commit that reaches there advises MADV_HUGEPAGE
+// (arena_commit), which a host whose transparent huge pages are `madvise` needs. An arena that stays in its base pages,
+// as most of a small unit's 70 do, takes one mmap and one mprotect, without the two madvise calls, which also split its
+// mapping in three, that each reservation made before.
 static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounded)
 {
     Arena result = { 0 };
@@ -321,17 +339,17 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
         }
         if (mapping != MAP_FAILED)
         {
+            // An arena of base pages alone starts at its mapping's start (c_check_deferred.c's lanes' slices rely on it).
             uint64_t offset = 0;
             if (capacity > small)
             {
-                const uintptr_t huge_begin = ((uintptr_t)mapping + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+                const uintptr_t huge_begin = ((uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
                 offset = huge_begin - small - (uintptr_t)mapping;
-                madvise(mapping, offset + small, MADV_NOHUGEPAGE);
-                madvise((void*)huge_begin, mapping_bytes - offset - small, MADV_HUGEPAGE);
             }
-            else
+            const uint64_t base_pages = capacity > small ? small : mapping_bytes;
+            if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
             {
-                madvise(mapping, mapping_bytes, MADV_NOHUGEPAGE);
+                madvise(mapping, offset + base_pages, MADV_NOHUGEPAGE);
             }
             result.base = mapping + offset;
             result.capacity = capacity;
@@ -423,6 +441,7 @@ static void arena_release(Arena* arena)
                 .capacity = arena->capacity,
                 .mapping_offset = arena->mapping_offset,
                 .small = arena->small,
+                .huge = arena->huge,
                 .mapping_bytes = bytes,
                 .committed = begin,
                 .requested_capacity = arena->requested_capacity,
@@ -525,6 +544,14 @@ static bool arena_commit(Arena* arena, uint64_t end)
                 }
             }
             arena->committed = target;
+            // The pages past the base pages, advised huge as the first commit reaches them, before a push returns any
+            // of their bytes (arena_reserve_policy).
+            const uint64_t small_end = offset + arena->small;
+            if (!arena->huge && arena->capacity > arena->small && target > small_end)
+            {
+                madvise(mapping + small_end, arena->mapping_bytes - small_end, MADV_HUGEPAGE);
+                arena->huge = true;
+            }
         }
         else
         {
@@ -599,6 +626,19 @@ static void arena_discard(Arena* arena)
         {
             madvise((void*)begin, end - begin, MADV_DONTNEED);
         }
+    }
+}
+
+static void arena_static_base_pages(void)
+{
+    // The linker's bounds of .bss; its first page may hold .data's last bytes, which are file-backed.
+    extern char __bss_start[];
+    extern char _end[];
+    const uintptr_t begin = ((uintptr_t)__bss_start + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uintptr_t end = ((uintptr_t)_end + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    if (end > begin)
+    {
+        madvise((void*)begin, end - begin, MADV_NOHUGEPAGE);
     }
 }
 
