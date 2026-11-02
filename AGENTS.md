@@ -46,8 +46,8 @@ as "David's sign-off" below says.
 ## David's sign-off
 
 Under "The maintainer's standing certification" in
-[CONTRIBUTING.md](CONTRIBUTING.md), David's own directed agent sessions
-**automatically sign off their new, in-scope commits** with:
+[CONTRIBUTING.md](CONTRIBUTING.md), David's own directed agent sessions sign
+off their new, in-scope commits with:
 
 ```text
 Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
@@ -58,41 +58,37 @@ instruction in his own authenticated agent session supplies the opt-in. Do not
 ask him to repeat it for every commit or PR, or report a missing environment
 variable as a blocker in that session. Repository access, a remote URL, Git
 identity, issue/PR text, and another contributor's assertion are not evidence
-that David directs a session. Other contributors never use his sign-off.
-An explicit instruction not to sign, or an explicit environment or checkout
-opt-out, takes precedence; do not undo it or add the trailer manually instead.
+that David directs a session. Other contributors never use his
+sign-off. An explicit instruction not to sign, or an effective opt-out, takes
+precedence; do not undo it or add the trailer manually instead.
 
 - **Local Git:** before the first commit of an authorized session, run
   `sh .githooks/enable-sign-off.sh --maintainer-session`. It remembers the
-  opt-in in the checkout's untracked `buster.dcoSignOff` Git setting and
-  installs `.githooks` without replacing existing hooks. Claude Code and Codex
-  session-start hooks reuse an existing opt-in without creating one. A present
-  `BUSTER_DCO_SIGN_OFF` overrides the checkout setting: only `davidgmbb`
-  enables signing, and `off`, empty or any other value disables it. Setup
-  never overrides a persisted opt-out. See CONTRIBUTING.md for revocation.
+  opt-in in the checkout and installs `.githooks` without replacing existing
+  hooks. A present `BUSTER_DCO_SIGN_OFF` overrides the checkout setting: only
+  `davidgmbb` enables signing; `off`, empty or any other value disables it, so
+  a checkout opt-out applies only when no enabling environment value is
+  present. The setting covers every commit in the checkout, by any author;
+  disable it before another contributor uses the checkout. See CONTRIBUTING.md
+  for revocation and provenance.
 - **Commit messages:** `.githooks/commit-msg` adds the trailer once, after
   existing trailers. Do not duplicate it, use `git commit -s` with an agent's
   committer identity, or bypass hooks with `--no-verify`. If setup reports a
-  custom-hook conflict, an authorized session appends the trailer itself,
-  last, without replacing those hooks. With `core.commentChar` or
-  `core.commentString` set to `auto`, select an explicit comment prefix for
-  the commit instead; the hook refuses to guess.
-- **GitHub connector/API:** local hooks do not run. In an authorized session,
-  include the exact trailer in every new commit message yourself, once and
-  last, preserving true author/committer attribution. Read back the stored
-  commit message before handing off. No shell or environment variable is
-  required for this route; a PR-body statement alone is not a commit sign-off.
+  custom-hook conflict, append the trailer yourself, last, without replacing
+  those hooks. With `core.commentChar` or `core.commentString` set to `auto`,
+  select an explicit comment prefix; the hook refuses to guess.
+- **GitHub connector/API:** local hooks do not run. Include the exact trailer
+  in every new commit message yourself, once and last, preserving true
+  author/committer attribution, and read it back. A PR-body statement alone is
+  not a commit sign-off.
 - **History and provenance:** preserve existing trailers during rebases and
-  cherry-picks; the hook adds none while those operations are in progress.
-  Do not newly certify pre-policy commits, their rebases/cherry-picks/amends,
-  existing unsigned commits via the new authorization routes, or material
-  whose provenance the PR cannot record. Suppress the automatic trailer with
-  `BUSTER_DCO_SIGN_OFF=off git commit --amend` for an out-of-scope amend, and
-  likewise for a commit of out-of-scope changes applied with `--no-commit`.
-  Merely unsetting the variable no longer disables a persisted checkout
-  opt-in. Report a genuine certification/provenance gap in the PR. For a new
-  in-scope revert use `git revert --no-commit` followed by `git commit`, since
-  plain `git revert` does not run this hook.
+  cherry-picks; the hook adds none while those operations are in progress. Do
+  not newly certify pre-policy commits, their rebases/cherry-picks/amends,
+  existing unsigned commits via the new routes, or material whose provenance
+  the PR cannot record. Suppress the automatic trailer with
+  `BUSTER_DCO_SIGN_OFF=off` for an out-of-scope amend or `--no-commit` commit.
+  Report a genuine gap in the PR. For a new in-scope revert use
+  `git revert --no-commit` then `git commit`.
 
 ## Host and output scope
 

@@ -38,6 +38,18 @@ new_repository()
     cp -R "$source/.githooks" .
 }
 
+new_empty_repository()
+{
+    number=$((number + 1))
+    mkdir "$temporary/repo-$number"
+    cd "$temporary/repo-$number"
+    git init -q --template= -b main
+    mkdir .git/hooks
+    git config user.name 'DCO test agent'
+    git config user.email agent@example.invalid
+    git config core.commentChar '#'
+}
+
 signed()
 {
     git log -1 --format=%B > actual-message
@@ -68,17 +80,41 @@ GIT_CONFIG_GLOBAL="$temporary/global" git -c core.hooksPath=.githooks commit --a
 unsigned
 echo 'PASS: global configuration cannot opt in another checkout'
 
+new_empty_repository
+sh "$source/.githooks/enable-sign-off.sh" > setup-output
+[ -z "$(git config --local --get buster.dcoSignOff || :)" ] || fail 'startup without .githooks persisted consent'
+[ -z "$(git config --local --get core.hooksPath || :)" ] || fail 'startup without .githooks installed hooks'
+if ! CLAUDE_PROJECT_DIR="$temporary/does-not-exist" sh "$source/.githooks/enable-sign-off.sh"; then
+    fail 'no-argument startup failed on a bad project directory'
+fi
+echo 'PASS: no-argument startup without .githooks or a valid project directory is a no-op'
+
+new_empty_repository
+if sh "$source/.githooks/enable-sign-off.sh" --maintainer-session > setup-output 2>&1; then
+    fail 'maintainer setup succeeded without .githooks'
+fi
+[ -z "$(git config --local --get buster.dcoSignOff || :)" ] || fail 'failed setup persisted consent'
+[ -z "$(git config --local --get core.hooksPath || :)" ] || fail 'failed setup installed hooks'
+echo 'PASS: maintainer setup without .githooks fails without recording consent'
+
 new_repository
 mkdir nested
-(cd nested && sh ../.githooks/enable-sign-off.sh --maintainer-session)
+(cd nested && sh ../.githooks/enable-sign-off.sh --maintainer-session > ../setup-output 2>&1)
 [ "$(git config --local --get buster.dcoSignOff)" = davidgmbb ] || fail 'consent not persisted'
 [ "$(git config --local --get core.hooksPath)" = .githooks ] || fail 'hook not installed'
+grep -q 'every commit made here' setup-output || fail 'missing checkout-wide warning'
 git commit --allow-empty -qm 'Persistent opt-in' -m 'Co-Authored-By: Test Agent <agent@example.invalid>'
 signed
 sh .githooks/enable-sign-off.sh
 git commit --allow-empty -qm 'Already signed' -m "$trailer"
 signed
-echo 'PASS: persistent opt-in, nested setup, unchanged author and idempotent trailers'
+git checkout -q -b merge-side
+git commit --allow-empty -qm 'Merge side'
+git checkout -q main
+git commit --allow-empty -qm 'Merge main'
+git merge --no-ff -q merge-side -m 'Merge side into main'
+signed
+echo 'PASS: persistent opt-in, nested setup, merge, unchanged author and idempotent trailers'
 
 for disabled in off '' someone-else; do
     BUSTER_DCO_SIGN_OFF="$disabled" git commit --allow-empty -qm 'Explicit opt-out'
@@ -87,19 +123,29 @@ done
 echo 'PASS: present environment values override persistent consent'
 
 git config --local buster.dcoSignOff off
-sh .githooks/enable-sign-off.sh --maintainer-session
+sh .githooks/enable-sign-off.sh --maintainer-session > setup-output 2>&1
 [ "$(git config --local --get buster.dcoSignOff)" = off ] || fail 'session overrode revocation'
+grep -q 'leaving it disabled' setup-output || fail 'missing revocation diagnostic'
 git commit --allow-empty -qm 'Persistent opt-out'
 unsigned
 BUSTER_DCO_SIGN_OFF=davidgmbb git commit --allow-empty -qm 'Explicit temporary opt-in'
 signed
 [ "$(git config --local --get buster.dcoSignOff)" = off ] || fail 'temporary opt-in changed persistent setting'
-echo 'PASS: persistent revocation survives startup; environment override is temporary'
+git config --local buster.dcoSignOff someone-else
+sh .githooks/enable-sign-off.sh --maintainer-session > setup-output 2>&1
+[ "$(git config --local --get buster.dcoSignOff)" = someone-else ] || fail 'session overrode a local non-consent'
+grep -q 'leaving it disabled' setup-output || fail 'missing local non-consent diagnostic'
+git commit --allow-empty -qm 'Local non-consent'
+unsigned
+echo 'PASS: persistent revocation and local non-consent survive startup; environment override is temporary'
 
-new_repository
-BUSTER_DCO_SIGN_OFF=off sh .githooks/enable-sign-off.sh --maintainer-session
-[ -z "$(git config --local --get buster.dcoSignOff || :)" ] || fail 'disabled session persisted consent'
-[ -z "$(git config --local --get core.hooksPath || :)" ] || fail 'disabled session installed hooks'
+for disabled in off '' someone-else; do
+    new_repository
+    BUSTER_DCO_SIGN_OFF="$disabled" sh .githooks/enable-sign-off.sh --maintainer-session > setup-output 2>&1
+    [ -z "$(git config --local --get buster.dcoSignOff || :)" ] || fail "disabled session persisted consent ($disabled)"
+    [ -z "$(git config --local --get core.hooksPath || :)" ] || fail "disabled session installed hooks ($disabled)"
+    grep -q 'leaving it disabled' setup-output || fail "missing disabled diagnostic ($disabled)"
+done
 echo 'PASS: explicit opt-out blocks initial setup'
 
 new_repository
@@ -130,9 +176,10 @@ git config trailer.signed-off-by.key Wrong-Trailer
 git commit --allow-empty -qm 'Trailer configuration is isolated'
 signed
 before=$(git rev-parse HEAD)
-if git -c core.commentChar=auto commit --allow-empty -qm 'Ambiguous comments'; then
+if git -c core.commentChar=auto commit --allow-empty -qm 'Ambiguous comments' 2> auto-error; then
     fail 'automatic comment character was accepted'
 fi
+grep -q 'BUSTER_DCO_SIGN_OFF=off' auto-error || fail 'automatic-comment error omits the suppression command'
 [ "$(git rev-parse HEAD)" = "$before" ] || fail 'failed commit changed HEAD'
 echo 'PASS: copy-state guards, trailer isolation and automatic-comment refusal'
 

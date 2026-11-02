@@ -11,7 +11,13 @@ if [ "$#" -gt 1 ] || { [ -n "$mode" ] && [ "$mode" != --maintainer-session ]; };
     exit 2
 fi
 
-cd "${CLAUDE_PROJECT_DIR:-.}" || exit 1
+cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || {
+    if [ "$mode" = --maintainer-session ]; then
+        echo "David's sign-off setup needs a Buster working tree." >&2
+        exit 1
+    fi
+    exit 0
+}
 root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     if [ "$mode" = --maintainer-session ]; then
         echo "David's sign-off setup needs a Buster working tree." >&2
@@ -20,19 +26,27 @@ root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     exit 0
 }
 cd "$root" || exit 1
-if [ ! -f .githooks/commit-msg ]; then
-    echo "David's sign-off setup cannot find .githooks/commit-msg." >&2
-    exit 1
-fi
 
 # Only the explicit maintainer-session mode persists consent. Normal session
 # startup never turns a temporary environment opt-in into a permanent one.
 # A present environment value (including empty) wins over local configuration.
 # Do not overwrite a persisted opt-out when another agent starts a session.
+persist=0
 if [ "$mode" = --maintainer-session ] && [ "${BUSTER_DCO_SIGN_OFF-davidgmbb}" = davidgmbb ] && ! git config --local --get buster.dcoSignOff >/dev/null 2>&1; then
-    git config --local buster.dcoSignOff davidgmbb || exit 1
+    persist=1
 fi
 sign_off=${BUSTER_DCO_SIGN_OFF-$(git config --local --get buster.dcoSignOff)}
+if [ "$persist" = 1 ]; then
+    sign_off=davidgmbb
+fi
+if [ "$sign_off" = davidgmbb ] && [ ! -f .githooks/commit-msg ]; then
+    echo "David's sign-off setup cannot find .githooks/commit-msg." >&2
+    exit 1
+fi
+if [ "$persist" = 1 ]; then
+    git config --local buster.dcoSignOff davidgmbb || exit 1
+    echo "David's sign-off is enabled for this checkout: the opt-in covers every commit made here, by any author. Disable it with 'git config --local buster.dcoSignOff off' before another contributor uses this checkout." >&2
+fi
 if [ "$sign_off" = davidgmbb ]; then
     path=$(git config core.hooksPath)
     own=$(find -H "$(git rev-parse --git-common-dir)/hooks" -mindepth 1 -maxdepth 1 ! -name '*.sample' 2>/dev/null)

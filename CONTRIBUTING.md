@@ -120,16 +120,20 @@ For local Git, the existing session-start hooks install `.githooks` when an
 opt-in is already present. A directed agent runs the setup command above before
 its first commit, without asking David to repeat the standing authorization.
 The checkout setting is untracked and shared with linked worktrees; it does not
-follow a clone or authorize another repository. Existing custom hooks are not
-replaced. The setup diagnostic tells an authorized session when it must append
-the trailer itself instead.
+follow a clone or authorize another repository. It is checkout-wide: the
+opt-in covers every commit made in the checkout, by any author. The setup
+command prints this warning; disable the setting before another contributor
+uses the checkout. Existing custom hooks are not replaced. The setup diagnostic tells an
+authorized session when it must append the trailer itself instead.
 
 The hook checks a present `BUSTER_DCO_SIGN_OFF` first: only `davidgmbb` enables
 it; `off`, an empty value, or any other value disables it. When the variable is
 absent, only the **local** `buster.dcoSignOff` setting is consulted, not global
 Git configuration. An explicit local value other than `davidgmbb` disables that
 fallback, and session setup never overwrites it. Existing environment-only
-setups remain temporary: normal startup does not persist their opt-in.
+setups remain temporary: normal startup does not persist their opt-in. A
+present environment value therefore wins over the checkout setting, and a
+checkout opt-out applies only while no enabling environment value is present.
 
 Use `BUSTER_DCO_SIGN_OFF=off git commit ...` to suppress automatic insertion
 for one operation. To disable a persisted checkout opt-in, run
@@ -153,10 +157,11 @@ or ask for another routine certification. A PR-body statement is not a substitut
 for those commit trailers. Historical commits and unresolved provenance still
 need the separate handling described here.
 
-The isolated shell-hook regression fixtures run in the path-scoped `DCO hooks`
-GitHub Actions workflow; they build no compiler and change no branch protection.
-They can also be run with `sh .githooks/test-sign-off.sh` on the shared host under
-the normal lock. They exercise only disposable repositories, not project history.
+The isolated shell-hook regression fixtures run in the required `DCO hook
+regression` job of the `Tests and Zen 5 benchmarks` workflow; they build no
+compiler and change no branch protection. They can also be run with
+`sh .githooks/test-sign-off.sh` on the shared host under the normal lock. They
+exercise only disposable repositories, not project history.
 
 ## Imports and generated material
 
