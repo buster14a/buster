@@ -106,6 +106,10 @@
 
 #include "buster/compiler/string8.h"
 
+// The external tools the cross-checks spawn, probed once per command (#1129), and their tests, for the test-tool command.
+// Every test file after this point sees its types and functions.
+#include "buster/compiler/test_tool.c"
+
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
 
@@ -1552,6 +1556,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
     {
         result = run_parallel_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-tool") == 0)
+    {
+        result = test_tool_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
     {

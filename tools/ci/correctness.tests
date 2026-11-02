@@ -358,6 +358,9 @@ musl="$corpus/libc/musl"
 ./build/compiler test-oracle-cache
 == Test the runner
 ./build/compiler test-parallel
+== Test the external tools' diagnostics
+# Fake, missing, quiet and hanging stand-ins for the tools the cross-checks probe; no external tool is needed.
+./build/compiler test-tool
 == Test GNU inline assembly's semantic fixtures against clang
 ./build/compiler test-checker-asm
 == Test c-testsuite's harness

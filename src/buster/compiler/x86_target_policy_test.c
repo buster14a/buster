@@ -237,7 +237,7 @@ static bool x86_target_test_fma_masks(void)
     return passed;
 }
 
-static bool x86_target_test_compiler_macros(void)
+static bool x86_target_test_compiler_macros(bool gcc_ready)
 {
     static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
     static const char* const compilers[] = { "clang", "gcc" };
@@ -252,6 +252,10 @@ static bool x86_target_test_compiler_macros(void)
         passed &= x86_target_parse(profiles[p], strlen(profiles[p]), &target);
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compilers); c += 1)
         {
+            if (c == 1 && !gcc_ready)
+            {
+                continue;
+            }
             PPClangOutput output = pp_test_clang_process(compilers[c], arguments, 1, "/dev/null", true);
             passed &= output.status == PP_CLANG_ACCEPTED;
             for (uint32_t f = 0; output.status == PP_CLANG_ACCEPTED && f < X86_FEATURE_COUNT; f += 1)
@@ -281,7 +285,7 @@ static bool x86_target_test_compiler_macros(void)
             free(output.diagnostics);
         }
     }
-    printf("target feature macros against Clang/GCC, including real native CPUID: %s (%u checks)\n", passed ? "pass" : "FAIL", checks);
+    printf("target feature macros against Clang%s, including real native CPUID: %s (%u checks)\n", gcc_ready ? "/GCC" : " (GCC skipped)", passed ? "pass" : "FAIL", checks);
     return passed;
 }
 

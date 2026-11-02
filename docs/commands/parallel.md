@@ -11,6 +11,30 @@ requirements. [Command index](README.md).
   in the list's order. `parallel_test.c` holds its tests (`main.c` includes
   both; `./build/compiler test-parallel` runs them); [The parallel runner](#the-parallel-runner)
   below describes both.
+
+## Test tool probing
+
+`src/buster/compiler/test_tool.c` (included by `main.c`, with its declarations
+in `test_tool.h`) probes an external tool a cross-check spawns, once per
+command (#1129): `test_tool_probe` runs `NAME --version`, keeps the first
+dotted decimal version, and compares it with a minimum; `test_tool_available`
+says whether the tool may be used; `test_tool_skip` prints
+`SECTION: skipped: needs NAME >= V, found W`, or `not found on PATH`, or
+`found version unreadable`, or `didn't end within N s`. A skipped section is
+not a correctness failure, so the rest of the command still runs and its real
+failures still fail; a tool
+that is present and compatible and gives wrong output still fails. The callers
+probe before their sections: perf in `test-unwind --cross-check` and
+`test-debug --cross-check`, GCC 15 or later (16.2.1 is the qualified 9700X
+version) in `test-calling-convention --cross-check` and `test-x86-target`, and
+binutils 2.46 or later's `as` in `test-x86-target` and `as`/`objdump` in
+`test-x86-disassembler --objdump` and `--file` (2.47 is the qualified 9700X
+version), whose whole oracle is then unavailable and whose exit status is 77
+(the runner's skip code).
+`./build/compiler test-tool` checks the helper's parsing, comparison, missing
+tool, unreadable version, hanging tool and skip text without the real tools;
+extra arguments are a usage error.
+
 ## The parallel runner
 
 `./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]`

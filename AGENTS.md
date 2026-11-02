@@ -310,8 +310,6 @@ translation units, build order, baked tables or code-placement experiments.
 
 ## Current repository and exact smoke commands
 
-- `build/` is disposable output. Do not commit generated binaries or captures.
-
 From the repository root, on the approved Linux Ryzen 7 9700X host:
 
 ```sh
@@ -458,11 +456,10 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-lexer, benchmark-lexer` — `c_lexer.c` — [guide](docs/commands/lexer.md).
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
 - `benchmark-link` — `link_benchmark.c` — [guide](docs/commands/link-benchmark.md).
-- `test-lowering, benchmark-lowering-source` — `c_lowering.c` — [guide](docs/commands/lowering.md).
-- `test-lowering-templates` (`c_check_program_templates.c`), `measure-lowering-templates` (`c_check_lower_inventory.c`) — [guide](docs/commands/lowering.md#node-templates-1048).
+- `test-lowering, benchmark-lowering-source, test-lowering-templates, measure-lowering-templates` — `c_lowering.c`, `c_check_program_templates.c`, `c_check_lower_inventory.c` — [guide](docs/commands/lowering.md#node-templates-1048).
 - `test-object-writer, benchmark-object-writer` — `object_writer.c` — [guide](docs/commands/object-writer.md).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
-- `parallel, test-parallel` — `parallel.c` — [guide](docs/commands/parallel.md).
+- `parallel, test-parallel, test-tool` — `parallel.c`, `test_tool.c` — [guide](docs/commands/parallel.md).
 - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
 - `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
 - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).

@@ -253,7 +253,7 @@ static bool unwind_native_oracle_tests(void)
     return valid;
 }
 
-static bool unwind_test_consumer(bool keep, uint32_t frame)
+static bool unwind_test_consumer(bool keep, uint32_t frame, const TestTool* perf)
 {
     char directory[] = "/tmp/buster-unwind-XXXXXX";
     Arena arena = arena_reserve(64ull << 20);
@@ -375,12 +375,21 @@ static bool unwind_test_consumer(bool keep, uint32_t frame)
     }
     char* record[] = { "perf", "record", "-q", "-m", "4M", "-e", "cycles:u", "-c", "1000000", "--call-graph", "dwarf", "-o", data, "--", executable, 0 };
     char* script[] = { "perf", "script", "-i", data, "-F", "ip,sym,srcline", 0 };
-    const bool recorded = valid && object_test_run(record, out, err) == 0;
-    const bool scripted = recorded && object_test_run(script, out, err) == 0;
-    const String8 profile = scripted ? object_test_read_file(&arena, out) : (String8){ 0 };
-    const bool perf_ok = scripted && debug_test_profile(profile.pointer);
-    valid &= perf_ok;
-    printf("unwind native perf%s: sampled Tier0 leaf -> outer -> process entry with source rows: %s\n", variants[frame], perf_ok ? "pass" : "FAIL");
+    if (test_tool_available(perf))
+    {
+        const bool recorded = valid && object_test_run(record, out, err) == 0;
+        const bool scripted = recorded && object_test_run(script, out, err) == 0;
+        const String8 profile = scripted ? object_test_read_file(&arena, out) : (String8){ 0 };
+        const bool perf_ok = scripted && debug_test_profile(profile.pointer);
+        valid &= perf_ok;
+        printf("unwind native perf%s: sampled Tier0 leaf -> outer -> process entry with source rows: %s\n", variants[frame], perf_ok ? "pass" : "FAIL");
+    }
+    else
+    {
+        char section[96];
+        snprintf(section, sizeof(section), "unwind native perf%s", variants[frame]);
+        test_tool_skip(perf, section);
+    }
     if (keep || !valid)
     {
         printf("unwind native fixture files: %s\n", directory);
@@ -394,10 +403,10 @@ static bool unwind_test_consumer(bool keep, uint32_t frame)
     return valid;
 }
 
-static bool unwind_test_consumers(bool keep)
+static bool unwind_test_consumers(bool keep, const TestTool* perf)
 {
-    const bool fixed = unwind_test_consumer(keep, 0);
-    const bool pointer = unwind_test_consumer(keep, 1);
-    const bool realigned = unwind_test_consumer(keep, 2);
+    const bool fixed = unwind_test_consumer(keep, 0, perf);
+    const bool pointer = unwind_test_consumer(keep, 1, perf);
+    const bool realigned = unwind_test_consumer(keep, 2, perf);
     return fixed && pointer && realigned;
 }

@@ -6708,6 +6708,7 @@ struct AbiTestCrossRun
     bool compiled;
     bool extension;
     bool char_unsigned;
+    bool skipped;
     pid_t child;
     int output;
     int errors;
@@ -6761,6 +6762,7 @@ static AbiTestCrossRun abi_test_cross_run(uint32_t index)
         .compiled = compiled,
         .extension = extension,
         .char_unsigned = char_unsigned,
+        .skipped = false,
         .child = -1,
         .output = -1,
         .errors = -1,
@@ -7503,29 +7505,33 @@ static int abi_test_cross_capture(const char* name)
 // whose tally goes to `tally`, in memory it shares with the parent. The parent must have flushed its stdout and stderr,
 // which the child would otherwise print again.
 static AbiTestCrossRun abi_test_cross_start(uint32_t index, AbiTestTally* tally, uint64_t seed, uint32_t count, const char* clang, const char* gcc, const char* buster,
-                                            const char* directory, bool keep)
+                                            const char* directory, bool keep, bool gcc_ready)
 {
     AbiTestCrossRun run = abi_test_cross_run(index);
-    run.output = abi_test_cross_capture("cross-check output");
-    run.errors = abi_test_cross_capture("cross-check errors");
-    if (run.output >= 0 && run.errors >= 0)
+    run.skipped = run.gcc && !gcc_ready;
+    if (!run.skipped)
     {
-        run.child = fork();
-    }
-    if (run.child == 0)
-    {
-        const bool redirected = dup2(run.output, STDOUT_FILENO) == STDOUT_FILENO && dup2(run.errors, STDERR_FILENO) == STDERR_FILENO;
-        if (redirected && run.extension)
+        run.output = abi_test_cross_capture("cross-check output");
+        run.errors = abi_test_cross_capture("cross-check errors");
+        if (run.output >= 0 && run.errors >= 0)
         {
-            abi_test_cross_extension(tally, clang, run, buster, directory, keep);
+            run.child = fork();
         }
-        else if (redirected)
+        if (run.child == 0)
         {
-            abi_test_cross(tally, seed + run.vector_bytes + (run.compiled ? 7 : 0), count, run.gcc ? gcc : clang, run, buster, directory, keep);
+            const bool redirected = dup2(run.output, STDOUT_FILENO) == STDOUT_FILENO && dup2(run.errors, STDERR_FILENO) == STDERR_FILENO;
+            if (redirected && run.extension)
+            {
+                abi_test_cross_extension(tally, clang, run, buster, directory, keep);
+            }
+            else if (redirected)
+            {
+                abi_test_cross(tally, seed + run.vector_bytes + (run.compiled ? 7 : 0), count, run.gcc ? gcc : clang, run, buster, directory, keep);
+            }
+            fflush(stdout);
+            fflush(stderr);
+            _exit(redirected ? 0 : 1);
         }
-        fflush(stdout);
-        fflush(stderr);
-        _exit(redirected ? 0 : 1);
     }
     return run;
 }
@@ -7548,46 +7554,49 @@ static void abi_test_cross_print(int descriptor, FILE* stream)
 // left in `shared` to `tally`. A run whose child couldn't start or didn't end normally is one failed check.
 static void abi_test_cross_finish(AbiTestTally* tally, AbiTestCrossRun run, const AbiTestTally* shared)
 {
-    int status = 0;
-    const bool waited = run.child > 0 && waitpid(run.child, &status, 0) == run.child;
-    abi_test_cross_print(run.errors, stderr);
-    abi_test_cross_print(run.output, stdout);
-    if (waited && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+    if (!run.skipped)
     {
-        tally->checks += shared->checks;
-        tally->failures += shared->failures;
-    }
-    else
-    {
-        char detail[128];
-        if (!waited)
+        int status = 0;
+        const bool waited = run.child > 0 && waitpid(run.child, &status, 0) == run.child;
+        abi_test_cross_print(run.errors, stderr);
+        abi_test_cross_print(run.output, stdout);
+        if (waited && WIFEXITED(status) && WEXITSTATUS(status) == 0)
         {
-            snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the run's process can't start", run.name, run.vector_bytes);
-        }
-        else if (WIFSIGNALED(status))
-        {
-            snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the run's process ended by signal %d", run.name, run.vector_bytes, WTERMSIG(status));
+            tally->checks += shared->checks;
+            tally->failures += shared->failures;
         }
         else
         {
-            snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the run's process exited with status %d", run.name, run.vector_bytes, WEXITSTATUS(status));
+            char detail[128];
+            if (!waited)
+            {
+                snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the run's process can't start", run.name, run.vector_bytes);
+            }
+            else if (WIFSIGNALED(status))
+            {
+                snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the run's process ended by signal %d", run.name, run.vector_bytes, WTERMSIG(status));
+            }
+            else
+            {
+                snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the run's process exited with status %d", run.name, run.vector_bytes, WEXITSTATUS(status));
+            }
+            abi_test_expect(tally, false, "cross-check", detail);
         }
-        abi_test_expect(tally, false, "cross-check", detail);
-    }
-    if (run.output >= 0)
-    {
-        close(run.output);
-    }
-    if (run.errors >= 0)
-    {
-        close(run.errors);
+        if (run.output >= 0)
+        {
+            close(run.output);
+        }
+        if (run.errors >= 0)
+        {
+            close(run.errors);
+        }
     }
 }
 
 // The twelve runs are independent, each with a world and files of its own, and each takes about its compiler's time, so
 // they run at once, a child process each. The parent prints each one's output and adds its tally in the runs' order, so
 // the lines and counts are those of the runs one after another; a run that fails keeps its files.
-static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clang, const char* gcc, const char* buster, bool keep)
+static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clang, const char* gcc, const char* buster, bool keep, bool gcc_ready)
 {
     AbiTestTally tally = { 0 };
     char directory[BUSTER_ABI_TEST_PATH_BYTES];
@@ -7602,7 +7611,7 @@ static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clan
         fflush(stderr);
         for (uint32_t r = 0; r < BUSTER_ABI_TEST_CROSS_RUNS; r += 1)
         {
-            runs[r] = abi_test_cross_start(r, &shared[r], seed, count, clang, gcc, buster, directory, keep);
+            runs[r] = abi_test_cross_start(r, &shared[r], seed, count, clang, gcc, buster, directory, keep, gcc_ready);
         }
         for (uint32_t r = 0; r < BUSTER_ABI_TEST_CROSS_RUNS; r += 1)
         {
@@ -7736,7 +7745,7 @@ static bool abi_test_cross_descriptor_failure(rlim_t descriptors, const char* di
     {
         AbiTestTally tally = { 0 };
         const AbiTestTally shared = { 0 };
-        AbiTestCrossRun run = abi_test_cross_start(0, &tally, 1, 20, "/bin/false", "/bin/false", "/bin/false", directory, false);
+        AbiTestCrossRun run = abi_test_cross_start(0, &tally, 1, 20, "/bin/false", "/bin/false", "/bin/false", directory, false, true);
         const bool failed = run.child == -1 && run.errors == -1 && (descriptors == 3 ? run.output == -1 : run.output == STDERR_FILENO + 1);
         abi_test_cross_finish(&tally, run, &shared);
         const int flags = fcntl(STDERR_FILENO + 1, F_GETFD);
@@ -7764,7 +7773,7 @@ static bool abi_test_cross_descriptors(void)
                 {
                     _exit(127);
                 }
-                const bool passed = abi_test_cross_check(1, 20, "/bin/false", "/bin/false", "/bin/false", false);
+                const bool passed = abi_test_cross_check(1, 20, "/bin/false", "/bin/false", "/bin/false", false, true);
                 _exit(abi_test_cross_standard_descriptors(closed) ? (passed ? 0 : 1) : 127);
             }
             int status = 0;
@@ -7880,9 +7889,24 @@ static int run_calling_convention_tests(int argc, char** argv)
         passed = abi_test_gcc_bit_fields() && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
         passed = (!cross_check || abi_test_cross_descriptors()) && passed;
+        // GCC 15 or later compiles the cross-check's C with -std=gnu23 and has the macros its worlds compare (16.2.1 is
+        // the qualified 9700X version); probe it once, before the runs fork, and skip only GCC's runs when it is missing
+        // or older. A present GCC's wrong output still fails.
+        TestTool gcc_tool = { 0 };
+        bool gcc_ready = true;
+        if (cross_check)
+        {
+            const uint32_t minimum[] = { 15 };
+            gcc_tool = test_tool_probe("gcc", gcc, minimum, 1);
+            gcc_ready = test_tool_available(&gcc_tool);
+            if (!gcc_ready)
+            {
+                test_tool_skip(&gcc_tool, "cross-check gcc");
+            }
+        }
         // The oracle cache, set up before the cross-check's runs fork, so that their counts reach its report.
         OracleCache* oracle = oracle_cache();
-        passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep)) && passed;
+        passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep, gcc_ready)) && passed;
         oracle_cache_report(oracle, "test-calling-convention");
         result = passed ? 0 : 1;
     }

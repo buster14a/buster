@@ -940,6 +940,42 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     }
     uint64_t failures = 0;
     uint64_t checked = 0;
+    // The objdump paths need binutils 2.46's forms and listings (2.47 is the qualified 9700X version): as reassembles
+    // the catalogue's operands and objdump decodes them. Probe each once; a missing or older one skips those sections
+    // and leaves the rest's failures to fail the command.
+    const uint32_t minimum[] = { 2, 46 };
+    TestTool as_tool = { 0 };
+    TestTool objdump_tool = { 0 };
+    bool oracle_ready = false;
+    bool raw_ready = false;
+    bool skipped = false;
+    if (oracle || raw != 0)
+    {
+        as_tool = test_tool_probe("as", "as", minimum, 2);
+        objdump_tool = test_tool_probe("objdump", "objdump", minimum, 2);
+        oracle_ready = oracle && test_tool_available(&as_tool) && test_tool_available(&objdump_tool);
+        raw_ready = raw != 0 && test_tool_available(&objdump_tool);
+    }
+    if (oracle && !oracle_ready)
+    {
+        if (!test_tool_available(&as_tool))
+        {
+            test_tool_skip(&as_tool, "disassembler GNU objdump oracle");
+        }
+        if (!test_tool_available(&objdump_tool))
+        {
+            test_tool_skip(&objdump_tool, "disassembler GNU objdump oracle");
+        }
+        skipped = true;
+    }
+    if (raw != 0 && !raw_ready)
+    {
+        if (!test_tool_available(&objdump_tool))
+        {
+            test_tool_skip(&objdump_tool, "disassembler GNU objdump oracle (raw file)");
+        }
+        skipped = true;
+    }
     bool initialized = arguments && x86_disassembler_initialize();
     if (initialized)
     {
@@ -1059,12 +1095,12 @@ static int run_x86_disassembler_tests(int argc, char** argv)
             munmap(mapping, (uint64_t)page * 3);
         }
         x86_test_mode = X86_ENCODER_MODE_64;
-        if (oracle)
+        if (oracle && oracle_ready)
         {
             failures += !x86_decode_test_objdump(&state, 0, 0, true);
             failures += !x86_decode_test_objdump(&state, 10000, 0, false);
         }
-        if (raw != 0)
+        if (raw != 0 && raw_ready)
         {
             failures += !x86_decode_test_objdump(&state, 0, raw, false);
         }
@@ -1074,5 +1110,5 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     {
         fprintf(stderr, "test-x86-disassembler [--count N] [--seed N] [--objdump] [--file raw-binary]: invalid arguments or initialization failed\n");
     }
-    return initialized && failures == 0 ? 0 : 1;
+    return initialized && failures == 0 ? (skipped ? 77 : 0) : 1;
 }
