@@ -7,7 +7,8 @@
 // - Raw rows: check_debug_rows against check_debug_rows_scalar on random functions (their entries' first records
 //   ascending, with runs of entries that start no code, and each record's offset after the one before), of every entry
 //   count to 130 and larger ones, with each column ending at a PROT_NONE page: the same rows, their offsets ascending
-//   and each below the function's length.
+//   and each below the function's length. The same rows through the tier-neutral source-event protocol (#1056): every
+//   valid function's layout and events are accepted and resolve to the raw rows, and a malformed layout is rejected.
 // - Kept rows: check_debug_keep against check_debug_keep_scalar on random rows (the function's file, others and none,
 //   lines in runs, some past INT32_MAX, the body's start at one of them or none), of every count to 130 and larger,
 //   ending at PROT_NONE pages.
@@ -160,6 +161,31 @@ static void check_debug_test_rows(CheckDebugTestTally* tally)
             }
             check_debug_test_expect(tally, meant, "the raw rows are the prologue's, the entries' that start code and the epilogue's, ascending", detail);
             rows_checked += scalar;
+            EmissionSourceEvent* events = calloc((uint64_t)entries + 1, sizeof(EmissionSourceEvent));
+            EmissionSourceRow* resolved = calloc((uint64_t)entries + 1, sizeof(EmissionSourceRow));
+            if (events != 0 && resolved != 0)
+            {
+                const bool accepted = check_debug_rows_protocol(entry_records, tokens, entries, offsets, records, length, declaration, closing, vector_offsets,
+                                                                vector_tokens, vector, false, events, resolved);
+                check_debug_test_expect(tally, accepted, "the source metadata protocol accepts the raw rows", detail);
+                uint32_t* bad_offsets = records >= 2 ? calloc((uint64_t)records + 1, sizeof(uint32_t)) : 0;
+                if (bad_offsets != 0)
+                {
+                    memcpy(bad_offsets, offsets, ((uint64_t)records + 1) * sizeof(uint32_t));
+                    bad_offsets[0] = 1;
+                    bad_offsets[1] = 0;
+                    const bool rejected = !check_debug_rows_protocol(entry_records, tokens, entries, bad_offsets, records, length, declaration, closing,
+                                                                     vector_offsets, vector_tokens, vector, false, events, resolved);
+                    check_debug_test_expect(tally, rejected, "the source metadata protocol rejects a malformed layout", detail);
+                    free(bad_offsets);
+                }
+            }
+            else
+            {
+                check_debug_test_expect(tally, false, "the source metadata protocol's test room", detail);
+            }
+            free(resolved);
+            free(events);
         }
         free(vector_tokens);
         free(vector_offsets);

@@ -3506,6 +3506,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_program_helpers.c"
 #include "c_check_program_asm.c"
 #include "c_check_program_lower.c"
+// The tier-neutral source/frame event protocol (#1056), whose source rows c_check_debug.c validates after sizing.
+#include "emission_metadata.c"
 #include "c_check_debug.c"
 #include "c_check_clock.c"
 #include "c_check_program_emit.c"
