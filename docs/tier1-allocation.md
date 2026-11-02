@@ -551,10 +551,35 @@ chain, or a block of a CFG (`Tier1EmitSaves`).
   register, the code keeps the owner its row was stored or kept for. A call
   stores a register only where its owner is now another value. A fixed
   registers' sequence, which stores those rows, forgets them. A CFG block whose
-  one predecessor comes before it in layout starts from that block's rows:
-  control enters from there alone, and a value a row holds can't be defined on
-  the way, since its block would then dominate the predecessor. Any other
-  block starts with none.
+  one predecessor comes before it in layout starts from that block's rows, and
+  any other block starts with none. A row stays its owner's while that SSA
+  value's bits don't change, and they change only where the value is defined
+  again, an iteration later. Two facts keep a carried row valid:
+  - A loop's header has two predecessors at least, its entry and its back edge,
+    so no row carries across a back edge.
+  - A block that carries in is entered from its one predecessor alone, in the
+    same pass, and can't define a value a row holds. That value is live in the
+    predecessor, so its definition dominates it; a definition in the block would
+    make the block dominate its own one predecessor, reachable only through
+    itself.
+
+`test-tier1-emit`'s call fixtures check this natively, against hostile helpers
+that poison every caller-saved register (`tier1_call_test.c`):
+
+- **A run of calls in one block**, where the second call stores none of the
+  values live past both, and **the carries**: the second call stores none of
+  them in a block whose one predecessor comes first, and stores again at a join
+  and past a later predecessor.
+- **Six values live past a call** take the six callee-saved registers, `rbp`
+  among them, and with a frame pointer leave `rbp` to the frame. In
+  `test-check-debug --cross-check`'s Tier 1 fixture, `six` is such a function,
+  with a branch and a join that keep it on the CFG consumer, since the
+  straight-line consumer takes no callee-saved register. Its FDE must save
+  `rbp` in a frame without a frame pointer, `backtrace()` walks through it to
+  `main`, and gdb steps every instruction of it.
+- **Every fixture's records**, and every caller of the pipeline test's, show
+  each call-save store loaded back before the code branches, returns or traps
+  (`tier1_emit_test_saves_loaded`).
 
 An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value

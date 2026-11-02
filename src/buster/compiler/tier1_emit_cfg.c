@@ -1503,9 +1503,15 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         const uint32_t first = b < added ? 0 : function->block_offsets[b - added];
         const uint32_t end = b < added ? 0 : function->block_offsets[b - added + 1];
         // The calls' saves in this block (Tier1EmitSaves, #1116). No load is owed at a block's start. The rows carry in
-        // from a block's one predecessor where it comes before it in layout: control enters from there alone, and no
-        // value whose bits a row holds is defined on the way, which would take its block dominating the predecessor.
-        // From elsewhere, nothing carries in.
+        // from a block's one predecessor where it comes before it in layout (its rows are known then), and from nowhere
+        // else. Rows are written only by calls and fixed registers' sequences, and a row stays its owner's as long as
+        // that SSA value's bits don't change: they change only where the value is defined again, an iteration later.
+        // - A loop's header has two predecessors at least, its entry and its back edge, so no row carries across a back
+        //   edge, where the value it holds may have been defined again since.
+        // - A block that carries in is entered from its one predecessor alone, in the same pass. It can't define a
+        //   value whose bits a row holds either: that value is live in the predecessor, so its definition dominates the
+        //   predecessor; in this block, the block would dominate its own one predecessor, reachable only through itself.
+        // Any other block starts with no rows.
         Tier1EmitSaves saves;
         tier1_emit_saves_reset(&saves);
         const uint32_t only = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] == 1 ? input->predecessors[input->predecessor_offsets[b]] : BUSTER_TIER1_CFG_NONE;

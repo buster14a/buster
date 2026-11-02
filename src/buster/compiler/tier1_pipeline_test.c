@@ -1268,8 +1268,9 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         if (emitted->reference_count != 0)
                         {
                             // A saved value's load waits until something reads it, and a row that holds its value isn't
-                            // stored again (#1116), so stores and loads needn't balance; a stored value is loaded back.
-                            tier1_pipeline_expect(test, !emitted->frame.red_zone && (emitted->call_stores == 0 || emitted->call_loads != 0), "callers use a real frame and load back the values they save");
+                            // stored again (#1116), so the totals needn't balance; each store is loaded back, which the
+                            // records show store by store.
+                            tier1_pipeline_expect(test, !emitted->frame.red_zone && tier1_emit_test_saves_loaded(emitted), "callers use a real frame and load back each value they save");
                         }
                         if (shape == 1 || (shape == 2 && !test->rematerialize))
                         {

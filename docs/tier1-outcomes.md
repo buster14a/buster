@@ -76,18 +76,23 @@ and lane-completion protocol remain the emission's existing ones.
 
 `--tier1-refusals` gives each permitted fallback's category, cause, original
 error/location, operation and disposition. Where selection refused a call, a
-last field, `call=`, lists the call's kinds (#1116):
+last field, `call=`, lists the call's kinds (#1116). Apart from `indirect` and
+`variadic`, which the selector takes, they are its shapes that the selector's
+call boundary doesn't take, by the selector's own predicates
+(`check_tier1_call_kinds`), so the report follows the boundary as it grows:
 
-- `indirect` and `variadic`, which the selector takes;
-- `abi-record` (a by-value aggregate's ABI record) and `stack-arguments` (past
-  six);
+- `indirect` and `variadic`;
+- `abi-record`, a by-value aggregate's ABI record;
+- `stack-arguments`: arguments past the boundary's six
+  (`BUSTER_TIER1_SELECT_CALL_ARGUMENTS`), not every argument the ABI would pass
+  on the stack;
 - `floating-`, `long-double-`, `narrow-` and `other-argument`;
 - `floating-`, `long-double-` and `other-result`;
-- `argument-count` (arguments that don't match the parameters).
+- `argument-count`: arguments that don't match the parameters.
 
-`--tier1-report` counts the refused calls by kind as `selection.call.KIND`, a
-call under each kind it has. So a corpus's `selection.call` total says which
-shape to take first. Multi-unit refusals use each unit's
+`--tier1-report` counts the refused calls by kind as `selection.call.KIND`. A
+call counts under every kind it has, so the kinds' counts can sum past
+`selection.call`. They say which shape to take first. Multi-unit refusals use each unit's
 buffered diagnostic stream, so concurrent units cannot interleave them.
 Fatal failures go through the normal source diagnostic. Histogram bounds
 never truncate the complete per-body outcome or alias unknown errors modulo

@@ -1024,6 +1024,8 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // logical byte width, except canonical I1 zero-extension reads its 32-bit storage. A zero extension of a canonical
 // I1, I8 or I16 value selects COPY instead, with canonical width and the narrow source width retained; COPY of a narrow
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
+// A COPY's source_width is the plan's record of that certificate, which both paths' plans must agree on; the emitter
+// doesn't read it, since a copy in its own register is nothing at every width (#1116, tier1_select_expand).
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
 // code leaves out follows from what the chosen patterns read (tier1_select_plan). For TIER1_RULE_ADDRESS,
 // TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE, TIER1_RULE_STORE_ADDRESS and a
@@ -1278,6 +1280,25 @@ static void tier1_select_canonical(const IrFunction* function, const uint32_t* b
 
 // This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers, floating-point
 // and aggregates. The shared verifier checks descriptor bounds and actual argument types before this helper runs.
+// The types a call's argument and result may have, and whether its arguments match its parameters (all of them, or a
+// variadic call's named ones and more), in a call the selector takes (tier1_select_call_supported). The C driver's
+// refusal report names a refused call's kinds by them (check_tier1_call_kinds).
+static bool tier1_select_call_argument(uint32_t type)
+{
+    return type == IR_I32 || type == IR_I64 || type == IR_PTR;
+}
+
+// A narrow result is zero-extended after the call.
+static bool tier1_select_call_result(uint32_t type)
+{
+    return type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
+}
+
+static bool tier1_select_call_arity(const IrCall* call)
+{
+    return call->variadic ? call->parameter_count <= call->argument_count : call->parameter_count == call->argument_count;
+}
+
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
     // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
@@ -1285,16 +1306,11 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
     if (supported)
     {
         const IrCall call = function->calls[function->b[node]];
-        const uint32_t type = function->type[node];
         // A variadic call's unnamed arguments are promoted ones: its al says no vector register holds one (tier1_emit_call).
-        // A narrow result is zero-extended after the call.
-        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
-        supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS &&
-                    (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
+        supported = call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && tier1_select_call_arity(&call) && tier1_select_call_result(function->type[node]);
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
-            const uint32_t argument_type = function->call_types[call.type_first + argument];
-            supported = argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR;
+            supported = tier1_select_call_argument(function->call_types[call.type_first + argument]);
         }
     }
     return supported;
@@ -1728,10 +1744,10 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     {
         base.rule = TIER1_RULE_COPY;
         base.values[0] = a;
-        // A copy in its own register is nothing (tier1_select_expand). A narrow source carries its width where the
+        // A copy in its own register is nothing (tier1_select_expand). The plan records a narrow source's width where the
         // planner's canonical column certifies its 32-bit storage (tier1_select_canonical: an entry MOVZX for narrow
         // parameters, the result MOVZX for narrow calls, and the producers' own full-width writes), so the copy is as
-        // canonical as its source.
+        // canonical as its source; the emitter doesn't read it.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         base.source_width = narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0 ? narrow_width : 0;
         base.intrinsic_cost = 1;
@@ -1767,8 +1783,9 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         // A zero extension of a canonical I1, I8 or I16 value is a copy: the source register already holds the
         // destination value with zeros past its width (the planner's canonical column, tier1_select_canonical), and a
         // 32-bit move zeroes the whole 64-bit register. This keeps the second movzx of issue #981's speedtest1 loop out
-        // of the plan on both paths. The copy carries the narrow source width, and is nothing in its own register; an
-        // I32 source's zero extension always writes its move, since its upper half is unspecified (tier1_select_width).
+        // of the plan on both paths. The copy records the narrow source width (plan metadata the emitter doesn't read: a
+        // copy in its own register is nothing); an I32 source's zero extension always writes its move, since its upper
+        // half is unspecified (tier1_select_width).
         // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the comparison's own setcc/movzx;
         // this copy covers a comparison the fold leaves alone.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);

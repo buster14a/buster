@@ -108,7 +108,9 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
     return error == 0 ? success : check_tier1_failure(stage, cause, error, instruction, detail);
 }
 
-// The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116).
+// The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116): each shape of it
+// that the selector's call boundary doesn't take, by the selector's own predicates (tier1_select_call_supported's), so
+// that the report follows the boundary as it grows; and whether it is indirect or variadic, which the boundary takes.
 static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
 {
     const bool call = node < ir->instruction_count && (ir->op[node] == IR_CALL || ir->op[node] == IR_CALL_INDIRECT) && ir->b[node] < ir->call_count;
@@ -120,17 +122,16 @@ static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
         kinds |= (ir->op[node] == IR_CALL_INDIRECT ? 1u : 0) << CHECK_TIER1_CALL_INDIRECT;
         kinds |= (descriptor->variadic ? 1u : 0) << CHECK_TIER1_CALL_VARIADIC;
         kinds |= (descriptor->abi != 0 ? 1u : 0) << CHECK_TIER1_CALL_ABI_RECORD;
-        kinds |= (descriptor->argument_count > BUSTER_ABI_INTEGER_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
-        kinds |= (descriptor->variadic ? descriptor->parameter_count > descriptor->argument_count : descriptor->parameter_count != descriptor->argument_count) ? 1u << CHECK_TIER1_CALL_ARGUMENT_COUNT : 0;
+        kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_CALL_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
+        kinds |= (tier1_select_call_arity(descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ARGUMENT_COUNT;
         for (uint32_t argument = 0; argument < descriptor->argument_count && descriptor->type_first + argument < ir->call_type_count; argument += 1)
         {
             const uint32_t type = ir->call_types[descriptor->type_first + argument];
-            kinds |= type == IR_F32 || type == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT : type == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT :
-                     type == IR_I1 || type == IR_I8 || type == IR_I16 ? 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT :
-                     type == IR_I32 || type == IR_I64 || type == IR_PTR ? 0 : 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT;
+            kinds |= tier1_select_call_argument(type) ? 0 : type == IR_F32 || type == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT : type == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT :
+                     type == IR_I1 || type == IR_I8 || type == IR_I16 ? 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT : 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT;
         }
-        kinds |= result == IR_F32 || result == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_RESULT : result == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT :
-                 result == IR_VOID || (result >= IR_I1 && result <= IR_I64) || result == IR_PTR ? 0 : 1u << CHECK_TIER1_CALL_OTHER_RESULT;
+        kinds |= tier1_select_call_result(result) ? 0 : result == IR_F32 || result == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_RESULT : result == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT :
+                 1u << CHECK_TIER1_CALL_OTHER_RESULT;
     }
     return kinds;
 }

@@ -370,6 +370,52 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     }
 }
 
+// Whether emitted record `r` is a general register's call-save store (load), exactly as tier1_emit_call_save makes it.
+static bool tier1_emit_test_call_save(const Tier1EmitResult* emitted, uint32_t r, bool load)
+{
+    const X86Instruction* record = &emitted->code.records[r];
+    const bool row = record->reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((emitted->prepared.call_save_mask >> record->reg) & 1) != 0;
+    const X86Instruction save = row ? tier1_emit_call_save(emitted, record->reg, load) : (X86Instruction){ .form = X86_FORM_NONE };
+    return row && record->form == save.form && record->rm == save.rm && record->mode == save.mode && record->displacement == save.displacement;
+}
+
+// The call-save stores among records [first, end).
+static uint32_t tier1_emit_test_save_stores(const Tier1EmitResult* emitted, uint32_t first, uint32_t end)
+{
+    uint32_t stores = 0;
+    for (uint32_t r = first; r < end && r < emitted->code.count; r += 1)
+    {
+        stores += tier1_emit_test_call_save(emitted, r, false);
+    }
+    return stores;
+}
+
+// Whether every call-save store is loaded back (#1116): a call owes its saved registers' loads until something needs
+// them, but each value it stores lives past it, so a load of that register from its row follows before the code leaves
+// the straight-line run it is in (a branch, a return, a trap or an indirect jump). A store whose load is lost is the
+// failure owing loads could introduce; this checks each store, not a total.
+static bool tier1_emit_test_saves_loaded(const Tier1EmitResult* emitted)
+{
+    uint32_t pending = 0;
+    bool loaded = true;
+    uint32_t branch = 0;
+    for (uint32_t r = 0; r < emitted->code.count; r += 1)
+    {
+        const X86Instruction* record = &emitted->code.records[r];
+        const uint16_t form = record->form & BUSTER_X86_FORM_NUMBER;
+        while (branch < emitted->code.branch_count && emitted->code.branches[branch] < r)
+        {
+            branch += 1;
+        }
+        const bool leaves = form == X86_FORM_RET || form == X86_FORM_UD2 || form == X86_FORM_JMP_RM64 || (branch < emitted->code.branch_count && emitted->code.branches[branch] == r);
+        loaded &= !leaves || pending == 0;
+        pending = leaves ? 0 : pending;
+        pending |= tier1_emit_test_call_save(emitted, r, false) ? 1u << record->reg : 0;
+        pending &= tier1_emit_test_call_save(emitted, r, true) ? ~(1u << record->reg) : ~0u;
+    }
+    return loaded && pending == 0;
+}
+
 #include "tier1_call_test.c"
 #include "tier1_narrow_test.c"
 #include "tier1_terminal_test.c"

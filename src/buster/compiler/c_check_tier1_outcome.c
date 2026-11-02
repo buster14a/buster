@@ -59,9 +59,11 @@ typedef enum CheckTier1Fallback
     CHECK_TIER1_FALLBACK_FORBIDDEN,
 } CheckTier1Fallback;
 
-// What a call selection refused has (#1116), as bits of CheckTier1Outcome.call_kinds: the shapes its arguments and result
-// take, against the selector's call boundary (tier1_select_call_supported), so that a corpus's refusals say which shape
-// to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell apart.
+// What a call selection refused has (#1116), as bits of CheckTier1Outcome.call_kinds: the shapes of its arguments and
+// result that the selector's call boundary doesn't take (tier1_select_call_supported's predicates), so that a corpus's
+// refusals say which shape to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell
+// apart. A call has every kind it has, so the kinds' counts can sum past the calls'. Stack arguments are the arguments
+// past the boundary's six (BUSTER_TIER1_SELECT_CALL_ARGUMENTS), not every argument the ABI would pass on the stack.
 typedef enum CheckTier1CallKind
 {
     CHECK_TIER1_CALL_INDIRECT,
