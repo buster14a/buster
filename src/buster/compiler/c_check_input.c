@@ -587,6 +587,11 @@ typedef enum CheckInputExpressionCode
     CHECK_INPUT_CODE_CONDITION,
     // A call's closing parenthesis: its callee's and its arguments' values.
     CHECK_INPUT_CODE_CALL,
+    // A string literal operand: a VALUE node of its string's object.
+    CHECK_INPUT_CODE_STRING,
+    // A return statement's keyword: its value converted to the function's return type (CONVERT), or a report of a missing
+    // one. goto, break and continue, of the same role, are the walk's.
+    CHECK_INPUT_CODE_RETURN,
     // In check_input_role_codes alone: an operand's role, whose class its kind gives.
     CHECK_INPUT_CODE_OPERAND,
 } CheckInputExpressionCode;
@@ -6568,7 +6573,12 @@ static uint8_t check_input_expression_code(const CheckInputReader* reader, uint3
     else if (role == PARSE_ROLE_OPERAND)
     {
         code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
-               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL : CHECK_INPUT_CODE_SCALAR;
+               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL :
+               kind == PARSE_KIND_STRING ? CHECK_INPUT_CODE_STRING : CHECK_INPUT_CODE_SCALAR;
+    }
+    else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_RETURN)
+    {
+        code = CHECK_INPUT_CODE_RETURN;
     }
     else if (role == PARSE_ROLE_PREFIX)
     {
@@ -6720,6 +6730,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
                                      _mm512_set1_epi8(CHECK_INPUT_CODE_IDENTIFIER));
         codes = _mm512_mask_mov_epi8(codes, operand & _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_LITERAL)),
                                      _mm512_set1_epi8(CHECK_INPUT_CODE_LITERAL));
+        codes = _mm512_mask_mov_epi8(codes, operand & _mm512_cmpeq_epi8_mask(kind, _mm512_set1_epi8(PARSE_KIND_STRING)), _mm512_set1_epi8(CHECK_INPUT_CODE_STRING));
+        codes = _mm512_mask_mov_epi8(codes, _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_RETURN)) & _mm512_cmpeq_epi8_mask(kind, _mm512_set1_epi8(PARSE_KIND_RETURN)),
+                                     _mm512_set1_epi8(CHECK_INPUT_CODE_RETURN));
         codes = _mm512_mask_mov_epi8(codes, other & ~refused, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
         codes = _mm512_mask_mov_epi8(codes, other & refused, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
         codes = _mm512_mask_mov_epi8(codes, skipped & ~list, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));

@@ -450,6 +450,58 @@ static bool check_input_expression_fixed(CheckInputReader* reader, uint32_t toke
     return acted;
 }
 
+// A string literal operand: a VALUE node of its string's object (check_input_string, which makes the object the first time
+// a string is met), or nothing where it has none; in a unit with overload tables, its token's head is its leaf's, none.
+static bool check_input_expression_string(CheckInputReader* reader, uint32_t token)
+{
+    const CheckInitString* string = check_input_string(reader, token);
+    if (string != 0)
+    {
+        const uint32_t node = check_input_add_node(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
+            *leaf = (CheckValue)
+            {
+                .type = string->type,
+                .category = CHECK_LVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = string->object,
+            };
+            if (reader->output->overload_heads != NULL)
+            {
+                reader->output->overload_heads[token] = leaf->overload_head;
+            }
+            check_input_expression_value(reader, token, node);
+        }
+    }
+    return true;
+}
+
+// A return statement: its one value converted to the function's return type (a CONVERT node, the token's node but no value
+// of an operand's), or without one a report where the function's type isn't void, but in a system header, as clang
+// warns (-Wreturn-mismatch). A return outside a function's body, or of more values, is the walk's.
+static bool check_input_expression_return(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+{
+    const TypeId type = reader->return_types[token];
+    const bool acted = type != 0 && values.count <= 1;
+    if (acted && values.count == 1)
+    {
+        reader->query_types[token] = type;
+        const uint32_t node = check_input_expression_operator(reader, CHECK_OP_CONVERT, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            reader->output->token_nodes[token] = node;
+        }
+    }
+    else if (acted && check_action_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && !check_graph_system_token(&reader->output->graph, token))
+    {
+        check_input_report(reader, token, CHECK_INPUT_RETURN);
+    }
+    return acted;
+}
+
 // A statement's terminator, or a for's closing parenthesis: each of its values discarded, a CAST to void, or a CONDITION
 // in a condition's context, which may hold one value at most. A unit with statement expressions, whose last statements'
 // values are their results and whose discards the regions chain, is the walk's.
@@ -608,6 +660,12 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
                 break;
             case CHECK_INPUT_CODE_CALL:
                 acted = check_input_expression_call(reader, token, values);
+                break;
+            case CHECK_INPUT_CODE_STRING:
+                acted = check_input_expression_string(reader, token);
+                break;
+            case CHECK_INPUT_CODE_RETURN:
+                acted = check_input_expression_return(reader, token, values);
                 break;
             case CHECK_INPUT_CODE_POSTFIX:
             {

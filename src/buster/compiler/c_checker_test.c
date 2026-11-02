@@ -2243,6 +2243,8 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
         [CHECK_INPUT_CODE_CONDITION] = "condition",
         [CHECK_INPUT_CODE_CALL] = "call",
+        [CHECK_INPUT_CODE_STRING] = "string",
+        [CHECK_INPUT_CODE_RETURN] = "return",
     };
     printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
     for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)

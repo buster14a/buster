@@ -121,8 +121,11 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     if (role == PARSE_ROLE_OPERAND)
     {
         code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
-               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL : CHECK_INPUT_CODE_SCALAR;
+               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL :
+               kind == PARSE_KIND_STRING ? CHECK_INPUT_CODE_STRING : CHECK_INPUT_CODE_SCALAR;
     }
+    // A return's keyword: goto, break and continue, of its role, are the walk's.
+    code = role == PARSE_ROLE_RETURN && kind == PARSE_KIND_RETURN ? CHECK_INPUT_CODE_RETURN : code;
     // The columns the reader wrote before the walk refine a class (#1038): a separator of a comma operator is a BINARY,
     // and an initializer's assignment, a builtin's token where the class's action would leave it to the walk, and an
     // intrinsic's call are the walk's.
@@ -302,7 +305,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     const uint8_t kind_values[] = { PARSE_KIND_L_SQUARE, PARSE_KIND_ASM, PARSE_KIND_SIZEOF, PARSE_KIND_PERIOD, PARSE_KIND_IDENTIFIER, PARSE_KIND_ATTRIBUTE,
                                     PARSE_KIND_CASE, PARSE_KIND_STATIC_ASSERT, PARSE_KIND_COMMA, PARSE_KIND_ALIGNAS, PARSE_KIND_CALLING_CONVENTION, PARSE_KIND_STRING,
                                     PARSE_KIND_L_SQUARE, PARSE_KIND_STRUCT, PARSE_KIND_ENUM, PARSE_KIND_TYPEOF, PARSE_KIND_EXTENSION, PARSE_KIND_IDENTIFIER,
-                                    PARSE_KIND_GOTO, PARSE_KIND_SWITCH, PARSE_KIND_NUMBER, PARSE_KIND_CHARACTER, PARSE_KIND_PLUS, PARSE_KIND_ARROW };
+                                    PARSE_KIND_GOTO, PARSE_KIND_SWITCH, PARSE_KIND_NUMBER, PARSE_KIND_CHARACTER, PARSE_KIND_PLUS, PARSE_KIND_ARROW,
+                                    PARSE_KIND_RETURN };
     // The names whose tokens the syntax bits mark, each as its bit.
     const uint32_t syntax_names[] = { C_NAME_BUILTIN_VA_ARG, C_NAME_BUILTIN_CONVERTVECTOR, C_NAME_BUILTIN_BIT_CAST, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR,
                                       C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_NORETURN, C_NAME_NONNULL, C_NAME_NULLABLE,
