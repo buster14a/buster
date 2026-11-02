@@ -1623,7 +1623,8 @@ static int run_assembler_tests(int count, char** arguments)
                                        "rep; bsr rax,rcx\nrep bsf ecx,dword ptr [rdi]\nlzcnt rcx,rax\n",
                                 directory, X86_ARCH_V3);
                 // The x87's stack registers (#147): st and st(i) in both syntaxes, every form of st(i) and GNU as's
-                // operands left out (fxch, fcom and fucom alone; fadd st(i); faddp alone and of st(i); fcomi st(i)),
+                // operands left out (fxch, fcom and fucom alone; fadd st(i); faddp alone and of st(i); fcomi st(i); AT&T's bare
+                // arithmetic mnemonics, its popping forms'),
                 // and AT&T's subtraction and division with st(i) the destination, which GNU as assembles as Intel's
                 // reversed forms, popping or not, st(0) among them.
                 asm_test_oracle(&test, ".text\nx87: fxch\nfxch %st(2)\nfadd %st(1),%st\nfadd %st,%st(1)\nfadd %st(3)\nfaddp\nfaddp %st,%st(2)\nfaddp %st(2)\n"
@@ -1634,6 +1635,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "fcomip %st(1),%st\nfucomi %st(1),%st\nfucomip %st(1),%st\nfcomi %st(2)\nfucomip %st(6)\nffree %st(3)\n"
                                        "fcmovb %st(1),%st\nfcmove %st(2),%st\nfcmovbe %st(3),%st\nfcmovu %st(4),%st\nfcmovnb %st(5),%st\nfcmovne %st(6),%st\n"
                                        "fcmovnbe %st(7),%st\nfcmovnu %st(1),%st\nfsub %st,%st\nfsubp %st,%st\nfdivr %st(0),%st(0)\nfadd %st,%st\n"
+                                       "fadd\nfmul\nfsub\nfsubr\nfdiv\nfdivr\n"
                                        ".intel_syntax noprefix\nfxch\nfxch st(3)\nfadd st,st(1)\nfadd st(1),st\nfadd st(2)\nfsub st(1),st\nfsub st,st(1)\n"
                                        "fsubp st(1),st\nfsubrp st(2),st\nfsubp\nfdivp st(1),st\nfdiv st(3),st\nfdivr st(1),st\nfld st(1)\nfstp st(1)\nfst st(0)\n"
                                        "fcomi st,st(1)\nfucomip st,st(2)\nfcmovb st,st(1)\nfcom st(2)\nfcom\nffree st(7)\nfsub st,st\nfsubp st,st\n"

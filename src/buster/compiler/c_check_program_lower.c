@@ -821,14 +821,15 @@ typedef enum CheckLowerTransportUse
     CHECK_LOWER_TRANSPORT_CONVERSION,
     CHECK_LOWER_TRANSPORT_CONSTANT,
     CHECK_LOWER_TRANSPORT_ELEMENT,
-    CHECK_LOWER_TRANSPORT_USES,
+    // The uses' count, the refusals' columns (check_lower_transport_refusal), no use of its own.
+    CHECK_LOWER_TRANSPORT_USE_COUNT,
 } CheckLowerTransportUse;
 
 // The refusal of `use` of a transport vector's values, named by its kind: AMX's tile, a vector of bool, one of 1 or 2
 // bytes, or one of more than 64 bytes.
 static const char* check_lower_transport_refusal(const TypeTable* types, TypeId type, CheckLowerTransportUse use)
 {
-    static const char* const refusals[4][CHECK_LOWER_TRANSPORT_USES] = {
+    static const char* const refusals[4][CHECK_LOWER_TRANSPORT_USE_COUNT] = {
         { "arithmetic on 1024-byte tile vectors", "conversions or splats of 1024-byte tile vectors", "constant expressions of 1024-byte tile vectors",
           "elements of 1024-byte tile vectors" },
         { "arithmetic on vectors of bool", "conversions or splats of vectors of bool", "constant expressions of vectors of bool", "elements of vectors of bool" },

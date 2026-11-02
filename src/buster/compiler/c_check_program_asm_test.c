@@ -90,8 +90,9 @@ static void check_test_program_asm_room(CheckTest* test)
 
 // Flag outputs (#147): every condition clang takes, after compares of values around each one's edges, into objects of
 // every size an integer store covers (bool, char, short, int, long, __int128, a float's bits and a struct of 4 bytes),
-// a `+` one, several beside register outputs and an x87 one, and one after a template of no instructions that keeps
-// the flags its own code left (a compare the statement's operands come after).
+// a `+` one, several beside register outputs and an x87 one, and one of a template of no instructions, whose condition
+// is of the flags the code before it left, which each compiler's differs in: the object must be written whatever it was
+// (0 or 1 of all of its 4 bytes, from 0x12345678), the helper's argument setup leaving the flags alone.
 static void check_test_program_asm_flags(CheckTest* test, const char* clang)
 {
     static const char* const conditions[] = { "a", "ae", "b", "be", "c", "e", "z", "g", "ge", "l", "le", "na", "nae", "nb",
@@ -125,7 +126,8 @@ static void check_test_program_asm_flags(CheckTest* test, const char* clang)
         "int tested(int n){int z=5;long q=9;int r;__asm__(\"movl %3, %1\\n\\taddl $1, %1\\n\\tcmpl $4, %3\" : \"+@ccg\"(z), \"=&r\"(r), \"=@ccle\"(q) : \"r\"(n));"
         "long double x=n<0?-n:n;int e;__asm__(\"fsqrt\\n\\tcmpl $2, %2\" : \"+t\"(x), \"=@cce\"(e) : \"r\"(n));"
         "int k;__asm__(\"xorl %1, %1\\n\\tsubl $1, %1\" : \"=@ccc\"(k), \"+r\"(r) : : \"cc\");"
-        "return z+r*3+(int)q*5+(int)(x*16)+e*7+k*11+r*13;}",
+        "int w=0x12345678;__asm__(\"\" : \"=@ccz\"(w));int u=0x12345678;__asm__(\"\" : \"=@ccnz\"(u));"
+        "return z+r*3+(int)q*5+(int)(x*16)+e*7+k*11+r*13+(w==0||w==1)*17+(u==0||u==1)*19+(w+u==1)*23;}",
         "asm-flag-mixed", clang);
 }
 

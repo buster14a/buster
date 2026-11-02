@@ -1747,7 +1747,8 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
 }
 
 // The x87's instructions on its stack registers as GNU as reads them (#147), on a request in Intel's operand order: the
-// operands it leaves out (fxch, fcom, fcomp, fucom and fucomp of st(1); fadd st(i) as fadd st(0), st(i); faddp alone as
+// operands it leaves out (fxch, fcom, fcomp, fucom and fucomp of st(1); AT&T's bare fadd as faddp, and the other five
+// arithmetic mnemonics as their popping forms; fadd st(i) as fadd st(0), st(i); faddp alone as
 // faddp st(1), st(0), and faddp st(i) as faddp st(i), st(0); fcomi st(i) as fcomi st(0), st(i)), and AT&T's subtraction
 // and division with st(i) the destination, which GNU as and clang assemble as Intel's reversed ones (`fsub %st, %st(1)`
 // is Intel's fsubr st(1), st(0), and `fsubp` Intel's fsubrp): the System V assembler's convention, which GNU as keeps.
@@ -1767,6 +1768,16 @@ static void asm_x87_operands(const AsmParser* parser, X86MatchRequest* request)
     const bool stack = request->count == 0 || (request->count <= 2 && request->operands[0].kind == X86_OPERAND_REGISTER && request->operands[0].class == BUSTER_X86_CLASS_ST &&
                                                (request->count == 1 || (request->operands[1].kind == X86_OPERAND_REGISTER && request->operands[1].class == BUSTER_X86_CLASS_ST)));
     bool popped = false;
+    // A bare arithmetic mnemonic in AT&T syntax is its popping form's (GNU as warns that it translates `fadd` to `faddp`,
+    // and Intel syntax refuses it, where clang's assembler takes it).
+    for (uint32_t i = 0; stack && !parser->options.intel && request->count == 0 && i < BUSTER_ARRAY_LENGTH(arithmetic); i += 1)
+    {
+        if (x86_match_name(request->mnemonic, arithmetic[i]))
+        {
+            request->mnemonic = (String8){ .pointer = (char*)popping[i], .length = strlen(popping[i]) };
+            break;
+        }
+    }
     for (uint32_t i = 0; stack && i < BUSTER_ARRAY_LENGTH(one); i += 1)
     {
         if (x86_match_name(request->mnemonic, one[i]) && request->count == 0)

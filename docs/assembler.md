@@ -143,7 +143,10 @@ The admitted families are:
   `fcompp/fucompp`, `fcomi/fcomip/fucomi/fucomip`, `ffree` and the eight
   `fcmovcc`, with the operands GNU as leaves out (`fxch`, `fcom` and `fucom`
   alone of st(1); `fadd %st(i)` of st(0) and st(i); `faddp` alone of st(1) and
-  st(0), `faddp %st(i)` of st(i); `fcomi %st(i)` of st(0) and st(i)). In AT&T
+  st(0), `faddp %st(i)` of st(i); `fcomi %st(i)` of st(0) and st(i); AT&T's
+  bare `fadd`, `fmul`, `fsub`, `fsubr`, `fdiv` and `fdivr` as their popping
+  forms, which GNU as warns it translates them to, and which Intel syntax
+  refuses, as GNU as does, though clang's assembler takes them). In AT&T
   syntax a subtraction or division whose destination is st(i) (`fsub
   %st, %st(1)`, `fsubp`, and every popping form) assembles as Intel's reversed
   one, as GNU as and clang assemble it (the System V assembler's convention:

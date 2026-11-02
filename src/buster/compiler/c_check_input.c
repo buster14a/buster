@@ -103,8 +103,10 @@ typedef enum CheckInputMessage
     // (#147, check_input_statement_attribute_kinds).
     CHECK_INPUT_STATEMENT_ATTRIBUTE,
     CHECK_INPUT_FALLTHROUGH_STATEMENT,
-    // A fallthrough null statement outside a switch, at the attribute's name.
+    // A fallthrough null statement outside a switch, at the attribute's name, and one in a switch whose next statement
+    // isn't a case or default label, at its first token (check_input_fallthrough_placed).
     CHECK_INPUT_FALLTHROUGH_SWITCH,
+    CHECK_INPUT_FALLTHROUGH_PLACEMENT,
     // __builtin_verbose_trap's arguments (#148), at the argument's first token: one that is no constant, and a string
     // with a `$` (check_input_verbose_trap_arguments).
     CHECK_INPUT_VERBOSE_TRAP_STRING,
@@ -180,6 +182,7 @@ static const char* const check_input_messages[] =
     "attribute cannot be applied to a statement",
     "'fallthrough' attribute only applies to empty statements",
     "fallthrough annotation is outside switch statement",
+    "fallthrough annotation does not directly precede switch label",
     "argument to __builtin_verbose_trap must be a pointer to a constant string",
     "argument to __builtin_verbose_trap must not contain $",
     "use of unknown builtin",

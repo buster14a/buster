@@ -147,9 +147,26 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
         const uint32_t close = parser->tree.parents[after + 1];
         after = close > after + 1 && close < count ? close + 1 : count;
     }
+    // A name clang refuses on a label is its error whatever the reading would make of the attributes (several of them,
+    // minsize and nomerge among them, this reads nowhere else): each list item's name, after its opener or a comma.
+    uint32_t refused = BUSTER_CHECK_NONE;
+    uint32_t items = BUSTER_CHECK_NONE;
+    for (uint32_t token = first; refused == BUSTER_CHECK_NONE && token < after; token += 1)
+    {
+        const uint8_t role = parser->tree.roles[token];
+        const bool item = token > first && (parser->tree.roles[token - 1] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ||
+                                            (parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA && parser->tree.depths[token - 1] == items));
+        items = role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ? parser->tree.depths[token] + 1 : items;
+        const bool named = item && parser->tokens.kinds[token] != PARSE_KIND_COMMA && role != PARSE_ROLE_CLOSE_ATTRIBUTE_LIST && parser->tokens.names[token] != 0;
+        refused = named && check_input_label_refusal(check_input_attribute_name(reader, parser->tokens.names[token])) != NULL ? token : BUSTER_CHECK_NONE;
+    }
+    if (refused != BUSTER_CHECK_NONE)
+    {
+        check_input_report(reader, refused, CHECK_INPUT_LABEL_ATTRIBUTE);
+    }
     uint32_t cursor = first;
     CheckInputAttributes* attributes = 0;
-    bool valid = after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
+    bool valid = refused == BUSTER_CHECK_NONE && after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
@@ -205,7 +222,7 @@ static bool check_input_statement_attribute_names(CheckInputReader* reader, uint
 
 // A statement's attributes, as clang's Sema takes them, after their reading (check_input_read_attributes) took each: a null
 // statement's fallthrough (`empty`), and a return's musttail (`returns`) are the statement's; GNU's noinline and
-// always_inline clang ignores on a statement (with a warning, which isn't modeled); musttail elsewhere, fallthrough on a
+// always_inline clang ignores on a statement (with a warning, which isn't modeled), and nomerge and suppress on any; musttail elsewhere, fallthrough on a
 // statement that isn't empty, and every other attribute are clang's errors, the first one's reported. The musttail's
 // first token, or BUSTER_CHECK_NONE, in `*musttail`. Whether they are valid.
 static bool check_input_statement_attribute_kinds(CheckInputReader* reader, CheckInputAttributes* attributes, bool empty, bool returns, uint32_t* musttail)
@@ -235,6 +252,12 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         }
         else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->standard && !attribute->keyword)
         {
+            attribute->ignored = true;
+        }
+        else if (kind == CHECK_ATTRIBUTE_NOMERGE || kind == CHECK_ATTRIBUTE_SUPPRESS)
+        {
+            // clang's nomerge keeps the statement's calls from merging, which -O0's code never does, and suppress is the
+            // static analyzer's (clang warns of a nomerge without a call, which isn't modeled).
             attribute->ignored = true;
         }
         else
@@ -632,6 +655,81 @@ static uint64_t check_input_label_capacity(const Parser* parser, uint32_t prefix
     return capacity;
 }
 
+// Whether token `token` is within statement `root`'s subtree: its parents lead to `root`, each later than the one
+// before (a statement's tokens' parents are within it).
+static bool check_input_fallthrough_within(const Parser* parser, uint32_t token, uint32_t root)
+{
+    uint32_t at = token;
+    while (at < root)
+    {
+        at = parser->tree.parents[at];
+    }
+    return at == root;
+}
+
+// Whether a fallthrough null statement (`token`, its `;`) directly precedes a switch label, as clang's analysis of the
+// function's CFG has it: the statement that runs after it, past null statements, out of compound statements, the
+// branches of an `if` and a switch's end (the switch's own next statement), but never a loop's body, which goes back to
+// its condition, is a case or default label (another switch's too). A plain label, any other statement or the
+// function's end is not. The walk goes up one statement at a time, its parents later tokens.
+static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t statement = token;
+    bool placed = false;
+    bool done = false;
+    while (!done)
+    {
+        const uint32_t parent = statement < count ? parser->tree.parents[statement] : count;
+        const uint8_t role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+        const uint8_t kind = parent < count ? parser->tokens.kinds[parent] : 0;
+        if (role == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            // The compound's next item: the first later token whose parent is the compound's brace, past null statements
+            // (a `;` with nothing under it).
+            uint32_t next = statement + 1;
+            bool found = false;
+            while (!found && next < parent)
+            {
+                const bool item = parser->tree.parents[next] == parent;
+                const bool empty = item && parser->tokens.kinds[next] == PARSE_KIND_SEMI && (next == 0 || !check_input_fallthrough_within(parser, next - 1, next));
+                found = item && !empty;
+                next += !found;
+            }
+            if (found)
+            {
+                placed = parser->tree.roles[next] == PARSE_ROLE_CLOSE_CASE;
+                done = true;
+            }
+            else
+            {
+                statement = parent;
+            }
+        }
+        else if (role == PARSE_ROLE_CLOSE_CONDITION)
+        {
+            // An if's branch goes on after the if, and a switch's body after the switch; a loop's body goes back.
+            const uint32_t keyword = reader->first_child[parent];
+            const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
+            done = keyword_kind != PARSE_KIND_IF && keyword_kind != PARSE_KIND_SWITCH;
+            statement = parent;
+        }
+        else if (role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_LABEL || kind == PARSE_KIND_ELSE)
+        {
+            // A labeled statement's, or an else branch's (whose parent is its if's condition), goes on after it.
+            statement = parent;
+        }
+        else
+        {
+            // A function's end, a loop's (do's) body, or a place no statement has: no label follows.
+            done = true;
+        }
+    }
+    return placed;
+}
+
+
 // before == NONE is the unchanged full-unit path. The diagnostic prefix collects all function-scoped label names
 // for forward references, but reports only sites before its completion and defers unfinished-function obligations.
 static __attribute__((always_inline)) void check_input_controls_mode(CheckInputReader* reader, uint32_t before)
@@ -860,6 +958,16 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 if (!enclosed)
                 {
                     check_input_report(reader, at, CHECK_INPUT_FALLTHROUGH_SWITCH);
+                }
+                else if (!reader->pp->options.suppress_warnings && !check_input_fallthrough_placed(reader, token))
+                {
+                    // clang's analysis of the function's CFG, which -w leaves out, reports it at the statement's first token.
+                    uint32_t first = token;
+                    while (first > 0 && check_input_fallthrough_within(parser, first - 1, token))
+                    {
+                        first -= 1;
+                    }
+                    check_input_report(reader, first, CHECK_INPUT_FALLTHROUGH_PLACEMENT);
                 }
             }
         }

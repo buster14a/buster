@@ -729,17 +729,26 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
 #define BUSTER_CHECK_EMIT_NOCOMMON 0x10u
 
 // The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
-// declaring tokens, which only a unit with a common attribute, or compiled with -fcommon, pays for.
-static void check_program_emit_commons(const CheckProgram* program, uint8_t* commons)
+// tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
+// scalar path, `scalar`, takes every token), which only a unit with a common attribute, or compiled with -fcommon, pays
+// for.
+static void check_program_emit_commons(const CheckProgram* program, uint8_t* commons, bool scalar)
 {
+    (void)scalar;
     const CheckInput* input = program->input;
-    for (uint32_t token = 0; token < input->token_count; token += 1)
+    for (uint32_t first = 0; first < input->token_count; first += 64)
     {
-        const bool declares = input->declarations[token] == token && (input->defined[token] || input->tentative[token]);
-        const uint32_t object = declares ? input->objects[token] : 0;
-        const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
-        const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
-        commons[symbol] |= symbol == 0 ? 0 : input->defined[token] ? BUSTER_CHECK_EMIT_COMMON_DEFINED : BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
+                                        check_input_scan_nonzero(input->static_objects, first, input->token_count);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const bool declares = input->declarations[token] == token && (input->defined[token] || input->tentative[token]);
+            const uint32_t object = declares ? input->objects[token] : 0;
+            const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+            commons[symbol] |= symbol == 0 ? 0 : input->defined[token] ? BUSTER_CHECK_EMIT_COMMON_DEFINED : BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
+        }
     }
 }
 
@@ -2147,7 +2156,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     common |= program->input->common_tentatives;
     if (valid && common)
     {
-        check_program_emit_commons(program, commons);
+        check_program_emit_commons(program, commons, BUSTER_SCALAR_PATH(scalar));
     }
     // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
     // retain attribute for the counting pass to look for.
