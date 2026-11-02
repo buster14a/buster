@@ -8,13 +8,21 @@ requirements. [Command index](README.md).
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Bounded direct scalar calls preserve live caller registers and
-  publish symbolic CALL references. Byte/word memory and integer conversions
+  records. Its vector path covers the integer core by bottom-up rewriting over
+  state tables `tier1_select_initialize` compiles from a grammar of the
+  candidates' patterns (`tier1_select_burs.c`, baked; labeled 16 nodes a depth
+  level), maximal munch its scalar twin and its fallback; `test-tier1-select`
+  checks the tables and the kernels' twins, which `test-tier1-pipeline` and
+  `benchmark-tier1-select-source` check on every function they plan. Bounded
+  direct scalar calls preserve live caller registers and publish symbolic CALL
+  references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
   self-loops. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
+  edge's stub. Long double, the 128-bit integers and the convention's rarer
+  aggregate shapes still refuse explicitly ([the Tier 1
+  guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
   stores, constants and bitcasts to and from integers of every width) and
   allocated in the opmask class by the CFG consumer, which moves and spills them

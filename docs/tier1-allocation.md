@@ -311,7 +311,17 @@ the location it gives the value.
 Liveness is `dataflow.c`'s solve over the values used outside their block, phi
 operands among them. A phi operand is a use on its edge: it joins its
 predecessor's use row unless that block defines it, and the predecessor's
-live-out row after the solve. Each value then gets an interval per block it is
+live-out row after the solve.
+
+A phi operand may be undefined (`BUSTER_TIER1_CFG_NONE`, #141): the IR's `undef`,
+which the CFG consumer passes as no value. Any value is the phi's along that edge,
+so the operand is no use, keeps nothing live, hints nothing, and the edge moves
+nothing for it; `tier1_cfg_verify` checks nothing of the phi's location on that
+edge. Without it, the one `undef` per local that promotion puts in the entry
+block was live from there to every join that read it: around a loop, everywhere.
+Promotion makes such operands where a block's lifetime start kills a local
+([the SSA guide](ssa.md)'s adapter), and Lua's `luaV_execute` had hundreds of
+them. Each value then gets an interval per block it is
 defined in or live into, from its definition or the block's start to its last
 use there, or to the block's end where it stays live. A value's blocks come
 block by block from the live-in rows, counted and then filled, so building the
@@ -458,6 +468,30 @@ of its class's registers, and a mask's register fragment moved to k0. A mask
 class with k0 among its registers must be refused by both paths. Over seeds 1
 to 20 and the default, every mutant fails the checker.
 
+### The vector class's floating values (#141)
+
+Tier 1's CFG consumer gives `F32` and `F64` values the second class, the vector
+registers: xmm0 to xmm14, with xmm15 the class's scratch for cycles and
+slot-to-slot moves (`BUSTER_TIER1_EMIT_VECTOR_REGISTERS`, or the
+`Tier1EmitOptions.vector_register_mask` of them, which the tests narrow to force
+spills). A value's slot is its width, which `movss` or `movsd` spills and reloads,
+and a move between two registers is a `movaps`, which copies the whole register
+rather than merging into its destination as the scalar moves do. The class's
+temporary slot holds a value at its width too. The System V convention preserves
+no xmm register, so a call saves each floating value live past it in its
+register's row before the call and reloads it after, by `movsd`, as it saves the
+masks (`Tier1EmitPrepared.vector_save_mask`: rows after the opmask registers'),
+rather than through fixed ranges. No floating value is rematerializable: a
+constant's recipe would need its bits in a general register first, which the
+recipes don't make.
+
+A floating parameter arrives in xmm0 to xmm7 by its place among the function's
+floating parameters (`tier1_select_parameter_place`), its definition bound to
+that register (`Tier1CfgInput.definition_registers`) as a general parameter's
+is to its own, and the entry's moves bring a free one where its allocation has
+it, one parallel move per class. A parameter past xmm7 is in the incoming area's
+next slot, which the entry loads with `movss` or `movsd`.
+
 ### On real code
 
 `tier1_cfg_ir.c` turns a promoted function of the shared IR into an allocation
@@ -582,10 +616,12 @@ change:
 - a constant;
 - a symbol's address, from rip, or from its GOT slot where the emission's
   access column reaches it so;
-- a frame object's address, a lea from rsp at the offset the frame's layout
-  gives the object, which `tier1_emit_cfg_frame` fills in after the layout:
-  selection refuses the dynamic stack, so nothing moves rsp between the
-  prologue and the epilogues;
+- a frame object's address, a lea from the frame's base at the offset the
+  frame's layout gives the object, which `tier1_emit_cfg_frame` fills in after
+  the layout: the base is rsp where nothing moves rsp between the prologue and
+  the epilogues, and rbp (or a realigned frame's r15) where the dynamic stack
+  moves it (#141: an `alloca`'s `sub rsp`, a call's outgoing area taken from rsp
+  around it), so the address never depends on where rsp is;
 - a copy of one of them: the C driver's typed streams carry pointers as 64-bit
   integers, so every address the front end keeps in a variable reaches its uses
   through a `ptrtoint` and an `inttoptr`, the selector's `TIER1_RULE_COPY`, with

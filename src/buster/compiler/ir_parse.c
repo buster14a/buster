@@ -674,6 +674,16 @@ static void ir_parse_instruction(IrParseState* state)
                 row.a = ir_parse_id(state, '$');
                 row.b = ir_parse_named(state, edges, 2);
             } break;
+            case IR_FENCE:
+            {
+                // Its order, and `signal` for a signal fence (#1059).
+                row.a = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                if (state->result.error == IR_PARSE_OK && !ir_parse_end_line(state))
+                {
+                    ir_parse_keyword(state, "signal");
+                    row.a |= BUSTER_IR_FENCE_SIGNAL;
+                }
+            } break;
             case IR_SYMBOL_ADDR:
             {
                 row.a = ir_parse_id(state, '@');

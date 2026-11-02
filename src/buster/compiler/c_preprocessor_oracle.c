@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The real-source Clang oracle for #125. main.c includes this after c_preprocessor_test.c, whose token/line and
 // scalar/vector comparisons it shares. pp_oracle_paths collects deterministic bounded input lists without recursion;
 // run_preprocessor_oracle runs one configuration, with one macro dump and explicit rejection/error accounting.
 // Process and directory control stay outside the compiler's vectorized preprocessing and comparison kernels.
 
+#include "buster/compiler/test_paths.h"
 #include <dirent.h>
 #include <fcntl.h>
 
@@ -330,8 +332,8 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
         }
     }
     char directory[BUSTER_PP_ORACLE_MAX_PATH] = { 0 };
-    const char* temporary = getenv("TMPDIR");
-    const int written = snprintf(directory, sizeof(directory), "%s/buster-pp-oracle-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    const int written = snprintf(directory, sizeof(directory), "%s/buster-pp-oracle-XXXXXX", temporary);
     const bool made_directory = ready && written > 0 && written < (int)sizeof(directory) && mkdtemp(directory) != 0;
     ready = ready && made_directory;
     PPOptions options;

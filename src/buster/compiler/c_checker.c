@@ -23,6 +23,8 @@
 // Source value evaluation without a new constraint report: initializer planning owns its diagnostics.
 #define BUSTER_CHECK_CONTEXT_VALUE 0x10u
 
+#include "c_check_sparse.c"
+
 typedef struct CheckVarargsCall CheckVarargsCall;
 struct CheckVarargsCall
 {

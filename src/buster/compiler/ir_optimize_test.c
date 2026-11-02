@@ -355,6 +355,9 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                 case IR_STACK_ADDR: value = (uint64_t)a * 64 + 1; break;
                 // A slot's lifetime marker reads and writes nothing (#177).
                 case IR_LIFETIME: break;
+                // A fence (#1059) is an effect in its place among the stores, volatile loads and calls, its order and
+                // scope with it: a pass that drops one, moves one across them or changes its order changes the trace.
+                case IR_FENCE: execution.effects = execution.effects * 65537 + 0xfe00 + a; break;
                 case IR_SYMBOL_ADDR: value = (uint64_t)a << 32; break;
                 case IR_ADDRESS: value = values[a] + (b == BUSTER_IR_NONE ? 0 : values[b] * f->addresses[f->c[i]].scale) + f->addresses[f->c[i]].offset; break;
                 case IR_LOAD:

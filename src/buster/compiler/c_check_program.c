@@ -457,7 +457,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const CheckInputAttribute* attribute = &attributes->records[i];
         const CheckInputAttributeKind kind = attribute->kind;
         const uint32_t bit = kind == CHECK_ATTRIBUTE_NAKED ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED :
-                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
+                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                                 kind == CHECK_ATTRIBUTE_CPU_DISPATCH ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
                              kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN || kind == CHECK_ATTRIBUTE_NORETURN ?
                                  BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
                              kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS :
@@ -767,7 +768,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
     }
     if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_CASE)
     {
-        const uint32_t owner = input->control_owners[token];
+        const uint32_t owner = check_sparse_get(input->control_owners, token);
         const uint32_t node = input->token_nodes[token];
         const uint32_t condition = owner < tokens ? input->token_nodes[owner] : BUSTER_CHECK_NONE;
         uint32_t width = 0;
@@ -787,9 +788,9 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
                 .owner = owner,
                 .target = BUSTER_CHECK_NONE,
                 .fallback = node == BUSTER_CHECK_NONE,
-                .range = input->case_ranges[token] != BUSTER_CHECK_NONE,
+                .range = check_sparse_get(input->case_ranges, token) != BUSTER_CHECK_NONE,
             };
-            const uint32_t high = input->case_ranges[token] != BUSTER_CHECK_NONE ? input->case_ranges[token] : node;
+            const uint32_t high = check_sparse_get(input->case_ranges, token) != BUSTER_CHECK_NONE ? check_sparse_get(input->case_ranges, token) : node;
             if (!item->fallback && (!check_program_case_value(program, node, item->type, &item->lower) ||
                                    !check_program_case_value(program, high, item->type, &item->upper)))
             {
@@ -1109,7 +1110,7 @@ static bool check_control_named(const CheckControlWriter* writer, uint32_t jump)
     const CheckInput* input = writer->program->input;
     const TypeTable* types = writer->program->types;
     const uint32_t count = parser->tokens.count;
-    const uint32_t function = input->body_declarations[writer->opening];
+    const uint32_t function = check_sparse_get(input->body_declarations, writer->opening);
     const TypeId type = function < count ? type_strip_aligned(types, input->declared_types[function]) : 0;
     const TypeId result = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_FUNCTION ? type_unqualified(type_strip_aligned(types, type_return(types, type))) : 0;
     const uint8_t result_kind = result != 0 ? type_kind(types, result) : BUSTER_TYPE_KIND_NONE;
@@ -1178,14 +1179,14 @@ static void check_control_extent(const CheckControlWriter* writer, uint32_t arm,
 static bool check_control_enterable(const CheckControlWriter* writer, uint32_t arm)
 {
     const uint8_t* roles = writer->parser->tree.roles;
-    const uint32_t* owners = writer->program->input->control_owners;
+    const CheckSparseColumn owners = writer->program->input->control_owners;
     uint32_t low = 0;
     uint32_t high = 0;
     check_control_extent(writer, arm, &low, &high);
     bool enterable = false;
     for (uint32_t token = low; arm != BUSTER_CHECK_NONE && !enterable && token <= high; token += 1)
     {
-        enterable = roles[token] == PARSE_ROLE_LABEL || (roles[token] == PARSE_ROLE_CLOSE_CASE && (owners[token] < low || owners[token] > high));
+        enterable = roles[token] == PARSE_ROLE_LABEL || (roles[token] == PARSE_ROLE_CLOSE_CASE && (check_sparse_get(owners, token) < low || check_sparse_get(owners, token) > high));
     }
     return enterable;
 }
@@ -1491,7 +1492,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             }
             else if (kind == PARSE_KIND_GOTO)
             {
-                const uint32_t target = input->label_targets[jump];
+                const uint32_t target = check_sparse_get(input->label_targets, jump);
                 if (target > writer->opening && target < writer->closing && writer->source_labels[target] != BUSTER_CHECK_NONE)
                 {
                     check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, writer->source_labels[target]);
@@ -1682,8 +1683,8 @@ static void check_control_drain(CheckControlWriter* writer)
             uint32_t a = writer->variable ? writer->allocation_first[task.token] : BUSTER_CHECK_NONE;
             // A variably modified typeof's operand (check_input_expressions' evaluation_nodes) is a side effect of the
             // declaration, after its type's variable bounds and before its initializers.
-            const uint32_t evaluation = writer->program->input->evaluation_nodes != NULL ?
-                                        writer->program->input->evaluation_nodes[task.token] : BUSTER_CHECK_NONE;
+            const uint32_t evaluation = check_sparse_present(writer->program->input->evaluation_nodes) ?
+                                        check_sparse_get(writer->program->input->evaluation_nodes, task.token) : BUSTER_CHECK_NONE;
             bool evaluated = false;
             while ((i != BUSTER_CHECK_NONE || v != BUSTER_CHECK_NONE || a != BUSTER_CHECK_NONE) && writer->program->status == CHECK_PROGRAM_OK)
             {
@@ -2260,7 +2261,7 @@ static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t
                 {
                     labeled = parser->tree.roles[t] == PARSE_ROLE_LABEL ||
                               (parser->tree.roles[t] == PARSE_ROLE_CLOSE_CASE &&
-                               (input->control_owners[t] < item->opening || input->control_owners[t] > item->closing));
+                               (check_sparse_get(input->control_owners, t) < item->opening || check_sparse_get(input->control_owners, t) > item->closing));
                 }
             }
         }
@@ -2483,7 +2484,7 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
                             _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX));
         while (selected != 0)
         {
-            const uint32_t target = input->label_targets[token + (uint32_t)__builtin_ctzll(selected)];
+            const uint32_t target = check_sparse_get(input->label_targets, token + (uint32_t)__builtin_ctzll(selected));
             if (target < count)
             {
                 addressed[target] = 1;
@@ -2493,9 +2494,9 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
     }
     for (; token < count; token += 1)
     {
-        if (parser->tokens.kinds[token] == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX && input->label_targets[token] < count)
+        if (parser->tokens.kinds[token] == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX && check_sparse_get(input->label_targets, token) < count)
         {
-            addressed[input->label_targets[token]] = 1;
+            addressed[check_sparse_get(input->label_targets, token)] = 1;
         }
     }
 }
@@ -2519,7 +2520,7 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t node_co
     uint32_t token = 0;
     for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
     {
-        __mmask16 opened = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(input->body_declarations + token), none);
+        __mmask16 opened = _mm512_cmpneq_epi32_mask(check_sparse_vector(input->body_declarations, token), none);
         if (input->deferred_tokens != 0)
         {
             opened &= _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->deferred_tokens + token)), _mm_setzero_si128());
@@ -2528,24 +2529,24 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t node_co
         {
             openings[bodies++] = token + (uint32_t)__builtin_ctz(lanes);
         }
-        const __mmask16 initializing = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_nodes + token), nodes);
+        const __mmask16 initializing = _mm512_cmplt_epu32_mask(check_sparse_vector(input->initializer_nodes, token), nodes);
         for (uint32_t lanes = initializing; lanes != 0; lanes &= lanes - 1)
         {
             const uint32_t at = token + (uint32_t)__builtin_ctz(lanes);
-            initializers[input->initializer_nodes[at]] = at;
-            check_program_bit_set(initialized, input->initializer_nodes[at]);
+            initializers[check_sparse_get(input->initializer_nodes, at)] = at;
+            check_program_bit_set(initialized, check_sparse_get(input->initializer_nodes, at));
         }
     }
     for (; token < count; token += 1)
     {
-        if (input->body_declarations[token] != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0))
+        if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0))
         {
             openings[bodies++] = token;
         }
-        if (input->initializer_nodes[token] < node_count)
+        if (check_sparse_get(input->initializer_nodes, token) < node_count)
         {
-            initializers[input->initializer_nodes[token]] = token;
-            check_program_bit_set(initialized, input->initializer_nodes[token]);
+            initializers[check_sparse_get(input->initializer_nodes, token)] = token;
+            check_program_bit_set(initialized, check_sparse_get(input->initializer_nodes, token));
         }
     }
     return bodies;
@@ -2579,7 +2580,7 @@ static void check_program_allocation(CheckProgram* program, const Parser* parser
 // Whether `token` declares a body's object (not a static one) whose type has a runtime size: a variable-length array's.
 static bool check_program_runtime_object(const CheckInput* input, const TypeTable* types, uint32_t token)
 {
-    return input->declarations[token] == token && input->declaration_bodies[token] < input->token_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+    return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
            !input->static_objects[token] && check_action_runtime_size(types, input->declared_types[token]);
 }
 
@@ -2596,7 +2597,7 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
     {
         const uint32_t declaration = initializers->declaration_tokens[i];
         const bool compound = declaration < count && input->compound_objects[declaration];
-        uint32_t token = declaration < count && input->initializer_begins[declaration] != 0 ? input->initializer_begins[declaration] - 1 : BUSTER_CHECK_NONE;
+        uint32_t token = declaration < count && check_sparse_get(input->initializer_begins, declaration) != 0 ? check_sparse_get(input->initializer_begins, declaration) - 1 : BUSTER_CHECK_NONE;
         uint32_t steps = 0;
         while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
         {
@@ -2645,7 +2646,7 @@ static void check_program_allocations(CheckProgram* program, const Parser* parse
         const uint32_t base = token - BUSTER_CHECK_PROGRAM_LANES;
         const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)base), lanes);
         const __mmask16 objects = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + base), tokens) &
-                                  _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->declaration_bodies + base), _mm512_set1_epi32((int)count)) &
+                                  _mm512_cmplt_epu32_mask(check_sparse_vector(input->declaration_bodies, base), _mm512_set1_epi32((int)count)) &
                                   _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->declaration_kinds + base)), _mm_set1_epi8((char)C_BINDING_OBJECT)) &
                                   _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + base)), _mm_setzero_si128());
         for (uint32_t bits = objects; bits != 0;)
@@ -2754,7 +2755,7 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
             check_program_event_push(events, &events->callee_keys, &events->callee_count, &events->callee_capacity, object, token);
         }
         // An alias's, ifunc's or weakref's: clang's code generation takes them at file scope alone (EmitGlobal).
-        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
             check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
         }
@@ -2900,7 +2901,8 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
                 const int32_t attribute_cpu = readable ? last_cpu : -1;
-                versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && !attribute->ignored;
+                versions |= (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                             attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && !attribute->ignored;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
                 {
                     applied = attribute;
@@ -3345,7 +3347,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {
         const uint32_t token = openings[b];
-        const uint32_t declaration = input->body_declarations[token];
+        const uint32_t declaration = check_sparse_get(input->body_declarations, token);
         const uint32_t start = writer.count;
         const uint32_t label_first = writer.label_position_count;
         check_control_build(&writer, token);

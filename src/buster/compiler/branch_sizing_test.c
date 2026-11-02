@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The branch sizing tests, for the test-branch-sizing command:
 //
@@ -55,6 +56,7 @@
 // Layout, in this order: the tally, the functions and their outcomes (branch_sizing_test_size), the reference and the
 // properties, the checks, GNU as, and run_branch_sizing_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1406,7 +1408,7 @@ static int run_branch_sizing_tests(int argc, char** argv)
     {
         // The random instructions and the printer are 64-bit mode's.
         x86_test_mode = X86_ENCODER_MODE_64;
-        const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+        const char* parent = oracle_temporary_directory();
         bool passed = branch_sizing_test_forms(&arena);
         passed = branch_sizing_test_errors(&arena, seed) && passed;
         passed = branch_sizing_test_boundaries(&arena, seed) && passed;

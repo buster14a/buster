@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The foreign inputs' tests (foreign.c), for the test-foreign command:
 //
@@ -34,6 +35,7 @@
 // The inputs go in a new directory under --directory ($TMPDIR, or /tmp), removed at the end unless --keep. The exit
 // status is 1 if the arguments are invalid or a check fails.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -2882,7 +2884,7 @@ static int run_foreign_tests(int argc, char** argv)
     uint32_t functions = 2000;
     bool cross_check = false;
     bool keep = false;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
     {

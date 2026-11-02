@@ -43,7 +43,7 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
 static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
 {
     return reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count &&
-           token < reader->output->initializer_ends[declaration] ? reader->incomplete_array_types[declaration] : 0;
+           token < check_sparse_get(reader->output->initializer_ends, declaration) ? reader->incomplete_array_types[declaration] : 0;
 }
 
 // `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is

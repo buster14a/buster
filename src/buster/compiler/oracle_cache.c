@@ -65,8 +65,9 @@
 // run, which check mode verifies, and a run whose result depends on one fails there, its entry stale.
 //
 // A test makes its files in directories of mkdtemp's under $TMPDIR (or /tmp), whose names differ from one run to the
-// next. A root is such a name in a run's strings: $TMPDIR/NAME, NAME a run of letters, digits, '.', '_' and '-' whose
-// last 6 characters, or the 6 before its last '.', are letters and digits, as mkdtemp's and mkstemps's random ones are.
+// next. A root is such a name in a run's strings: the temporary directory, normalized by oracle_temporary_directory (any
+// number of slashes after it, or the base '/'), then NAME, a run of letters, digits, '.', '_' and '-' whose last 6
+// characters, or the 6 before its last '.', are letters and digits, as mkdtemp's and mkstemps's random ones are.
 // In a key, each root's 6 characters are a placeholder for its place among the run's roots, by first appearance. An
 // entry holds the roots it was made with, and when it is taken each is replaced, in the result and in the names of the
 // files it lists, by the run's root of the same place, which is as long. So a result that names the run's files names
@@ -110,6 +111,8 @@
 #include <sys/vfs.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
+
+#include "buster/compiler/test_paths.h"
 
 extern char** environ;
 
@@ -435,8 +438,8 @@ struct OracleRoot
     uint32_t random;
 };
 
-// A run's roots, by first appearance, and the temporary directory they are in ($TMPDIR, or /tmp, without trailing
-// slashes; none if that is /).
+// A run's roots, by first appearance, and the temporary directory they are in ($TMPDIR, or /tmp, normalized by
+// oracle_temporary_directory; none if that is too long).
 typedef struct OracleRoots OracleRoots;
 struct OracleRoots
 {
@@ -467,28 +470,67 @@ static bool oracle_random_characters(const char* text)
 
 static void oracle_roots_begin(OracleRoots* roots)
 {
-    const char* base = getenv("TMPDIR");
-    base = base != 0 && base[0] != 0 ? base : "/tmp";
-    size_t length = strlen(base);
-    while (length > 1 && base[length - 1] == '/')
-    {
-        length -= 1;
-    }
+    const char* base = oracle_temporary_directory();
+    const size_t length = strlen(base);
     roots->count = 0;
     roots->overflow = false;
-    roots->base_length = length < sizeof(roots->base) && !(length == 1 && base[0] == '/') ? (uint32_t)length : 0;
+    roots->base_length = length < sizeof(roots->base) ? (uint32_t)length : 0;
     memcpy(roots->base, base, roots->base_length);
     roots->base[roots->base_length] = 0;
 }
 
-// The root that starts at text[at], if one does: its length (0 if none) and where its random characters start.
+// Whether the slash at text[at] begins a path for a base of "/": the start of the string, after a separator, or after an
+// option's letters (`-I/buster-XXXXXX`) with no slash before it in the token. A nested path's slash (`/b/x-XXXXXX`, or
+// the `/include` after a directory) doesn't.
+static bool oracle_root_directory_at(const char* text, size_t at)
+{
+    if (at == 0)
+    {
+        return true;
+    }
+    const uint8_t previous = (uint8_t)text[at - 1];
+    if (previous == '/')
+    {
+        return false;
+    }
+    if (!oracle_name_character(previous))
+    {
+        return true;
+    }
+    size_t begin = at;
+    while (begin > 0)
+    {
+        const uint8_t c = (uint8_t)text[begin - 1];
+        if (c == '/')
+        {
+            return false;
+        }
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '='))
+        {
+            break;
+        }
+        begin -= 1;
+    }
+    return begin < at && text[begin] == '-';
+}
+
+// The root that starts at text[at], if one does: its length (0 if none) and where its random characters start. A root
+// may follow its base with any number of slashes (a test's `$TMPDIR/` template gives `/tmp//name`), and a base of "/"
+// is a root's own first slash, so a path's first slash or an option's may start one (as `-I/buster-XXXXXX` does); a
+// nested path's slash doesn't.
 static uint32_t oracle_root_at(const OracleRoots* roots, const char* text, size_t length, size_t at, uint32_t* random)
 {
     uint32_t result = 0;
     const size_t base = roots->base_length;
-    if (base != 0 && length - at > base + 1 && memcmp(text + at, roots->base, base) == 0 && text[at + base] == '/')
+    const bool root_directory = base == 1 && roots->base[0] == '/';
+    const bool follows = root_directory ? oracle_root_directory_at(text, at) : base != 0 && length - at > base && text[at + base] == '/';
+    if (base != 0 && length - at > base && memcmp(text + at, roots->base, base) == 0 && follows)
     {
-        const size_t start = at + base + 1;
+        size_t start = at + base + (root_directory ? 0 : 1);
+        while (start < length && text[start] == '/')
+        {
+            start += 1;
+        }
         size_t end = start;
         while (end < length && oracle_name_character((uint8_t)text[end]))
         {
@@ -520,14 +562,27 @@ static void oracle_roots_find(OracleRoots* roots, const char* text)
     {
         uint32_t random = 0;
         const uint32_t root = oracle_root_at(roots, text, length, at, &random);
+        // With the base '/', `$TMPDIR/NAME` spells `//NAME`: keep one leading slash and match the rest as the root, so
+        // that a probe path the tool resolved as `/NAME/...` and this argument name the same root.
+        const char* name = text + at;
+        uint32_t root_length = root;
+        if (root != 0 && roots->base_length == 1 && roots->base[0] == '/')
+        {
+            while (root_length > 1 && name[0] == '/' && name[1] == '/')
+            {
+                name += 1;
+                root_length -= 1;
+                random -= 1;
+            }
+        }
         bool known = root == 0;
         for (uint32_t r = 0; r < roots->count && !known; r += 1)
         {
-            known = roots->roots[r].length == root && memcmp(roots->roots[r].name, text + at, root) == 0;
+            known = roots->roots[r].length == root_length && memcmp(roots->roots[r].name, name, root_length) == 0;
         }
         if (!known && roots->count < BUSTER_ORACLE_ROOTS)
         {
-            roots->roots[roots->count] = (OracleRoot){ .name = text + at, .length = root, .random = random };
+            roots->roots[roots->count] = (OracleRoot){ .name = name, .length = root_length, .random = random };
             roots->count += 1;
         }
         else

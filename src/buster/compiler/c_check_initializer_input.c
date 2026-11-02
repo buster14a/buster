@@ -43,7 +43,7 @@ static uint32_t check_initializers_plan_index(const CheckInitializers* initializ
 static bool check_init_object_candidate(const CheckInput* input, const TypeTable* types, uint32_t token)
 {
     const bool initialized = input->objects != NULL && input->objects[token] != 0 &&
-                             input->initializer_begins[token] < input->initializer_ends[token] && type_is_valid(types, input->declared_types[token]);
+                             check_sparse_get(input->initializer_begins, token) < check_sparse_get(input->initializer_ends, token) && type_is_valid(types, input->declared_types[token]);
     const TypeId type = initialized ? type_strip_aligned(types, input->declared_types[token]) : 0;
     return initialized && check_vector_type(types, type) &&
            (type_qualifiers(type) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_TYPE_CONST;
@@ -58,12 +58,12 @@ static uint32_t check_init_declarations(const CheckInput* input, uint32_t end, u
     for (uint32_t first = 0; first < end; first += 16)
     {
         const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, end) & 0xffff :
-                                        check_input_scan_below(input->initializer_begins, first, end, BUSTER_CHECK_NONE);
+                                        check_sparse_below(input->initializer_begins, first, end, BUSTER_CHECK_NONE);
         for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             declarations[count] = token;
-            count += input->initializer_begins[token] != BUSTER_CHECK_NONE;
+            count += check_sparse_get(input->initializer_begins, token) != BUSTER_CHECK_NONE;
         }
     }
     return count;
@@ -79,7 +79,7 @@ static bool check_init_objects_open(CheckInitObjects* objects, const CheckInput*
     for (uint32_t d = 0; d < declaration_count; d += 1)
     {
         const uint32_t token = declarations[d];
-        count += check_init_object_candidate(input, types, token) && input->initializer_ends[token] <= cutoff;
+        count += check_init_object_candidate(input, types, token) && check_sparse_get(input->initializer_ends, token) <= cutoff;
     }
     uint64_t capacity = count != 0 ? 1 : 0;
     while (capacity < (uint64_t)count * 2)
@@ -170,7 +170,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
             const uint64_t output_mark = output->length;
             CheckInitializer constant = { 0 };
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
-                                       input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
+                                       input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
                                        true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects);
             valid = accepted || constant.status != CHECK_INIT_RESOURCE;
             known = accepted && check_init_object_bytes(types, &constant, bytes, size);
@@ -180,7 +180,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
         {
             objects->entries[slot] = (CheckInitObject){
                 .object = input->objects[token],
-                .end = input->initializer_ends[token],
+                .end = check_sparse_get(input->initializer_ends, token),
                 .type = type_unqualified(type_strip_aligned(types, input->declared_types[token])),
                 .bytes = bytes,
             };
@@ -289,7 +289,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     {
         valid = input->token_count == parser->tokens.count && input->token_count < UINT32_MAX && stream->count == input->graph.count &&
                 stream->status == CHECK_STATUS_OK && !input->resource && (input->report_count == 0 || input->diagnostic_graph) &&
-                (input->token_count == 0 || (input->initializer_begins != 0 && input->initializer_ends != 0 && input->declared_types != 0 &&
+                (input->token_count == 0 || (check_sparse_present(input->initializer_begins) && check_sparse_present(input->initializer_ends) && input->declared_types != 0 &&
                  input->static_objects != 0 && input->token_nodes != 0)) && (input->report_count == 0 || input->reports != 0) &&
                 (stream->report_count == 0 || stream->reports != 0) && (stream->count == 0 ||
                  (check_stream_has_values(stream) && stream->diagnostics != 0 && input->graph.ops != 0 && input->graph.tokens != 0 &&
@@ -368,8 +368,8 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     for (uint32_t d = 0; valid && d < declaration_count; d += 1)
     {
         const uint32_t declaration = declarations[d];
-        const uint32_t begin = input->initializer_begins[declaration];
-        const uint32_t end = input->initializer_ends[declaration];
+        const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
+        const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
         bool eligible = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
         for (uint32_t token = begin; eligible && token < end; token += 1)
         {
@@ -458,7 +458,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
     const uint32_t tokens = input->token_count;
     bool valid = output != scratch && tokens == parser->tokens.count && tokens < UINT32_MAX &&
                  stream->count == input->graph.count && (tokens == 0 ||
-                 (input->initializer_begins != 0 && input->initializer_ends != 0 && input->declared_types != 0 &&
+                 (check_sparse_present(input->initializer_begins) && check_sparse_present(input->initializer_ends) && input->declared_types != 0 &&
                   input->static_objects != 0 && input->token_nodes != 0));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
     if (valid && (input->resource || input->report_count != 0 || stream->status != CHECK_STATUS_OK || stream->report_count != 0))
@@ -478,8 +478,8 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
     for (uint32_t d = 0; valid && d < count; d += 1)
     {
         const uint32_t token = declarations[d];
-        const uint32_t begin = input->initializer_begins[token];
-        const uint32_t end = input->initializer_ends[token];
+        const uint32_t begin = check_sparse_get(input->initializer_begins, token);
+        const uint32_t end = check_sparse_get(input->initializer_ends, token);
         valid = begin < end && end <= tokens && type_is_valid(types, input->declared_types[token]);
         if (!valid)
         {
@@ -529,14 +529,14 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         else
         {
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
-                                      input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
+                                      input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
                                       input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
         }
         if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
         {
             valid = false;
             plan->status = CHECK_INIT_RESOURCE;
-            plan->failed_token = input->initializer_begins[token];
+            plan->failed_token = check_sparse_get(input->initializer_begins, token);
         }
         if (valid)
         {
@@ -546,7 +546,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         {
             result->status = plan->status;
             result->token = plan->failed_token;
-            result->completion = input->initializer_ends[token];
+            result->completion = check_sparse_get(input->initializer_ends, token);
 
         }
     }

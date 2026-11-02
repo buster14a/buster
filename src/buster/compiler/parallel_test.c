@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The runner's tests, for the test-parallel command:
 //
@@ -52,6 +53,7 @@
 // Its files go in a new directory under $TMPDIR (or /tmp), removed unless a check fails. The exit status is 1 if a
 // check fails.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1281,8 +1283,8 @@ static int run_parallel_tests(int argc, char** argv)
     else
     {
         ParallelTest test = { .arena = arena_reserve(BUSTER_PARALLEL_ARENA_CAPACITY) };
-        const char* temporary = getenv("TMPDIR");
-        snprintf(test.directory, sizeof(test.directory), "%s/buster-test-parallel-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+        const char* temporary = oracle_temporary_directory();
+        snprintf(test.directory, sizeof(test.directory), "%s/buster-test-parallel-XXXXXX", temporary);
         printf("test-parallel:\n");
         if (mkdtemp(test.directory) == 0)
         {

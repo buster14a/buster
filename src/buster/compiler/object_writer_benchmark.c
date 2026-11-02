@@ -2,6 +2,7 @@
 // Original material Copyright (c) 2026 David Gonzalez Martin.
 // Counter/timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
 // Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
+
 //
 // The object writer's benchmark: what an object costs, from the link representation to its file, against what writing
 // the same bytes costs alone: the file-write floor (docs/object-writer-and-linker.md, "The floors").
@@ -33,6 +34,7 @@
 //
 // Layout, in this order: the clock and the hardware counters, the floors, and run_object_writer_benchmark.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -213,8 +215,8 @@ int run_object_writer_benchmark(int argc, char** argv)
     uint64_t filler = BUSTER_OBJECT_BENCHMARK_DEFAULT_FILLER;
     uint64_t seed = 1;
     bool function_sections = false;
-    const char* temporary = getenv("TMPDIR");
-    const char* directory = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
+    const char* temporary = oracle_temporary_directory();
+    const char* directory = temporary;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
     {
