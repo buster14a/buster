@@ -843,7 +843,9 @@ heads and at its merge with main, `cc3387f`:
   12.6. In user-space instructions, `--tier1` runs 4,413 M of speedtest1
   against Tier 0's 5,694 M and clang -O2's 2,010 M, and 8,749 M of Lua's
   scripts against 10,763 M and 4,281 M. Each program's hottest function
-  (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
+  (`sqlite3VdbeExec`, `luaV_execute`) was still Tier 0's then; with floating
+  values and blocks' lifetimes (#141) both are Tier 1's, as every function of
+  `sqlite3.c` but the two 128-bit multiplies is.
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
   the frozen `sqlite3.c`, since the bottom-up rewrite (medians of five processes
   of both paths interleaved, CPU 2): 225.0 by the vector path and 277.2 by the
@@ -857,7 +859,9 @@ heads and at its merge with main, `cc3387f`:
   `sqlite3.c` took 475.2 ms against 476.6 (`ab` of `time-runs`, 5 rounds of 21
   runs), 6,345.3 M instructions against 6,438.6 M, and its 2,666 functions'
   records are 346,741 against 346,753; speedtest1's and Lua's code by `--tier1`
-  ran alike (3,865.1 M instructions in speedtest1 by both).
+  ran alike (3,865.1 M instructions in speedtest1 by both)
+  ([record](https://github.com/buster14a/buster-performance/tree/e73dcc345d67ef236098d29757c7218d0aeb86e8/docs/measurements/tier1-burs-lifetimes-141-2026-11-02),
+  with commit 6's blocks' lifetimes and the review's measurements).
 - **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
   `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
   others fail in clang's own steps (links past the small code model, which
