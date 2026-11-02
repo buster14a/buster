@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Baseline measurement revision for #1058; this comment changes no code.
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The C driver's stage clock (#518): `--time-stages` reports where a compile's time went, stage by stage, on standard
