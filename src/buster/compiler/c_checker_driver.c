@@ -356,8 +356,9 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 const CheckWarningSeverity severity = check_diagnostic_severity(input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
+                    const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                                   severity >= CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                                                   severity >= CHECK_WARNING_ERROR ? (source_error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
                     pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s", check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS));
                     valid = !pp->diagnostic_collection_failed;
@@ -422,16 +423,18 @@ static void check_driver_visibility_report(const Parser* parser, Preprocessor* p
         if (record->warning == 2)
         {
             pp_diagnose_output_phase(pp, pp_severity, record->diagnostic_source, publication, phase, "unknown visibility '%.*s' [%s-Wignored-attributes]",
-                               (int)record->name.length, record->name.pointer, severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
+                               (int)record->name.length, record->name.pointer,
+                               check_driver_warning_error_prefix(!record->error && severity == CHECK_WARNING_ERROR));
         }
         else
         {
             char promoted[256];
             const char* message = record->message;
-            const char* option = !record->error && severity >= CHECK_WARNING_ERROR ? strstr(message, "[-W") : NULL;
+            const char* prefix = check_driver_warning_error_prefix(!record->error && severity == CHECK_WARNING_ERROR);
+            const char* option = prefix[0] != 0 ? strstr(message, "[-W") : NULL;
             if (option != NULL)
             {
-                snprintf(promoted, sizeof(promoted), "%.*s[-Werror,%s", (int)(option - message), message, option + 1);
+                snprintf(promoted, sizeof(promoted), "%.*s[%s%s", (int)(option - message), message, prefix, option + 1);
                 message = promoted;
             }
             if (record->diagnostic_location != 0)
@@ -485,7 +488,8 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                 pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN, "non-void function does not return a value%s [%s-Wreturn-type]",
-                                   body->return_warning == 2 ? " in all control paths" : "", severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
+                                   body->return_warning == 2 ? " in all control paths" : "",
+                                   check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
             }
         }
     }
@@ -557,8 +561,11 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                 {
                     *--text = '-';
                 }
+                // A source pragma's error is an ordinary error under -Wfatal-errors; a command-line or default error
+                // arrives already fatal from check_diagnostic_severity.
+                const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (event->default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
-                    severity == CHECK_WARNING_ERROR ? (event->default_error ?
+                    severity == CHECK_WARNING_ERROR ? (event->default_error && !source_error ?
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                 // Clang's warn_argument_invalid_range is an error by default, so its printer never adds `-Werror,`: the
                 // option alone, whether it is a warning, an error or a fatal error (#1079).
@@ -584,7 +591,8 @@ static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const
         }
         else
         {
-            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(warning));
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(warning),
+                               check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
 }
@@ -967,8 +975,9 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 else if (sequence >= offset)
                 {
                     const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
+                    const bool source_error = input->fatal_errors && severity == CHECK_WARNING_ERROR;
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (input->implicit_function_c99 ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
-                                                   severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
+                                                   severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
@@ -3247,14 +3256,17 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
 // still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
 // differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values
 // and their auxiliary options; only the exact inactive/default requests below are admitted. This does not yet audit
-// every -f/-m option. Negative options outside these families retain their existing handling.
+// every -f/-m option. Negative options outside these families retain their existing handling. -fsanitize-coverage=
+// isn't one of them: the predefines resolve its features as clang does, later -fno-sanitize-coverage= among them, and
+// the driver refuses what is left where it emits code (#1138's predefines.sanitize_coverage); only the bare spelling,
+// which clang doesn't take, is refused here by name.
 static bool check_driver_unsupported_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
         "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
         "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
-        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double", "-fsanitize-coverage",
     };
     static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
                                             "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
@@ -3262,7 +3274,6 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
                                             "-ftrivial-auto-var-init",
                                             "-ftrapv",
                                             "-fzero-call-used-regs",
-                                            "-fsanitize-coverage",
                                             "-fsplit-stack",
                                             "-mcmodel" };
     bool unsupported = false;
@@ -3281,7 +3292,6 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
     static const char* const inactive[] = {
         "-ftrivial-auto-var-init=uninitialized",
         "-fzero-call-used-regs=skip",
-        "-fsanitize-coverage=0",
         "-mcmodel=small",
     };
     for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
@@ -3364,6 +3374,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* unsupported_codegen = NULL;
     const char* unsupported_stack_protector = NULL;
     const char* unsupported_cf_protection = NULL;
+    // Object/linkage options have independent last-option states; their neutral forms retain today's output.
+    const char* unsupported_common = NULL;
+    // The last -fvisibility= or -fvisibility-ms-compat; clang's driver reads only the last of them.
+    const char* visibility_option = NULL;
+    const char* unsupported_visibility = NULL;
+    const char* unsupported_function_sections = NULL;
+    const char* unsupported_data_sections = NULL;
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per core of the CPUs the
     // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
     // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
@@ -3514,6 +3531,34 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             unsupported_cf_protection = strcmp(arguments[i], "-fcf-protection=none") == 0 ? NULL : arguments[i];
             filtered[filtered_count++] = arguments[i];
         }
+        else if (strcmp(arguments[i], "-fcommon") == 0 || strcmp(arguments[i], "-fno-common") == 0)
+        {
+            unsupported_common = strcmp(arguments[i], "-fcommon") == 0 ? arguments[i] : NULL;
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "-ffunction-sections") == 0 || strcmp(arguments[i], "-fno-function-sections") == 0)
+        {
+            unsupported_function_sections = strcmp(arguments[i], "-ffunction-sections") == 0 ? arguments[i] : NULL;
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "-fdata-sections") == 0 || strcmp(arguments[i], "-fno-data-sections") == 0)
+        {
+            unsupported_data_sections = strcmp(arguments[i], "-fdata-sections") == 0 ? arguments[i] : NULL;
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "-fvisibility-ms-compat") == 0 ||
+                 strncmp(arguments[i], "-fvisibility=", sizeof("-fvisibility=") - 1) == 0)
+        {
+            // The last of these decides the default, as clang's driver reads them; validate it after the loop.
+            visibility_option = arguments[i];
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "-fvisibility") == 0)
+        {
+            // Clang has no bare -fvisibility; keep the explicit named refusal.
+            unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : arguments[i];
+            filtered[filtered_count++] = arguments[i];
+        }
         else if (check_driver_unsupported_codegen_option(arguments[i]))
         {
             // Values of options above are already consumed, so an output name like -pg is never treated as a flag.
@@ -3632,12 +3677,29 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
     }
+    // -fvisibility= follows clang's driver: only the last -fvisibility= or -fvisibility-ms-compat counts. An earlier
+    // malformed value is ignored; a malformed last value is pp_parse_options' clang-compatible invalid-value diagnostic.
+    if (visibility_option != NULL)
+    {
+        const char* value = visibility_option + sizeof("-fvisibility") - 1;
+        const bool unsupported = strcmp(visibility_option, "-fvisibility-ms-compat") == 0 ||
+                                 strcmp(value, "=hidden") == 0 || strcmp(value, "=protected") == 0 || strcmp(value, "=internal") == 0;
+        unsupported_visibility = unsupported ? visibility_option : NULL;
+    }
     // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
     unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
     // Syntax-only takes precedence over -c, whichever came first.
     emit_object = emit_object && !syntax_only;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
+    if (emit_object || link)
+    {
+        // The C producer does not yet implement common definitions, a command-line visibility change, or per-definition sections.
+        // Reject before parsing/opening any input or output, in both tiers and for every unit of a multi-file command.
+        const char* unsupported_object = unsupported_common != NULL ? unsupported_common : unsupported_visibility != NULL ? unsupported_visibility :
+                                         unsupported_function_sections != NULL ? unsupported_function_sections : unsupported_data_sections;
+        unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_object;
+    }
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
     const char* path = 0;
@@ -3727,6 +3789,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+        fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // Predefines model these options even without code generation. Decide from their resolved state, not from
     // seeing an enabling argument: a later -fno-sanitize= or -fno-openmp may have canceled it. Refuse before any
