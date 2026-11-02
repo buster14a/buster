@@ -124,38 +124,57 @@ command of many units pays for the board only once its units run out, when its
 last units' emissions share their parts.
 
 On the 9700X's CPUs 0 to 7, SQLite 3.53.4's `sqlite3.c` (9.5 MB) and `shell.c`
-(1.2 MB) as one command, against the same executable's two processes at once,
-whole processes' medians (`time-runs`, 21 runs, each row twice); [the
-record](https://github.com/buster14a/buster-performance/tree/afdfdd4051b834e5a880766a87bf7f464be3b437/docs/measurements/units-functions-777-cache-776-2026-10-29) has the commands and logs:
+(1.2 MB) as one command took 122.1 ms with `-c` and 126.0 ms linked once the
+board came, against #778's 133.9 and 138.3 ([that
+record](https://github.com/buster14a/buster-performance/tree/afdfdd4051b834e5a880766a87bf7f464be3b437/docs/measurements/units-functions-777-cache-776-2026-10-29)).
+Its control, the units' two processes at once, was waited for without checking
+the processes' statuses or outputs, and its comparison with them qualifies
+nothing.
 
-The two-process column is an **unverified historical control**. Its shell
-commands use operand-free `wait`; the recorded zero failures count wrappers,
-not each compiler child, and no retained per-child status or fresh-output receipt
-proves every timed compile succeeded. The linked control can reuse old objects.
-This establishes no actual compiler failure, but the derived 0.9% compile gap
-and 8.6% linked speedup against that column cannot qualify performance
-acceptance. The synchronous one-command parent/head rows and tests have their
-own recorded scope. The record preserves the original scripts, numbers and logs;
-this correction adds no measurement, and #777 remains open.
+The control that does ([the record](https://github.com/buster14a/buster-performance/tree/80a072d39c48468ed7f1895cef8fdf37e3ab9587/docs/measurements/units-control-777-2026-11-02)): at `3ce71ec3`, and with the
+lanes' release of #777 (below), the one command against its units' two
+processes at once by the same executable, each process's exit status checked
+and every output removed before each run and required after it, the whole
+processes' medians of 31 runs (`time-runs`) in four rounds (two for the link
+of the lanes' release, whose `-c` is the same in all four), every object its
+unit's alone and every executable main's:
 
-| ms | #778 | #777 | two processes at once (unverified) |
+| ms | main | the lanes' release | two processes at once |
 | --- | ---: | ---: | ---: |
-| `-c` | 133.86 | 122.04, 122.18 | 121.08, 120.85 |
-| linked | 138.25 | 125.97 | 137.77, with `cc`'s link of their objects |
+| `-c` | 114.23 to 114.70 | 113.35 to 114.11 | 113.82 to 114.20 |
+| linked | 119.52 to 119.84 | 119.01, 119.20 | 122.25 to 122.36 with mold's link, 130.56 to 131.01 with `cc`'s |
 
-- The large unit's emission shared its parts with the seven other lanes, which
-  took 1,020 of them. `sqlite3.c` alone with `-c` takes 114.10 ms. The recorded
-  0.9% gap against the two-process wrappers is unverified; it does not establish
-  a slowdown or its cause in one process's address space.
-- The command's peak resident set is 537 MB, against #778's 436: the other
-  lanes' writers and arenas for the parts they take. The historical larger
-  process's 424 MB is from the unverified two-process control.
+- **The units grow alike in one process and in two.** Beside each other,
+  `sqlite3.c`'s preprocessing takes 11.9 ms against 9.9 alone, its
+  `check-input` 52.8 against 48.7, and `shell.c`'s `check-input` 23.8 against
+  15.8, in the one command (medians of 7 runs of a trace of its lanes, in the
+  record's `experiment/`) as in the two processes (11.8, 52.4 and 23.7 by
+  `--time-stages`): what the units share is the machine's memory, not an
+  address space. So the one command can match its processes, and beat them
+  only where it does less.
+- **The one command's tail.** The lanes' run ended 1.4 to 1.7 ms after
+  `sqlite3.c`'s unit, 110.7 ms into it: lane 0 released its memory (1.0 to
+  1.4 ms), and `shell.c`'s lane, done 45 ms in, released its own (0.9 to
+  1.7 ms) only then, last in 6 of the 7 runs. A lane now releases its memory as
+  soon as it has no unit left to take, and with `-c` the last lane leaves its
+  memory to the exit ("Memory" below): the one command is 0.3% to 1.0% faster
+  than main's in each round, from 0.7% faster to 0.3% slower than its
+  processes, and its peak is 421 MB rather than 471 (426 linked, rather than
+  480). The two processes peak at 368 MB, the larger one's.
+- **Linked**, the one command is 2.6% to 2.7% faster than its processes and
+  mold's link of their objects, and 9% faster than with `cc`'s.
+- The large unit's emission shares its parts with the seven other lanes,
+  which take 1,019 of them: its `lanes` stage takes 4.1 ms, against 4.5 to 6.7
+  in a process of its own.
 - Its lanes without units sleep on the board's futex at once: waiting with
   `lane_wait`'s spin and its millisecond in `mwaitx` took 192 ms of user time
-  against 164 to 171, with no difference in wall time.
-- Lua's, synth's and musl's commands by 8 lanes, which have no lanes without
-  units until their last units, run as #778's (34.47 ms against 34.65, 530.34
-  against 528.40, 238.36 against 240.57), with the same peaks.
+  against 164 to 171, with no difference in wall time (#834's record).
+- Lua's, synth's and musl's commands run as main's (whose many units' lanes
+  #1128 has slower than #763's record): by 8 lanes, Lua's link takes 41.12 ms
+  against 42.32, synth's 621.8 against 626.2 and musl's `-c` (its 1,309 units)
+  678.5 and 675.9 against 674.4 and 677.2 in two measurements; by one lane,
+  80.93 against 81.67, 1,732.3 against 1,729.3 and 1,041.6 against 1,043.8.
+  Their peaks are main's but 0.8 to 3.4 MB.
 
 ## What the units share
 
@@ -319,7 +338,17 @@ So a units lane does four things:
   free their memory at once, `MADV_DONTNEED` taking the address space's lock
   for reading, where the calling thread released every lane's after them,
   alone: on synth's link by 8 lanes, that release took 7.5 to 8.2 ms, and the
-  calling thread's release after the lanes now takes 0.6 to 0.7 ms.
+  calling thread's release after the lanes now takes 0.6 to 0.7 ms. It does so
+  before it helps the other units' functions (#777), while they still compile:
+  a lane that compiled a small unit beside a large one freed its memory only
+  after the large one, when the command waited for it. The lane that stops
+  taking units last has no other unit's work to overlap its release with: in a
+  command without a link whose process exits after the lanes (main's, which
+  releases no memory: `run_check_command_mode`), the exit frees that lane's
+  memory with the rest of the address space, as it frees a command of one
+  file's. Before a link it releases it as the others do, so that the link's
+  peak stays the units': kept through synth's link by one lane, it took the
+  peak from 328 MB to 386.
 
 ## The link
 
