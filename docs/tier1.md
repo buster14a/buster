@@ -95,6 +95,26 @@ link set. Timings are pinned to CPU 2. Repeat frozen-input comparisons in
 alternating order across fresh processes; measure sustained vector execution
 and execution following lighter work. CI retains priority between runs.
 
+## Optimization flags and backend selection (#1132)
+
+**Tier 0 is the default regardless of `-O`.** The conventional Clang-compatible
+`-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz`, `-Og`, `-Ofast` and `-O` options
+currently configure preprocessing state (including `__OPTIMIZE__`,
+`__OPTIMIZE_SIZE__` and `__NO_INLINE__`), **not** backend optimization passes.
+In particular, `buster -O2 -c file.c` uses Tier 0, not the Tier 1 pipeline
+benchmarked against Clang `-O2`. Macro-dependent source/header paths can
+nonetheless produce different code between `-O0` and `-O2`.
+
+Use `buster --tier1 -O2 -c file.c` explicitly to request Tier 1; `--tier1`
+wins even with `-O0`, and a function unsupported by Tier 1 takes its
+documented Tier 0 fallback unless `--tier1-strict` forbids that fallback.
+`--tier1` currently rejects `-g` because its source-row debug information is
+not implemented. The driver deliberately does not map standard `-O` flags
+to Tier 1 until #138's correctness and compile-/run-time gates and #1116's
+code-quality gates qualify it for ordinary Release builds. The driver
+regression in `test-checker-driver` pins this selection policy; changing the
+mapping requires updating that test and re-evaluating these gates.
+
 ## The C driver's `--tier1`
 
 `./build/compiler --tier1 [options] file.c...`

@@ -68,16 +68,24 @@ requirements. [Command index](README.md).
 ## Unsupported hardening requests
 
 The semantic C driver refuses the option families `-ftrivial-auto-var-init`,
-`-ftrapv`, `-fzero-call-used-regs`, `-fsanitize-coverage`, `-fsplit-stack` and
-`-mcmodel` by name (#1125). It does not yet implement the requested automatic
-initialization, overflow traps, return-register clearing, coverage callbacks,
-split-stack prologues or alternative code models. Family-prefix matching also
-refuses bare flags, empty or unknown values and auxiliary hardening options;
-unknown values never silently select a weaker default.
+`-ftrapv`, `-fzero-call-used-regs`, `-fsplit-stack` and `-mcmodel` by name
+(#1125). It does not yet implement the requested automatic initialization,
+overflow traps, return-register clearing, split-stack prologues or alternative
+code models. Family-prefix matching also refuses bare flags, empty or unknown
+values and auxiliary hardening options; unknown values never silently select a
+weaker default.
 
 Only the complete spellings `-ftrivial-auto-var-init=uninitialized`,
-`-fzero-call-used-regs=skip`, `-fsanitize-coverage=0` and `-mcmodel=small` are
-admitted as the existing inactive/default behavior. Negative flags retain their
+`-fzero-call-used-regs=skip` and `-mcmodel=small` are admitted as the existing
+inactive/default behavior.
+
+`-fsanitize-coverage=` isn't one of these families: its features resolve as
+clang's do, after every option, a later `-fno-sanitize-coverage=` among them,
+and object emission and linking refuse what is left by name, as sanitizers
+below (#1138). Non-emitting commands keep its predefines. `-fsanitize-coverage=`
+and `-fsanitize-coverage=0` ask for nothing, a value clang doesn't know is
+clang's error, and the bare `-fsanitize-coverage`, which clang doesn't take, is
+refused by name. Negative flags retain their
 existing handling. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
 Clang's last-option-wins policy. Unlike `-fstack-protector*` and
