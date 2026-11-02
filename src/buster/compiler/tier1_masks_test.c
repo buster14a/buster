@@ -734,6 +734,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         printf("test-tier1-masks: %s, %s path: selection error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)selected, node);
     }
     const Tier1EmitOptions options = {
+        .certify = true,
         .register_mask = tier1_liveness_register_mask(),
         .vector = vector,
         .rematerialize = rematerialize,
@@ -1039,6 +1040,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
                 uint32_t node = BUSTER_IR_NONE;
                 const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path == 0, &plan, &node);
                 const Tier1EmitOptions options = {
+                    .certify = true,
                     .register_mask = tier1_liveness_register_mask(),
                     .vector = path == 0,
                 };
@@ -1298,6 +1300,7 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             const Tier1SelectError selected = ok ? tier1_select_plan(&optimized[f], &dominance, &arenas[2], &test->scratch, path == 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
             ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the typed program's masks");
             const Tier1EmitOptions options = {
+                .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
                 .vector = path == 0,
                 .rematerialize = true,

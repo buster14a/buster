@@ -457,7 +457,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const CheckInputAttribute* attribute = &attributes->records[i];
         const CheckInputAttributeKind kind = attribute->kind;
         const uint32_t bit = kind == CHECK_ATTRIBUTE_NAKED ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED :
-                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
+                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                                 kind == CHECK_ATTRIBUTE_CPU_DISPATCH ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
                              kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN || kind == CHECK_ATTRIBUTE_NORETURN ?
                                  BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
                              kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS :
@@ -2900,7 +2901,8 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
                 const int32_t attribute_cpu = readable ? last_cpu : -1;
-                versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && !attribute->ignored;
+                versions |= (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                             attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && !attribute->ignored;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
                 {
                     applied = attribute;
@@ -3506,6 +3508,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_program_helpers.c"
 #include "c_check_program_asm.c"
 #include "c_check_program_lower.c"
+// The tier-neutral source/frame event protocol (#1056), whose source rows c_check_debug.c validates after sizing.
+#include "emission_metadata.c"
 #include "c_check_debug.c"
 #include "c_check_clock.c"
 #include "c_check_program_emit.c"

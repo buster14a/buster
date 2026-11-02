@@ -352,7 +352,8 @@ by the sizes it declares them with. `main` gets `argc` 1, `argv` and an empty
 environment. Memory checking is on and undefined-byte checking off: a native
 writes the memory a program gives it (`strcpy`'s) without telling the
 interpreter which bytes it defined. A run is bounded by 2^32 steps (`--steps`)
-and an alarm (`--timeout`, 600 s by default).
+and an alarm (`--timeout`, 600 s by default, 1,800 s in a detector's build: CI's
+MSan rows took from 226 s to past 600 s for `00040.c`'s memory form).
 
 Three of the IR front's rules came out of these runs (the [tools
 guide](ir-tools.md)'s "Execution contract"): it verifies each function once per
