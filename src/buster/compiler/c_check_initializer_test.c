@@ -295,20 +295,15 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
 {
     const uint64_t mark = scratch->length;
     CheckInitString* strings = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitString, input->string_count);
-    uint32_t* ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser->tokens.count + 1);
-    bool valid = strings != NULL && ids != NULL;
+    CheckSparsePool* pool = NULL;
+    CheckSparseColumn ids = { 0 };
+    bool valid = strings != NULL && check_sparse_reserve(scratch, &pool, &ids, 1, parser->tokens.count, false, false);
     for (uint32_t token = 0; valid && token < parser->tokens.count; token += 1)
     {
         const uint32_t id = check_sparse_get(input->string_ids, token);
         valid = id == BUSTER_CHECK_NONE || id < input->string_count;
-        ids[token] = id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE;
+        check_sparse_set(pool, ids, token, id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE);
     }
-    if (valid)
-    {
-        ids[parser->tokens.count] = BUSTER_CHECK_NONE;
-    }
-    const CheckSparseColumn sparse_ids = valid ? check_sparse_from_values(scratch, ids, parser->tokens.count) : (CheckSparseColumn){ 0 };
-    valid &= check_sparse_present(sparse_ids);
     for (uint32_t i = 0; valid && i < input->string_count; i += 1)
     {
         strings[input->string_count - 1 - i] = input->strings[i];
@@ -324,7 +319,7 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
         .stream = &stream,
         .strings = strings,
         .string_count = input->string_count,
-        .string_ids = sparse_ids,
+        .string_ids = ids,
     };
     for (uint32_t i = 0; valid && i < input->string_count; i += 1)
     {
@@ -340,10 +335,10 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
             valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == string;
             value.offset = 1;
             valid = valid && check_init_string(&walker, 0, 0, 0) == NULL;
-            const uint32_t id = ids[string->token];
-            ids[string->token] = input->string_count;
+            const uint32_t id = check_sparse_get(ids, string->token);
+            check_sparse_set(pool, ids, string->token, input->string_count);
             valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == NULL;
-            ids[string->token] = id;
+            check_sparse_set(pool, ids, string->token, id);
         }
     }
     check_test_expect(test, valid, "string initializer indices survive pool reordering, preserve object offsets and exclude predefined arrays");
