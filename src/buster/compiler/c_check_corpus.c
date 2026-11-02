@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Independent source-corpus qualification. External files stay external: the harness records every input and
 // compares acceptance and the first diagnostic line with Clang, and the complete scalar/vector parser, binding,
@@ -10,6 +11,8 @@
 // objects were compared, so that a corpus whose files the backend comes to refuse can't pass by comparing none.
 // --id-order N checks each file with its identifiers' ids in another order, as the driver's --id-order gives them (#153).
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
+
+#include "buster/compiler/test_paths.h"
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
 
@@ -1080,23 +1083,20 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 //   that a constant condition never evaluates count too (CheckProgramOptions.unselected_operands). clang -O0 leaves a
 //   constant condition's dead arm in a branch's condition (CodeGenFunction::EmitBranchOnBoolExpr); the selection
 //   counts only what may run.
-// - dropped: a definition only ours has, which the selection of clang's model doesn't reach: the program with
-//   unselected operands counted and a constant if's dead arm left out (CheckProgramOptions.folded_ifs). clang -O0
-//   doesn't emit the arm an integer constant condition never runs (CodeGenFunction::EmitIfStmt), and so leaves out
-//   what only it calls, as of musl's FORCE_EVAL; Tier 0 lowers it, and the selection counts it.
 // - inlined: a local function only ours has, whose definition has always_inline: clang -O0 inlines it at its calls
 //   (its always-inliner) and emits none of a local one it inlined everywhere, as of SQLite's SQLITE_INLINE
 //   allocateSpace; Tier 0 calls it.
+// The arm of an if that an integer constant condition never runs, which clang -O0 doesn't emit
+// (CodeGenFunction::EmitIfStmt), -c leaves out too, with what only it refers to (CheckProgram.dropped_ranges, #1108).
 typedef enum CheckCorpusSymbolReason
 {
     CHECK_CORPUS_SYMBOL_FOLDED,
     CHECK_CORPUS_SYMBOL_UNSELECTED,
-    CHECK_CORPUS_SYMBOL_DROPPED,
     CHECK_CORPUS_SYMBOL_INLINED,
     CHECK_CORPUS_SYMBOL_REASONS,
 } CheckCorpusSymbolReason;
 
-static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped", "inlined" };
+static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "inlined" };
 
 typedef struct CheckCorpusSymbols CheckCorpusSymbols;
 struct CheckCorpusSymbols
@@ -1221,14 +1221,11 @@ static bool check_corpus_symbol_emitted(const CheckProgram* program, const Check
 }
 
 // What check_corpus_symbol_reason reads of an object (CheckCorpusSymbolIndex.facts): -c's selection initializes its
-// data and one of its bodies refers to it; -c's selection lowers its body, or emits its data; clang's model keeps its
-// body, or its data.
+// data and one of its bodies refers to it; -c's selection lowers its body, or emits its data.
 #define BUSTER_CHECK_CORPUS_OBJECT_INITIALIZED UINT8_C(1)
 #define BUSTER_CHECK_CORPUS_OBJECT_READ UINT8_C(2)
 #define BUSTER_CHECK_CORPUS_OBJECT_OUR_BODY UINT8_C(4)
 #define BUSTER_CHECK_CORPUS_OBJECT_OUR_DATA UINT8_C(8)
-#define BUSTER_CHECK_CORPUS_OBJECT_KEPT_BODY UINT8_C(16)
-#define BUSTER_CHECK_CORPUS_OBJECT_KEPT_DATA UINT8_C(32)
 
 // A definition that may explain a difference: `key`, the name it is compared by; its object; and `item`, its place in
 // the order a reason takes the candidates in (a SymbolId, a data entry or a body).
@@ -1247,8 +1244,8 @@ struct CheckCorpusSymbolCandidates
     uint32_t count;
 };
 
-// check_corpus_symbol_reason's candidates, found once per file: the definitions of -c's selection, of the selection that
-// counts unselected operands and of clang's model, sorted by the name each is compared by and then in the order the
+// check_corpus_symbol_reason's candidates, found once per file: the definitions of -c's selection and of the selection
+// that counts unselected operands (clang's model), sorted by the name each is compared by and then in the order the
 // reasons take them in, and what the reasons read of each object. A difference then finds its candidates by binary
 // searches, and takes them in the order a pass over the whole selection would: main.c's 12,016 differences took 15 s
 // with a pass each over its 135,000 symbols, and its data and bodies.
@@ -1256,7 +1253,7 @@ typedef struct CheckCorpusSymbolIndex CheckCorpusSymbolIndex;
 struct CheckCorpusSymbolIndex
 {
     const CheckProgramSelection* selected;
-    // BUSTER_CHECK_CORPUS_OBJECT_* per object, for the largest of the three programs' object counts.
+    // BUSTER_CHECK_CORPUS_OBJECT_* per object, for the larger of the two programs' object counts.
     uint8_t* facts;
     uint32_t object_count;
     // By emitted symbol (check_corpus_symbol_emitted): -c's symbols of declared objects, in SymbolId order, and its data
@@ -1306,16 +1303,15 @@ static uint32_t check_corpus_symbol_bound(const CheckCorpusSymbolCandidates* can
     return low;
 }
 
-// check_corpus_symbol_reason's candidates for -c's selection `selected`, whose code is `code`, the selection `reached`
-// that counts unselected operands, and clang's model `kept`, compared with `names`, into `index`, in `arena`: whether
-// there was room. The parser and the identifiers spell the bodies' names.
+// check_corpus_symbol_reason's candidates for -c's selection `selected`, whose code is `code`, and the selection
+// `reached` that counts unselected operands, compared with `names`, into `index`, in `arena`: whether there was room.
+// The parser and the identifiers spell the bodies' names.
 static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const CheckInput* input, const Parser* parser, const InternTable* identifiers,
                                       const CheckProgramSelection* selected, const CheckProgramCode* code, const CheckProgramSelection* reached,
-                                      const CheckProgramSelection* kept, const LoweringNames* names, Arena* arena)
+                                      const LoweringNames* names, Arena* arena)
 {
     uint32_t object_count = selected->program.object_count;
     object_count = reached->program.object_count > object_count ? reached->program.object_count : object_count;
-    object_count = kept->program.object_count > object_count ? kept->program.object_count : object_count;
     *index = (CheckCorpusSymbolIndex){
         .selected = selected,
         .facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, object_count),
@@ -1355,22 +1351,6 @@ static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const Check
             if (object < object_count)
             {
                 facts[object] |= BUSTER_CHECK_CORPUS_OBJECT_OUR_BODY;
-            }
-        }
-        for (uint32_t body = 0; body < kept->program.body_count; body += 1)
-        {
-            const uint32_t object = kept->program.bodies[body].object;
-            if (object < object_count)
-            {
-                facts[object] |= BUSTER_CHECK_CORPUS_OBJECT_KEPT_BODY;
-            }
-        }
-        for (uint32_t i = 0; i < kept->data.count; i += 1)
-        {
-            const uint32_t object = kept->data.objects[i].object;
-            if (object < object_count)
-            {
-                facts[object] |= BUSTER_CHECK_CORPUS_OBJECT_KEPT_DATA;
             }
         }
         for (SymbolId symbol = 1; symbol <= selected->program.symbol_count; symbol += 1)
@@ -1429,29 +1409,10 @@ static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const Check
     return valid;
 }
 
-// Whether a data object that -c emits and clang's model drops explains the difference `name`: the first candidate of
-// its emitted symbol, in data order, that explains no other difference. Each source object can justify at most one
-// extra symbol, including when several shadowed statics normalize to the same name. Kept data is compared by object
-// ID, never by its renumbered SymbolId or by its owner's presence alone.
-static bool check_corpus_symbol_dropped_data(const CheckCorpusSymbolIndex* index, const LoweringSymbol* name, uint8_t* explained_objects)
-{
-    bool dropped = false;
-    const uint32_t end = check_corpus_symbol_bound(&index->data, name, true);
-    for (uint32_t i = check_corpus_symbol_bound(&index->data, name, false); !dropped && i < end; i += 1)
-    {
-        const uint32_t object = index->data.items[i].object;
-        if (!explained_objects[object])
-        {
-            dropped = (index->facts[object] & BUSTER_CHECK_CORPUS_OBJECT_KEPT_DATA) == 0;
-            explained_objects[object] = dropped ? 1 : explained_objects[object];
-        }
-    }
-    return dropped;
-}
-
 // The reason a difference of an accepted file's comparison has, or CHECK_CORPUS_SYMBOL_REASONS for none, from `index`
-// (check_corpus_symbol_index's), whose `selected` is what -c emitted, `reached` what the selection reaches with
-// unselected operands counted, and `kept` what it reaches in clang's model, with them and folded ifs.
+// (check_corpus_symbol_index's), whose `selected` is what -c emitted and `reached` what the selection reaches with
+// unselected operands counted: clang's model, whose constant ifs leave their dead arms out as -c's do
+// (CheckProgram.dropped_ranges).
 static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifference* difference, const CheckCorpusPath* path, const CheckCorpusSymbolIndex* index,
                                                           uint8_t* explained_objects)
 {
@@ -1483,17 +1444,6 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
                 reason = read ? CHECK_CORPUS_SYMBOL_FOLDED : reason;
                 explained_objects[object] = read ? 1 : explained_objects[object];
             }
-        }
-        // Dropped: a body that clang's model doesn't keep, or data.
-        for (uint32_t i = bodies_first; reason == CHECK_CORPUS_SYMBOL_REASONS && i < bodies_end; i += 1)
-        {
-            const uint32_t object = bodies->items[i].object;
-            const bool theirs = object < index->object_count && (index->facts[object] & BUSTER_CHECK_CORPUS_OBJECT_KEPT_BODY) != 0;
-            reason = !theirs ? CHECK_CORPUS_SYMBOL_DROPPED : reason;
-        }
-        if (reason == CHECK_CORPUS_SYMBOL_REASONS && check_corpus_symbol_dropped_data(index, name, explained_objects))
-        {
-            reason = CHECK_CORPUS_SYMBOL_DROPPED;
         }
         // Inlined: a local always_inline function, which clang inlines at every call.
         const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
@@ -1540,10 +1490,8 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
     CheckProgram unselected = { 0 };
-    CheckProgram model = { 0 };
     CheckProgramSelection selected = { 0 };
     CheckProgramSelection reached = { 0 };
-    CheckProgramSelection kept = { 0 };
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
@@ -1562,9 +1510,6 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     options.unselected_operands = true;
     valid = valid && check_program(&unselected, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&reached, &unselected, &data, false, &path->output_arena, &path->scratch);
-    options.folded_ifs = true;
-    valid = valid && check_program(&model, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
-            check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
                                                      &path->scratch, NULL, NULL, true, true);
     const bool emitted = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
@@ -1623,7 +1568,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         }
         CheckCorpusSymbolIndex index = { 0 };
         const bool indexed = !compared || count == 0 ||
-                             check_corpus_symbol_index(&index, &path->input, parser, pp->table, &selected, &code, &reached, &kept, &names, &path->scratch);
+                             check_corpus_symbol_index(&index, &path->input, parser, pp->table, &selected, &code, &reached, &names, &path->scratch);
         failure = !indexed ? "out of memory for its explanation candidates" : failure;
         compared &= indexed;
         for (uint32_t i = 0; compared && i < count; i += 1)
@@ -1773,7 +1718,12 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
                  a->control_count == b->control_count && a->body_count == b->body_count &&
                  a->case_count == b->case_count && a->region_count == b->region_count && a->reference_count == b->reference_count &&
                  a->object_count == b->object_count && a->symbol_count == b->symbol_count && a->builtin_count == b->builtin_count &&
-                 a->asm_target_count == b->asm_target_count && a->output_bytes == b->output_bytes && (a->asm_offsets == NULL) == (b->asm_offsets == NULL);
+                 a->asm_target_count == b->asm_target_count && a->output_bytes == b->output_bytes && (a->asm_offsets == NULL) == (b->asm_offsets == NULL) &&
+                 a->dropped_range_count == b->dropped_range_count;
+    for (uint32_t i = 0; equal && i < a->dropped_range_count; i += 1)
+    {
+        equal = a->dropped_ranges[i] == b->dropped_ranges[i];
+    }
     for (uint32_t i = 0; equal && i < a->control_count; i += 1)
     {
         const CheckControl* x = a->controls + i;
@@ -1802,7 +1752,8 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
     {
         const CheckProgramRegion* x = a->regions + i;
         const CheckProgramRegion* y = b->regions + i;
-        equal = x->first == y->first && x->count == y->count && x->body == y->body && x->node == y->node && x->result == y->result;
+        equal = x->first == y->first && x->count == y->count && x->body == y->body && x->node == y->node && x->result == y->result &&
+                a->region_reached[i] == b->region_reached[i];
     }
     for (uint32_t i = 0; equal && i < a->object_count; i += 1)
     {
@@ -2061,14 +2012,14 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->thread_local[token] == right->thread_local[token] && left->compound_objects[token] == right->compound_objects[token] &&
                 check_corpus_attributes_equal(left->attributes[token], right->attributes[token]) &&
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
-                left->tentative[token] == right->tentative[token] && left->initializer_nodes[token] == right->initializer_nodes[token] &&
-                left->initializer_begins[token] == right->initializer_begins[token] && left->initializer_ends[token] == right->initializer_ends[token] &&
-                left->token_nodes[token] == right->token_nodes[token] && left->evaluation_nodes[token] == right->evaluation_nodes[token] &&
-                left->string_ids[token] == right->string_ids[token] &&
-                left->body_declarations[token] == right->body_declarations[token] &&
-                left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
-                left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
-                left->label_targets[token] == right->label_targets[token] && left->case_ranges[token] == right->case_ranges[token] &&
+                left->tentative[token] == right->tentative[token] && check_sparse_get(left->initializer_nodes, token) == check_sparse_get(right->initializer_nodes, token) &&
+                check_sparse_get(left->initializer_begins, token) == check_sparse_get(right->initializer_begins, token) && check_sparse_get(left->initializer_ends, token) == check_sparse_get(right->initializer_ends, token) &&
+                left->token_nodes[token] == right->token_nodes[token] && check_sparse_get(left->evaluation_nodes, token) == check_sparse_get(right->evaluation_nodes, token) &&
+                check_sparse_get(left->string_ids, token) == check_sparse_get(right->string_ids, token) &&
+                check_sparse_get(left->body_declarations, token) == check_sparse_get(right->body_declarations, token) &&
+                check_sparse_get(left->declaration_bodies, token) == check_sparse_get(right->declaration_bodies, token) && check_sparse_get(left->parameters, token) == check_sparse_get(right->parameters, token) &&
+                check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) && check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
+                check_sparse_get(left->label_targets, token) == check_sparse_get(right->label_targets, token) && check_sparse_get(left->case_ranges, token) == check_sparse_get(right->case_ranges, token) &&
                 left->expression_regions[token] == right->expression_regions[token] && check_input_asm_id(left, token) == check_input_asm_id(right, token) &&
                 left->constant_warnings[token] == right->constant_warnings[token] &&
                 left->constant_warning_ignored[token] == right->constant_warning_ignored[token];
@@ -2301,11 +2252,11 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  x->registers[token] != y->registers[token] ? "registers" : x->thread_local[token] != y->thread_local[token] ? "thread_local" :
                  x->compound_objects[token] != y->compound_objects[token] ? "compound_objects" :
                  !check_corpus_attributes_equal(x->attributes[token], y->attributes[token]) ? "attributes" : x->tentative[token] != y->tentative[token] ? "tentative" :
-                 x->initializer_nodes[token] != y->initializer_nodes[token] ? "initializer_nodes" :
-                 x->initializer_begins[token] != y->initializer_begins[token] ? "initializer_begins" : x->initializer_ends[token] != y->initializer_ends[token] ? "initializer_ends" :
-                 x->body_declarations[token] != y->body_declarations[token] ? "body_declarations" : x->parameters[token] != y->parameters[token] ? "parameters" :
-                 x->parameter_next[token] != y->parameter_next[token] ? "parameter_next" : x->control_owners[token] != y->control_owners[token] ? "control_owners" :
-                 x->label_targets[token] != y->label_targets[token] ? "label_targets" : x->case_ranges[token] != y->case_ranges[token] ? "case_ranges" :
+                 check_sparse_get(x->initializer_nodes, token) != check_sparse_get(y->initializer_nodes, token) ? "initializer_nodes" :
+                 check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
+                 check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :
+                 check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" : check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
+                 check_sparse_get(x->label_targets, token) != check_sparse_get(y->label_targets, token) ? "label_targets" : check_sparse_get(x->case_ranges, token) != check_sparse_get(y->case_ranges, token) ? "case_ranges" :
                  x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : check_input_asm_id(x, token) != check_input_asm_id(y, token) ? "asm_ids" :
                  x->constant_warnings[token] != y->constant_warnings[token] ? "constant_warnings" :
                  x->constant_warning_ignored[token] != y->constant_warning_ignored[token] ? "constant_warning_ignored" : 0;
@@ -2379,8 +2330,8 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     }
     uint32_t token = 0;
     while (comparable && token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
-           x->objects[token] == y->objects[token] && x->declaration_bodies[token] == y->declaration_bodies[token] && x->token_nodes[token] == y->token_nodes[token] &&
-           x->evaluation_nodes[token] == y->evaluation_nodes[token] &&
+           x->objects[token] == y->objects[token] && check_sparse_get(x->declaration_bodies, token) == check_sparse_get(y->declaration_bodies, token) && x->token_nodes[token] == y->token_nodes[token] &&
+           check_sparse_get(x->evaluation_nodes, token) == check_sparse_get(y->evaluation_nodes, token) &&
            x->declaration_kinds[token] == y->declaration_kinds[token] && x->linkage[token] == y->linkage[token] && x->defined[token] == y->defined[token])
     {
         token += 1;
@@ -2429,8 +2380,8 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
         snprintf(text, capacity, "token %u: declaration %u against %u, type %#x against %#x, object %u against %u, body %u against %u, node %u against %u, "
                  "evaluation %u against %u",
                  token, x->declarations[token], y->declarations[token], x->declared_types[token], y->declared_types[token], x->objects[token], y->objects[token],
-                 x->declaration_bodies[token], y->declaration_bodies[token], x->token_nodes[token], y->token_nodes[token],
-                 x->evaluation_nodes[token], y->evaluation_nodes[token]);
+                 check_sparse_get(x->declaration_bodies, token), check_sparse_get(y->declaration_bodies, token), x->token_nodes[token], y->token_nodes[token],
+                 check_sparse_get(x->evaluation_nodes, token), check_sparse_get(y->evaluation_nodes, token));
     }
     else if (!check_corpus_environments_equal(&x->environment, &y->environment))
     {
@@ -3461,8 +3412,8 @@ static int run_checker_corpus(int count, char** arguments)
         selected = selected < limit ? selected : (uint32_t)limit;
     }
     char directory[4096] = { 0 };
-    const char* temporary = getenv("TMPDIR");
-    const int written = snprintf(directory, sizeof(directory), "%s/buster-check-corpus-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    const int written = snprintf(directory, sizeof(directory), "%s/buster-check-corpus-XXXXXX", temporary);
     const bool made_directory = valid && written > 0 && written < (int)sizeof(directory) && mkdtemp(directory) != 0;
     valid = valid && made_directory;
     valid = valid && check_corpus_oracle_controls(directory, clang);
@@ -3589,10 +3540,9 @@ static int run_checker_corpus(int count, char** arguments)
     if (symbols_requested)
     {
         printf("checker-corpus: symbols compared=%" PRIu64 " minimum=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64
-               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
+               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
                symbols.different, symbols.unexplained, check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED],
-               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_INLINED], symbols.documented[CHECK_CORPUS_SYMBOL_INLINED], symbols.unsupported, symbols.failures);
         for (uint32_t i = 0; i < symbols.feature_count; i += 1)
         {

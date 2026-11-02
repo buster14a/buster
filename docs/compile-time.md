@@ -242,6 +242,8 @@ empty value is `UINT32_MAX` with bounded all-one byte fills,
 including each column's sentinel. Requested scalar parsing keeps the original
 interleaved initialization loop as an independent oracle, and the six
 reader-internal NONE stores keep their existing ownership and initialization.
+(Twelve of those columns are sparse since, and need no fill; the reader's six
+are filled a column at a time too: "The sparse output columns", below.)
 Optional zero-default columns retain their existing NULL guards. Dirty and
 borrowed output storage is always explicitly cleared; no fresh-page or arena
 high-water assumption is made. The column layout and allocated byte count do
@@ -629,12 +631,111 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   so that each takes its 2.8 MB whatever its pages: 33 MB. The walk reads most
   of them back by token (the initializers' and the parameters' 12 to 18 times),
   so that records in their place, written as the walk goes, need its lookups to
-  change, and #592's passes' too.
+  change, and #592's passes' too. They are sparse columns now (below).
 - **The graph's leaves.** Their 96-byte values take 14 MB for 144,720 leaves, of
   which the identifiers' carry little but a type and an object: columns and
   payload rows, as the stream's values have, would take about 8 MB less.
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
   8.3 MB, written at declarations, most of whose bits would fit one byte.
+
+### The sparse output columns (#628)
+
+On main `3ce71ec3`, `-c` of the frozen `sqlite3.c` (716,136 tokens) peaked at
+323.5 MB on the 9700X, at the end of `check-input`, which added 171 MB of it.
+Twelve of the reader's output columns took 34.4 MB of that, a value a token
+each, for 57,349 entries:
+
+| column | entries | 16-token blocks with one |
+| --- | ---: | ---: |
+| `declaration_bodies` | 16,655 | 8,917 |
+| `parameters` | 13,789 | 6,777 |
+| `parameter_next` | 5,934 | 3,837 |
+| `initializer_begins`, `initializer_ends` | 4,182 each | 3,502 each |
+| `initializer_nodes` | 3,982 | 3,318 |
+| `control_owners` | 3,012 | 1,285 |
+| `body_declarations` | 2,674 | 2,671 |
+| `string_ids` | 2,132 | 1,445 |
+| `label_targets` | 797 | 780 |
+| `evaluation_nodes`, `case_ranges` | none | none |
+
+The entries lie on most of each column's pages (on 155 to 604 of its 700
+base pages, but for the two empty ones), so neither base pages nor a value for
+NONE that a fresh page holds would have saved much of their memory. And the
+reader filled all twelve with NONE before the walk, 34.4 MB of stores.
+
+They are sparse columns now (`c_check_sparse.c`):
+- **The layout.** A column is a directory, an entry for each 16 tokens, of
+  blocks of 16 values in a pool that the unit's columns share. Block 0 holds
+  16 NONEs and is never written, so a directory's zero entry reads NONE for its
+  16 tokens. A fresh output arena's directories are as the kernel mapped them,
+  so the columns need no fill (`check_input_run`'s `output_zero`); otherwise
+  only the directories are cleared. On `sqlite3.c` the columns take 36,034
+  blocks, 2.3 MB, and the directories 2.1 MB: 4.5 MB in place of 34.4 MB.
+- **Reads and writes.** A read is two loads (`check_sparse_get`), and 16 tokens'
+  values two blocks' and a permute (`check_sparse_vector`), at any start, which
+  the program's and the lowering's scans of 16 tokens at a time take. A write at
+  a token whose 16 have no block takes the pool's next; a write of NONE there
+  takes none. The pool has a block for each directory entry of each column, which
+  a write takes once at most.
+- **Lanes.** The deferred reader's lanes write their own tokens of the same
+  columns at once, and two lanes' tokens can share 16. There a write claims the
+  empty directory entry, then takes, fills and publishes the block; another
+  lane's write waits for it. A read of a claimed entry reads block 0, which is
+  right, as the reading lane hasn't written its own token there yet.
+  - The lanes take blocks one after another, so two lanes' first fills can fall
+    in one fresh 2 MB region of the pool. As with the rare columns
+    (`check_input_rare_claim`, #764, #847), the first lane to fill a block in a
+    region claims it and faults it in, and the others wait
+    (`check_sparse_region`), so no two lanes clear a huge page for it at once.
+  - A shared pool's directories are cleared on the reading's own thread, so
+    their pages are in place before the lanes start.
+- **The deferred merge** maps `string_ids` at its entries by
+  `check_sparse_entries`, which skips 16 tokens without a block with one load,
+  and loads a block's values in its lane's range alone: a neighboring lane
+  writes the others of a block that straddles the range's end.
+
+The reader's own six NONE columns (`activate`, `first_value` and the others), in
+the scratch, are filled a column at a time on the vector path too, as the
+output's two dense ones are (`check_input_output_none`); the scalar twin keeps
+its one loop over every token.
+
+`test-checker`'s scans test checks the columns against columns of a value a
+token at every count to 200: random writes, every token's value, every 16
+tokens' vector at every start, the masks and the entries' lists by both paths,
+with the directory ending at a `PROT_NONE` page. Three lanes then write one
+shared pool's columns at once, interleaved tokens of the same blocks, and scan
+and write their own ranges, which start and end inside blocks: every value, every
+block taken once, and every region's claim settled. The tests that build a
+`CheckInput` by hand build its sparse columns from their values.
+
+On the 9700X, CPU 2 under the host's lock, main `dac5b770` against the change
+merged with it (`67f7bf51`), with every object the same bytes, by both paths, on
+8 lanes and with `-g`: 8 interleaved rounds of `perf stat -r 3`, and
+`measure-compile --runs 11` of each with the other as its reference ([the
+record](https://github.com/buster14a/buster-performance/tree/a012932ca4ca85bca5783d65245ac9837942d02c/docs/measurements/sparse-columns-628-2026-11-02)
+has the raw outputs, the receipts and the scripts):
+
+| measure | main | sparse columns |
+| --- | ---: | ---: |
+| task clock | 117.07 ms | 116.07 ms |
+| user cycles | 555.8 M | 555.5 M |
+| user instructions | 1,274.2 M | 1,272.1 M |
+| kernel cycles | 93.6 M | 88.0 M |
+| peak RSS (`wait4`) | 323,720 KiB | 296,856 KiB |
+| `check-input` | 49.07 ms | 47.35 ms |
+| `check-input`'s peak added | 171,256 KiB | 144,504 KiB |
+
+- **The time.** Every round of the 8 has the change 0.8 to 1.5 ms faster, nearly
+  all of it the kernel's: the fills' and the pages' clearing it no longer does.
+  An earlier round on main `3ce71ec3` (with `93f2085f`, the same code) had it
+  2.0 ms faster, with 1.1% fewer user cycles, which this round doesn't repeat:
+  a placement's difference, as `sqlite3.c`'s `-c` is known to show.
+- **The peak** is still the reader's end, 26,864 KiB (8.3%) lower.
+- **The shared pool's claims** (`3950f15b`, after the review), measured the same
+  way against `dac5b770`: task clock 117.07 → 115.90 ms, kernel cycles 93.8 →
+  89.3 M, peak 323,608 → 296,856 KiB, objects the same bytes. User
+  instructions are 0.75 M more than `67f7bf51`'s: the directories' acquire loads
+  and the exhaustion test.
 
 ## The checker's graph and program passes (#530)
 
@@ -1349,9 +1450,10 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 The build's post-link step has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
-and their marked copies, the x86 semantics' tables, and the checker unit's
-copies of Tier 0's tables, the Zen 5 cost model's tables and the unwind
-templates, with their initialized flags, all in a section of their own
+and their marked copies, the x86 semantics' tables, Tier 1's selection state
+tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
+are), and the checker unit's copies of Tier 0's tables, the Zen 5 cost model's
+tables and the unwind templates, with their initialized flags, all in a section of their own
 (`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
 with them built, at their fixed addresses, and reads the pages it touches from
 the page cache, shared with every other process.

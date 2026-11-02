@@ -295,13 +295,14 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
 {
     const uint64_t mark = scratch->length;
     CheckInitString* strings = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitString, input->string_count);
-    uint32_t* ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser->tokens.count + 1);
-    bool valid = strings != NULL && ids != NULL;
+    CheckSparsePool* pool = NULL;
+    CheckSparseColumn ids = { 0 };
+    bool valid = strings != NULL && check_sparse_reserve(scratch, &pool, &ids, 1, parser->tokens.count, false, false);
     for (uint32_t token = 0; valid && token < parser->tokens.count; token += 1)
     {
-        const uint32_t id = input->string_ids[token];
+        const uint32_t id = check_sparse_get(input->string_ids, token);
         valid = id == BUSTER_CHECK_NONE || id < input->string_count;
-        ids[token] = id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE;
+        check_sparse_set(pool, ids, token, id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE);
     }
     for (uint32_t i = 0; valid && i < input->string_count; i += 1)
     {
@@ -334,10 +335,10 @@ static void check_init_test_string_index(CheckTest* test, const CheckInput* inpu
             valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == string;
             value.offset = 1;
             valid = valid && check_init_string(&walker, 0, 0, 0) == NULL;
-            const uint32_t id = ids[string->token];
-            ids[string->token] = input->string_count;
+            const uint32_t id = check_sparse_get(ids, string->token);
+            check_sparse_set(pool, ids, string->token, input->string_count);
             valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == NULL;
-            ids[string->token] = id;
+            check_sparse_set(pool, ids, string->token, id);
         }
     }
     check_test_expect(test, valid, "string initializer indices survive pool reordering, preserve object offsets and exclude predefined arrays");
@@ -405,11 +406,11 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     const uint32_t declaration = initializers.declaration_tokens[i];
                     CheckInitializer strict = { 0 };
                     const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
-                                                                 input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                 input.declared_types[declaration], check_sparse_get(input.initializer_begins, declaration), check_sparse_get(input.initializer_ends, declaration),
                                                                  input.static_objects[declaration] != 0, &output, &scratch, &strict);
                     check_test_expect(test, !accepted && strict.status == CHECK_INIT_INVALID && strict.parts == 0 && strict.count == 0 && output.length == 0 && scratch.length == 0,
                                       "direct strict planner still rejects source-compatible excess elements transactionally");
-                    check_test_expect(test, initializers.warning_count != 0 && initializers.plans[i].warning_token < input.initializer_ends[declaration],
+                    check_test_expect(test, initializers.warning_count != 0 && initializers.plans[i].warning_token < check_sparse_get(input.initializer_ends, declaration),
                                       "source excess elements retain warning positions separately from successful plans");
                 }
             }
@@ -438,7 +439,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     tiny.capacity = sizeof(CheckInitPart);
                     CheckInitializer rejected = { 0 };
                     const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
-                                                                input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                input.declared_types[declaration], check_sparse_get(input.initializer_begins, declaration), check_sparse_get(input.initializer_ends, declaration),
                                                                 input.static_objects[declaration] != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
                     check_test_expect(test, !partial && rejected.status == CHECK_INIT_RESOURCE && rejected.parts == 0 && rejected.count == 0 && tiny.length == 0 && scratch.length == 0,
                                       "partially planned source initializer rolls back all parts on output exhaustion");

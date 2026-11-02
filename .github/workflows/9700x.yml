@@ -1167,6 +1167,24 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
+          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions), in node order and keyed in
+          # 64-node windows, alone and after scalar work as its regions (`vector`) are.
+          taskset -c 2 ./build/compiler benchmark-checker-source --only transitions "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only transitions --after-scalar 100 "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only windows "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only windows --after-scalar 100 "${source[@]}"
+          # A second corpus, every path: musl's regcomp.c, with the per-file jobs' musl options.
+          musl="$corpus/libc/musl"
+          taskset -c 2 ./build/compiler benchmark-checker-source -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
+            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl/src/regex/regcomp.c"
+          # The whole compile with them and without: sqlite3.c's -c with measure-compile's options, as whole processes in a
+          # rotating order, whose objects must be the same bytes.
+          sqlite="$corpus/sqlite"
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          taskset -c 2 ./build/compiler time-runs --runs 21 --list "${options[@]}" -o "$RUNNER_TEMP/regions.o" \
+            --list --check-transitions "${options[@]}" -o "$RUNNER_TEMP/transitions.o"
+          cmp "$RUNNER_TEMP/regions.o" "$RUNNER_TEMP/transitions.o"
 
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g

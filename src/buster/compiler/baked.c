@@ -3,9 +3,9 @@
 //
 // The backend's baked tables (#590, baked.h). `bake-tables OUTPUT` writes this executable with its buster_baked section
 // as the backend's initializers leave it, so that a compile starts with x86_encode's templates, the x86 semantics'
-// tables, Tier 0's, the Zen 5 cost model's and the unwind templates built. build.sh runs it on each executable it links.
-// It runs in the checker's unit, whose Tier 0, unwind and Zen 5 copies the C driver uses (main.c): it zeroes the
-// section, runs the five initializers, checks that they wrote nothing in the image's writable memory outside the
+// tables, Tier 0's, the Zen 5 cost model's, the unwind templates and Tier 1's selection state tables built. build.sh
+// runs it on each executable it links. It runs in the checker's unit, whose Tier 0, unwind, Zen 5 and Tier 1 copies the
+// C driver uses (main.c): it zeroes the section, runs the six initializers, checks that they wrote nothing in the image's writable memory outside the
 // section (but the GOT, which the loader may fill as functions are first called), and copies the section's bytes over
 // its place in /proc/self/exe's. The file's GNU build ID is then recomputed over the baked bytes, since the linker's
 // note is over the pre-bake file. A PIE, whose section would hold its load address's pointers if any table had one, and
@@ -18,6 +18,10 @@
 // fails this test rather than skipping it.
 //
 // Entry points: run_bake_command and run_baked_tables_test.
+
+// Tier 1's selection state tables (tier1_select_burs.c), which main.c includes after this file.
+static bool tier1_select_initialize(void);
+static bool tier1_select_initialized(void);
 
 // OS-dependent includes
 #include <elf.h>
@@ -252,7 +256,7 @@ static int bake_read_image(BakeImage* image)
     return result;
 }
 
-// Zeroes the section and runs the five initializers, which must succeed and write nothing in the image's writable
+// Zeroes the section and runs the six initializers, which must succeed and write nothing in the image's writable
 // memory outside it (but the GOT). Returns whether they did. A TSan or MSan build checks the first part alone
 // (BUSTER_BAKE_RUNTIME_STATE).
 static bool bake_build(const BakeImage* image)
@@ -268,7 +272,8 @@ static bool bake_build(const BakeImage* image)
             bake_hashes(image, before, NULL);
         }
         memset(__start_buster_baked, 0, bake_section_size());
-        const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize();
+        const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize() &&
+                           tier1_select_initialize();
         const uint64_t changed = outside_checked ? bake_hashes(image, NULL, before) : 0;
         valid = built && changed == 0;
         if (!valid)
@@ -449,10 +454,11 @@ static int run_baked_tables_test(int argc, char** argv)
     // Whether this executable started with any table built: then its file must be a fresh build's, and a complete bake
     // has every initializer's state. A file that starts with none is the unbaked path (a PIE, BUSTER_BAKE=0, or a link
     // without build.sh), which builds the tables when it runs.
+    const bool tier1_ready = tier1_select_initialized();
     const bool initialized = result == 0 && (x86_encoder_initialized || x86_semantics_initialized || x86_zen5_initialized || tier0_initialized ||
-                                             unwind_ready);
+                                             unwind_ready || tier1_ready);
     const bool complete = initialized && x86_encoder_initialized && x86_semantics_initialized && x86_zen5_initialized && tier0_initialized &&
-                          unwind_ready;
+                          unwind_ready && tier1_ready;
     uint8_t* first = result == 0 ? malloc(bake_section_size()) : NULL;
     if (argc != 1)
     {
