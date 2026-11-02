@@ -689,16 +689,34 @@ git config --unset core.hooksPath
 printf '#!/bin/sh\nexit 0\n' > .git/hooks/commit-msg
 chmod +x .git/hooks/commit-msg
 cp .git/hooks/commit-msg kept-copy
-chmod a-w .git/hooks
-status=0
-"$dco" compose > compose-output 2>&1 || status=$?
-chmod u+w .git/hooks
-[ "$status" = 1 ] && grep -q 'nothing changed' compose-output || fail 'compose: a failed install'
-cmp .git/hooks/commit-msg kept-copy && [ ! -e .git/hooks/commit-msg.buster-dco-chained ] || fail 'a failed compose moved the existing commit-msg'
+# Root ignores the directory's mode, so only a non-root run can make the install fail.
+if [ "$(id -u)" != 0 ]
+then
+    chmod a-w .git/hooks
+    status=0
+    "$dco" compose > compose-output 2>&1 || status=$?
+    chmod u+w .git/hooks
+    [ "$status" = 1 ] && grep -q 'nothing changed' compose-output || fail 'compose: a failed install'
+    cmp .git/hooks/commit-msg kept-copy && [ ! -e .git/hooks/commit-msg.buster-dco-chained ] || fail 'a failed compose moved the existing commit-msg'
+fi
 echo leftover > .git/hooks/commit-msg.buster-dco-new
 "$dco" compose > /dev/null || fail 'compose: a leftover temporary file'
 [ ! -e .git/hooks/commit-msg.buster-dco-new ] && cmp .git/hooks/commit-msg.buster-dco-chained kept-copy || fail 'compose: the retry'
 echo 'PASS: a failed compose leaves the existing commit-msg in place, and a retry succeeds'
+
+new_repository
+mkdir .custom-hooks
+git config core.hooksPath .custom-hooks
+# A held configuration lock makes the last step, setting core.hooksPath, fail after the dispatcher is written.
+: > .git/config.lock
+status=0
+"$dco" compose > compose-output 2>&1 || status=$?
+rm .git/config.lock
+dispatcher="$(git rev-parse --path-format=absolute --git-common-dir)/buster-dco-hooks"
+[ "$status" = 1 ] && grep -q 'nothing changed' compose-output || fail 'compose: a failed core.hooksPath write'
+[ ! -e "$dispatcher" ] && [ "$(git config core.hooksPath)" = .custom-hooks ] || fail 'a failed compose left a dispatcher behind'
+"$dco" compose > /dev/null && [ "$(git config core.hooksPath)" = "$dispatcher" ] || fail 'compose: the retry after a failed core.hooksPath write'
+echo 'PASS: a failed custom-layout compose removes its dispatcher, and a retry succeeds'
 
 new_repository
 mkdir .custom-hooks

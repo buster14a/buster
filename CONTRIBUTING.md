@@ -242,7 +242,10 @@ block), MISSING, MALFORMED, DUPLICATE and OUTSIDE (a sign-off outside the
 trailer block, which counts for nothing) findings, merges, and authors who
 didn't sign. Other contributors' sign-offs count; a `Co-authored-by` trailer
 does not. A shallow clone, an unresolvable revision or unrelated histories make
-it INCOMPLETE. Without a clone, `build/dco audit --api-pull PULL.json
+it INCOMPLETE. The trailer block is found with the comment prefix of the
+checkout running the audit, not the one in effect when the commit was made: a
+commit signed under `core.commentString=//` with a `// note` line after its
+trailers reads as MISSING in a default checkout. Without a clone, `build/dco audit --api-pull PULL.json
 --api-commits PAGE.json...` reads `gh api repos/O/R/pulls/N` and every page of
 its `/commits?per_page=100&page=K` (or one `gh api --paginate --slurp` file).
 A page count short of the pull request's `commits`, a head that moved, or a
