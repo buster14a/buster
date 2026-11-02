@@ -18,7 +18,7 @@ static uint32_t check_common_address_root(const CheckGraph* graph, const CheckSt
 
 static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser* parser, const CheckInput* input, uint32_t token, uint32_t id, bool default_ignored)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, false);
     CheckWarningSeverity severity = command.quiet ? CHECK_WARNING_IGNORE :
         check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, command.severity);
     bool system = check_graph_system_token(&input->graph, token);

@@ -738,7 +738,7 @@ static const char* check_driver_pointer_sign_message(const Parser* parser, Prepr
 static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
 {
     const uint32_t index = check_diagnostic_warning_index(warning);
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, index, default_ignored);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, index, default_ignored, false);
     CheckWarningSeverity severity = command.quiet ? CHECK_WARNING_IGNORE :
         check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, index, command.severity);
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers && check_graph_system_token(&input->graph, token))
