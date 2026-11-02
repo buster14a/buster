@@ -218,18 +218,21 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         const char* name;
         const char* first;
         const char* second;
+        // With code generation, an active OpenMP request is refused by the driver's instrumentation barrier before
+        // the checker reads the source; `barrier` is the spelling that barrier must name.
+        const char* barrier;
     } refused[] = {
-        { "#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL },
-        { "#pragma scalar_storage_order big-endian\nint object;\n", "scalar_storage_order", NULL, NULL },
-        { "#pragma GCC target(\"avx2\")\nint object;\n", "GCC target", NULL, NULL },
-        { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL },
-        { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL },
-        { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL },
-        { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL },
-        { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp" },
-        { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL },
-        { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp=libiomp5", "-undef" },
-        { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp=libgomp", NULL },
+        { "#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL, NULL },
+        { "#pragma scalar_storage_order big-endian\nint object;\n", "scalar_storage_order", NULL, NULL, NULL },
+        { "#pragma GCC target(\"avx2\")\nint object;\n", "GCC target", NULL, NULL, NULL },
+        { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
+        { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
+        { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },
+        { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
+        { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
+        { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
+        { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp=libiomp5", "-undef", "-fopenmp=libiomp5" },
+        { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp=libgomp", NULL, "-fopenmp=libgomp" },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(refused); c += 1)
     {
@@ -239,7 +242,28 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         check_test_expect(test, written, "unsupported semantic pragma fixture is written");
         for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
         {
+            // A non-emitting action still reaches the checker's semantic refusal for every directive, OpenMP's among
+            // them, and writes no object.
             unlink(object);
+            char* syntax[14] = { (char*)executable, "-std=gnu17", "-fsyntax-only", source, "-w" };
+            uint32_t syntax_count = 5;
+            if (refused[c].first != NULL)
+            {
+                syntax[syntax_count++] = (char*)refused[c].first;
+            }
+            if (refused[c].second != NULL)
+            {
+                syntax[syntax_count++] = (char*)refused[c].second;
+            }
+            syntax[syntax_count] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int syntax_status = check_test_driver_spawn(syntax, &actual);
+            check_test_expect(test, syntax_status != 0 && actual != NULL && strstr(actual, "unsupported semantic '#pragma ") != NULL &&
+                              strstr(actual, refused[c].name) != NULL && access(object, F_OK) != 0,
+                              "warning controls cannot suppress a named semantic pragma refusal");
+            free(actual);
+            // Code generation refuses an active OpenMP request by name before the source is read; the other directives
+            // reach the checker's refusal and still write no object.
             char* arguments[14] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, "-w" };
             uint32_t count = 7;
             if (refused[c].first != NULL)
@@ -251,11 +275,16 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
                 arguments[count++] = (char*)refused[c].second;
             }
             arguments[count] = scalar != 0 ? "--scalar" : NULL;
-            char* actual = NULL;
-            const int result = check_test_driver_spawn(arguments, &actual);
-            check_test_expect(test, result != 0 && actual != NULL && strstr(actual, "unsupported semantic '#pragma ") != NULL &&
-                              strstr(actual, refused[c].name) != NULL && access(object, F_OK) != 0,
-                              "warning controls cannot suppress a named semantic pragma refusal or emit an object");
+            actual = NULL;
+            const int compiled = check_test_driver_spawn(arguments, &actual);
+            const bool named = compiled != 0 && actual != NULL &&
+                               (refused[c].barrier != NULL ? strstr(actual, "unsupported code generation option '") != NULL &&
+                                                                 strstr(actual, refused[c].barrier) != NULL :
+                                                             strstr(actual, "unsupported semantic '#pragma ") != NULL &&
+                                                                 strstr(actual, refused[c].name) != NULL);
+            check_test_expect(test, named && access(object, F_OK) != 0,
+                              refused[c].barrier != NULL ? "an active OpenMP request is refused by name before code generation" :
+                                                           "warning controls cannot suppress a named semantic pragma refusal or emit an object");
             free(actual);
         }
     }

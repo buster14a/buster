@@ -177,6 +177,15 @@
 //     at statement level, as RETURN. Its arguments go where its callee's parameters arrive, which are where the
 //     function's own arrive (the call's stack arguments within the function's incoming ones), the frame is released,
 //     and it jumps to its callee (tier0_emit_call's tail).
+//   - FENCE: a memory fence (#1059), which pops nothing and pushes nothing (`class` VOID): `value` its order, C's
+//     memory_order (BUSTER_TYPED_FENCE_ORDER: 0 relaxed, 1 consume, 2 acquire, 3 release, 4 acq_rel, 5 seq_cst), and its
+//     scope (BUSTER_TYPED_FENCE_SIGNAL: a signal fence, which orders the thread's accesses against a signal handler on the
+//     same thread alone; without it, a thread fence, against every thread). A consumer moves no access to memory across
+//     it, eliminates none past it and never drops it, as an unknown call's barrier; unlike a call, it reads and writes no
+//     register. On x86-64, whose stores are seen in program order but for a later load's, only a thread fence of seq_cst
+//     needs an instruction, mfence (tier0_fence_records); Tier 0, which moves no access across an entry, emits nothing
+//     for the others: the C producer's __atomic_thread_fence, __atomic_signal_fence, __sync_synchronize and C11's
+//     fences of a constant order (c_check_program_helpers.c's check_program_direct_fence).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
@@ -265,9 +274,15 @@
 #define BUSTER_TYPED_JUMP_INDIRECT 46
 // Right before the vectors' kind, so that the vector validator leaves both to the scalar one with one test.
 #define BUSTER_TYPED_TAIL_CALL 47
-// The vectors' kind, the last, which the validators' paths test as one with the kinds past it.
+// The vectors' kind, which the validators' paths test as one with the kinds past it.
 #define BUSTER_TYPED_X86 48
-#define BUSTER_TYPED_KINDS 49
+// Past the vectors' kind, so that the vector validator leaves it to the scalar one, whose vectors' test takes it.
+#define BUSTER_TYPED_FENCE 49
+#define BUSTER_TYPED_KINDS 50
+// A FENCE's value: its order (C's memory_order) and its scope (a signal fence's bit), and the one that takes mfence.
+#define BUSTER_TYPED_FENCE_ORDER 0x07
+#define BUSTER_TYPED_FENCE_SIGNAL 0x08
+#define BUSTER_TYPED_FENCE_SEQ_CST 5
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -725,6 +740,19 @@ static bool tier0_moves_stack(uint32_t kind)
     _Static_assert(BUSTER_TYPED_FRAME_ADDRESS == BUSTER_TYPED_STACK_RESTORE + 1 && BUSTER_TYPED_STACK_RESTORE == BUSTER_TYPED_ALLOCA + 2,
                    "the stack's kinds are one range");
     return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_FRAME_ADDRESS;
+}
+
+// Whether a FENCE's value is one: an order of C's (0 to 5) and the scope's bit, nothing else.
+static bool tier0_fence_valid(uint64_t value)
+{
+    return (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_FENCE_SIGNAL)) == 0 && (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
+}
+
+// A FENCE's records: mfence for a thread fence of seq_cst, which orders the thread's stores before its later loads, as
+// x86-64 doesn't; none for the others, which order nothing the processor reorders (clang's code has none for them either).
+static uint32_t tier0_fence_records(uint64_t value)
+{
+    return value == BUSTER_TYPED_FENCE_SEQ_CST ? 1 : 0;
 }
 
 // The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer (one whose
@@ -2713,6 +2741,8 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     tier0_defer(BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     tier0_defer(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
+    // FENCE: tier0_emit_deferred's, mfence or nothing by its value (tier0_fence_records).
+    tier0_defer(BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -3277,6 +3307,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_TAIL_CALL] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
+    [BUSTER_TYPED_FENCE] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
@@ -6022,6 +6053,15 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
     }
 }
 
+// A FENCE's records (tier0_fence_records): mfence for a thread fence of seq_cst, none for the others.
+static void tier0_emit_fence(uint64_t value, Tier0Writer* writer)
+{
+    if (tier0_fence_records(value) != 0)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MFENCE, 0, 0, 0, 0, 0));
+    }
+}
+
 // The x87 control word's rounding toward zero around a store to an integer, which C's conversions need and the x87's
 // default rounding to nearest doesn't give (fisttp, which would, is SSE3's, past the baseline): before, the control word
 // saved in red zone temporary 0 and loaded with RC 11 through `scratch` and temporary 1; after, temporary 0 loaded back.
@@ -8110,6 +8150,10 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     {
         tier0_emit_tail_call(function, entries, frame, homes, i, writer);
     }
+    else if (kind == BUSTER_TYPED_FENCE)
+    {
+        tier0_emit_fence(function->values[i], writer);
+    }
     else if (memory && tier0_vector_entry(entries, i))
     {
         tier0_emit_vector_entry(function, entries, frame, homes, i, writer);
@@ -8327,6 +8371,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     else if (kind == BUSTER_TYPED_TAIL_CALL)
     {
         count = tier0_count_tail_call(function, entries, i, memory, references);
+    }
+    else if (kind == BUSTER_TYPED_FENCE)
+    {
+        count = tier0_fence_records(function->values[i]);
     }
     else if (memory && tier0_vector_entry(entries, i))
     {
@@ -8714,6 +8762,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 {
                     clobbers |= tier0_tail_clobbers(function, i);
                 }
+                else if (function->kinds[i] == BUSTER_TYPED_FENCE)
+                {
+                    // No register: mfence or nothing.
+                }
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
                     // A copy's scratch, its stacks' first free register: an XMM one from 16 bytes, a general one below.
@@ -8865,6 +8917,10 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     if (tier0_memory_function(function) && (tier0_vector_entry(entries, i) || tier0_memory_entry(entries, i)))
     {
         tier0_memory_uses(function, entries, i, uses, window, touch);
+    }
+    else if (kind == BUSTER_TYPED_FENCE)
+    {
+        // Neither stack: mfence or nothing.
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
@@ -10499,9 +10555,9 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                 validator.depth = 0;
                 validator.reachable = true;
             }
-            // An unknown kind or class and the vectors' (X86 and VECTOR, the last of each) take one test, so that the
-            // other entries run no test of their own for vectors: the lowering validates every function it lowers, and
-            // a second test per entry cost sqlite3.c's -c 1.5 million instructions (#556's review). A vector's entry
+            // An unknown kind or class, the vectors' (X86 and VECTOR, the last class) and FENCE, past X86, take one
+            // test, so that the other entries run no test of their own for vectors: the lowering validates every function
+            // it lowers, and a second test per entry cost sqlite3.c's -c 1.5 million instructions (#556's review). A vector's entry
             // checks its last operand as the others do below (tier0_last_mismatch), then the vectors' rules; none of the
             // memory classes' checks applies to it.
             if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_X86 || class >= BUSTER_TYPED_CLASS_VECTOR)
@@ -10515,6 +10571,15 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                 {
                     tier0_reject(&validator, i, "a last operand of another class than the entry before it, which both paths read for it");
                     break;
+                }
+                if (kind == BUSTER_TYPED_FENCE)
+                {
+                    // A fence takes and leaves the stacks as they are, anywhere a value may be on them.
+                    if (class != BUSTER_TYPED_CLASS_VOID || !tier0_fence_valid(value))
+                    {
+                        tier0_reject(&validator, i, "a fence of a class, or of an order or a scope that isn't one");
+                    }
+                    continue;
                 }
                 tier0_validate_vector(function, &validator, hashes, seen, i);
                 continue;
@@ -11826,6 +11891,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
             {
                 clobbers |= tier0_tail_clobbers(function, i);
+            }
+            else if (function->kinds[i] == BUSTER_TYPED_FENCE)
+            {
+                // No register, as the scalar selection has it.
             }
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {

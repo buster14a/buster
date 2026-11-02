@@ -2176,6 +2176,15 @@ struct CheckSourceFixture
     const TypeCapacity* capacity;
     // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
     double* check_seconds;
+    // Whether the reader must make the unit overload tables (CHECK_TEST_OVERLOAD_TABLES) or none (CHECK_TEST_OVERLOAD_NONE),
+    // on both paths: a name of the overloadable attribute's counts only inside an attribute list (#1038). 0 checks neither.
+    uint8_t overload_tables;
+};
+
+enum
+{
+    CHECK_TEST_OVERLOAD_TABLES = 1,
+    CHECK_TEST_OVERLOAD_NONE = 2,
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -2234,6 +2243,8 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
         [CHECK_INPUT_CODE_CONDITION] = "condition",
         [CHECK_INPUT_CODE_CALL] = "call",
+        [CHECK_INPUT_CODE_STRING] = "string",
+        [CHECK_INPUT_CODE_RETURN] = "return",
     };
     printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
     for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
@@ -2246,12 +2257,13 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         // Only the classes the enum names occur.
         const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
         // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
-        // identifiers, a function's name, a label's address, sizeof or alignof, an initializer's assignment or
-        // a builtin, a statement expression's terminators, and builtins', intrinsics' and K&R calls. The others' actions
-        // leave a token only where a child has no value, which no unit the coded walk takes has (their guard keeps the
-        // walk's refusal), and a list's takes every token; DROP's tokens never reach an action.
+        // identifiers, a function's name, a label's address, sizeof or alignof, and K&R calls. An initializer's
+        // assignment, a builtin's token and an intrinsic's call are the walk's class (check_input_expression_fold), and
+        // a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
+        // a child has no value or the walk refuses the token (their guard keeps the walk's refusal), and a list's takes
+        // every token; DROP's tokens never reach an action.
         const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
-                              code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_TERMINATOR || code == CHECK_INPUT_CODE_CALL;
+                              code == CHECK_INPUT_CODE_CALL;
         const bool expected = !named                            ? !counted
                               : code == CHECK_INPUT_CODE_SCALAR ? test->expression_acted[code] == 0
                               : code == CHECK_INPUT_CODE_DROP   ? !counted
@@ -2264,6 +2276,40 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
     }
     printf("\n");
     check_test_expect(test, test->expression_left[CHECK_INPUT_CODE_SCALAR] != 0, "the coded walk leaves the scalar class's tokens to the walk's visit");
+}
+
+// Whether the two paths' readers built the same expression graph of a unit of `tokens` tokens: its nodes, their leaves,
+// the arguments' slices and the overload calls, and the tokens' nodes and overload heads (#1038: the coded walk's twin,
+// the walk, must give the graph node for node, which a typed stream compares only as the checker's results).
+static bool check_test_source_graphs_equal(const CheckInput* a, const CheckInput* b, uint32_t tokens)
+{
+    const CheckGraph* x = &a->graph;
+    const CheckGraph* y = &b->graph;
+    bool equal = x->count == y->count && x->leaf_count == y->leaf_count && x->argument_count == y->argument_count && x->overload_count == y->overload_count &&
+                 (a->overload_heads == NULL) == (b->overload_heads == NULL);
+    for (uint32_t node = 0; equal && node < x->count; node += 1)
+    {
+        equal = x->ops[node] == y->ops[node] && x->tokens[node] == y->tokens[node] && x->operand0[node] == y->operand0[node] &&
+                x->operand1[node] == y->operand1[node] && x->operand2[node] == y->operand2[node] && x->types[node] == y->types[node] &&
+                x->members[node] == y->members[node] && x->contexts[node] == y->contexts[node] && x->leaf_slots[node] == y->leaf_slots[node] &&
+                x->argument_offsets[node] == y->argument_offsets[node] && x->argument_counts[node] == y->argument_counts[node] &&
+                (x->source_positions == NULL || x->source_positions[node] == y->source_positions[node]);
+        equal = equal && (x->ops[node] != CHECK_OP_VALUE || check_test_value_equal(check_graph_leaf_of(x, node), check_graph_leaf_of(y, node)));
+    }
+    for (uint32_t argument = 0; equal && argument < x->argument_count; argument += 1)
+    {
+        equal = x->argument_nodes[argument] == y->argument_nodes[argument] &&
+                (x->argument_tokens == NULL || x->argument_tokens[argument] == y->argument_tokens[argument]);
+    }
+    for (uint32_t call = 0; equal && call < x->overload_count; call += 1)
+    {
+        equal = x->overload_calls[call].node == y->overload_calls[call].node && x->overload_calls[call].head == y->overload_calls[call].head;
+    }
+    for (uint32_t token = 0; equal && token < tokens; token += 1)
+    {
+        equal = a->token_nodes[token] == b->token_nodes[token] && (a->overload_heads == NULL || a->overload_heads[token] == b->overload_heads[token]);
+    }
+    return equal;
 }
 
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
@@ -2371,9 +2417,15 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                                                 input[0].expression_left[CHECK_INPUT_CODE_SCALAR];
                 snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
                          fixture->name, classed, input[1].expression_visits, scalar_counted);
-                const bool coded = input[1].overload_heads != NULL || input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
+                const bool coded = input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
                                    (classed != 0 && classed <= input[1].expression_visits);
                 check_test_expect(test, coded && scalar_counted == 0, resource_message);
+            }
+            if (fixture->overload_tables != 0)
+            {
+                snprintf(resource_message, sizeof(resource_message), "%s: the %s path's reader makes %s", fixture->name, p == 0 ? "scalar" : "vector",
+                         fixture->overload_tables == CHECK_TEST_OVERLOAD_TABLES ? "overload tables" : "no overload tables");
+                check_test_expect(test, (input[p].overload_heads != NULL) == (fixture->overload_tables == CHECK_TEST_OVERLOAD_TABLES), resource_message);
             }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;
@@ -2463,6 +2515,12 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     if (ready)
     {
         check_test_expect(test, rejected[0] == rejected[1] && lines[0] == lines[1], "source paths disagree on acceptance or first-error line");
+        if (!rejected[0] && !rejected[1])
+        {
+            char graphs[256];
+            snprintf(graphs, sizeof(graphs), "%s: the source paths build the same expression graph", fixture->name);
+            check_test_expect(test, check_test_source_graphs_equal(&input[0], &input[1], input[0].token_count), graphs);
+        }
         if (checked[0] && checked[1])
         {
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
@@ -5298,6 +5356,175 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // GNU's function multiversioning (#839): target("default") makes a function multiversioned even alone, and
+        // clang refuses these declaration attributes beside it, at the function's name.
+        {
+            "multiversioning: always_inline beside target default",
+            "int g(int x) { return x; }\n__attribute__((always_inline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: noinline beside target default",
+            "int g(int x) { return x; }\n__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: flatten beside target default",
+            "int g(int x) { return x; }\n__attribute__((flatten, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cold beside target default",
+            "int g(int x) { return x; }\n__attribute__((cold, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: hot beside target default",
+            "int g(int x) { return x; }\n__attribute__((hot, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: weak beside target default",
+            "int g(int x) { return x; }\n__attribute__((weak, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: const beside target default",
+            "int g(int x) { return x; }\n__attribute__((const, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: pure beside target default",
+            "int g(int x) { return x; }\n__attribute__((pure, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: naked beside target default",
+            "int g(int x) { return x; }\n__attribute__((naked, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: alias beside target default",
+            "int g(int x) { return x; }\n__attribute__((alias(\"g\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: target_clones beside target",
+            "int g(int x) { return x; }\n__attribute__((target_clones(\"avx2\", \"default\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_specific beside target",
+            "int g(int x) { return x; }\n__attribute__((cpu_specific(generic), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: used beside target default",
+            "int g(int x) { return x; }\n__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: nothrow beside target default",
+            "int g(int x) { return x; }\n__attribute__((nothrow, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a second target version checks the first declaration",
+            "__attribute__((always_inline, target(\"avx2\"))) int h(int x);\n"
+            "__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_dispatch beside target",
+            "__attribute__((cpu_dispatch(generic), target(\"default\"))) int h(int x) { return x + 1; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: aligned beside target default",
+            "int h(void) __attribute__((aligned(16), target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: may_alias beside target default",
+            "int h(void) __attribute__((may_alias, target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: inline nonnull beside target default",
+            "inline int h(int *p) __attribute__((nonnull, nothrow, target(\"default\"))) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a block-scope declaration beside target default",
+            "int f(void) { int h(void) __attribute__((target(\"default\"), always_inline)); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: several declarators beside target default",
+            "__attribute__((target(\"default\"), always_inline)) int h(void), g(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific declaration alone is unsupported",
+            "__attribute__((cpu_specific(generic))) int h(void);\n",
+            true,
+            true
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu17",
+            "int h(void) __attribute__((nodiscard, target(\"default\")));\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu23",
+            "int h(void) __attribute__((nodiscard, maybe_unused, no_sanitize_undefined, target(\"default\")));\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "multiversioning: no_builtin on a declaration still reports the conflict",
+            "__attribute__((no_builtin(\"printf\"), always_inline, target(\"default\"))) int h(void);\n",
+            true,
+            false
+        },
     };
     enum
     {
@@ -5858,6 +6085,8 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
 
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
+static void check_test_lowering_inventory(CheckTest* test);
+static void check_test_lowering_templates(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
@@ -6276,6 +6505,10 @@ static int run_checker_tests(int argc, char** argv)
             }
             if (check_test_takes())
             {
+                check_test_identifier_leaves(&test);
+            }
+            if (check_test_takes())
+            {
                 check_test_selection_positions(&test);
             }
             if (check_test_takes())
@@ -6471,6 +6704,14 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_lowering_source_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_lowering_inventory(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_lowering_templates(&test);
             }
             if (check_test_takes())
             {

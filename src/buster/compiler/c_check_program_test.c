@@ -2497,6 +2497,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
 #include "c_check_program_folds_test.c"
+#include "c_check_program_fence_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -3203,6 +3204,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
         check_test_program_folds(test, clang);
+        check_test_program_fences(test, clang);
         check_test_program_batch(test);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
@@ -3972,6 +3974,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
             "float x=1.0+0x1p-24;int a=x>1.0f;int f=fp_state();change_rounding(0);return a*100+f;}",
             "fenv-implicit-narrowing-conversion", clang);
+        // The Microsoft spelling maps to STDC FENV_ACCESS's runtime policy: clang compiles the STDC oracle, ours
+        // the extension spelling, and both builds must agree under each runtime rounding mode.
+        check_test_program_against(test,
+            "#pragma fenv_access(on)\n"
+            "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
+            "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
+            "#pragma STDC FENV_ACCESS ON\n"
+            "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
+            "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
+            false, "fenv-access-extension-matches-stdc", clang);
     }
     if (!check_test_program_daz())
     {

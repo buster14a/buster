@@ -1,0 +1,20 @@
+function (ptr, i32) -> i32 {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i32 1
+  %2 = fence.void relaxed
+  %3 = store.void %0, %1 align=4
+  %4 = fence.void release
+  %5 = fence.void seq_cst
+  %6 = load.i32 %0 align=4
+  %7 = fence.void consume
+  %8 = fence.void acquire
+  %9 = fence.void acq_rel
+  %10 = fence.void relaxed signal
+  %11 = fence.void consume signal
+  %12 = fence.void acquire signal
+  %13 = fence.void release signal
+  %14 = fence.void acq_rel signal
+  %15 = fence.void seq_cst signal
+  %16 = ret.void %6
+}

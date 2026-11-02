@@ -902,6 +902,8 @@ struct PredefinesOptions
     uint64_t sanitizers;
     uint64_t ubsan_feature_ignored;
     bool sanitize_coverage;
+    // The coverage features still on that instrument directly or imply instrumentation, when sanitize_coverage is.
+    uint32_t coverage_features;
     // -target's or --target='s triple (predefines_target_valid), or null for the build Clang's configured default
     // (BUSTER_CLANG_DEFAULT_TARGET, x86_64-pc-linux-gnu when a direct build leaves it undefined).
     const char* target;
@@ -2524,6 +2526,62 @@ static uint32_t predefines_coverage_list(const char* spelling, const char* list,
     return result;
 }
 
+// clang's describeSanitizeArg for coverage: "-fsanitize-coverage=" and the values of `argument`'s list whose features
+// meet `mask`, into `buffer`.
+static const char* predefines_coverage_describe(const char* argument, uint32_t mask, char* buffer, size_t capacity)
+{
+    size_t used = predefines_text_append(buffer, 0, capacity, "-fsanitize-coverage=", 20);
+    bool first = true;
+    const char* name = strchr(argument, '=') + 1;
+    bool more = true;
+    while (more)
+    {
+        const char* end = strchr(name, ',');
+        const size_t length = end != 0 ? (size_t)(end - name) : strlen(name);
+        uint32_t feature = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_coverage_names); i += 1)
+        {
+            const bool same = strlen(predefines_coverage_names[i]) == length && memcmp(predefines_coverage_names[i], name, length) == 0;
+            feature |= same ? 1u << i : 0;
+        }
+        if (length != 0 && (feature & mask) != 0)
+        {
+            used = first ? used : predefines_text_append(buffer, used, capacity, ",", 1);
+            used = predefines_text_append(buffer, used, capacity, name, length);
+            first = false;
+        }
+        more = end != 0;
+        name = end != 0 ? end + 1 : name;
+    }
+    return buffer;
+}
+
+// The last -fsanitize-coverage= that turns on one of `mask`'s features, less those a later -fno-sanitize-coverage=
+// turns off, described as predefines_coverage_describe does; empty when none does.
+static __attribute__((unused)) const char* predefines_coverage_last(const PredefinesOptions* options, uint32_t mask, char* buffer, size_t capacity)
+{
+    const char* result = "";
+    uint32_t left = mask;
+    for (uint32_t i = options->sanitize_count; i > 0 && result[0] == 0; i -= 1)
+    {
+        const char* argument = options->sanitize_arguments[i - 1];
+        const char* list = strchr(argument, '=') + 1;
+        bool valid = true;
+        if (predefines_starts(argument, "-fsanitize-coverage="))
+        {
+            if (!predefines_coverage_number(list) && (predefines_coverage_list("-fsanitize-coverage=", list, &valid) & left) != 0)
+            {
+                result = predefines_coverage_describe(argument, left, buffer, capacity);
+            }
+        }
+        else if (predefines_starts(argument, "-fno-sanitize-coverage="))
+        {
+            left &= ~predefines_coverage_list("-fno-sanitize-coverage=", list, &valid);
+        }
+    }
+    return result;
+}
+
 // clang's SanitizerArgs for x86_64-linux-gnu, after every option: options->sanitizers (the sanitizers on),
 // options->ubsan_feature_ignored and options->sanitize_coverage, with clang's errors. The sanitizer options are read from
 // the last back, each -fsanitize= turning on only what no later -fno-sanitize= turns off; the rules that need the whole
@@ -2718,6 +2776,10 @@ static bool predefines_sanitizers(PredefinesOptions* options)
     options->sanitizers = kinds;
     options->ubsan_feature_ignored = ignored;
     options->sanitize_coverage = (coverage & BUSTER_PREDEFINES_COVERAGE_INSTRUMENTING) != 0;
+    // The requested features, not only the instrumenting ones: trace-pc-guard and stack-depth reach that set through the
+    // edge and function implications above, so the last argument that asked for one of them is the one to name.
+    options->coverage_features = coverage & (BUSTER_PREDEFINES_COVERAGE_INSTRUMENTING | BUSTER_PREDEFINES_COVERAGE_IMPLY_EDGE |
+                                             BUSTER_PREDEFINES_COVERAGE_STACK_DEPTH);
     return result;
 }
 

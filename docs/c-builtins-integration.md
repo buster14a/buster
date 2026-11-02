@@ -619,6 +619,151 @@ an aggregate's initializer and in code, with payloads, signs, negations and the
 conversions that quiet a signaling NaN, and `nan`'s, `nanf`'s and `nanl`'s
 payloads in static data.
 
+## Helper contracts and direct forms (#1059)
+
+A helper is the fallback for an operation, not its representation. Behind a
+helper's call the code generators see only an unknown call, which constrains
+optimization, spills the caller-saved registers live across it, and costs a call
+and a return. `c_check_program_helpers.c` publishes what each helper family's
+operations are, so that a consumer can take one directly where the contract and
+its tests support it, and must take the helper, or refuse, where they don't.
+
+Each family's contract (`check_program_helper_contracts`) gives the effects every
+one of its operations may have, which a caller keeps whatever code implements
+it: memory read or written through an address it is given (`READS`, `WRITES`),
+an access of the object's width atomic as other threads see it (`ATOMIC`), a
+memory order (`ORDERS`; every helper strengthens its order to `seq_cst`), no
+access moved across it or eliminated past it (`BARRIER`, a call's), the floating
+environment read and its exceptions raised (`FP_ENVIRONMENT`, `FP_EXCEPTIONS`),
+errno set (`ERRNO`), no return (`TERMINATES`), a return it may not make, which a
+consumer assumes neither way (`MAY_TERMINATE`), and effects past these, which a
+consumer keeps whole (`UNMODELED`). The two termination effects are the
+operation's own control flow: a defined non-return, or code whose control flow
+the contract can't bound. A fault is its access's or its operation's (an atomic
+load through a bad pointer faults as a plain load does, and a floating
+exception traps only where the program unmasks it), which a direct form keeps
+by those instructions' own semantics (`x86_semantics.c`'s
+`BUSTER_X86_EFFECT_FAULT` and `BUSTER_X86_EFFECT_FP_EXCEPTION` per form), not a
+call's effect. Apart from them, its requirements are what a
+direct form of the operation needs of the function it is placed in, which a
+helper's call doesn't pass to its caller (the call's convention covers the
+registers, and the helper is compiled for the unit's target): target features
+its instructions need (`FEATURES`) and fixed or implicit registers past the
+convention (`FIXED`). `check_program_helper_family` takes a helper's family by
+what names it, and a helper no family names (a load or store of another id, a
+read/modify/write without its rule, a new helper before its family has its row)
+is `unmodeled`'s, with every effect as a bound (it may not return, never that it
+doesn't), never a neighbour family's.
+`check_program_helper_effects` narrows the family's set to a planned helper's
+(`load_n` reads, `store_n` writes; only clang's IEEE maximum and minimum read
+the floating environment among the read/modify/writes; a math builtin's facts).
+
+| Family | Effects | Requirements | Direct form |
+| --- | --- | --- | --- |
+| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | none yet |
+| `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | none yet |
+| `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
+| `terminal` (`trap`, `unreachable`) | terminates | none | none |
+| `flt-rounds` | floating environment, barrier | none | none |
+| `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
+| `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
+| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | none |
+| `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
+
+A helper's physical effects are `x86_semantics.c`'s, read from its records
+(`check_program_helper_physical`), never a list of this file's: the resources
+they read and write (general and vector registers, flags, MXCSR, the x87's
+control word), their forms' memory effects (a fence, a locked access) and
+properties (a fault, a floating exception), whether they read or write an object
+a pointer names (an access based on `rsp`, on `rbp` where the code has a frame
+pointer, or on `r15` where it has a realigned frame's base is its frame's), and
+whether the code returns or traps. A record of a form the
+tables don't cover has only the conservative record, which says nothing of it,
+so it is counted apart, and a consumer takes its helper as one of unknown
+effects. `test-checker`'s contract check (`check_test_program_helper_contracts`)
+makes every helper the emitters make (379: the atomic loads and stores of every
+width, the three fences, every read/modify/write of every width and format, both
+terminal builtins, FLT_ROUNDS, the 14 math builtins and the 112 x86 leaves, AMX's
+among them; each family's exact count, which a helper an emitter adds or stops
+making changes; and four unnamed helpers with a trap's, sqrt's, a fence's and a
+store's code, which keep `unmodeled`'s bounds) and checks each against its
+contract: no callee-saved register
+written but those its published frame restores, no object written or read, no
+fence or locked access, no floating environment read or exception raised, that
+its contract doesn't have (but where it is `UNMODELED`), no trap without a
+return its contract doesn't allow, and each claim backed by its code but where
+the contract is `UNMODELED`, whose effects are bounds (a load reads its object
+and a store writes it and fences; a
+read/modify/write writes its object with a locked access; a thread fence fences
+and a signal fence only returns; a terminal builtin traps and doesn't return; a
+claim of the floating environment reads MXCSR or the x87's control word; errno
+is written). Its one gap the tables don't cover where the contract models every
+effect, the IEEE maximum's and minimum's `btr` and `bts` of an immediate, the
+test names for those helpers alone, and checks every uncovered record against
+it, not the first alone; the x86 leaves' system instructions (`pause`, `rdtsc`, Key
+Locker's) are uncovered too, under their family's `UNMODELED`.
+
+**Direct fences.** `check_program_direct_fence` admits `__atomic_thread_fence`,
+`__atomic_signal_fence`, `__c11_atomic_thread_fence` and
+`__c11_atomic_signal_fence`, unscoped, of an order the checker knows that is one
+of C's (0 to 5) and whose argument evaluates for no effect (no side effect, and
+nothing of the floating environment: a conversion under `FENV_ACCESS`, which
+clang evaluates at run time), and `__sync_synchronize`. The helper planner and the lowering ask it alike: the
+planner plans no helper for the node, and the lowering writes the typed stream's
+`FENCE` of its order and scope (`BUSTER_TYPED_FENCE_SIGNAL` for a signal fence)
+in the helper's call's place, its constant argument evaluated for nothing. Every
+consumer keeps it: Tier 0 emits `mfence` for a thread fence of `seq_cst` and
+nothing for the others, as clang does ([the Tier 0 guide](tier0.md)), the typed
+interpreter runs it as nothing, `ir_lower` makes it the IR's `fence`, which no
+optimizer moves anything across, eliminates anything past or drops, and Tier 1
+selects it to `mfence` or nothing ([the IR guide](ir.md)'s "Fences"). A fence of
+a dynamic or out-of-range order (which the helper strengthens to `seq_cst`,
+where clang emits a switch over the orders or nothing), of an argument with an
+effect or the floating environment's, or of a scoped family keeps its helper. On SQLite 3.50.4,
+`sqlite3MemoryBarrier`'s `__sync_synchronize` went from
+`sub rsp, 8; call <helper>; add rsp, 8; ret` to `mfence; ret`, and the unit has
+one helper fewer; c-testsuite's subset, which has no fence, compiles to the
+same bytes as before.
+
+**Coverage.** `--helper-report` prints on standard error, after the command, a
+line of the totals over its units (`helpers`, with `units`, `refused`: units the
+lowering refused an operation of by name, `direct`: builtin uses lowered
+directly, `helper`: the lowered code's call sites of a helper, an explicit
+builtin's, an implicit `_Atomic` access's, a generic form's and an asm
+statement's alike, and `planned`: helpers emitted) and a line per family
+(`helpers.fence`, `direct=`, `helper=`, `planned=`). A family without a direct
+form counts no direct use, which the fence test checks of every family.
+
+**Tests.** `test-checker`'s fence section (`c_check_program_fence_test.c`)
+lowers fences of every order and scope and the helper's cases by both paths,
+checks each function's `FENCE` entries and values, its calls, and Tier 0's
+records by both twins as `x86_semantics.c` reads them (an `mfence` between a
+store and a load where the source has a `seq_cst` fence there, none for the
+other orders), and the plan's counts, then runs them natively against clang -O0's
+build. A function with a statement expression has fences over a live value: its
+lowering tracks its stack (`check_lower_track`, as every function of a program
+with a terminal helper does), where a `FENCE` neither pops nor pushes; the
+compiler's own `main.c` by `-c` and `--lower-all` is the larger case. `test-checker-driver`'s fence unit (`c_check_fence_driver_test.c`) is the
+concurrent control a sequential interpreter can't be: a store-buffering litmus,
+built by both paths, by Tier 0 and by `--tier1` (every function Tier 1's),
+whose threads each store, fence and load, run 100,000 iterations without a
+thread fence (a signal fence, a compiler barrier alone: the control) and with a
+`seq_cst` one. The fenced runs must never show both loads reading 0; the
+control's count shows the machine reorders without the fence. On a 4-CPU cloud
+container, over two runs of the four builds, the control showed both loads
+reading 0 in 58 to 41,194 of 100,000 iterations (clang -O0's build of the same
+program: 53,347), and the fenced litmus in none. The control may show none on a
+run whose threads never overlap, which leaves the fenced run's check weaker,
+not wrong; the test prints both counts. It also reads each build's
+`--helper-report` and its objects' fenced threads (one `mfence` each, the
+control's none).
+
+**Pending** (#1059): the atomic loads and stores (direct `mov`s with an `xchg`
+or `mfence` for a `seq_cst` store, which need the IR to carry an atomic access
+and Tier 1 to select it), the read/modify/writes, the asm statements' operations
+placed in their callers (slice 4), and the paired 9700X measurements of helper
+calls, save and reload traffic, code size, compile time and runtime.
+
 ## Atomic and terminal helper calls
 
 `c_check_builtin_atomic_c11.c` supplies the C11 `__c11_atomic_*` family used by
@@ -679,8 +824,10 @@ signed/unsigned pointer-valued stores retain Clang's pointer-sign warning.
 explicit parameter/result classes. Naturally aligned 1/2/4/8-byte loads
 return zero-extended raw bits; width-specific stores followed by MFENCE and
 MOV loads provide conservative sequential consistency. Thread/sync fences
-use MFENCE. Signal fences require no machine instruction. Every helper CALL,
-including a signal fence, must remain an unknown-effect compiler barrier;
+use MFENCE. Signal fences require no machine instruction. A fence of a constant
+order is no helper's call at all, but the typed stream's `FENCE` ("Helper
+contracts and direct forms", above). Every helper CALL,
+including a signal fence's, must remain an unknown-effect compiler barrier;
 a RET by itself does not constrain optimization. Each original order,
 pointer and value expression must still execute once even when the helper
 does not inspect its numeric order.
