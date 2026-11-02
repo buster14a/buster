@@ -1228,58 +1228,190 @@ static bool check_control_fold_push(const CheckControlWriter* writer, uint32_t* 
     return room;
 }
 
-// Whether `value` is one that clang's evaluator gives a statement expression's statement (an expression's or an
-// automatic object's initializer's): an integer or floating constant without side effects or faults.
+// Whether `value` is one that clang's evaluator takes where it evaluates an expression for nothing but its value (a
+// statement expression's statement, an automatic object's initializer, a comma's left operand): an integer, floating
+// or address constant, an rvalue (an lvalue's designator, `n;`, reads its object), without side effects or faults.
 static bool check_control_fold_value(const CheckValue* value)
 {
-    return (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING) && value->fault == CHECK_FAULT_NONE &&
-           (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+    return (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING || value->constant_kind == CHECK_CONSTANT_ADDRESS) &&
+           value->category == CHECK_RVALUE && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
 }
 
-// Whether clang's evaluator takes `statement`, of a statement expression before its value (VisitStmtExpr's
-// EvaluateStmt): an empty one, an expression whose value is a constant without side effects, or a declaration of
-// automatic objects whose initializers' values are such constants, or none, a variable-length array's among them. Their
-// expressions go on the walk's stack, for the __builtin_constant_p it may meet. A static or extern declaration, an
-// asm statement, a jump, a typeof's operand or any other statement is none it folds, nor is one without room.
-static bool check_control_fold_statement(const CheckControlWriter* writer, uint32_t statement, uint32_t* depth, uint32_t visits)
+// Whether clang's evaluator takes expression `node` where it wants nothing but its value: check_control_fold_value's
+// (a string literal's address after its decay among them), or through its casts and a declaration's initialization
+// (CHECK_OP_INITIALIZE) its operand's, or the address of a named object, which it forms without reading the object
+// (`&n` of a local, or a local array's decay); and its node on the walk's stack, for the __builtin_constant_p it may
+// hold.
+static bool check_control_fold_operand(const CheckControlWriter* writer, uint32_t node, uint32_t* depth, uint32_t visits)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t operand = node;
+    CheckValue value = operand < graph->count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
+    // The first value it takes on the way down: a string literal's is its decay's, not the array lvalue's under it.
+    for (uint32_t steps = 0; !check_control_fold_value(&value) && operand < graph->count && steps < graph->count &&
+                             (graph->ops[operand] == CHECK_OP_CAST || graph->ops[operand] == CHECK_OP_CONVERT || graph->ops[operand] == CHECK_OP_INITIALIZE);
+         steps += 1)
+    {
+        operand = graph->operand0[operand];
+        value = operand < graph->count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
+    }
+    // A named array (of a constant size) decays to its address as `&` takes a named object's.
+    const bool decays = operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && check_action_kind(program->types, value.type) == BUSTER_TYPE_KIND_ARRAY;
+    const uint32_t object = operand < graph->count && graph->ops[operand] == CHECK_OP_ADDRESS ? graph->operand0[operand] : decays ? operand : BUSTER_CHECK_NONE;
+    const bool named = object < graph->count && graph->ops[object] == CHECK_OP_VALUE && check_graph_leaf_of(graph, object)->object != 0 &&
+                       (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+    return operand < graph->count && (check_control_fold_value(&value) || named) && check_control_fold_push(writer, depth, visits, operand);
+}
+
+// A statement on the fold walk's stack (check_control_foldable), beside the expressions' nodes: its token with this bit.
+#define BUSTER_CHECK_CONTROL_FOLD_STATEMENT UINT32_C(0x80000000)
+
+// Whether clang's evaluator takes what the writer emits at `token` (check_control_drain's token: a statement's
+// terminator or a for statement's first `;`): its declarations' initializers, or else its expressions, each a value
+// that check_control_fold_value takes, and none a static declaration, an asm statement or a typeof's operand. The
+// expressions go on the walk's stack, for the __builtin_constant_p they may hold. An extern declaration has no code.
+static bool check_control_fold_simple(const CheckControlWriter* writer, uint32_t token, uint32_t* depth, uint32_t visits)
 {
     const CheckProgram* program = writer->program;
     const CheckInput* input = program->input;
-    const Parser* parser = writer->parser;
     uint32_t low = 0;
     uint32_t high = 0;
-    check_control_extent(writer, statement, &low, &high);
-    bool foldable = parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR && (writer->asm_statements == NULL || writer->asm_statements[statement] == BUSTER_CHECK_NONE) &&
-                    (input->evaluation_nodes == NULL || input->evaluation_nodes[statement] == BUSTER_CHECK_NONE);
-    for (uint32_t token = low; foldable && token <= high; token += 1)
+    check_control_extent(writer, token, &low, &high);
+    bool foldable = (writer->asm_statements == NULL || writer->asm_statements[token] == BUSTER_CHECK_NONE) &&
+                    (input->evaluation_nodes == NULL || input->evaluation_nodes[token] == BUSTER_CHECK_NONE);
+    for (uint32_t t = low; foldable && t <= high; t += 1)
     {
-        const uint8_t kind = parser->tokens.kinds[token];
-        const bool object = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT;
-        foldable = kind != PARSE_KIND_RETURN && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_BREAK && kind != PARSE_KIND_CONTINUE &&
-                   !(object && (input->static_objects[token] || input->linkage[token] != 0));
+        const bool object = input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_OBJECT;
+        foldable = !(object && input->static_objects[t] && input->linkage[t] == 0);
     }
-    // Its declarations' initializers (check_control_drain's plans), or else its expressions, each a value at its token.
-    const uint32_t first_plan = foldable && program->initializers != NULL && check_program_bit(writer->planned, statement) ? writer->plan_first[statement] : BUSTER_CHECK_NONE;
+    const uint32_t first_plan = foldable && program->initializers != NULL && check_program_bit(writer->planned, token) ? writer->plan_first[token] : BUSTER_CHECK_NONE;
     for (uint32_t i = first_plan; foldable && i != BUSTER_CHECK_NONE; i = writer->plan_next[i])
     {
         const CheckInitializer* plan = program->initializers->plans + i;
         for (uint32_t part = 0; foldable && part < plan->count; part += 1)
         {
             const CheckInitPart* write = plan->parts + part;
-            foldable = write->kind != CHECK_INIT_VALUE ||
-                       (check_control_fold_value(&write->value) && (write->node >= input->graph.count || check_control_fold_push(writer, depth, visits, write->node)));
+            // By its source expression where it has one, or by its value converted to the object's type (a string
+            // literal's array, whose source is the array's lvalue, decays to its address), with the source on the
+            // walk's stack all the same.
+            const bool source = write->node < input->graph.count;
+            foldable = write->kind != CHECK_INIT_VALUE || (source && check_control_fold_operand(writer, write->node, depth, visits)) ||
+                       (check_control_fold_value(&write->value) && (!source || check_control_fold_push(writer, depth, visits, write->node)));
         }
     }
-    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? writer->token_first[statement] : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
+    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? writer->token_first[token] : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
          node = writer->node_next[node])
     {
-        uint32_t operand = node;
-        while (operand != BUSTER_CHECK_NONE && (input->graph.ops[operand] == CHECK_OP_CAST || input->graph.ops[operand] == CHECK_OP_CONVERT))
+        foldable = check_control_fold_operand(writer, node, depth, visits);
+    }
+    return foldable;
+}
+
+// Whether clang's evaluator takes `statement`, of a statement expression before its value (VisitStmtExpr's
+// EvaluateStmt), as far as it decides here: an empty statement or one check_control_fold_simple takes; a block, an
+// else or a do's body, whose statements go on the walk's stack; an if of a constant condition, whose taken arm does; a
+// while, a for or a do whose constant condition is false (the for's first clause taken by check_control_fold_simple);
+// and a switch of a constant condition without a case. Every other statement, a jump that it evaluates among them, it
+// doesn't.
+static bool check_control_fold_statement(const CheckControlWriter* writer, uint32_t statement, uint32_t* depth, uint32_t visits)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const Parser* parser = writer->parser;
+    const uint8_t role = parser->tree.roles[statement];
+    bool foldable = false;
+    if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
+    {
+        foldable = true;
+        for (uint32_t child = writer->first[statement]; foldable && child != BUSTER_CHECK_NONE; child = writer->next[child])
         {
-            operand = input->graph.operand0[operand];
+            foldable = parser->tree.roles[child] == PARSE_ROLE_OPEN_BLOCK || check_control_fold_push(writer, depth, visits, child | BUSTER_CHECK_CONTROL_FOLD_STATEMENT);
         }
-        const CheckValue value = operand < input->graph.count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
-        foldable = check_control_fold_value(&value) && check_control_fold_push(writer, depth, visits, operand);
+    }
+    else if (role == PARSE_ROLE_TERMINATOR)
+    {
+        // A do statement's terminator holds its body (DO) and its condition: its body once, then a false condition.
+        uint32_t body = BUSTER_CHECK_NONE;
+        uint32_t condition = BUSTER_CHECK_NONE;
+        foldable = true;
+        for (uint32_t child = writer->first[statement]; foldable && child != BUSTER_CHECK_NONE; child = writer->next[child])
+        {
+            const uint8_t child_role = parser->tree.roles[child];
+            foldable = child_role != PARSE_ROLE_RETURN && child_role != PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+            body = child_role == PARSE_ROLE_DO ? child : body;
+            condition = child_role == PARSE_ROLE_CLOSE_CONDITION ? child : condition;
+        }
+        if (body != BUSTER_CHECK_NONE)
+        {
+            const CheckGraph* graph = &input->graph;
+            const uint32_t node = condition != BUSTER_CHECK_NONE ? input->token_nodes[condition] : BUSTER_CHECK_NONE;
+            const uint32_t expression = node < graph->count && graph->ops[node] == CHECK_OP_CONDITION ? graph->operand0[node] : node;
+            const CheckValue value = expression < graph->count ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
+            bool truth = true;
+            foldable = foldable && value.constant_kind != CHECK_CONSTANT_NONE && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                       check_action_truth(program->types, &value, &truth) && !truth && check_control_fold_push(writer, depth, visits, expression) &&
+                       check_control_fold_push(writer, depth, visits, body | BUSTER_CHECK_CONTROL_FOLD_STATEMENT);
+        }
+        else
+        {
+            foldable = foldable && check_control_fold_simple(writer, statement, depth, visits);
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR)
+    {
+        // check_control_expand's children: an if, while or switch's keyword, body and else; a for's two `;`s and body.
+        uint32_t keyword = BUSTER_CHECK_NONE;
+        uint32_t body = BUSTER_CHECK_NONE;
+        uint32_t alternate = BUSTER_CHECK_NONE;
+        uint32_t first = BUSTER_CHECK_NONE;
+        uint32_t condition = BUSTER_CHECK_NONE;
+        for (uint32_t child = writer->first[statement]; child != BUSTER_CHECK_NONE; child = writer->next[child])
+        {
+            const uint8_t child_role = parser->tree.roles[child];
+            const bool semi = child < statement && parser->tokens.kinds[child] == PARSE_KIND_SEMI;
+            keyword = child < statement && child_role == PARSE_ROLE_LEAF_RIGHT ? child : keyword;
+            condition = semi && first != BUSTER_CHECK_NONE ? child : condition;
+            first = semi && first == BUSTER_CHECK_NONE ? child : first;
+            alternate = child > statement && child_role == PARSE_ROLE_ELSE ? child : alternate;
+            body = child > statement && child_role != PARSE_ROLE_ELSE ? child : body;
+        }
+        const bool loop = role == PARSE_ROLE_CLOSE_FOR;
+        const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? writer->token_first[condition] : BUSTER_CHECK_NONE) : input->token_nodes[statement];
+        const CheckGraph* graph = &input->graph;
+        const uint32_t expression = node < graph->count && graph->ops[node] == CHECK_OP_CONDITION ? graph->operand0[node] : node;
+        const CheckValue value = expression < graph->count ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
+        bool truth = false;
+        const uint8_t kind = keyword != BUSTER_CHECK_NONE ? parser->tokens.kinds[keyword] : 0;
+        foldable = value.constant_kind != CHECK_CONSTANT_NONE && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_truth(program->types, &value, &truth) &&
+                   check_control_fold_push(writer, depth, visits, expression);
+        if (loop)
+        {
+            foldable = foldable && !truth && first != BUSTER_CHECK_NONE && check_control_fold_simple(writer, first, depth, visits);
+        }
+        else if (kind == PARSE_KIND_IF)
+        {
+            const uint32_t taken = truth ? body : alternate;
+            foldable = foldable && (taken == BUSTER_CHECK_NONE || check_control_fold_push(writer, depth, visits, taken | BUSTER_CHECK_CONTROL_FOLD_STATEMENT));
+        }
+        else if (kind == PARSE_KIND_WHILE)
+        {
+            foldable = foldable && !truth;
+        }
+        else if (kind == PARSE_KIND_SWITCH)
+        {
+            uint32_t low = 0;
+            uint32_t high = 0;
+            check_control_extent(writer, body, &low, &high);
+            for (uint32_t t = low; foldable && body != BUSTER_CHECK_NONE && t <= high; t += 1)
+            {
+                foldable = parser->tree.roles[t] != PARSE_ROLE_CLOSE_CASE;
+            }
+        }
+        else
+        {
+            foldable = false;
+        }
     }
     return foldable;
 }
@@ -1287,10 +1419,11 @@ static bool check_control_fold_statement(const CheckControlWriter* writer, uint3
 // Whether clang's constant evaluation folds the condition `expression`, whose source value is an integer constant,
 // outside a constant context too (CodeGenFunction::ConstantFoldsToSimpleInteger's Expr::EvaluateAsInt): not where it
 // evaluates a __builtin_constant_p of an argument that is no constant and has no side effect, which the evaluator
-// refuses there, though a constant context's value, the checker's source value, is 0; nor a statement expression with
-// a statement before its value that the evaluator refuses (check_control_fold_statement). The walk takes the operands
-// the evaluation takes: not those that a constant condition of &&, || or ?: skips, nor sizeof's, _Alignof's or a
-// query's. Without room on the writer's fold stack (a node a visit), it says no.
+// refuses there, though a constant context's value, the checker's source value, is 0; nor a comma whose left operand
+// is no constant; nor a statement expression with a statement before its value that the evaluator refuses
+// (check_control_fold_statement). The walk takes the operands and statements the evaluation takes: not the operands
+// that a constant condition of &&, || or ?: skips, nor sizeof's, _Alignof's or a query's, nor an untaken if's arm.
+// Without room on the writer's fold stack (an entry a visit), it says no.
 static bool check_control_foldable(const CheckControlWriter* writer, uint32_t expression)
 {
     const CheckProgram* program = writer->program;
@@ -1303,10 +1436,15 @@ static bool check_control_foldable(const CheckControlWriter* writer, uint32_t ex
     bool foldable = expression < graph->count && check_control_fold_push(writer, &depth, visits, expression);
     while (foldable && depth != 0)
     {
-        const uint32_t node = stack[--depth];
-        const CheckOp op = graph->ops[node];
+        const uint32_t entry = stack[--depth];
+        const uint32_t node = entry & ~BUSTER_CHECK_CONTROL_FOLD_STATEMENT;
+        const CheckOp op = entry == node ? graph->ops[node] : CHECK_OP_VALUE;
         visits += 1;
-        if (op == CHECK_OP_BUILTIN_QUERY)
+        if (entry != node)
+        {
+            foldable = check_control_fold_statement(writer, node, &depth, visits);
+        }
+        else if (op == CHECK_OP_BUILTIN_QUERY)
         {
             const uint32_t index = graph->members[node] == CBUILTIN_CONSTANT_P ?
                                    check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), node) : BUSTER_CHECK_NONE;
@@ -1321,16 +1459,19 @@ static bool check_control_foldable(const CheckControlWriter* writer, uint32_t ex
             const uint32_t region = input->region_count != 0 && token < input->token_count ? input->expression_regions[token] : 0;
             const CheckInputRegion* source = region != 0 && region <= input->region_count ? input->regions + region - 1 : NULL;
             foldable = source != NULL && source->block < input->token_count && source->result < graph->count;
+            foldable = foldable && check_control_fold_push(writer, &depth, visits, source->result);
             for (uint32_t child = foldable ? writer->first[source->block] : BUSTER_CHECK_NONE; foldable && child != BUSTER_CHECK_NONE; child = writer->next[child])
             {
                 const bool statement = child != source->final_statement && writer->parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK;
-                foldable = !statement || check_control_fold_statement(writer, child, &depth, visits);
+                foldable = !statement || check_control_fold_push(writer, &depth, visits, child | BUSTER_CHECK_CONTROL_FOLD_STATEMENT);
             }
-            foldable = foldable && check_control_fold_push(writer, &depth, visits, source->result);
         }
         else if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
         {
             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            // A comma's left operand is evaluated for nothing but its value (check_control_fold_operand, which walks it).
+            foldable = op != CHECK_OP_COMMA || check_control_fold_operand(writer, operands[0], &depth, visits);
+            operands[0] = op == CHECK_OP_COMMA ? BUSTER_CHECK_NONE : operands[0];
             bool truth = false;
             const CheckValue condition = (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && operands[0] < graph->count ?
                                          check_stream_value(stream, operands[0]) : (CheckValue){ 0 };

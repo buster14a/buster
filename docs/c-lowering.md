@@ -173,11 +173,27 @@ definition. Its flags and edges:
   condition is its source value, where clang's constant evaluation would fold
   it outside a constant context too (`check_control_foldable`): not where it
   evaluates `__builtin_constant_p` of a variable (`__builtin_constant_p(5)`
-  folds), nor a statement expression with a statement before its value that
-  the evaluator refuses. Such a statement expression keeps both arms; one
-  folds whose statements declare automatic objects initialized with constants
-  or not at all (a variable-length array among them), or are constant
-  expressions. The condition and the dead arm are left out with their
+  folds), nor a comma whose left operand is no constant (`(n, 0)` keeps both
+  arms; `(1, 0)` and `(sizeof(n), 0)` fold), nor a statement expression with a
+  statement before its value that the evaluator (`EvaluateStmt`) refuses. Such
+  a statement expression keeps both arms; one folds whose statements declare
+  automatic objects initialized with constants, address constants among them
+  (`&n`, an array's or a string literal's decay), or not at all (a
+  variable-length array among them),
+  declare extern objects, or are constant expressions, blocks of such
+  statements, an `if` of a constant condition by its taken arm, a `while`, a
+  `for` (its first clause such a statement) or a `do` whose constant condition
+  is false, or a `switch` of a constant condition without a `case`. A read of
+  an object (`n;`), a static declaration, a `return` or other jump the
+  evaluation reaches, and a loop that runs keep both arms. Some shapes that
+  clang folds keep both arms here, which runs alike: a statement expression
+  with a jump in code its evaluation skips (`if (0) return 0;`, a `goto` in a
+  `while (0)`) or that initializes a `volatile` object, which the checker
+  counts as side effects of the statement expression; a constant `switch` with
+  a `case` or `default` label, which the walk doesn't model; a `const` local's
+  read as its value, which the checker gives no constant; and an address the
+  walk doesn't take (an element's, a variable-length array's decay). The
+  condition and the dead arm are left out with their
   references, their block-scope statics (a `used` one is no root either) and
   their statement expressions, whose regions are written empty
   (`CheckProgram.dropped_ranges`, their token ranges), and the lowering gives

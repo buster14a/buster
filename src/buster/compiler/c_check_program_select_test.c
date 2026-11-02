@@ -288,6 +288,9 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
         // The objects clang's model selects, 0 for the same as -c's: the model counts the operands that a constant
         // condition never evaluates, and so the statics of their statement expressions, which no code emits.
         uint32_t model_objects;
+        // Whether -c keeps an arm that clang's object leaves out: compared with clang's object by its counts alone,
+        // and run.
+        bool wider;
     };
     static const CheckFoldedIf fixtures[] = {
         { "folded-if-sizeof-chain",
@@ -352,17 +355,47 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
           "if(({0;}))n=h(n);return n;}", 6, 2 },
         { "unevaluated-operand-block-scope-statics",
           "int tested(int n){return n+(0&&({static int x=1;x;}))+(1||({static int y __attribute__((used))=2;y;}))+(int)sizeof(({static int z=3;z;}));}", 1, 0, 2 },
+        // #1154's third review: a statement expression's statements before its value as clang's EvaluateStmt takes them,
+        // a block (empty or of declarations it takes), an if of a constant condition by its taken arm, a while, a for
+        // (its first clause a declaration it takes) or a do of a false condition, and a switch without a case; not a
+        // taken arm, an else or a for's first clause that it refuses. Initializers and statements of address constants
+        // (of a local, an array's or a string literal's decay) and an extern declaration fold; a read of an object
+        // doesn't. A comma
+        // folds where its left operand is a constant, sizeof's among them, and in a statement or an initializer too.
+        { "folded-if-statement-expression-statements",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}"
+          "int tested(int n){if(({{}0;}))n=a(n);if(({if(0){}0;}))n=a(n);if(({if(1){}0;}))n=a(n);if(({while(0){}0;}))n=a(n);"
+          "if(({for(;0;){}0;}))n=a(n);if(({switch(0){}0;}))n=a(n);if(({{int x=1;}0;}))n=a(n);if(({do{}while(0);0;}))n=a(n);"
+          "if(({for(int i=0;0;){}0;}))n=a(n);if(({if(1){int y=n;}0;}))n=b(n);if(({if(0){int y=n;}else{static int z;}0;}))n=c(n);"
+          "if(({for(int i=n;0;){}0;}))n=d(n);return n;}", 4, 1 },
+        { "folded-if-statement-expression-address-constants",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}int g;"
+          "int tested(int n){if(({int*p=&n;0;}))n=a(n);if(({const char*p=\"abc\";0;}))n=a(n);if(({&n;0;}))n=a(n);"
+          "if(({extern int x;0;}))n=a(n);if(({int arr[2];int*q=arr;0;}))n=a(n);if(({\"abc\";0;}))n=a(n);if(({g;0;}))n=b(n);if(({n;0;}))n=c(n);"
+          "return n+g;}", 3, 1 },
+        { "folded-if-comma-conditions",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}"
+          "int tested(int n){if((n,0))n=a(n);if(({(n,0);0;}))n=b(n);if(({int x=(n,0);0;}))n=c(n);if((1,0))n=d(n);if((sizeof(n),0))n=d(n);"
+          "return n;}", 4, 0 },
+        // Conservative where the checker's verdict on a statement expression is a side effect (a return in its dead
+        // if, a volatile object's initialization) or the walk doesn't model the statement (a switch's case): both arms
+        // are kept, which runs as clang's build runs.
+        { "folded-if-statement-expression-kept-arms",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}"
+          "int tested(int n){if(({if(0)return 0;0;}))n=a(n);if(({volatile int x=1;0;}))n=b(n);if(({switch(0){case 0:;}0;}))n=c(n);return n;}",
+          4, 0, 0, true },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         const CheckFoldedIf* fixture = fixtures + i;
         char name[160];
-        check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, false);
+        check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang,
+                                         fixture->wider ? 0 : clang, 0, false);
         snprintf(name, sizeof(name), "%s-in-clangs-model", fixture->name);
         // A model that selects other objects than clang's object defines is compared by its counts alone, and run.
         const uint32_t model_objects = fixture->model_objects != 0 ? fixture->model_objects : fixture->objects;
         check_test_program_selection_run(test, fixture->source, name, fixture->functions, model_objects, CHECK_PROGRAM_OK, clang,
-                                         model_objects == fixture->objects ? clang : 0, 0, true);
+                                         model_objects == fixture->objects && !fixture->wider ? clang : 0, 0, true);
     }
 }
 
