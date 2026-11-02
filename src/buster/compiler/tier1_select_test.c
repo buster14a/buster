@@ -625,6 +625,9 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
         case IR_RET:
             result = left == BUSTER_IR_NONE ? 0 : values[left];
             break;
+        case IR_FENCE:
+            // A fence orders other threads' views of this one's accesses: a sequential run has nothing of it (#1059).
+            break;
         default:
             assert(false);
             break;
@@ -882,7 +885,7 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 // nodes. Its load reads p + i (address 0); address 1 is p + 8 and address 2 p + 16; constant 0 is 7. The consumers
 // have no lea for the costed cover to prefer over the fold (an add's: the cover keeps its load apart). A call's shape
 // is planned alone, since this emitter refuses calls (tier1_select_test_call_barriers runs them through the native
-// one); the IR has no atomic access of its own: C's atomic operations reach it as calls.
+// one). A fence of any order and an atomic load are barriers too, and an atomic load folds into nothing (#1059).
 typedef struct Tier1SelectTestBarrier Tier1SelectTestBarrier;
 struct Tier1SelectTestBarrier
 {
@@ -915,12 +918,16 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
     { "not a volatile load", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, { 0, BUSTER_IR_VOLATILE }, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "not a load used twice", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 5, 6 }, { 1, N, 4, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "not past a call", { IR_ADDRESS, IR_LOAD, IR_CALL, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 1, 2, 6 }, { 1, N, 0, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past a seq_cst fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 5, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past an acquire fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, false },
+    { "not an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, { 0, BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
 };
 #undef N
 
 // tier1_select_barriers against its scalar twin and an oracle (each node's last barrier before it, by a scan back), on
-// random kinds and flags (stores, calls, indirect calls, loads volatile or not, other nodes, and flag bits besides
-// volatile's) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
+// random kinds and flags (stores, calls, indirect calls, fences, loads volatile, atomic or neither, other nodes, and flag
+// bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
 // page, the entries' page poisoned before them.
 static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
 {
@@ -933,7 +940,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
     uint32_t* scalar = calloc(most, sizeof(uint32_t));
     uint32_t* oracle = calloc(most, sizeof(uint32_t));
     tier1_select_test_expect(test, ready && scalar != 0 && oracle != 0, "barrier scan's guarded columns");
-    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
+    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_FENCE, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
     static const uint32_t counts[] = { 255, 256, 257, 1000, 4095, 4096 };
     uint64_t random = UINT64_C(0x2c1b3c6dd9b0f6a1);
     bool same = ready && scalar != 0 && oracle != 0;
@@ -947,7 +954,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
         {
             const uint64_t bits = tier1_select_test_random(&random);
             // One in eight nodes a barrier's kind, or a load's half the time.
-            op[node] = (bits & 7) == 0 ? kinds[(bits >> 3) % 3] : kinds[3 + (bits >> 3) % (BUSTER_ARRAY_LENGTH(kinds) - 3)];
+            op[node] = (bits & 7) == 0 ? kinds[(bits >> 3) % 4] : kinds[4 + (bits >> 3) % (BUSTER_ARRAY_LENGTH(kinds) - 4)];
             flags[node] = (uint8_t)(bits >> 16);
         }
         memset(mapping + page * 4, 0xa5, page * 4);
@@ -957,7 +964,8 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
         for (uint32_t node = 0; node < count; node += 1)
         {
             uint32_t before = node;
-            while (before != 0 && !(op[before - 1] == IR_STORE || op[before - 1] == IR_CALL || op[before - 1] == IR_CALL_INDIRECT || (op[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_VOLATILE) != 0)))
+            while (before != 0 && !(op[before - 1] == IR_STORE || op[before - 1] == IR_CALL || op[before - 1] == IR_CALL_INDIRECT || op[before - 1] == IR_FENCE ||
+                                    (op[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_OBSERVABLE) != 0)))
             {
                 before -= 1;
             }

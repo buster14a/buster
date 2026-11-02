@@ -557,11 +557,15 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 == Test dominators, frontiers and natural loops
 ./build/compiler test-dominators
 ./build/compiler test-ir-source --dominators tests/ir-source/dominators.c
-== Test fences through the IR's lowerings, promotion, text and interpreter against clang
+== Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
 # #1059: each fence of a constant order is the typed stream's FENCE and the IR's fence, which both lowerings, both
 # promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
 ./build/compiler test-ir-source --dominators tests/ir-source/fences.c
 ./build/compiler test-ssa-source --clang clang tests/ir-source/fences.c
+# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET (and a seq_cst
+# store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
+./build/compiler test-ir-source --dominators tests/ir-source/atomics.c
+./build/compiler test-ssa-source --clang clang tests/ir-source/atomics.c
 == Test deferred-body source-position environments
 ./build/compiler test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution

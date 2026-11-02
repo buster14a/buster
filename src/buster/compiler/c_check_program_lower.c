@@ -5524,6 +5524,39 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     check_lower_call_to(writer, node, CHECK_LOWER_RUNTIMES, 0, 0);
 }
 
+// A direct atomic load or store (#1059, check_program_direct_access's `marker`): the pointer's operand, for a store the
+// value's, converted to the object's value type, then the typed stream's LOAD or SET of the value type's class with the
+// marker, and after a seq_cst store the FENCE of seq_cst its order needs on x86-64 (a total store order's store buffer
+// must drain before a later load); its constant order evaluated for nothing, as a direct fence's. The tasks run in
+// reverse.
+static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t marker)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = graph->argument_offsets[node];
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool store = id == CBUILTIN_ATOMIC_STORE_N || id == CBUILTIN_C11_ATOMIC_STORE;
+    const uint8_t class = check_lower_class(writer, effect->value_type);
+    if (store)
+    {
+        const TypeId checked = stream->argument_conversions[first + 1].type;
+        if ((marker & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SEQ_CST);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_SET, class, marker);
+        check_lower_convert(writer, checked, effect->value_type);
+        check_lower_operand(writer, node, 1 + 3, false, checked);
+    }
+    else
+    {
+        check_lower_convert(writer, effect->value_type, check_stream_type(stream, node));
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, marker);
+    }
+    check_lower_operand(writer, node, 0 + 3, false, stream->argument_conversions[first].type);
+}
+
 static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -9103,9 +9136,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         // constant argument evaluated for nothing.
         const uint32_t atomic = helper == BUSTER_CHECK_NONE ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node) : BUSTER_CHECK_NONE;
         const uint32_t fence = atomic != BUSTER_CHECK_NONE ? check_program_direct_fence(program, node, stream->atomics + atomic) : UINT32_MAX;
+        // And an atomic load or store the plan took as direct, its LOAD or SET with its atomic marker.
+        const uint32_t access = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX ? check_program_direct_access(program, node, stream->atomics + atomic) : UINT32_MAX;
         if (fence != UINT32_MAX)
         {
             check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, fence);
+        }
+        else if (access != UINT32_MAX)
+        {
+            check_lower_atomic_direct(writer, node, stream->atomics + atomic, access);
         }
         else if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {

@@ -660,7 +660,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 
 | Family | Effects | Requirements | Direct form |
 | --- | --- | --- | --- |
-| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | none yet |
+| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`) |
 | `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | none yet |
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
@@ -725,12 +725,45 @@ effect or the floating environment's, or of a scoped family keeps its helper. On
 one helper fewer; c-testsuite's subset, which has no fence, compiles to the
 same bytes as before.
 
+**Direct atomic loads and stores.** `check_program_direct_access` admits
+`__atomic_load_n`, `__atomic_store_n`, `__c11_atomic_load` and
+`__c11_atomic_store`, unscoped, of an integer's, an enumeration's or a pointer's
+object of 1, 2, 4 or 8 bytes, its value's size, known aligned to it (a native
+one, for C11's), of an order the checker knows that its kind takes (a load's
+relaxed, consume, acquire or seq_cst; a store's relaxed, release or seq_cst) and
+whose argument evaluates for no effect, as a direct fence's. The lowering
+(`check_lower_atomic_direct`) evaluates the pointer and, for a store, the value
+converted to the object's type, and writes the typed stream's `LOAD` or `SET` of
+that type's class with the atomic marker (`BUSTER_TYPED_ACCESS_ATOMIC` and the
+order), and after a seq_cst store the `FENCE` of seq_cst. An implicit `_Atomic`
+object's load and store, and an update's first load, are direct too
+(`check_lower_atomic_direct_plan`): its plan's address and buffers stay, and its
+leaf's call becomes the marked access of its bits' class, of seq_cst. Tier 0
+compiles a marked access as any other (`mov`, `movzx`; atomic when naturally
+aligned on x86-64, whose total store order gives a load's and a release store's
+orders), the store's `FENCE` its `mfence`; the IR keeps it as an atomic access
+([the IR guide](ir.md)'s "Atomic accesses") that no pass splits, merges,
+eliminates or moves past another access, a call or a fence, and Tier 1 selects
+it as an ordinary access it never folds. clang's code is the same but for a
+seq_cst store, its `xchg` where this is `mov` and `mfence`, the helpers' and
+GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for the
+9700X's measurements. A dynamic or invalid order (which the helper strengthens
+to seq_cst), a scoped family's, a floating object's and an unaligned or wider
+one keep their helper or libatomic's call. The planner reserves an implicit
+object's compare-exchange leaf for a width only where a compound assignment,
+increment or decrement updates such an object, and a builtin's width's leaves
+where a builtin takes them; no leaf for a load or a store. The compiler's own
+`main.c` takes 77 atomic accesses directly and keeps 8 helper calls of them (its
+tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the unit plans no
+helper.
+
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
-lowering refused an operation of by name, `direct`: builtin uses lowered
-directly, `helper`: the lowered code's call sites of a helper, an explicit
-builtin's, an implicit `_Atomic` access's, a generic form's and an asm
-statement's alike, and `planned`: helpers emitted) and a line per family
+lowering refused an operation by name, `direct`: the lowered code's direct
+forms, an atomic access's marked `LOAD`, `STORE` or `SET` and a fence's `FENCE`
+(but a seq_cst store's own), `helper`: the lowered code's call sites of a helper,
+an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
+asm statement's alike, and `planned`: helpers emitted) and a line per family
 (`helpers.fence`, `direct=`, `helper=`, `planned=`). A family without a direct
 form counts no direct use, which the fence test checks of every family.
 
@@ -756,13 +789,27 @@ program: 53,347), and the fenced litmus in none. The control may show none on a
 run whose threads never overlap, which leaves the fenced run's check weaker,
 not wrong; the test prints both counts. It also reads each build's
 `--helper-report` and its objects' fenced threads (one `mfence` each, the
-control's none).
+control's none). The same litmus runs twice more with atomic accesses: a
+seq_cst store and a seq_cst load (the direct marked `SET`, its `FENCE` and the
+marked `LOAD`), which must never show both loads reading 0, and relaxed ones, the
+second control; a seq_cst thread's object has one `mfence`, a relaxed one's
+none. On the same container, the relaxed control showed both loads reading 0 in
+50 to 18,745 of 100,000 iterations, and the seq_cst runs in none.
+`test-checker`'s atomic-access section (`c_check_program_atomic_access_test.c`)
+lowers loads and stores of each width and order, C11's, a pointer's and an
+implicit object's by both paths, checks each function's marked entries, its
+fences, its calls and Tier 0's records by both twins, and the plan's counts,
+then runs every width and order, the implicit object's loads, stores and
+updates and the helpers' cases natively against clang. `test-checker-driver`'s
+report unit pins `--helper-report`'s direct forms and calls of a unit with
+every kind of each, and Tier 1's selection tests keep a load from folding past
+a fence of any order or an atomic load, and an atomic load from folding at all.
 
-**Pending** (#1059): the atomic loads and stores (direct `mov`s with an `xchg`
-or `mfence` for a `seq_cst` store, which need the IR to carry an atomic access
-and Tier 1 to select it), the read/modify/writes, the asm statements' operations
-placed in their callers (slice 4), and the paired 9700X measurements of helper
-calls, save and reload traffic, code size, compile time and runtime.
+**Pending** (#1059): the read/modify/writes (exchange, compare-exchange and the
+fetch operations: `lock` forms or a compare-exchange loop), C's volatile
+accesses carried to the IR as such, the asm statements' operations placed in
+their callers (slice 4), and the paired 9700X measurements of helper calls,
+save and reload traffic, code size, compile time and runtime.
 
 ## Atomic and terminal helper calls
 

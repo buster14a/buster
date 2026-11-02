@@ -163,7 +163,7 @@ static IrError ssa_ir_classify(SsaIrWork* work)
                     if (work->local_types[slot] == BUSTER_SSA_TYPE_VOID)
                     {
                         const uint8_t access = load ? f->type[i] : store ? f->type[f->b[i]] : (uint8_t)IR_VOID;
-                        if ((load || store) && (f->flags[i] & BUSTER_IR_VOLATILE) == 0 && access != BUSTER_SSA_TYPE_VOID && access < BUSTER_SSA_TYPE_AGGREGATE)
+                        if ((load || store) && (f->flags[i] & BUSTER_IR_OBSERVABLE) == 0 && access != BUSTER_SSA_TYPE_VOID && access < BUSTER_SSA_TYPE_AGGREGATE)
                         {
                             work->local_types[slot] = access;
                         }
@@ -175,7 +175,7 @@ static IrError ssa_ir_classify(SsaIrWork* work)
                     }
                     const bool agreed_load = load && f->type[i] == work->local_types[slot];
                     const bool agreed_store = store && f->type[f->b[i]] == work->local_types[slot];
-                    if ((!agreed_load && !agreed_store) || (f->flags[i] & BUSTER_IR_VOLATILE) != 0)
+                    if ((!agreed_load && !agreed_store) || (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0)
                     {
                         work->local_flags[slot] |= BUSTER_SSA_LOCAL_ADDRESS_TAKEN;
                     }

@@ -1113,7 +1113,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     {
                         if (op == IR_LOAD)
                         {
-                            if ((function->flags[i] & BUSTER_IR_VOLATILE) != 0)
+                            if ((function->flags[i] & BUSTER_IR_OBSERVABLE) != 0)
                             {
                                 uint8_t* destination = loaded;
                                 const volatile uint8_t* source = (const volatile uint8_t*)(uintptr_t)av.low;
@@ -1133,7 +1133,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         }
                         else
                         {
-                            if ((function->flags[i] & BUSTER_IR_VOLATILE) != 0)
+                            if ((function->flags[i] & BUSTER_IR_OBSERVABLE) != 0)
                             {
                                 volatile uint8_t* destination = (volatile uint8_t*)(uintptr_t)av.low;
                                 const uint8_t* source = stored;

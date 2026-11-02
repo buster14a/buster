@@ -106,15 +106,17 @@ patterns are:
   to the consumer (#141). It moves past the nodes between them that neither write
   memory, call nor access a volatile object (arithmetic, constants, addresses,
   other nonvolatile loads) and past none that do: a store to any address, a
-  call, a volatile load or store. A pass of its own after the plan's pass over
+  call, a fence of any order, a volatile or atomic load (#1059:
+  `BUSTER_IR_OBSERVABLE`), and an atomic load folds into nothing. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
-  (the build's `-fno-strict-aliasing`): 40 instructions more per node. The IR has no atomic access of its own: C's atomic operations
-  reach it as calls of the unit's leaves, but a fence of a constant order (#1059), which is the IR's `fence`
-  (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst` and no records for the others, a barrier no
-  selection moves an access across. A volatile load remains a separate
+  (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
+  order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
+  gives their orders, with a seq_cst store's `fence` after it; other atomic operations reach it as calls of the unit's
+  leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
+  and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
