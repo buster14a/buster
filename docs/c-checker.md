@@ -19,6 +19,19 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
+Sanitizer instrumentation and OpenMP code generation are not implemented
+([#1112](https://github.com/buster14a/buster/issues/1112)). Object emission
+(including `check -c`) and direct linking reject an enabled `-fsanitize=...`,
+instrumenting `-fsanitize-coverage=...`, or `-fopenmp[=runtime]` by name before
+reading source files or creating/replacing output. This applies to both tiers
+and to `--scalar`. The final resolved option state decides: disabling all
+requested sanitizers or OpenMP with later negative options permits ordinary,
+uninstrumented compilation; disabling only part of a sanitizer group does not.
+Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeling.
+`-fsyntax-only` suppresses `-c` in either order. A sanitizer or `_OPENMP` macro
+observed in a non-emitting action is not a promise that Buster can generate the
+corresponding instrumentation or parallel runtime calls.
+
 The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
 `-Werror` does not guarantee the warnings or build failures Clang gives for the
 same source: some warnings are not produced, and some produced warnings are not
@@ -4382,10 +4395,12 @@ GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
-not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
-active `-fopenmp` request, including alternate runtime selections, is refused
-until execution semantics are implemented; it must not silently produce serial
-code. A subsequent `-fno-openmp` restores the ignore behavior.
+not a definition of `_OPENMP`, determines whether OpenMP was requested. An active
+`-fopenmp` request, including alternate runtime selections, must not silently
+produce serial code: a code-generating action refuses the option itself before
+reading source (the instrumentation boundary in the introduction), while a
+non-emitting action refuses each `#pragma omp` directive through the checker. A
+subsequent `-fno-openmp` restores the ignore behavior for both.
 
 Known unsupported semantic effects remain hard, named errors, including
 `redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing

@@ -2814,11 +2814,13 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 }
 
 #include "c_check_pic_driver_test.c"
+#include "c_check_instrumentation_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
 {
     check_test_driver_pic(test, executable, directory);
+    check_test_driver_instrumentation(test, executable, directory);
     static const char source_text[] = "int main(void) { return 0; }\n";
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
@@ -3080,9 +3082,14 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
     uint64_t expression_nodes = 0;
     uint64_t batch_nodes = 0;
+    uint64_t template_nodes = 0;
     const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
-    const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
-    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes && (BUSTER_HOST_VECTOR ? batch_nodes != 0 : batch_nodes == 0),
+    const char* templates = coverage != NULL ? strstr(coverage, "\ttemplates=") : NULL;
+    const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2 &&
+                         templates != NULL && sscanf(templates, "\ttemplates=%" SCNu64, &template_nodes) == 1;
+    // The vector path's fragments (#624) and node templates (#1048) take some of the nodes; the scalar path's take none.
+    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes + template_nodes &&
+                                (BUSTER_HOST_VECTOR ? batch_nodes + template_nodes != 0 : batch_nodes == 0 && template_nodes == 0),
                       "--time-stages reports evaluated expressions and the host's template share");
     free(text);
     text = NULL;
@@ -5422,6 +5429,8 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
     unlink(object);
 }
 
+#include "c_check_hardening_driver_test.c"
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -6268,6 +6277,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_unsupported_codegen(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_hardening(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
