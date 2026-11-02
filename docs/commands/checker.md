@@ -65,6 +65,35 @@ requirements. [Command index](README.md).
   control-flow, corpus and downstream integration still needed
   for #133; this module does not establish whole-compiler semantic coverage.
 
+## Object and linkage options (#1124)
+
+The C driver refuses an effective `-fcommon`, `-ffunction-sections`,
+`-fdata-sections`, non-default `-fvisibility=hidden|protected|internal`, or
+`-fvisibility-ms-compat` when writing an object (`-c`, including `check -c`)
+or linking an executable. The diagnostic names the option:
+`error: unsupported code generation option '…'`. This is an explicit
+unsupported boundary, not implementation of these features. The refusal
+precedes input processing and output creation, including multi-file commands,
+and preserves an existing destination in both Tier 0 and Tier 1.
+
+Each family has independent last-option-wins state. `-fno-common`,
+`-fno-function-sections`, `-fno-data-sections` and `-fvisibility=default`
+retain the current output and cancel an earlier request in their own family.
+For visibility, the last of `-fvisibility=…` and `-fvisibility-ms-compat`
+decides, as clang's driver reads them: an earlier malformed value is ignored,
+a malformed last value keeps clang's `invalid value` diagnostic, and an
+effective `-fvisibility-ms-compat` (clang's hidden default) is refused by name.
+Option values consumed by another option (such as `-include -fcommon`) are
+filenames, not code-generation requests.
+
+Valid requests remain accepted for preprocessing, syntax checking, `check`,
+and typed/static dumps, which emit neither an object nor an executable.
+Explicit source visibility attributes and pragmas are unaffected. The real-driver
+regressions in `c_check_pic_driver_test.c`, included by `test-checker-driver`,
+cover these boundaries, both option orders, the effective visibility spelling,
+`-fvisibility-ms-compat`, scalar/default paths, both tiers, output preservation
+and the original two-unit tentative-definition example.
+
 ## Unsupported hardening requests
 
 The semantic C driver refuses the option families `-ftrivial-auto-var-init`,
@@ -105,5 +134,5 @@ filenames, not hardening requests.
 files, a missing source, option-looking include and output names, both tiers
 and paths, non-emitting actions, malformed/auxiliary forms and exact inactive
 defaults. This closes these option families, not the driver's entire unknown
-`-f`/`-m` acceptance policy; the wider allowlist audit and #1112, #1123 and
-#1124 remain separate work.
+`-f`/`-m` acceptance policy; the wider allowlist audit and #1112 and #1123
+remain separate work. The object and linkage options of #1124 are above.
