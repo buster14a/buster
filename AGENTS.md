@@ -999,9 +999,11 @@ designs and the compilers already built this way.
   `src/buster/compiler/emission_metadata_test.c` supplies
   `test-emission-metadata [--seed N]`, built by `build.sh` and run by the
   correctness inventory; the standalone wrapper `tests/emission-metadata/test.c`
-  gives the isolated baseline, AVX-512F and sanitizer commands. The driver,
-  `Tier0Code`, the Tier 1 frame adapter and the unwind writer do not consume the
-  protocol yet; #1056 remains open. [The guide](docs/emission-metadata.md)
+  gives the isolated baseline, AVX-512F and sanitizer commands. The driver's
+  `-g` source-row path (`c_check_debug.c`) validates Tier 0's declaration, entry
+  and epilogue rows through it and fails closed on disagreement; the common
+  emitted-function result, producer-owned frame publication, Tier 1 `-g` and the
+  unwind writer remain. #1056 remains open. [The guide](docs/emission-metadata.md)
   records the record-boundary, ownership and remaining acceptance contracts.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a

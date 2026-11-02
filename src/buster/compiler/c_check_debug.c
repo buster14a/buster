@@ -24,6 +24,11 @@
 //    sequence has one) whose line differs from the kept row before's, and the row where the body starts, whatever its
 //    line, which the unit marks (DebugFunction.prologue_end) for a debugger's breakpoint on the function.
 //
+// Pass 1 also resolves its events through the tier-neutral protocol (#1056, check_debug_rows_protocol): the declaration
+// at (0, LEFT), each kept entry at its first record's RIGHT side and the epilogue's record side, over the records' exact
+// starts and ends after branch sizing. The resolved rows must be the raw rows; a refusal or disagreement fails the -g
+// emission as an internal backend error rather than publishing rows the protocol cannot justify.
+//
 // check_debug_build makes the driver's debug.c unit from them: a function per source body, named by its identifier, at
 // its declaration's line, in a file table whose first file is the translation unit's, and the sections executable_write
 // attaches (ExecutableOptions.debug), placing each function at its symbol's address, and object_build (-c's
@@ -116,6 +121,95 @@ static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* 
     count += epilogue < length ? 1 : 0;
     return count;
 #endif
+}
+
+// Validates a function's raw rows through the tier-neutral protocol (#1056): its declaration at (0, LEFT), each kept
+// entry at its first record's RIGHT side, and the epilogue's record side, over the records' exact starts and ends after
+// branch sizing. `events` and `resolved` have room for entry_count + 1 rows. Returns false when the protocol refuses the
+// producer's metadata or resolves a row the raw rows don't have; the emission then fails closed instead of publishing
+// rows the protocol can't justify. This is the producer/consumer bridge's first consumer: the raw rows remain the
+// publication until the common emitted-function result lands.
+static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint32_t* entry_tokens, uint32_t entry_count, const uint32_t* offsets,
+                                      uint32_t record_count, uint32_t length, uint32_t declaration, uint32_t closing, const uint32_t* row_offsets,
+                                      const uint32_t* row_tokens, uint32_t row_count, bool scalar, EmissionSourceEvent* events, EmissionSourceRow* resolved)
+{
+    const uint32_t declaration_origin = declaration;
+    const uint32_t declaration_kind = declaration != BUSTER_EMISSION_NO_ORIGIN ? EMISSION_SOURCE_ORIGIN : EMISSION_SOURCE_GENERATED;
+    events[0] = (EmissionSourceEvent){
+        .at = {
+            .boundary = 0,
+            .side = EMISSION_LEFT,
+        },
+        .origin = declaration_origin,
+        .kind = declaration_kind,
+    };
+    uint32_t event_count = 1;
+    for (uint32_t e = 0; e < entry_count; e += 1)
+    {
+        // The last entry at an offset is the one whose code starts there; the raw rows keep it too.
+        if (offsets[entry_records[e]] != offsets[entry_records[e + 1]])
+        {
+            const uint32_t token = entry_tokens[e];
+            events[event_count] = (EmissionSourceEvent){
+                .at = {
+                    .boundary = entry_records[e],
+                    .side = EMISSION_RIGHT,
+                },
+                .origin = token,
+                .kind = token != BUSTER_EMISSION_NO_ORIGIN ? EMISSION_SOURCE_ORIGIN : EMISSION_SOURCE_GENERATED,
+            };
+            event_count += 1;
+        }
+    }
+    const EmissionLayout layout = {
+        .starts = offsets,
+        .ends = offsets + 1,
+        .count = record_count,
+        .size = length,
+    };
+    const EmissionMetadata metadata = {
+        .sources = events,
+        .source_count = event_count,
+        .origin_count = BUSTER_EMISSION_NO_ORIGIN,
+    };
+    EmissionMetadataPlan plan;
+    EmissionCheck check = emission_metadata_plan(&metadata, &layout, scalar, &plan);
+    bool valid = check.error == EMISSION_OK && plan.source_count == event_count && plan.frame_count == 0;
+    if (valid)
+    {
+        const EmissionStorage storage = {
+            .sources = resolved,
+            .source_capacity = event_count,
+        };
+        EmissionResolved result;
+        check = emission_metadata_resolve(&metadata, &layout, &storage, scalar, &result);
+        valid = check.error == EMISSION_OK && result.source_count == event_count;
+        // The declaration is dropped by the raw rows when the first entry starts at zero; the protocol keeps both
+        // anchors, so the comparison starts after the declaration in that case.
+        uint32_t expected = 0;
+        uint32_t event = offsets[entry_records[0]] != 0 ? 0 : 1;
+        for (; valid && event < event_count; event += 1)
+        {
+            valid = expected < row_count && resolved[event].offset == row_offsets[expected] && resolved[event].origin == row_tokens[expected];
+            expected += valid ? 1 : 0;
+        }
+        const uint32_t epilogue = offsets[entry_records[entry_count]];
+        if (valid && epilogue < length)
+        {
+            valid = expected < row_count && row_offsets[expected] == epilogue && row_tokens[expected] == closing;
+            expected += valid ? 1 : 0;
+        }
+        valid = valid && expected == row_count;
+        if (valid)
+        {
+            const EmissionAnchor epilogue_at = {
+                .boundary = entry_records[entry_count],
+                .side = EMISSION_RIGHT,
+            };
+            valid = epilogue_at.boundary <= record_count && emission_anchor_offset(&layout, epilogue_at) == epilogue;
+        }
+    }
+    return valid;
 }
 
 // The history runs that start at or before output token `output`: pp_history_at's search, whose origin is the last one's.
