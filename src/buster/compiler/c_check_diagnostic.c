@@ -189,6 +189,8 @@ static void check_input_warning_policy(CheckInput* input, const PPOptions* optio
 {
     _Static_assert(CHECK_WARNING_ID_KR_TOO_MANY - CHECK_WARNING_ID_KR_DEFINITION + 1 == BUSTER_ARRAY_LENGTH(input->kr_warning_severities),
                    "the K&R policy snapshot covers its four stable IDs");
+    _Static_assert(BUSTER_ARRAY_LENGTH(input->x86_range_severities) == 2,
+                   "the x86 range snapshot has a warning and a DefaultError baseline");
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(input->kr_warning_severities); i += 1)
     {
         const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false, false);

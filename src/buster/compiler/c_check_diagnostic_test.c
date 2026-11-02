@@ -307,9 +307,11 @@ static void check_test_warning_policy_x86_range(CheckTest* test)
     const PPOptions empty = { 0 };
     check_test_expect(test, check_warning_command_line(&empty, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, false, false).severity == CHECK_WARNING_WARNING,
                       "an ordinary warning default for the same ID starts from a warning");
-    CheckInput input = { .x86_range_policy = true, .x86_range_severities = { CHECK_WARNING_WARNING, CHECK_WARNING_WARNING } };
+    CheckInput input = { .x86_range_policy = true, .x86_range_severities = { CHECK_WARNING_ERROR, CHECK_WARNING_WARNING } };
+    check_test_expect(test, check_diagnostic_range_severity(&input, 0, false) == CHECK_WARNING_ERROR,
+                      "the ordinary-warning slot of the x86 range snapshot is selected by default_error == false");
     check_test_expect(test, check_diagnostic_range_severity(&input, 0, true) == CHECK_WARNING_WARNING,
-                      "the checked input's x86 range policy snapshot replaces the default error");
+                      "the DefaultError slot of the x86 range snapshot is selected by default_error == true");
     CheckInputDiagnosticPragma record =
     {
         .option = { .pointer = "-Wargument-outside-range", .length = sizeof("-Wargument-outside-range") - 1 },
