@@ -2270,6 +2270,51 @@ static void check_test_program_local_bits(CheckTest* test)
     }
 }
 
+// The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by its scalar twin, the same targets
+// and the same first failure, for counts across the masks' tails, the kinds at a page's end, the four branch kinds among
+// the kinds beside them, and every label with an entry, or some out of range or without one.
+static void check_test_program_resolve_labels(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && page >= 200 && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "the branches' kinds have a protected tail");
+    uint64_t values[200];
+    uint64_t twin_values[200];
+    uint32_t labels[16];
+    bool same = true;
+    uint32_t resolved = 0;
+    uint32_t failed = 0;
+    for (uint32_t round = 0; ready && round < 600; round += 1)
+    {
+        const uint32_t count = round % 200;
+        // Every label with an entry in a third of the rounds; some out of range or without one in the others.
+        const bool whole = round % 3 == 0;
+        uint8_t* kinds = mapping + page - count;
+        const uint32_t label_count = 1 + check_test_random(test) % 16;
+        for (uint32_t l = 0; l < label_count; l += 1)
+        {
+            labels[l] = !whole && check_test_random(test) % 8 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % 1000;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            kinds[i] = (uint8_t)(BUSTER_TYPED_BRANCH_FALSE - 2 + check_test_random(test) % 8);
+            values[i] = check_test_random(test) % (whole ? label_count : label_count + 2);
+        }
+        memcpy(twin_values, values, (uint64_t)count * sizeof(uint64_t));
+        const bool twin = check_lower_resolve_labels_scalar(kinds, twin_values, count, labels, label_count);
+        const bool vector = check_lower_resolve_labels(kinds, values, count, labels, label_count);
+        same &= twin == vector && memcmp(values, twin_values, (uint64_t)count * sizeof(uint64_t)) == 0;
+        resolved += twin;
+        failed += !twin;
+    }
+    check_test_expect(test, same && resolved != 0 && failed != 0, "the branches' targets by 64 kinds at a time are their scalar twin's, and so is the first failure");
+    if (mapping != MAP_FAILED && mapping != 0)
+    {
+        munmap(mapping, page * 2);
+    }
+}
+
 // A program fixture checked and lowered by both paths for a target (null for x86-64's): accepted or not, lowered or
 // refused, with the references and initializations it keeps; and, for a refusal with `reason`, the feature the refusal
 // names (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
@@ -3295,6 +3340,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_addressed(test);
         check_test_program_scans(test);
         check_test_program_local_bits(test);
+        check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
     }
     if (check_test_takes())

@@ -1951,6 +1951,52 @@ static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_
     return result;
 }
 
+// A body's branches' targets (BRANCH_FALSE to JUMP_VALUE's values), its labels, to their entries through `labels`, in
+// entry order, until the first whose label is out of `label_count` or has no entry: whether every one has one. The
+// scalar twin of check_lower_resolve_labels.
+static bool check_lower_resolve_labels_scalar(const uint8_t* kinds, uint64_t* values, uint32_t count, const uint32_t* labels, uint32_t label_count)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        if (kinds[i] >= BUSTER_TYPED_BRANCH_FALSE && kinds[i] <= BUSTER_TYPED_JUMP_VALUE)
+        {
+            const uint64_t label = values[i];
+            valid = label < label_count && labels[label] != BUSTER_CHECK_NONE;
+            values[i] = valid ? labels[label] : values[i];
+        }
+    }
+    return valid;
+}
+
+_Static_assert(BUSTER_TYPED_BRANCH_FALSE < BUSTER_TYPED_JUMP_VALUE && BUSTER_TYPED_JUMP_VALUE - BUSTER_TYPED_BRANCH_FALSE == 3,
+               "the branches' kinds are four, in a row");
+
+// The same, the kinds 64 at a time: a mask of the branches among them, whose entries then take their targets in order,
+// rather than a compare and a branch an entry, which the branches' places in the entries make mispredicted. The loads
+// are masked to the entries.
+static bool check_lower_resolve_labels(const uint8_t* kinds, uint64_t* values, uint32_t count, const uint32_t* labels, uint32_t label_count)
+{
+    const __m512i first_kind = _mm512_set1_epi8((char)BUSTER_TYPED_BRANCH_FALSE);
+    const __m512i kinds_span = _mm512_set1_epi8((char)(BUSTER_TYPED_JUMP_VALUE - BUSTER_TYPED_BRANCH_FALSE));
+    bool valid = true;
+    for (uint32_t first = 0; valid && first < count; first += 64)
+    {
+        const __mmask64 active = count - first < 64 ? (UINT64_C(1) << (count - first)) - 1 : UINT64_MAX;
+        const __m512i some = _mm512_maskz_loadu_epi8(active, kinds + first);
+        uint64_t branches = _mm512_cmple_epu8_mask(_mm512_sub_epi8(some, first_kind), kinds_span) & active;
+        while (valid && branches != 0)
+        {
+            const uint32_t i = first + (uint32_t)__builtin_ctzll(branches);
+            const uint64_t label = values[i];
+            valid = label < label_count && labels[label] != BUSTER_CHECK_NONE;
+            values[i] = valid ? labels[label] : values[i];
+            branches &= branches - 1;
+        }
+    }
+    return valid;
+}
+
 static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
@@ -12199,19 +12245,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_drain(writer);
             }
         }
-        for (uint32_t i = 0; i < writer->count && status->status == CHECK_PROGRAM_OK; i += 1)
+        // The branches' targets, from their labels to their entries.
+        if (status->status == CHECK_PROGRAM_OK)
         {
-            if (writer->kinds[i] >= BUSTER_TYPED_BRANCH_FALSE && writer->kinds[i] <= BUSTER_TYPED_JUMP_VALUE)
+            const bool resolved = BUSTER_SCALAR_PATH(writer->scalar) ?
+                                      check_lower_resolve_labels_scalar(writer->kinds, writer->values, writer->count, writer->labels, writer->label_count) :
+                                      check_lower_resolve_labels(writer->kinds, writer->values, writer->count, writer->labels, writer->label_count);
+            if (!resolved)
             {
-                const uint64_t label = writer->values[i];
-                if (label >= writer->label_count || writer->labels[label] == BUSTER_CHECK_NONE)
-                {
-                    check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-                }
-                else
-                {
-                    writer->values[i] = writer->labels[label];
-                }
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
             }
         }
         // The labels whose addresses the program takes, from their control entries to their entries, as the targets.

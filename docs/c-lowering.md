@@ -454,7 +454,7 @@ facts. The closure can run over prefix sums of the slots' counts. The vector
 pass's results are to be checked against these scalar ones, and the lowering
 against the tasks, by the same command.
 
-## The preparation's node counts (#1048)
+## The preparation's node counts and the branches' targets (#1048)
 
 Before the bodies, `check_lower_prepare` bounds the writers' room by counts
 over every node of the unit's graph: its builtins (the integer ones too, which
@@ -476,6 +476,17 @@ The loop is the scalar twin (`check_lower_node_counts_scalar`, which
 `--scalar` takes), and `test-checker` compares the two on every boundary
 fixture of its program tests, among them a vector's libm builtins and an
 `_Atomic` global.
+
+After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
+take their targets: their labels' entries. The loop compared every entry's
+kind and branched on it, a branch whose outcome follows the branches' places
+among the entries: 4.7 M instructions over `sqlite3.c`'s 407,396 entries.
+`check_lower_resolve_labels` compares the kinds 64 at a time, and only the
+branches among them take their targets, in entry order, up to the first label
+without an entry, as its scalar twin (`check_lower_resolve_labels_scalar`)
+does. `test-checker` compares the two on random kinds at a page's end,
+across the masks' tails, with labels that all have entries and with some that
+don't.
 
 ## Against clang -O0's objects
 
