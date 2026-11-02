@@ -347,10 +347,13 @@ the vector path's bytes, and gdb's backtrace at every instruction of each
 function, both returns and the loops' iterations among them, gives the function
 and `main`. Tier 1 doesn't make the other
 shapes the planner can: its allocator gives a leaf no callee-saved register (they
-go only to values live across a call), so a red zone has no pushes above it, and
-its selection refuses the dynamic stack's operations, so no frame of Tier 1's is
-addressed from rbp (`test-tier1-frame` and `test-tier1-frame-execution` check
-those). `test-unwind` checks the writer's
+go only to values live across a call), so a red zone has no pushes above it
+(`test-tier1-frame` and `test-tier1-frame-execution` check it). Since #141's
+dynamic stack, a function with an allocation, a save or a restore asks for a
+dynamic frame (`BUSTER_TIER1_FRAME_DYNAMIC_STACK`): its places are rbp's, or a
+realigned one's r15's, and the CFG consumer takes each call's outgoing area from
+rsp before the call's stores and gives it back after the call
+(`dynamic_outgoing`, `tier1_emit_cfg_call_area`). `test-unwind` checks the writer's
 open descriptions against its independent CFI interpreter and
 `unwind_tier0_frame_tails` on early returns and open frames of every save mask,
 with and without a frame pointer, with its refusals. `test-c-testsuite --tier1`

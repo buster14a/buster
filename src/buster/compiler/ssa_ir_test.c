@@ -317,6 +317,9 @@ static uint64_t ssa_ir_test_interpret(const IrFunction* functions, uint32_t func
             case IR_STACK_ADDR:
                 value = frame->slots[a];
                 break;
+            case IR_LIFETIME:
+                // A slot's lifetime marker reads and writes nothing here, as in the shared IR's interpreter.
+                break;
             case IR_SYMBOL_ADDR:
                 ok = a != 0 && a <= global_count + function_count;
                 if (ok && a <= global_count)
@@ -1476,6 +1479,108 @@ static void ssa_ir_test_failures(SsaIrTestTally* tally)
     arena_release(&scratch);
 }
 
+// A block-scope local's lifetime start writes its undef (#141): a loop whose body assigns `x` on one path of a diamond and
+// reads it on that path alone, as Lua's interpreter's handlers assign and read their `lua_Number n1`. With the start, the
+// promoted IR has no phi of x at the loop's header, where x would otherwise be live around the loop; without it, it has
+// one. Both, by both paths, compute the all-memory IR's result: the sum of the odd numbers below n.
+static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
+{
+    static const char text[] =
+        "function (i64) -> i64 {\n"
+        "  slot $0 size=8 align=8 type=i64 flags=0x00\n"
+        "  slot $1 size=8 align=8 type=i64 flags=0x00\n"
+        "  slot $2 size=8 align=8 type=i64 flags=0x00\n"
+        "b0:\n"
+        "  %0 = param.i64 0\n"
+        "  %1 = stack_addr.ptr $0\n"
+        "  %2 = stack_addr.ptr $1\n"
+        "  %3 = stack_addr.ptr $2\n"
+        "  %4 = const.i64 0x00000000000000000000000000000000\n"
+        "  %5 = store.void %2, %4 align=8\n"
+        "  %6 = store.void %3, %4 align=8\n"
+        "  %7 = br.void b1\n"
+        "b1:\n"
+        "  %8 = load.i64 %3 align=8\n"
+        "  %9 = icmp.i1 %8, %0 ult\n"
+        "  %10 = cbr.void %9, b2, b7\n"
+        "b2:\n"
+        "  %11 = lifetime.void $0 start\n"
+        "  %12 = const.i64 0x00000000000000000000000000000001\n"
+        "  %13 = and.i64 %8, %12\n"
+        "  %14 = icmp.i1 %13, %4 ne\n"
+        "  %15 = cbr.void %14, b3, b4\n"
+        "b3:\n"
+        "  %16 = store.void %1, %8 align=8\n"
+        "  %17 = br.void b4\n"
+        "b4:\n"
+        "  %18 = cbr.void %14, b5, b6\n"
+        "b5:\n"
+        "  %19 = load.i64 %1 align=8\n"
+        "  %20 = load.i64 %2 align=8\n"
+        "  %21 = add.i64 %20, %19\n"
+        "  %22 = store.void %2, %21 align=8\n"
+        "  %23 = br.void b6\n"
+        "b6:\n"
+        "  %24 = lifetime.void $0 end\n"
+        "  %25 = add.i64 %8, %12\n"
+        "  %26 = store.void %3, %25 align=8\n"
+        "  %27 = br.void b1\n"
+        "b7:\n"
+        "  %28 = load.i64 %2 align=8\n"
+        "  %29 = ret.void %28\n"
+        "}\n";
+    Arena input = arena_reserve(1ull << 24);
+    Arena output = arena_reserve(1ull << 24);
+    Arena twin_output = arena_reserve(1ull << 24);
+    Arena scratch = arena_reserve(1ull << 24);
+    Arena execution = arena_reserve(1ull << 24);
+    uint32_t header_phis[2] = { 0, 0 };
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        // The second pass's text has the start's line as a lifetime end, which writes nothing.
+        char source[sizeof(text)];
+        memcpy(source, text, sizeof(text));
+        char* start = strstr(source, "$0 start");
+        if (pass == 1 && start != 0)
+        {
+            memcpy(start + 3, "end  ", 5);
+        }
+        arena_pop_to(&input, 0);
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        IrFunction parsed = { 0 };
+        const bool read = ssa_ir_test_expect(tally, ir_parse((String8){ .pointer = source, .length = strlen(source) }, &input, &scratch, &parsed).error == IR_PARSE_OK, "the lifetime fixture parses");
+        IrFunction promoted = { 0 };
+        IrFunction twin = { 0 };
+        if (read && ssa_ir_test_promote(tally, &parsed, &output, &twin_output, &scratch, &promoted, &twin))
+        {
+            for (uint32_t form = 0; form < 2; form += 1)
+            {
+                const IrFunction* function = form == 0 ? &promoted : &twin;
+                uint32_t phis = 0;
+                for (uint32_t i = function->block_offsets[1]; i < function->block_offsets[2]; i += 1)
+                {
+                    phis += function->op[i] == IR_PHI;
+                }
+                header_phis[pass] = form == 0 ? phis : header_phis[pass];
+                ssa_ir_test_expect(tally, phis == header_phis[pass], "both paths place the header's phis alike");
+            }
+            const uint64_t arguments[1] = { 10 };
+            ssa_ir_test_execute(tally, &parsed, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture in memory");
+            ssa_ir_test_execute(tally, &promoted, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture promoted by the vector path");
+            ssa_ir_test_execute(tally, &twin, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture promoted by the scalar path");
+        }
+    }
+    // The header's phis: the sum and the counter, and x's too where its start doesn't end it.
+    ssa_ir_test_expect(tally, header_phis[0] == 2, "a lifetime start ends the local's liveness around the loop");
+    ssa_ir_test_expect(tally, header_phis[1] == 3, "without the start the loop carries the local");
+    arena_release(&execution);
+    arena_release(&scratch);
+    arena_release(&twin_output);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static int run_ssa_ir_tests(int argc, char** argv)
 {
     uint64_t seed = 134;
@@ -1516,6 +1621,7 @@ static int run_ssa_ir_tests(int argc, char** argv)
     {
         SsaIrTestTally tally = {0};
         ssa_ir_test_memory(&tally);
+        ssa_ir_test_lifetimes(&tally);
         ssa_ir_test_variable_operands(&tally);
         ssa_ir_test_failures(&tally);
         ssa_ir_test_programs(&tally, seed, count, false);
