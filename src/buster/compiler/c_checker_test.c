@@ -2271,6 +2271,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];
+    // The oracle's -w (parse_test_clang's): clang then skips its analysis of each function's CFG, and so its misplaced
+    // fallthrough's error (check_input_fallthrough_analyzed), which test-checker-driver compares without -w.
     const PPOptions pp_options = {
         .language = {
             .standard = fixture->standard != 0 ? fixture->standard : 2017,
@@ -2278,6 +2280,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         },
         .no_standard_includes = true,
         .semantic_pragmas = true,
+        .suppress_warnings = true,
         .predefines.char_unsigned = fixture->char_unsigned,
     };
     const ParseOptions parser_options[2] = {

@@ -730,6 +730,18 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
 }
 
 
+// Whether clang's analysis of the function's CFG, which reports a misplaced fallthrough, runs where `token` is:
+// AnalysisBasedWarnings::IssueWarnings returns at once when every warning is ignored (-w), and for a function in a
+// system header unless -Wsystem-headers (the token's own level stands for the function's). A reader without a
+// preprocessor (a synthetic control walk's) has neither option, so the analysis runs.
+static bool check_input_fallthrough_analyzed(const CheckInputReader* reader, uint32_t token)
+{
+    const Preprocessor* pp = reader->pp;
+    const CheckGraph* graph = &reader->output->graph;
+    const bool system = graph->system_tokens != NULL && token < graph->system_token_count && graph->system_tokens[token] != 0;
+    return pp == NULL || (!pp->options.suppress_warnings && (!system || pp->options.system_header_warnings));
+}
+
 // before == NONE is the unchanged full-unit path. The diagnostic prefix collects all function-scoped label names
 // for forward references, but reports only sites before its completion and defers unfinished-function obligations.
 static __attribute__((always_inline)) void check_input_controls_mode(CheckInputReader* reader, uint32_t before)
@@ -959,9 +971,9 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 {
                     check_input_report(reader, at, CHECK_INPUT_FALLTHROUGH_SWITCH);
                 }
-                else if (!reader->pp->options.suppress_warnings && !check_input_fallthrough_placed(reader, token))
+                else if (check_input_fallthrough_analyzed(reader, token) && !check_input_fallthrough_placed(reader, token))
                 {
-                    // clang's analysis of the function's CFG, which -w leaves out, reports it at the statement's first token.
+                    // clang's analysis of the function's CFG reports it at the statement's first token.
                     uint32_t first = token;
                     while (first > 0 && check_input_fallthrough_within(parser, first - 1, token))
                     {

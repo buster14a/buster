@@ -135,6 +135,49 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         }
     }
     unlink(source);
+    // clang's analysis of a function's CFG, which reports a misplaced fallthrough, doesn't run under -w, nor for a
+    // function in a system header without -Wsystem-headers: the same header's misplaced fallthrough found through
+    // -isystem and through -I, with each option, must give clang's errors (or none) by both paths.
+    char system_directory[PATH_MAX];
+    char header[PATH_MAX];
+    snprintf(system_directory, sizeof(system_directory), "%s/fallthrough-headers", directory);
+    snprintf(header, sizeof(header), "%s/fallthrough.h", system_directory);
+    static const char header_text[] = "static inline int fallthrough_header(int x) {\nswitch (x) {\ncase 1: __attribute__((fallthrough));\n}\nreturn x;\n}\n";
+    static const char includer[] = "#include <fallthrough.h>\nint g(int x) { return fallthrough_header(x); }\n";
+    const bool headers = (mkdir(system_directory, 0700) == 0 || errno == EEXIST) && parse_test_write(header, header_text, strlen(header_text)) &&
+                         parse_test_write(source, includer, strlen(includer));
+    static const char* const searches[] = { "-isystem", "-I" };
+    static const char* const options[] = { "-std=gnu17", "-Wsystem-headers", "-w" };
+    for (uint32_t s = 0; headers && s < BUSTER_ARRAY_LENGTH(searches); s += 1)
+    {
+        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
+        {
+            char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", (char*)options[o], (char*)searches[s], system_directory, source, NULL };
+            char* reference = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &reference);
+            char expected[8192];
+            const bool expected_valid = check_test_cleanup_errors(reference, 0, expected, sizeof(expected));
+            free(reference);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17", "-fsyntax-only", (char*)options[o], (char*)searches[s],
+                                    system_directory, source, scalar != 0 ? "--scalar" : NULL, NULL };
+                char* text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                char actual[8192];
+                const bool actual_valid = check_test_cleanup_errors(text, 0, actual, sizeof(actual));
+                free(text);
+                char description[512];
+                snprintf(description, sizeof(description), "a header's misplaced fallthrough through %s with %s, by the %s path: clang's (status %d)\n%sagainst (status %d)\n%s",
+                         searches[s], options[o], scalar != 0 ? "scalar" : "vector", oracle, expected, status, actual);
+                check_test_expect(test, (oracle == 0 || oracle == 1) && status == oracle && expected_valid && actual_valid && strcmp(expected, actual) == 0,
+                                  description);
+            }
+        }
+    }
+    unlink(header);
+    unlink(source);
+    rmdir(system_directory);
     // A label's attributes are its own, a declaration's after it among them: aligned(64) doesn't align y, which the
     // program reads through its address's remainder, as clang's build does.
     static const char program[] =
