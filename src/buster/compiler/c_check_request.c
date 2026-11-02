@@ -271,19 +271,23 @@ static bool check_request_read(PPOptions* parsed, CheckRequestRefusal* refusal, 
     char** own = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)count + 1);
     CheckRequestScan scan = { 0 };
     uint32_t passed = 0;
+    // After `--` every argument is an input, as the driver and pp_parse_options take them: never scanned as an option.
+    bool end_options = false;
     for (uint32_t i = 0; own != 0 && i < count; i += 1)
     {
-        const bool valued = i + 1 < count && pp_option_takes_value(arguments[i]);
+        const bool ending = !end_options && strcmp(arguments[i], "--") == 0;
+        const bool valued = !end_options && !ending && i + 1 < count && pp_option_takes_value(arguments[i]);
         if (valued)
         {
             own[passed++] = arguments[i];
             own[passed++] = arguments[i + 1];
             i += 1;
         }
-        else if (check_request_scan(&scan, arguments[i]))
+        else if (end_options || ending || check_request_scan(&scan, arguments[i]))
         {
             own[passed++] = arguments[i];
         }
+        end_options |= ending;
     }
     PPOptions result = { 0 };
     const char* path = 0;

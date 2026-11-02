@@ -374,6 +374,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-calling-convention --cross-check
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
+./build/compiler test-emission-metadata
 ./build/compiler benchmark-backend
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
@@ -425,6 +426,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-diagnostics, benchmark-diagnostics` — `diagnostic.c` — [guide](docs/commands/determinism.md).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
+- `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
@@ -462,7 +464,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-tier0, benchmark-backend, benchmark-backend-source` — `tier0.c` — [guide](docs/commands/tier0.md).
 - `test-tier1-select, test-tier1-pipeline, test-tier1-masks` — `tier1_select.c` — [guide](docs/commands/tier1.md).
 - `test-tier1-allocation, benchmark-tier1-allocation` — `tier1_allocate.c` — [guide](docs/commands/tier1-allocation.md).
-- `allocation certificate checks` — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
+- `benchmark-tier1-certificate`, allocation certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
 - `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
 - `test-tier1-frame, test-tier1-frame-execution` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
 - `test-tier1-schedule, benchmark-tier1-schedule` — `tier1_schedule.c` — [guide](docs/commands/tier1-schedule.md).

@@ -173,8 +173,9 @@ The default `test-checker` run deals them to its parts too. The checks:
   path, and the request's override gives the same receipt. A file left out at
   the target-feature check has its receipt, and a refused request has none.
 - **Reading:** `check_request_read` with the file among the options, an
-  option's value that looks like a refused option, `-o`, no room and a
-  refusal; and each refusal's message against the driver's literal text.
+  option's value that looks like a refused option, an input after `--` that
+  looks like one, `-o`, no room and a refusal; and each refusal's message
+  against the driver's literal text.
 - **Parity:** original fixtures prepared by `check_source_prepare`, emitted,
   published and built as `-c` builds its object (`check_driver_object_build`,
   which `check_driver_object` calls), against the driver's own `-c` object of

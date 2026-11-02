@@ -1438,6 +1438,20 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-source --only lower --after-scalar 200 "${source[@]}"
 
+      - name: Benchmark the allocation certificates of the frozen SQLite source's functions
+        # #939: tier1_cfg.c's allocation of every function -c compiles of the oracle's frozen sqlite3.c, its certificate
+        # published (tier1_certificate_cfg) and checked (tier1_certificate_check), per IR instruction, beside the
+        # allocation itself and tier1_cfg_verify, with the certificates' sizes, after every certificate is proved.
+        # benchmark-backend-source's options.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',tier1-certificate,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-tier1-certificate "${source[@]}"
+
       - name: Benchmark the verified Tier 1 optimization passes
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')
         run: |

@@ -6,10 +6,10 @@
 //
 // - refusals: option lists of each code generation, PIC, layout and target family, in the orders where the last or the
 //   first decides, read by check_request_parse as a client reads them: the refusal and its option, the arguments that
-//   go on to the preprocessor, an option's value never read as an option, and a refused or unreadable request (an
-//   arena without room, an option without its value after pp_parse_options filled the fields of the options before it)
-//   leaving its configuration all zero; then the driver on each list, by -c and by -fsyntax-only, whose exit status and first line of errors
-//   must be check_request_describe's;
+//   go on to the preprocessor, an option's value or an input after -- never read as an option, and a refused or
+//   unreadable request (an arena without room, an option without its value after pp_parse_options filled the fields of
+//   the options before it) leaving its configuration all zero; then the driver on each list, by -c and by
+//   -fsyntax-only, whose exit status and first line of errors must be check_request_describe's;
 // - the program's options: check_request_program_options takes the identifiers, the target and the predefines from
 //   the preprocessor and keeps the unit's own fields;
 // - receipts: one file prepared twice gives the same digest and text; another -march, -D, -funsigned-char, --scalar,
@@ -282,6 +282,12 @@ static void check_test_request_read(CheckTest* test, const char* file)
     check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_CODEGEN && strcmp(refusal.option, "-ftls-model=initial-exec") == 0 &&
                             check_request_test_zero(&parsed, sizeof(parsed)),
                       "request: check_request_read refuses code generation before the layout, before parsing");
+    char* ended[] = { "-nostdinc", "--", "-fshort-enums" };
+    memset(&parsed, 0xa5, sizeof(parsed));
+    input = "poisoned";
+    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, ended, BUSTER_ARRAY_LENGTH(ended), false, &arena);
+    check_test_expect(test, read && input != 0 && strcmp(input, "-fshort-enums") == 0 && refusal.error == CHECK_REQUEST_ACCEPTED && parsed.no_standard_includes,
+                      "request: check_request_read takes an argument after -- as the input, never as a refused option");
     Arena empty = { 0 };
     char* plain[] = { (char*)file };
     memset(&parsed, 0xa5, sizeof(parsed));

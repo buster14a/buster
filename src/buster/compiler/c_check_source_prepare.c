@@ -114,7 +114,7 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
     source->options.scalar = requested && (request.scalar || source->options.scalar);
     source->scalar = source->options.scalar;
     const bool scalar = source->scalar;
-    const bool preprocessed = requested && intern_initialize(source->identifiers) && pp_initialize(pp, &source->options, source->identifiers) && pp_run(pp, source->input);
+    const bool preprocessed = requested && intern_initialize(source->identifiers) && pp_initialize(pp, &source->options, source->identifiers) && pp_run_input(pp, source->input);
     bool accepted = preprocessed && check_corpus_check_policy(path, parser, pp, scalar, source->options.quiet);
     if (accepted && request.fault == CHECK_SOURCE_CHECK)
     {
