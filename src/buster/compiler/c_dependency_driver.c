@@ -5,6 +5,7 @@
 // publication. Each unit makes its buffer in caller-owned memory. The command publishes buffers in argv order,
 // after its units succeed; neither parallel units nor diagnostic-history replays write dependency files.
 
+#include "string8.h"
 #include "c_dependency.c"
 
 typedef struct DependencyOptions DependencyOptions;
@@ -177,7 +178,8 @@ static bool dependency_check_destinations(const DependencyOptions* options, char
 
 // Named destinations are replaced only after a complete successful write and close. A temporary sibling makes rename
 // atomic and leaves an old depfile intact on failure. Stdout is deliberately not transactional, but its failures are
-// reported. The caller, not a unit lane, owns publication. mkstemp's private permissions also respect restrictive users.
+// reported. The caller, not a unit lane, owns publication. A new depfile gets the mode fopen would give it (0666 and
+// the umask); one replacing a regular file keeps that file's permission bits, as clang's truncation does.
 static bool dependency_publish(const DependencyOutput* output, FILE* errors)
 {
     bool result = true;
@@ -186,7 +188,8 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
         const char* path = output->path;
         const String8 bytes = output->bytes;
         struct stat existing;
-        const bool special = stat(path, &existing) == 0 && !S_ISREG(existing.st_mode);
+        const bool found = stat(path, &existing) == 0;
+        const bool special = found && !S_ISREG(existing.st_mode);
         if (strcmp(path, "-") == 0)
         {
             result = fwrite(bytes.pointer, 1, (size_t)bytes.length, stdout) == bytes.length && fflush(stdout) == 0;
@@ -216,7 +219,25 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
                 memcpy(temporary + length, ".tmp.XXXXXX", sizeof(".tmp.XXXXXX"));
                 fd = mkstemp(temporary);
             }
-            FILE* stream = fd >= 0 ? fdopen(fd, "wb") : NULL;
+            // mkstemp makes the file private. Give it the destination's permissions before the rename, from the file
+            // it replaces or from the umask, so a new depfile is not 0600 and a replaced one keeps its mode.
+            bool mode_ready = true;
+            if (fd >= 0)
+            {
+                mode_t mode;
+                if (found)
+                {
+                    mode = existing.st_mode & 0777;
+                }
+                else
+                {
+                    const mode_t mask = umask(0);
+                    umask(mask);
+                    mode = (mode_t)(0666 & ~mask);
+                }
+                mode_ready = fchmod(fd, mode) == 0;
+            }
+            FILE* stream = fd >= 0 && mode_ready ? fdopen(fd, "wb") : NULL;
             result = stream != NULL;
             if (stream != NULL)
             {
@@ -228,7 +249,7 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
             {
                 close(fd);
             }
-            if (fd >= 0 && !result)
+            if (!result && temporary != NULL)
             {
                 unlink(temporary);
             }

@@ -104,12 +104,7 @@
 
 #include "buster/compiler/c_lexer.c"
 
-typedef struct String8 String8;
-struct String8
-{
-    char* pointer;
-    uint64_t length;
-};
+#include "buster/compiler/string8.h"
 
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);

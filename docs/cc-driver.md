@@ -46,7 +46,9 @@ rolled back on a later dependency-output error. Existing input/output aliases,
 including hard links, and the same new output spelled through an aliased parent
 directory, are rejected before compilation. Dangling symlink aliases are
 conservatively rejected. Publication replaces a regular-file symlink itself;
-it does not promise to preserve that link. New depfiles use private permissions.
+it does not promise to preserve that link. A new depfile gets the mode `fopen`
+would give it (`0666` less the umask), and one replacing a regular file keeps
+that file's permission bits, as clang's truncation does.
 `/dev/null` works as a sink and is never replaced. Other special destinations are
 refused. Stdout writes are checked but cannot be rolled back.
 

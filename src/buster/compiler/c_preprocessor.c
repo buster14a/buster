@@ -20629,6 +20629,10 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             options->verbose = true;
         }
+        else if (strcmp(argument, "-static") == 0 || strcmp(argument, "-static-pie") == 0 || strcmp(argument, "-pie") == 0)
+        {
+            // Linker modes the C driver selects; preprocessing ignores them, as clang's driver does with -E and -M.
+        }
         else if (predefined != PREDEFINES_PARSE_UNKNOWN)
         {
             result = predefined != PREDEFINES_PARSE_ERROR;

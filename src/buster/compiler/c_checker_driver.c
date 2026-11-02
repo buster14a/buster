@@ -2440,7 +2440,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         check_clock_mark(stage_clock, CHECK_STAGE_WRITE);
         if (again && cached)
         {
-            snapshot_discard(cache, RUNTIME_KIND_DYNAMIC);
+            snapshot_discard(cache, runtime_kind);
         }
         arena_pop_to(scratch, mark);
         check_program_lanes_release(lanes);
