@@ -3212,8 +3212,11 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable") != NULL;
-    // The reader's expressions' walk (#1038), under its stage.
+    // The reader's expressions' walk (#1038), under its stage; and the lowering's coverage (#1048), the first report's
+    // `lowering-nodes` line, once.
     const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
+    const char* covered = text != NULL ? strstr(text, "\nlowering coverage: lowering-nodes\tevaluated=") : NULL;
+    const bool coverage_once = covered != NULL && strstr(covered + 1, "\nlowering coverage: ") == NULL;
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
@@ -3221,6 +3224,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
     check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk under its stage");
+    check_test_expect(test, coverage_once, "measure-compile reports the lowering's coverage once");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {

@@ -169,7 +169,8 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     char** argv = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)m->argument_count + 6);
     uint64_t failures = timed == NULL || rows == NULL || values == NULL || argv == NULL;
     // The lowering's coverage, from the first --time-stages report: its `lowering-nodes` line (#624's fragments' and #1048's
-    // templates' shares of the evaluated nodes), which every run repeats.
+    // templates' shares of the evaluated nodes), which every run repeats, kept to print with the medians.
+    char coverage_line[512] = { 0 };
     bool covered = false;
     for (uint32_t run = 0; failures == 0 && run < m->warmups + m->runs; run += 1)
     {
@@ -193,7 +194,8 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             if (coverage != NULL)
             {
                 const char* end = strchr(coverage, '\n');
-                printf("lowering coverage: %.*s\n", (int)(end != NULL ? end - coverage : (long)strlen(coverage)), coverage);
+                const ptrdiff_t length = end != NULL ? end - coverage : (ptrdiff_t)strlen(coverage);
+                snprintf(coverage_line, sizeof(coverage_line), "%.*s", (int)length, coverage);
                 covered = true;
             }
             arena_pop_to(arena, mark);
@@ -245,6 +247,10 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     {
         printf("--time-stages costs %.3f ms (%.2f%%) of the default's median wall time\n", medians[1] - medians[0],
                medians[0] > 0 ? (medians[1] - medians[0]) * 100.0 / medians[0] : 0.0);
+    }
+    if (failures == 0 && covered)
+    {
+        printf("lowering coverage: %s\n", coverage_line);
     }
     if (failures == 0 && compiles == 3)
     {
