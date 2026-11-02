@@ -2614,7 +2614,13 @@
 // and MOVBE forms, the baseline's system instructions, AVX's and AVX2's VEX forms, and the AVX-512 F, BW, DQ, CD and
 // VBMI forms, with AVX512VL for a packed instruction's 128- and 256-bit forms). The forms of extensions this table has
 // no feature for (AVX512-FP16, AVX10.2, AMX, XOP, FMA4, TBM, LWP, Key Locker, APX's EVEX promotions and the others)
-// stay unclassified, and so denied on every target.
+// stay unclassified, and so denied on every target. Generated data: a script of the PR's session (not kept) read the
+// form table at 49bedeaf (x86_64_encoder.c's names, mnemonics, families, descriptors and vector lengths), took the
+// forms x86_match_supported admits and this table left unclassified, and gave each a hand-written mnemonic group's
+// features (these rows' and the extended rows' below), adding AVX512VL where an EVEX mnemonic has a 512-bit form and
+// the row is narrower; then the rows were reviewed by hand. GNU as 2.42 was an oracle only, through the GAS
+// architecture gate (x86_target_policy_test.c), which dropped the operandless ud0 and ud1 and endbr32 and made
+// clflush baseline.
     BUSTER_X86_TARGET_REQUIREMENT(INT_IMM8, BUSTER_X86_TARGET_KNOWN)
     BUSTER_X86_TARGET_REQUIREMENT(UD0_R16_RM16, BUSTER_X86_TARGET_KNOWN)
     BUSTER_X86_TARGET_REQUIREMENT(UD0_R32_RM32, BUSTER_X86_TARGET_KNOWN)

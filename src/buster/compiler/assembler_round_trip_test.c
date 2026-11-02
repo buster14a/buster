@@ -652,7 +652,8 @@ static void asm_round_trip_fixtures(AsmTest* test, const char* directory, bool c
     // The choices among an instruction's encodings, with every feature (the C lowering's index): VEX's before EVEX's though
     // EVEX's compressed displacement is shorter (an AVX instruction isn't AVX-512's), EVEX's vpdpbusd before AVX-VNNI's,
     // which a processor with AVX512-VNNI may lack, and VEX's where the target has no EVEX one; the accumulator's xchg
-    // (90+r), but 87's for EAX with itself (90 is NOP, which keeps RAX's upper half); and a shift of one operand, D1's.
+    // (90+r), but 87's for EAX with itself (90 is NOP, which keeps RAX's upper half), and 48 90 for RAX with itself (a
+    // NOP either way, which GNU as writes 90); and a shift of one operand, D1's.
     const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
     const X86Target vnni = { .features = BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(AVXVNNI), .architecture = X86_ARCH_OTHER };
     static const struct
@@ -667,6 +668,8 @@ static void asm_round_trip_fixtures(AsmTest* test, const char* directory, bool c
         { "vpdpbusd %xmm1, %xmm2, %xmm3\n", true, 6, { 0x62, 0xf2, 0x6d, 0x08, 0x50, 0xd9 } },
         { "vpdpbusd %xmm1, %xmm2, %xmm3\n", false, 5, { 0xc4, 0xe2, 0x69, 0x50, 0xd9 } },
         { "xchg %eax, %eax\n", true, 2, { 0x87, 0xc0 } },
+        { "xchg %rax, %rax\n", true, 2, { 0x48, 0x90 } },
+        { "xchg %ax, %ax\n", true, 2, { 0x66, 0x90 } },
         { "xchg %ecx, %eax\n", true, 1, { 0x91 } },
         { "shrl %ecx\n", true, 2, { 0xd1, 0xe9 } },
     };

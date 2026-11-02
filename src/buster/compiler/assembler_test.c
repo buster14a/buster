@@ -652,7 +652,7 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
             {
                 X86MatchRequest request = {.mnemonic = name, .count = count};
                 request.width = variant % 4 == 0 ? x86_match_suffix_width(form) : 0;
-                request.broadcast = variant % 3 == 0 && (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
+                request.broadcast = variant % 3 == 0 && (form->evex & BUSTER_X86_EVEX_BROADCAST) ? (uint32_t)form->operand_bytes / form->disp8_scale : 0;
                 request.rounding = variant % 11 == 0;
                 request.decorations = variant % 7 == 0 ? variant & 0xff : 0;
                 for (uint32_t i = 0; i < count; i += 1)

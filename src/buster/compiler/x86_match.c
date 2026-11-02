@@ -852,10 +852,11 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
             mask &= mask - 1;
             X86Instruction instruction;
             bool accepted = BUSTER_VECTOR_PATH(vectorized) ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
-            // XCHG of EAX (or RAX) with itself isn't 90, which is NOP and leaves RAX's upper half as it was: its form is
-            // 87's, as GNU as encodes it (#1134 admits the accumulator's 90+r forms).
+            // XCHG of EAX with itself isn't 90, which is NOP and leaves RAX's upper half as it was: its form is 87's, as GNU as
+            // encodes it (#1134 admits the accumulator's 90+r forms). RAX's with itself is a NOP either way: 48 90, where
+            // GNU as writes 90.
             const uint32_t row = index->forms[at];
-            accepted &= !((row == X86_FORM_XCHG_R32_EAX || row == X86_FORM_XCHG_R64_RAX) && instruction.rm == 0);
+            accepted &= !(row == X86_FORM_XCHG_R32_EAX && instruction.rm == 0);
             if (accepted)
             {
                 const X86FormDescription* form = x86_form_description(instruction.form);

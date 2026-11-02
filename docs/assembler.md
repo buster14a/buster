@@ -172,7 +172,8 @@ others, which Zen 4 lacks beside AVX512-VNNI) comes after the EVEX one, as GNU a
 picks it without `{vex}`. Then it takes the shortest. An exchange of two general
 registers with the accumulator first swaps its operands, so that `xchg rax, rcx`
 takes the accumulator's one-byte form (`48 91`), as GNU as encodes it; `xchg
-eax, eax` takes 87's form, since 90 is NOP, which keeps RAX's upper half.
+eax, eax` takes 87's form, since 90 is NOP, which keeps RAX's upper half, and
+`xchg rax, rax` is `48 90`, a NOP as GNU as's `90` is.
 
 A diagnostic for an instruction that doesn't match names it as the source writes
 it and says why: `instruction not supported` (a name the syntax doesn't admit,
@@ -456,8 +457,10 @@ the matcher's choice among its encodings (no higher rank, and of the original's
 rank no longer). With `--cross-check`, GNU as assembles two records of every
 form in both syntaxes, each in a 16-byte slot filled with `int3`, and its bytes
 must be the matcher's, but where GNU as would choose another encoding of the
-same instruction (`x86_assembler_prefers_another_form`), which is counted. On
-binutils 2.42 that was 16,314 of 16,316 lines the same and 2 counted. The
+same instruction (`x86_assembler_prefers_another_form`), which is counted. The
+sources enable MPX (`.arch .mpx`), whose `bnd` prefix binutils 2.46 and 2.47 take
+only so. On binutils 2.42 that was 16,314 of 16,316 lines the same and 2 counted
+(GNU as's accumulator form of `add $49,%ax`, in each syntax). The
 issue's 47 inline-assembly instructions and #1115's are fixtures of their own,
 compared with GNU as too, beside each diagnostic's message and name and the
 encoding choices above.
