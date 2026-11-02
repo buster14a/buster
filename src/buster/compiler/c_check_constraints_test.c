@@ -2775,6 +2775,14 @@ static const CheckImplicitIntFixture check_implicit_int_fixtures[] =
     { "a static object in a block", "int p(void) { static q; return q; }\n" },
     { "a typedef without a type specifier", "typedef t;\n" },
     { "a typedef without a type specifier and its use", "typedef t;\nt x = 1;\n" },
+    { "a pointer declarator with a qualified pointer", "int q;\n*const p = &q;\n" },
+    { "a parenthesized qualified pointer declarator", "(*const p);\n" },
+    { "a pointer to a const pointer without a type specifier", "**const p;\n" },
+    { "a qualified pointer declarator and its initializer", "*const p = 0;\n" },
+    { "a GNU restricted pointer declarator", "int q;\n*__restrict p = &q;\n" },
+    { "a pointer declarator with a GNU attribute", "*__attribute__((unused)) p;\n" },
+    { "a pointer declarator with a GNU attribute and its initializer", "*__attribute__((unused)) p = 0;\n" },
+    { "a function declarator with a GNU attribute", "*__attribute__((unused)) p(void);\n" },
     {
         "an old-style program with file-scope, block-scope and parameter implicit int",
         "static x = 3;\n"
@@ -2789,6 +2797,9 @@ struct CheckImplicitIntMode
 {
     uint32_t standard;
     bool gnu;
+    const char* name;
+    // C94 (iso9899:199409) is C89 with digraphs, as the preprocessor's mode table makes it.
+    uint8_t digraphs;
 };
 
 // Whether the checker's `message` is clang's `oracle` message without its warning option, which the checker doesn't
@@ -2806,23 +2817,25 @@ static void check_test_implicit_int(CheckTest* test, const char* clang, const ch
 {
     static const CheckImplicitIntMode modes[] =
     {
-        { 1989, false },
-        { 1989, true },
-        { 1999, false },
-        { 1999, true },
+        { 1989, false, "c89", 0 },
+        { 1989, false, "iso9899:199409", C_DIGRAPHS_ON },
+        { 1989, true, "gnu89", 0 },
+        { 1999, false, "c99", 0 },
+        { 1999, true, "gnu99", 0 },
     };
     uint32_t checks = 0;
     bool ready = made;
     for (uint32_t m = 0; ready && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
     {
-        char standard[16];
-        snprintf(standard, sizeof(standard), "-std=%s%u", modes[m].gnu ? "gnu" : "c", modes[m].standard % 100);
+        char standard[24];
+        snprintf(standard, sizeof(standard), "-std=%s", modes[m].name);
         const PPOptions options =
         {
             .language =
             {
                 .standard = modes[m].standard,
                 .gnu = modes[m].gnu,
+                .digraphs = modes[m].digraphs,
             },
             .no_standard_includes = true,
             .quiet = true,
@@ -2843,8 +2856,8 @@ static void check_test_implicit_int(CheckTest* test, const char* clang, const ch
             char path[4300];
             snprintf(path, sizeof(path), "%s/implicit_int_%u_%u.c", directory, m, f);
             CheckCorpusOracle oracle;
-            bool row = check_corpus_write(path, fixture->source, strlen(fixture->source)) &&
-                       check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
+            const bool written = check_corpus_write(path, fixture->source, strlen(fixture->source));
+            bool row = written && check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
             char description[512];
             snprintf(description, sizeof(description), "implicit int %s (%s): clang %s, the fixture records %s", fixture->rule, standard,
                      row && oracle.rejected ? "rejects" : "accepts", rejected ? "rejection" : "acceptance");
@@ -2869,10 +2882,11 @@ static void check_test_implicit_int(CheckTest* test, const char* clang, const ch
                     check_test_expect(test, same, description);
                 }
                 checks += 1;
-                row = unlink(path) == 0;
             }
+            // The writer's file goes even where the oracle failed: one failure must not leave the directory behind.
+            const bool removed = !written || unlink(path) == 0;
             snprintf(description, sizeof(description), "implicit int %s (%s): the fixture's file is removed", fixture->rule, standard);
-            check_test_expect(test, row, description);
+            check_test_expect(test, removed, description);
         }
     }
     printf("test-checker: implicit int: %u fixtures, %u checks\n", (uint32_t)(BUSTER_ARRAY_LENGTH(check_implicit_int_fixtures) * BUSTER_ARRAY_LENGTH(modes)), checks);

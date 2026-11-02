@@ -1035,6 +1035,9 @@ struct CheckInputReader
     uint32_t* declaration_specifiers;
     TypeId* declaration_deduced;
     TypeId* declaration_bases;
+    // The C89 declaration-start column: entry q is the first token of the declaration whose declarator name is q, the
+    // start a candidate's implicit declaration begins at (check_input_declaration_starts). 0 where the unit isn't C89.
+    uint32_t* declaration_starts;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
     uint8_t* declaration_abis;
@@ -1868,6 +1871,17 @@ static uint32_t check_input_scan_pointers(const void* const* column, uint32_t fi
     const __mmask8 lanes = (__mmask8)check_input_scan_all(first, count);
     const __m512i pointers = _mm512_maskz_loadu_epi64(lanes, column + first);
     return _mm512_mask_test_epi64_mask(lanes, pointers, pointers);
+}
+
+// The inclusive maxima of 16 dwords: four shifts by 1, 2, 4 and 8 lanes (valignd with zeros) and maxima.
+BUSTER_INLINE __m512i check_input_prefix_max16(__m512i values)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    values = _mm512_max_epu32(values, _mm512_alignr_epi32(values, zero, 15));
+    values = _mm512_max_epu32(values, _mm512_alignr_epi32(values, zero, 14));
+    values = _mm512_max_epu32(values, _mm512_alignr_epi32(values, zero, 12));
+    values = _mm512_max_epu32(values, _mm512_alignr_epi32(values, zero, 8));
+    return values;
 }
 
 #include "c_check_attribute.c"
@@ -4747,7 +4761,9 @@ static uint32_t check_input_declaration_start(const Parser* parser, uint32_t fir
 }
 
 // The first token of the declaration whose declarator name is `name`. A declaration starts after the previous
-// terminator, block opening or body, but a struct or enum body among its own specifiers belongs to it.
+// terminator, block opening or body, but a struct or enum body among its own specifiers belongs to it. This is the
+// scalar oracle of the start column (check_input_declaration_starts), which the walk reads instead of walking back once
+// per candidate: an initializer's `&` and `(` names made that walk quadratic in the declaration's length.
 static uint32_t check_input_declaration_begin(const Parser* parser, uint32_t name)
 {
     uint32_t begin = name;
@@ -4777,6 +4793,141 @@ static uint32_t check_input_declaration_begin(const Parser* parser, uint32_t nam
         }
     }
     return begin;
+}
+
+// Whether a declaration before `role` stops at it: the walk back from a declarator name breaks on the previous
+// declaration's terminator, a block's opening or closing brace, and a function body's opening or closing brace.
+BUSTER_INLINE bool check_input_declaration_boundary(uint8_t role)
+{
+    return role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_OPEN_BODY ||
+           role == PARSE_ROLE_CLOSE_BODY;
+}
+
+// The declaration-start column's scalar path, the twin of check_input_declaration_starts' vector path. `column[token]`
+// is the first token of the declaration whose declarator name is `token`, as check_input_declaration_begin gives it: the
+// largest of the token after the last boundary before it and the token after the last struct or enum body before it that
+// holds a boundary. A body's own terminator is the last boundary of a declaration that ends inside it, while its close
+// makes that body's boundary no part of a later declaration. `stack` holds one boundary count per open body, and the
+// prefixes' maximum is carried from token to token.
+static void check_input_declaration_starts_scalar(const Parser* parser, uint32_t* column, uint32_t* stack)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* roles = parser->tree.roles;
+    uint32_t boundaries = 0;
+    uint32_t depth = 0;
+    uint32_t maximum = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        const uint8_t role = roles[token];
+        uint32_t start = 0;
+        if (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM)
+        {
+            stack[depth++] = boundaries;
+        }
+        else if (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM)
+        {
+            // A body with a boundary in it starts the declarations after it at its close's successor, as the walk's
+            // break at the body's own boundary does; an empty one leaves the declaration before it current.
+            const uint32_t saved = depth != 0 ? stack[--depth] : boundaries;
+            start = saved != boundaries ? token + 1 : 0;
+        }
+        else if (check_input_declaration_boundary(role))
+        {
+            start = token + 1;
+            boundaries += 1;
+        }
+        column[token] = maximum;
+        maximum = start > maximum ? start : maximum;
+    }
+    column[count] = maximum;
+}
+
+// The declaration-start column's vector path: the boundary starts' column and its exclusive prefix maxima are 64 and
+// 16 tokens at a time; the struct and enum stack, which tells a body with a boundary in it from an empty one, is the
+// ordered part. The scalar path above is its exact twin, and both give check_input_declaration_begin's result.
+static void check_input_declaration_starts_vector(const Parser* parser, uint32_t* column, uint32_t* stack)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* roles = parser->tree.roles;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    memset(column, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+    for (uint32_t token = 0; token < count; token += 64)
+    {
+        const uint32_t length = count - token < 64 ? count - token : 64;
+        const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
+        const __m512i role = _mm512_maskz_loadu_epi8(lanes, roles + token);
+        const uint64_t boundary = _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_TERMINATOR)) |
+                                  _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BLOCK)) |
+                                  _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BLOCK)) |
+                                  _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)) |
+                                  _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BODY));
+        for (uint32_t part = 0; part < 64 && part < length; part += 16)
+        {
+            const uint32_t left = length - part < 16 ? length - part : 16;
+            const __mmask16 part_lanes = (__mmask16)_bzhi_u32(UINT32_MAX, left);
+            const __mmask16 starts = (__mmask16)(boundary >> part) & part_lanes;
+            const __m512i positions = _mm512_add_epi32(_mm512_set1_epi32((int32_t)(token + part + 1)), lanes16);
+            _mm512_mask_storeu_epi32(column + token + part, starts, positions);
+        }
+    }
+    uint32_t boundaries = 0;
+    uint32_t depth = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        const uint8_t role = roles[token];
+        if (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM)
+        {
+            stack[depth++] = boundaries;
+        }
+        else if (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM)
+        {
+            const uint32_t saved = depth != 0 ? stack[--depth] : boundaries;
+            column[token] = saved != boundaries ? token + 1 : 0;
+        }
+        else if (check_input_declaration_boundary(role))
+        {
+            boundaries += 1;
+        }
+    }
+    // The exclusive prefix maxima: each block's inclusive maxima shifted by one lane, its predecessor's last maximum in
+    // the first, so that entry q holds the maximum over the tokens before it.
+    __m512i carry = zero;
+    for (uint32_t token = 0; token < count; token += 16)
+    {
+        const uint32_t length = count - token < 16 ? count - token : 16;
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
+        const __m512i values = _mm512_maskz_loadu_epi32(lanes, column + token);
+        const __m512i inclusive = check_input_prefix_max16(values);
+        // The one-lane shift of the block's inclusive maxima, then the earlier tokens' maximum, which a block whose own
+        // values are smaller would otherwise lose.
+        const __m512i shifted = _mm512_max_epu32(_mm512_alignr_epi32(inclusive, carry, 15), carry);
+        _mm512_mask_storeu_epi32(column + token, lanes, shifted);
+        // The block's last maximum is its last lane's, which a partial block's zero lanes beyond the count don't have.
+        const __m512i block = _mm512_permutexvar_epi32(_mm512_set1_epi32((int32_t)(length - 1)), inclusive);
+        carry = _mm512_max_epu32(carry, block);
+    }
+    column[count] = _mm_cvtsi128_si32(_mm512_castsi512_si128(carry));
+}
+
+// The declaration-start column and the struct and enum stack it builds through, from the parser's roles.
+static void check_input_declaration_starts(const Parser* parser, uint32_t* column, uint32_t* stack, bool scalar)
+{
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        check_input_declaration_starts_scalar(parser, column, stack);
+    }
+    else
+    {
+        check_input_declaration_starts_vector(parser, column, stack);
+    }
+}
+
+// The first token of the declaration whose declarator name is `name`: the start column where the reader has one (the C89
+// modes, whose implicit declarations ask for it per name), else the walk.
+static uint32_t check_input_declaration_first(const CheckInputReader* reader, uint32_t name)
+{
+    return reader->declaration_starts != 0 ? reader->declaration_starts[name] : check_input_declaration_begin(reader->parser, name);
 }
 
 // The note's declaration as clang's MaybeSuggestAddingStaticToDecl gives it: the first declaration of the function,
@@ -4825,7 +4976,7 @@ static void check_input_static_local_warning(CheckInputReader* reader, uint32_t 
         if (warn)
         {
             const uint32_t first_declaration = check_input_first_declaration(reader, function);
-            const uint32_t declaration = check_input_declaration_start(reader->parser, check_input_declaration_begin(reader->parser, first_declaration), function);
+            const uint32_t declaration = check_input_declaration_start(reader->parser, check_input_declaration_first(reader, first_declaration), function);
             const CheckWarningEvent event = {
                 .id = CHECK_WARNING_ID_STATIC_LOCAL_INLINE,
                 .kind = CHECK_WARNING_EVENT_STATIC_LOCAL_INLINE,
@@ -6046,8 +6197,13 @@ static bool check_input_starts_implicit_declaration(const CheckInputReader* read
     const uint8_t previous = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_NONE;
     const bool adjacent = token == 0 || previous == PARSE_ROLE_TERMINATOR || previous == PARSE_ROLE_CLOSE_BODY;
     const bool scope = parser->language.standard < 1999 && reader->function_body == BUSTER_CHECK_NONE;
-    const bool candidate = scope && role == PARSE_ROLE_OPERAND && (adjacent || previous == PARSE_ROLE_PREFIX || previous == PARSE_ROLE_OPEN_GROUP);
-    const uint32_t begin = candidate && !adjacent ? check_input_declaration_begin(parser, token) : token;
+    // A name after a `*`, a `(` or a pointer's qualifier or attribute (`*const p`, `*__restrict p`,
+    // `*__attribute__((unused)) p`) finds the declaration its declarator starts. A declarator's attribute branch may
+    // already have read this name's declaration (check_input_resolve_range), which the type it gave says.
+    const bool candidate = scope && reader->declared_types[token] == 0 && role == PARSE_ROLE_OPERAND &&
+                           (adjacent || previous == PARSE_ROLE_PREFIX || previous == PARSE_ROLE_OPEN_GROUP || previous == PARSE_ROLE_QUALIFIER_LEFT ||
+                            previous == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT);
+    const uint32_t begin = candidate && !adjacent ? check_input_declaration_first(reader, token) : token;
     const uint8_t begin_role = parser->tree.roles[begin];
     const uint8_t before_begin = begin != 0 ? parser->tree.roles[begin - 1] : PARSE_ROLE_NONE;
     const bool boundary = begin == 0 || before_begin == PARSE_ROLE_TERMINATOR || before_begin == PARSE_ROLE_CLOSE_BODY;
@@ -6267,6 +6423,15 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         uint32_t implicit_first = BUSTER_CHECK_NONE;
         const bool implicit = syntactic && !reader->ignored[i] && parser->language.standard < 1999 && check_input_starts_implicit_declaration(reader, i, &implicit_first);
+        // A declarator's own attribute (`*__attribute__((unused)) p`, and its standard spelling after `*`) is read with
+        // the declaration the `*` starts: the attribute token would otherwise start at itself and leave the `*` to the
+        // expressions' walk.
+        uint32_t declaration_first = implicit ? implicit_first : i;
+        if (!implicit && (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 &&
+            (role == PARSE_ROLE_QUALIFIER_LEFT || role == PARSE_ROLE_OPEN_ATTRIBUTE_LEFT))
+        {
+            declaration_first = check_input_declaration_first(reader, i);
+        }
         if ((syntactic && !reader->ignored[i] && (role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
              (kind == PARSE_KIND_EXTENSION && i + 1 < parser->tokens.count && (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER ||
@@ -6280,7 +6445,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             }
             else
             {
-                check_input_declaration(reader, implicit ? implicit_first : i);
+                check_input_declaration(reader, declaration_first);
             }
         }
         if (syntactic && !reader->ignored[i] && (role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION))
@@ -8503,6 +8668,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(return_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(definition_origins, uint32_t);
+    // C89's implicit declarations ask where a candidate's declaration starts per name (check_input_starts_implicit_declaration):
+    // the column answers each in constant time. Other modes keep the walk for their rare static function note alone.
+    const bool declaration_starts = valid && parser->language.standard < 1999 && parser->tree.roles != 0;
+    reader.declaration_starts = declaration_starts ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
+    valid &= !declaration_starts || reader.declaration_starts != 0;
     BUSTER_CHECK_INPUT_ARRAY(ignored, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializers, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializer_declarations, uint32_t);
@@ -8879,7 +9049,23 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             check_input_system_tokens(&reader, pp, arena);
             check_input_attribute_items(&reader);
-            check_input_resolve_range(&reader, 0, count);
+            if (reader.declaration_starts != 0)
+            {
+                // The column's struct and enum stack is the walk's own, which the walk opens after it.
+                const uint64_t stack_mark = scratch->length;
+                uint32_t* stack = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
+                valid = stack != 0;
+                if (valid)
+                {
+                    check_input_declaration_starts(parser, reader.declaration_starts, stack, BUSTER_SCALAR_PATH(parser->options.scalar));
+                }
+                arena_pop_to(scratch, stack_mark);
+                input->resource |= !valid;
+            }
+            if (!input->resource)
+            {
+                check_input_resolve_range(&reader, 0, count);
+            }
             if (deferred != 0)
             {
                 // The bodies, read apart and merged into the reader's state, where source order would have read them;

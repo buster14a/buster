@@ -1115,8 +1115,11 @@ struct CheckTestProgramBuild
     char* oracle;
     size_t oracle_length;
     bool oracle_unsigned;
+    // The clang mode the cached oracle and checked object's source were built with.
+    const char* oracle_standard;
     uint8_t* object;
     uint64_t object_size;
+    const char* object_standard;
     bool mismatch;
 };
 
@@ -1161,9 +1164,10 @@ static void check_test_program_build_path(char* path, size_t size, const char* n
     snprintf(path, size, "%s/%s", check_test_program_build.directory, name);
 }
 
-// Compiles `name`.c, holding `text`, to `name`.o in the build's directory, its diagnostics in `out` and `err`.
-static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, bool char_unsigned, const char* out,
-                                       const char* err)
+// Compiles `name`.c, holding `text`, to `name`.o in the build's directory with clang's `standard` mode, its diagnostics
+// in `out` and `err`.
+static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, bool char_unsigned, const char* standard,
+                                       const char* out, const char* err)
 {
     char source[96];
     char object[96];
@@ -1175,6 +1179,7 @@ static bool check_test_program_compile(const char* clang, const char* name, cons
     char* compile[] = {
         (char*)clang,
         BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned),
+        (char*)standard,
         "-Wno-unused-command-line-argument",
         "-c",
         source,
@@ -1186,9 +1191,9 @@ static bool check_test_program_compile(const char* clang, const char* name, cons
 }
 
 // The build's directory, made on first use, with the harness of plain char's signedness compiled into it, and the
-// oracle of `text` compiled unless it is the last one's, with the same signedness (`*same_oracle`).
-static bool check_test_program_prepare(const char* clang, const char* text, size_t length, bool char_unsigned, const char* out, const char* err,
-                                       bool* same_oracle)
+// oracle of `text` compiled in `standard` unless it is the last one's, with the same signedness (`*same_oracle`).
+static bool check_test_program_prepare(const char* clang, const char* text, size_t length, bool char_unsigned, const char* standard, const char* out,
+                                       const char* err, bool* same_oracle)
 {
     CheckTestProgramBuild* build = &check_test_program_build;
     if (build->directory[0] == 0)
@@ -1203,17 +1208,17 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
     if (valid && !build->harness[char_unsigned])
     {
         build->harness[char_unsigned] = check_test_program_compile(clang, check_test_program_harness_name(char_unsigned), check_test_program_harness,
-                                                                   sizeof(check_test_program_harness) - 1, char_unsigned, out, err);
+                                                                   sizeof(check_test_program_harness) - 1, char_unsigned, "-std=gnu17", out, err);
         valid = build->harness[char_unsigned];
     }
     const bool same = build->oracle != 0 && build->oracle_unsigned == char_unsigned && build->oracle_length == length &&
-                      memcmp(build->oracle, text, length) == 0;
+                      strcmp(build->oracle_standard, standard) == 0 && memcmp(build->oracle, text, length) == 0;
     *same_oracle = same;
     if (valid && !same)
     {
         free(build->oracle);
         build->oracle = 0;
-        valid = check_test_program_compile(clang, "oracle", text, length, char_unsigned, out, err);
+        valid = check_test_program_compile(clang, "oracle", text, length, char_unsigned, standard, out, err);
         build->oracle = valid ? malloc(length) : 0;
         valid = valid && build->oracle != 0;
         if (valid)
@@ -1221,6 +1226,7 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
             memcpy(build->oracle, text, length);
             build->oracle_length = length;
             build->oracle_unsigned = char_unsigned;
+            build->oracle_standard = standard;
         }
     }
     return valid;
@@ -1252,7 +1258,7 @@ static void check_test_program_build_release(void)
 // clang's build of `oracle_source`, or of the program's own source where it is null; with `mismatch`, the run must find
 // the two different on some input rather than alike.
 static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* oracle_source, bool mismatch, const char* clang,
-                                                       bool char_unsigned, bool alignment_oracle, bool run_native, Arena* scratch)
+                                                       bool char_unsigned, bool alignment_oracle, bool run_native, const char* standard, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -1289,10 +1295,10 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     {
         valid = check_test_program_oracle(link, oracle_source != 0 ? oracle_source : source, &text, &length);
     }
-    valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
+    valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, standard, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
     const bool same = run_native && valid && same_oracle && build->object != 0 && build->mismatch == mismatch && build->object_size == size &&
-                      memcmp(build->object, bytes, size) == 0;
+                      strcmp(build->object_standard, standard) == 0 && memcmp(build->object, bytes, size) == 0;
     char harness_file[32];
     snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
     check_test_program_build_path(harness, sizeof(harness), harness_file);
@@ -1321,6 +1327,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         free(build->object);
         build->object = valid && run_native ? bytes : 0;
         build->object_size = valid && run_native ? size : 0;
+        build->object_standard = standard;
         build->mismatch = mismatch;
         bytes = valid && run_native ? 0 : bytes;
     }
@@ -1362,7 +1369,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
 
 static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
-    return check_test_program_execute_with_alignment(link, source, 0, false, clang, char_unsigned, false, true, scratch);
+    return check_test_program_execute_with_alignment(link, source, 0, false, clang, char_unsigned, false, true, "-std=gnu17", scratch);
 }
 
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
@@ -1763,7 +1770,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 // host can run it.
 static void check_test_program_source_native_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                                     int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native, uint32_t local_limit,
-                                                    const char* oracle_source, bool mismatch)
+                                                    const char* oracle_source, bool mismatch, uint32_t standard, bool gnu, const char* standard_flag)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1771,7 +1778,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
     PredefinesOptions predefines = check_test_program_predefines();
     predefines.char_unsigned = char_unsigned;
     const PPOptions pp_options = {
-        .language = { .standard = 2017, .gnu = true },
+        .language = { .standard = standard, .gnu = gnu },
         .no_standard_includes = !check_test_program_includes,
         .predefines = predefines,
         .target = target != NULL ? *target : (X86Target){ 0 },
@@ -1979,7 +1986,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             }
             check_test_expect(test,
                               check_test_program_execute_with_alignment(&code.link, source, oracle_source, mismatch, clang, char_unsigned, alignment_oracle,
-                                                                        run_native, &scratch),
+                                                                        run_native, standard_flag, &scratch),
                               description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
@@ -1997,13 +2004,15 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
 static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                                     int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0, NULL, false);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0, NULL, false,
+                                            2017, true, "-std=gnu17");
 }
 
 static void check_test_program_source_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                             int32_t expected_pools, uint32_t entry_limit, uint32_t local_limit)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit, NULL, false);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit, NULL, false, 2017,
+                                            true, "-std=gnu17");
 }
 
 static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
@@ -2028,12 +2037,19 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
+// A program fixture in another language mode, with clang reading the same source and mode as the oracle.
+static void check_test_program_source_standard(CheckTest* test, const char* source, const char* name, const char* clang, uint32_t standard, bool gnu,
+                                               const char* standard_flag)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, NULL, false, standard, gnu, standard_flag);
+}
+
 // A program fixture with plain char signed, x86-64's, against clang's build of another source of the same names, a
 // model of what the program computes or a mutant of it: the program must agree with it, or with `mismatch` differ from
 // it on some input.
 static void check_test_program_against(CheckTest* test, const char* source, const char* oracle_source, bool mismatch, const char* name, const char* clang)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, oracle_source, mismatch);
+    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, oracle_source, mismatch, 2017, true, "-std=gnu17");
 }
 
 static void check_test_program_initializer_facts(CheckTest* test)
@@ -3370,6 +3386,25 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_local_bits(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
+        // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what
+        // `tested` computes, and clang's build of the same source in the same mode is the oracle the executable compares.
+        static const char implicit_int_source[] =
+            "x = 3;\n"
+            "typedef t;\n"
+            "t y = 1;\n"
+            "int q = 7;\n"
+            "*const p = &q;\n"
+            "*__restrict r = &q;\n"
+            "*__attribute__((unused)) a = &q;\n"
+            "struct S { const x; };\n"
+            "int tested(int n)\n"
+            "{\n"
+            "    return x == 3 && sizeof(x) == sizeof(int) && y == 1 && sizeof(y) == sizeof(int) && q == 7 && *p == 7 && *a == 7 &&\n"
+            "           *r == 7 && p == &q && a == &q && r == &q && sizeof(*p) == sizeof(int) && sizeof(const) == sizeof(int) &&\n"
+            "           sizeof(volatile) == sizeof(int) && sizeof(struct S) == sizeof(int) && (const)1 == 1 ? 0 : 1;\n"
+            "}\n";
+        check_test_program_source_standard(test, implicit_int_source, "implicit-int-c89", clang, 1989, false, "-std=c89");
+        check_test_program_source_standard(test, implicit_int_source, "implicit-int-gnu89", clang, 1989, true, "-std=gnu89");
     }
     if (check_test_takes())
     {

@@ -502,11 +502,84 @@ static void check_test_sparse_columns(CheckTest* test)
     arena_release(&dirty);
 }
 
+// The declaration-start column (check_input_declaration_starts, #1121): random roles with paired struct and enum bodies,
+// the vector path and its scalar twin against check_input_declaration_begin, the walk the column replaces, for every
+// token of every length to 299. A body's own boundary makes the tokens after its close start at the close's successor;
+// an empty body leaves the declaration before it current.
+static void check_test_declaration_starts(CheckTest* test)
+{
+    enum { MAXIMUM = 300 };
+    static const uint8_t boundaries[] = { PARSE_ROLE_TERMINATOR, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_CLOSE_BLOCK, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_CLOSE_BODY };
+    static const uint8_t others[] = { PARSE_ROLE_OPERAND, PARSE_ROLE_PREFIX, PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_CLOSE_GROUP,
+                                      PARSE_ROLE_SPECIFIER, PARSE_ROLE_QUALIFIER_LEFT, PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT };
+    uint8_t roles[MAXIMUM];
+    uint8_t opens[MAXIMUM];
+    uint32_t expected[MAXIMUM + 1];
+    uint32_t scalar[MAXIMUM + 1];
+    uint32_t vector[MAXIMUM + 1];
+    uint32_t stack[MAXIMUM + 1];
+    uint32_t differences = 0;
+    // This test's own generator, so that its draws leave the default run's seed for the fixtures after it unchanged.
+    uint64_t state = 0x1121;
+    for (uint32_t round = 0; round < 400; round += 1)
+    {
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        const uint32_t count = (uint32_t)(state >> 32) % MAXIMUM;
+        uint32_t depth = 0;
+        // A struct or enum body's opener follows its keyword, as every parse tree's does: no boundary is ever directly
+        // followed by an opener.
+        uint8_t pending = PARSE_ROLE_NONE;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            if (pending != PARSE_ROLE_NONE)
+            {
+                opens[depth++] = pending;
+                roles[token] = pending;
+                pending = PARSE_ROLE_NONE;
+                continue;
+            }
+            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t draw = (uint32_t)(state >> 32);
+            const bool must_close = depth != 0 && (token + depth >= count || draw % 5 == 0);
+            if (must_close)
+            {
+                depth -= 1;
+                roles[token] = opens[depth] == PARSE_ROLE_OPEN_STRUCT ? PARSE_ROLE_CLOSE_STRUCT : PARSE_ROLE_CLOSE_ENUM;
+            }
+            else if (depth < 8 && token + depth + 2 < count && draw % 5 == 1)
+            {
+                roles[token] = PARSE_ROLE_LEAF_RIGHT;
+                pending = (draw & 0x100) != 0 ? PARSE_ROLE_OPEN_STRUCT : PARSE_ROLE_OPEN_ENUM;
+            }
+            else if (draw % 3 != 0)
+            {
+                roles[token] = boundaries[(draw >> 4) % BUSTER_ARRAY_LENGTH(boundaries)];
+            }
+            else
+            {
+                roles[token] = others[(draw >> 8) % BUSTER_ARRAY_LENGTH(others)];
+            }
+        }
+        Parser parser = { 0 };
+        parser.tokens.count = count;
+        parser.tree.roles = roles;
+        check_input_declaration_starts_scalar(&parser, scalar, stack);
+        check_input_declaration_starts_vector(&parser, vector, stack);
+        for (uint32_t token = 0; token <= count; token += 1)
+        {
+            expected[token] = check_input_declaration_begin(&parser, token);
+            differences += scalar[token] != expected[token] || vector[token] != expected[token];
+        }
+    }
+    check_test_expect(test, differences == 0, "the declaration-start column's paths give the walk's start for every random role");
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
     check_test_sparse_columns(test);
     check_test_sparse_lanes(test);
+    check_test_declaration_starts(test);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     // The columns, each in two pages, the second PROT_NONE: kinds, roles, names (or 32-bit values), pointers, and the
     // syntax bits and the marks count_tokens writes; then the expressions' classes' inputs (ignored tokens, first children

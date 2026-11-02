@@ -78,13 +78,20 @@ Parenthesized identifiers and non-call uses of ordinary names do not acquire an 
 
 C89's implicit `int` is read too (#1121): a declaration whose specifiers give no
 type has type `int`, at file scope and in a block, for objects, functions,
-parameters, `register`/`auto`/`static`/`const` declarations and typedefs. A
-file-scope declaration with no specifier at all is such a declaration too
-(`x;`, `main() {}`, `f(a, b) {}`, `(x);`, `*p;`); a block-scope declaration
-needs a specifier to begin it, as `x;` there is an expression. C99 and later
-keep clang's missing-type diagnostic, which the parser reports before the
-checker runs; an old-style definition with a declared return type keeps its
-own undeclared-parameter diagnostic.
+parameters, members (`struct S { const x; };`), `register`/`auto`/`static`/
+`const` declarations and typedefs. A file-scope declaration with no specifier at
+all is such a declaration too (`x;`, `main() {}`, `f(a, b) {}`, `(x);`, `*p;`,
+and a declarator whose name follows a pointer's qualifier or attribute, as in
+`*const p`, `**const p`, `*__restrict p` and `*__attribute__((unused)) p`);
+a block-scope declaration needs a specifier to begin it, as `x;` there is an
+expression. A C89 type name may also hold only qualifiers, so `sizeof(const)`,
+`(const)1` and `sizeof(volatile)` are `int`; `sizeof(register)` and
+`sizeof(static)` still take the parser's error. C99 and later keep clang's
+missing-type diagnostic, which the parser reports before the checker runs; an
+old-style definition with a declared return type keeps its own
+undeclared-parameter diagnostic. In C99 `f(a, b) {}` the parser's missing
+return type at 1:1 stays before clang's first undeclared parameter at 1:6, as
+documented for the existing C99 boundary.
 
 Eligible library names are different (#804): their first undeclared use takes
 the library prototype from the frozen Clang builtin catalogue, then uses the
