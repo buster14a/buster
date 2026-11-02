@@ -19,7 +19,8 @@
 // (check_program_helper_contracts): what a caller must keep of it whatever code implements it, the language's effects
 // (memory, atomicity, order, the floating environment, errno, termination); apart from them, what a direct form of it
 // needs of its function (target features, fixed registers), which a helper's call hides behind the call's convention;
-// and where a direct form exists, what it admits. A helper no family names is UNMODELED's, whose effects are every one.
+// and where a direct form exists, what it admits. A helper no family names is UNMODELED's, whose effects are every one
+// as bounds (it may not return: MAY_TERMINATE, never TERMINATES, which says it doesn't).
 // The physical effects of a helper's code are x86_semantics.c's, read from its records (check_program_helper_physical),
 // never a list of this file's. A fence of a constant order lowers to the typed stream's FENCE
 // (check_program_direct_fence) and plans no helper; every other use keeps its helper, and the plan counts each family's
@@ -88,6 +89,8 @@ typedef enum CheckProgramHelperFamily
 //   - FP_ENVIRONMENT and FP_EXCEPTIONS: it reads the floating environment (MXCSR's rounding), and may raise its flags;
 //   - ERRNO: it may set errno through the address it is given;
 //   - TERMINATES: it doesn't return, and has no successor;
+//   - MAY_TERMINATE: it may not return (it may trap or end the process): a consumer assumes neither that it returns nor
+//     that it doesn't, and keeps its successor;
 //   - UNMODELED: it has effects past these (system state, a template's own), which a consumer keeps whole.
 // And what a direct form of it needs of the function it is placed in (CheckProgramHelperContract.requirements), which
 // a helper's call doesn't pass to its caller: the call's convention covers the registers, and the helper is compiled
@@ -106,11 +109,12 @@ typedef enum CheckProgramHelperFamily
 #define BUSTER_CHECK_HELPER_FEATURES 0x0200u
 #define BUSTER_CHECK_HELPER_FIXED 0x0400u
 #define BUSTER_CHECK_HELPER_UNMODELED 0x0800u
+#define BUSTER_CHECK_HELPER_MAY_TERMINATE 0x1000u
 
 #define BUSTER_CHECK_HELPER_EFFECTS                                                                                                                   \
     (BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER |       \
      BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_ERRNO | BUSTER_CHECK_HELPER_TERMINATES |                   \
-     BUSTER_CHECK_HELPER_UNMODELED)
+     BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE)
 #define BUSTER_CHECK_HELPER_REQUIREMENTS (BUSTER_CHECK_HELPER_FEATURES | BUSTER_CHECK_HELPER_FIXED)
 
 // A family's published contract: its name, the effects every one of its operations may have (each planned helper's own,
@@ -169,15 +173,18 @@ static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PRO
     [CHECK_PROGRAM_HELPER_X86] = {
         .name = "x86-leaf",
         .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER | BUSTER_CHECK_HELPER_FP_ENVIRONMENT |
-                   BUSTER_CHECK_HELPER_UNMODELED,
+                   BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE,
         .requirements = BUSTER_CHECK_HELPER_FEATURES | BUSTER_CHECK_HELPER_FIXED,
         .direct = NULL,
         .helper = "an x86 builtin whose instruction no Tier 0 row takes (c_builtin_x86_helpers.c), where the target has its features",
     },
+    // A template's instructions are its author's: the assembler takes every form whatever the unit's target
+    // (check_asm_matches), as GNU as and clang's integrated assembler do, so a direct form would need no feature the
+    // compiler gates (no FEATURES), only its constraints' and clobbers' registers.
     [CHECK_PROGRAM_HELPER_ASM] = {
         .name = "asm",
         .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER | BUSTER_CHECK_HELPER_FP_ENVIRONMENT |
-                   BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_UNMODELED,
+                   BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE,
         .requirements = BUSTER_CHECK_HELPER_FIXED,
         .direct = NULL,
         .helper = "an asm statement with instructions, its operands placed by their constraints in the helper's frame (docs/c-inline-assembly.md)",
@@ -185,7 +192,8 @@ static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PRO
     [CHECK_PROGRAM_HELPER_UNMODELED] = {
         .name = "unmodeled",
         .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER |
-                   BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_ERRNO | BUSTER_CHECK_HELPER_UNMODELED,
+                   BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_ERRNO | BUSTER_CHECK_HELPER_UNMODELED |
+                   BUSTER_CHECK_HELPER_MAY_TERMINATE,
         .requirements = BUSTER_CHECK_HELPER_FEATURES | BUSTER_CHECK_HELPER_FIXED,
         .direct = NULL,
         .helper = "a helper no other family names, which a consumer keeps whole until its family has its row",

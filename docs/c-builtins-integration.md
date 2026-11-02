@@ -635,7 +635,8 @@ an access of the object's width atomic as other threads see it (`ATOMIC`), a
 memory order (`ORDERS`; every helper strengthens its order to `seq_cst`), no
 access moved across it or eliminated past it (`BARRIER`, a call's), the floating
 environment read and its exceptions raised (`FP_ENVIRONMENT`, `FP_EXCEPTIONS`),
-errno set (`ERRNO`), no return (`TERMINATES`), and effects past these, which a
+errno set (`ERRNO`), no return (`TERMINATES`), a return it may not make, which a
+consumer assumes neither way (`MAY_TERMINATE`), and effects past these, which a
 consumer keeps whole (`UNMODELED`). Apart from them, its requirements are what a
 direct form of the operation needs of the function it is placed in, which a
 helper's call doesn't pass to its caller (the call's convention covers the
@@ -644,7 +645,8 @@ its instructions need (`FEATURES`) and fixed or implicit registers past the
 convention (`FIXED`). `check_program_helper_family` takes a helper's family by
 what names it, and a helper no family names (a load or store of another id, a
 read/modify/write without its rule, a new helper before its family has its row)
-is `unmodeled`'s, with every effect, never a neighbour family's.
+is `unmodeled`'s, with every effect as a bound (it may not return, never that it
+doesn't), never a neighbour family's.
 `check_program_helper_effects` narrows the family's set to a planned helper's
 (`load_n` reads, `store_n` writes; only clang's IEEE maximum and minimum read
 the floating environment among the read/modify/writes; a math builtin's facts).
@@ -657,9 +659,9 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
 | `flt-rounds` | floating environment, barrier | none | none |
 | `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
-| `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, unmodeled, barrier | features, fixed registers | none |
-| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, unmodeled, barrier | fixed registers | none |
-| `unmodeled` (a helper no other family names) | every one but terminates: memory, atomic, orders, floating environment and exceptions, errno, unmodeled, barrier | features, fixed registers | none |
+| `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
+| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | none |
+| `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
 
 A helper's physical effects are `x86_semantics.c`'s, read from its records
 (`check_program_helper_physical`), never a list of this file's: the resources
@@ -676,17 +678,22 @@ makes every helper the emitters make (379: the atomic loads and stores of every
 width, the three fences, every read/modify/write of every width and format, both
 terminal builtins, FLT_ROUNDS, the 14 math builtins and the 112 x86 leaves, AMX's
 among them; each family's exact count, which a helper an emitter adds or stops
-making changes) and checks each against its contract: no callee-saved register
+making changes; and four unnamed helpers with a trap's, sqrt's, a fence's and a
+store's code, which keep `unmodeled`'s bounds) and checks each against its
+contract: no callee-saved register
 written but those its published frame restores, no object written or read, no
 fence or locked access, no floating environment read or exception raised, that
-its contract doesn't have (but where it is `UNMODELED`), and each claim backed
-by its code (a load reads its object and a store writes it and fences; a
+its contract doesn't have (but where it is `UNMODELED`), no trap without a
+return its contract doesn't allow, and each claim backed by its code but where
+the contract is `UNMODELED`, whose effects are bounds (a load reads its object
+and a store writes it and fences; a
 read/modify/write writes its object with a locked access; a thread fence fences
 and a signal fence only returns; a terminal builtin traps and doesn't return; a
 claim of the floating environment reads MXCSR or the x87's control word; errno
 is written). Its one gap the tables don't cover where the contract models every
 effect, the IEEE maximum's and minimum's `btr` and `bts` of an immediate, the
-test names, and checks every uncovered record against it, not the first alone; the x86 leaves' system instructions (`pause`, `rdtsc`, Key
+test names for those helpers alone, and checks every uncovered record against
+it, not the first alone; the x86 leaves' system instructions (`pause`, `rdtsc`, Key
 Locker's) are uncovered too, under their family's `UNMODELED`.
 
 **Direct fences.** `check_program_direct_fence` admits `__atomic_thread_fence`,
