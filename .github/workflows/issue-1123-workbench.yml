@@ -1,0 +1,23 @@
+name: Issue 1123 isolated workbench
+on:
+  push:
+    branches: [agent/1123-linker-options-workbench]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Inspect driver and linker integration
+        run: |
+          git rev-parse HEAD
+          grep -nE 'unsupported_codegen|unsupported_pic|check_driver_options|run_c_checker|run_check|pp_cli|argv|ExecutableOptions' src/buster/compiler/c_checker_driver.c | tail -100
+          grep -nE 'rpath|runpath|RUNPATH|DT_RPATH|entry_name|entry_symbol|defsym' src/buster/compiler/{dynamic*,executable*,foreign_cli*,c_checker_units.c} 2>/dev/null | head -100 || true
+          git archive -o /tmp/buster-1123-source.tar HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buster-1123-source
+          path: /tmp/buster-1123-source.tar
+          retention-days: 1
