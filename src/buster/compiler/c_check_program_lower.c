@@ -7972,6 +7972,7 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const bool candidate = info != NULL && cbuiltin_library_candidate(info->name, info->name_length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
     const uint32_t libgcc = candidate ? cbuiltin_library_libgcc(info->name, info->name_length) : BUSTER_CBUILTIN_LIBRARY_LIBGCC;
+    const CBuiltinLibraryId alias = candidate ? cbuiltin_library_alias(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
     if (fortify != CBUILTIN_FORTIFY_COUNT)
     {
         check_lower_fortify(writer, node, fortify);
@@ -7988,6 +7989,11 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     else if (libgcc != BUSTER_CBUILTIN_LIBRARY_LIBGCC)
     {
         check_lower_call_to(writer, node, (CheckLowerRuntime)(CHECK_LOWER_RUNTIME_POWIDF2 + libgcc), 0, 0);
+    }
+    else if (alias != CBUILTIN_LIBRARY_COUNT)
+    {
+        // A builtin of no F row that calls a library function under its own prototype (__builtin_char_memchr's memchr).
+        check_lower_call_to(writer, node, check_lower_library_runtime(alias), 0, 0);
     }
     else if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {

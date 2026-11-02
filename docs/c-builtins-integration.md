@@ -1712,6 +1712,11 @@ clang's `E` rows do. `__builtin_canonicalizef16`, no `F` row, is the floating
 builtins' (0x3da): its `__fp16` argument converted to `float` and back, which
 quiets a signaling NaN as clang's code does.
 
+**`__builtin_char_memchr`**, no `F` row either, is `memchr`'s call under its
+own prototype (`char *(const char *, int, size_t)`), as clang's code calls it
+(`cbuiltin_library_alias`): its arguments convert to that prototype and its
+value is a `char *`.
+
 **Where clang's code is no call.** clang -O0 compiles many of these rows to
 LLVM intrinsics rather than calls: `llvm.maxnum` and `llvm.minnum` for `fmax`
 and `fmin`, `llvm.maximumnum` and `llvm.minimumnum` for the `_num` ones,

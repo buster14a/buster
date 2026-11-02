@@ -1621,7 +1621,8 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     const bool candidate = cbuiltin_library_candidate(name, length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
     const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
-                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC);
+                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC) ||
+                               (candidate && cbuiltin_library_alias(name, length) != CBUILTIN_LIBRARY_COUNT);
     if (library != CBUILTIN_LIBRARY_COUNT)
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);

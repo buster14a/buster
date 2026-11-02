@@ -421,11 +421,21 @@ static __attribute__((unused)) const char* cbuiltin_library_header(const char* t
 
 // Whether __has_builtin advertises a name as a library builtin this compiler implements: the list's and powi's. A
 // refused one isn't. Overlong query slices fail before any byte past the bound is read.
+// The library function a builtin of no F row calls under its own prototype, as clang's code calls it (#148):
+// __builtin_char_memchr's memchr (CGBuiltin.cpp takes it as __builtin_memchr's), which returns char * rather than void *;
+// CBUILTIN_LIBRARY_COUNT for any other name.
+static __attribute__((unused)) CBuiltinLibraryId cbuiltin_library_alias(const char* name, uint32_t length)
+{
+    const bool memchr = name != NULL && length == 21 && memcmp(name, "__builtin_char_memchr", 21) == 0;
+    return memchr ? CBUILTIN_LIBRARY_MEMCHR : CBUILTIN_LIBRARY_COUNT;
+}
+
 static __attribute__((unused)) bool cbuiltin_library_source(const uint8_t* name, uint32_t length)
 {
     const bool bounded = name != NULL && length <= BUSTER_CBUILTIN_LIBRARY_MAX_NAME;
     const bool result = bounded && (cbuiltin_library_id((const char*)name, length) != CBUILTIN_LIBRARY_COUNT ||
-                                    cbuiltin_library_libgcc((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC);
+                                    cbuiltin_library_libgcc((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC ||
+                                    cbuiltin_library_alias((const char*)name, length) != CBUILTIN_LIBRARY_COUNT);
     return result;
 }
 
