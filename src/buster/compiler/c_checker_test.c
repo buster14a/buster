@@ -5461,6 +5461,54 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        {
+            "multiversioning: cpu_dispatch beside target",
+            "__attribute__((cpu_dispatch(generic), target(\"default\"))) int h(int x) { return x + 1; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: aligned beside target default",
+            "int h(void) __attribute__((aligned(16), target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: may_alias beside target default",
+            "int h(void) __attribute__((may_alias, target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: inline nonnull beside target default",
+            "inline int h(int *p) __attribute__((nonnull, nothrow, target(\"default\"))) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a block-scope declaration beside target default",
+            "int f(void) { int h(void) __attribute__((target(\"default\"), always_inline)); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: several declarators beside target default",
+            "__attribute__((target(\"default\"), always_inline)) int h(void), g(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific declaration alone is unsupported",
+            "__attribute__((cpu_specific(generic))) int h(void);\n",
+            true,
+            true
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu17",
+            "int h(void) __attribute__((nodiscard, target(\"default\")));\n",
+            false,
+            false
+        },
     };
     enum
     {

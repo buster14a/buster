@@ -218,6 +218,9 @@ struct CheckInputReport
     // A token to order this report by instead of `token`, or 0: an alias definition's error is clang's after the
     // multiversioning error at the function's name, though its attribute is earlier.
     uint32_t sort;
+    // Keep this report even when another at its token comes first: clang's multiversioning check repeats the earlier
+    // declaration's error when a later declaration makes it a version.
+    bool repeated;
 };
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
@@ -381,6 +384,11 @@ struct CheckInput
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
+    // GNU's multiversioning reports are deferred until the unit's body checks have run, so they don't cut the first
+    // declaration's expression walk (#839): clang reports the body's errors after them.
+    CheckInputReport* multiversion_reports;
+    uint32_t multiversion_report_count;
+    uint32_t multiversion_report_capacity;
     uint32_t* implicit_function_tokens;
     uint32_t implicit_function_count;
     uint8_t implicit_function_diagnostic;
@@ -1597,21 +1605,52 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
     }
 }
 
-// check_input_report of a multiversioning message that names the attribute at `attribute` and carries `note` at
-// `note_token`, if any.
+// Append a multiversioning message that names the attribute at `attribute` and carries `note` at `note_token`, if any,
+// to the unit's deferred reports.
 static void check_input_report_multiversion(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint8_t multiversion,
                                             uint32_t attribute, uint32_t note_token, CheckInputNoteKind note, uint32_t sort)
 {
-    const uint32_t count = reader->output->report_count;
-    check_input_report(reader, token, message);
-    if (reader->output->report_count != count)
+    CheckInput* input = reader->output;
+    if (input->multiversion_report_count == input->multiversion_report_capacity)
     {
-        CheckInputReport* report = reader->output->reports + count;
-        report->attribute = attribute;
-        report->note_token = note_token;
-        report->note_kind = (uint8_t)note;
-        report->multiversion = multiversion;
-        report->sort = sort;
+        const uint64_t capacity = input->multiversion_report_capacity != 0 ? (uint64_t)input->multiversion_report_capacity * 2 : 4;
+        CheckInputReport* records = capacity <= UINT32_MAX ? arena_push_array(reader->arena, capacity, sizeof(CheckInputReport), 4) : 0;
+        if (records == NULL)
+        {
+            input->resource = true;
+            return;
+        }
+        if (input->multiversion_report_count != 0)
+        {
+            memcpy(records, input->multiversion_reports, (uint64_t)input->multiversion_report_count * sizeof(CheckInputReport));
+        }
+        input->multiversion_reports = records;
+        input->multiversion_report_capacity = (uint32_t)capacity;
+    }
+    input->multiversion_reports[input->multiversion_report_count++] = (CheckInputReport){
+        .token = token,
+        .message = message,
+        .attribute = attribute,
+        .note_token = note_token,
+        .note_kind = (uint8_t)note,
+        .multiversion = multiversion,
+        .sort = sort,
+    };
+}
+
+// Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order.
+static void check_input_multiversion_flush(CheckInputReader* reader)
+{
+    CheckInput* input = reader->output;
+    for (uint32_t i = 0; !input->resource && i < input->multiversion_report_count; i += 1)
+    {
+        const CheckInputReport report = input->multiversion_reports[i];
+        const uint32_t count = input->report_count;
+        check_input_report(reader, report.token, report.message);
+        if (input->report_count != count)
+        {
+            input->reports[count] = report;
+        }
     }
 }
 
@@ -5181,7 +5220,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                                          (reader->output->function_flags[previous_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
             const bool attributes_valid = valid;
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
-            if (attributes_valid && file && function && !is_typedef)
+            if (attributes_valid && function && !is_typedef)
             {
                 check_input_attribute_multiversion(reader, attributes, name, previous_attributes, previous_declaration, is_inline, previous_inline);
             }
@@ -5268,7 +5307,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
                     if (valid && attribute->kind == CHECK_ATTRIBUTE_WEAKREF && !attribute->ignored && reader->linkage[name] != 1)
                     {
+                        const uint32_t reports = reader->output->report_count;
                         check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAKREF_LINKAGE);
+                        // clang's multiversioning check comes before the weakref's linkage error (#839).
+                        if (reader->output->report_count != reports && check_input_attribute_multiversion_present(attributes))
+                        {
+                            reader->output->reports[reports].sort = name + 1;
+                        }
                         valid = false;
                     }
                     if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
@@ -8897,6 +8942,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 {
                     check_input_packed_members(&reader);
                 }
+                check_input_multiversion_flush(&reader);
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
                 if (!input->resource)
                 {

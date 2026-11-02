@@ -128,6 +128,10 @@ static String8 check_driver_attribute_spelling(const Parser* parser, const Prepr
         {
             CheckInputReader names = { .pp = (Preprocessor*)pp };
             result = check_input_attribute_name(&names, name);
+            // clang's messages name the attribute record, not every spelling of it.
+            result = check_input_attribute_equal(result, "no_sanitize_address") || check_input_attribute_equal(result, "no_address_safety_analysis") ||
+                     check_input_attribute_equal(result, "no_sanitize_thread") ? (String8){ .pointer = "no_sanitize", .length = 11 } : result;
+            result = check_input_attribute_equal(result, "weakref") ? (String8){ .pointer = "alias", .length = 5 } : result;
         }
         else
         {
@@ -808,8 +812,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
         {
-            const uint32_t extra_index = (uint32_t)firsts[i] - input->report_count - stream_reports;
-            const bool repeated = (uint32_t)firsts[i] >= input->report_count + stream_reports && extra_index < extra_count && extra[extra_index].repeated;
+            const uint32_t sequence = (uint32_t)firsts[i];
+            const uint32_t extra_index = sequence - input->report_count - stream_reports;
+            const bool input_repeated = sequence < input->report_count && input->reports[sequence].repeated;
+            const bool repeated = input_repeated ||
+                                  (sequence >= input->report_count + stream_reports && extra_index < extra_count && extra[extra_index].repeated);
             if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated)
             {
                 firsts[first_count++] = firsts[i];

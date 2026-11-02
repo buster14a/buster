@@ -1436,17 +1436,17 @@ static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKin
         case CHECK_ATTRIBUTE_EXTERNALLY_VISIBLE:
         case CHECK_ATTRIBUTE_UNSEQUENCED:
         case CHECK_ATTRIBUTE_REPRODUCIBLE:
+            result = true;
+            break;
         // clang ignores artificial on a function that isn't inline, and refuses it on an inline one.
         case CHECK_ATTRIBUTE_ARTIFICIAL: result = !inline_function; break;
-        // Type attributes.
+        // Type attributes. aligned and may_alias are FunctionDecl attributes to clang, which refuses them there.
         case CHECK_ATTRIBUTE_PACKED:
-        case CHECK_ATTRIBUTE_ALIGNED:
         case CHECK_ATTRIBUTE_ALIGNAS:
         case CHECK_ATTRIBUTE_MODE:
         case CHECK_ATTRIBUTE_VECTOR_SIZE:
         case CHECK_ATTRIBUTE_EXT_VECTOR_TYPE:
         case CHECK_ATTRIBUTE_TRANSPARENT_UNION:
-        case CHECK_ATTRIBUTE_MAY_ALIAS:
         case CHECK_ATTRIBUTE_ALIGN_VALUE:
         // Attributes whose subjects aren't functions; their own checks report a bad subject.
         case CHECK_ATTRIBUTE_COMMON:
@@ -1549,14 +1549,38 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         return;
     }
     bool multiversion = false;
-    for (uint32_t i = 0; !multiversion && i < attributes->count; i += 1)
+    bool target = false;
+    bool clones = false;
+    bool cpu = false;
+    for (uint32_t i = 0; i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        multiversion = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
-                                               attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH);
+        if (!attribute->ignored)
+        {
+            target |= attribute->kind == CHECK_ATTRIBUTE_TARGET;
+            clones |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES;
+            cpu |= attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
+        }
     }
+    multiversion = target || clones || cpu;
     if (!multiversion)
     {
+        return;
+    }
+    if (cpu && !target && !clones)
+    {
+        // CPU dispatch's code generation isn't supported. Without another multiversioning attribute there is no
+        // compatibility error to report, and retaining the declaration would let -c write a call to a plain symbol the
+        // source doesn't define (#839's review).
+        for (uint32_t i = 0; i < attributes->count; i += 1)
+        {
+            CheckInputAttribute* attribute = attributes->records + i;
+            if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH))
+            {
+                check_input_report(reader, attribute->name_token, CHECK_INPUT_UNSUPPORTED);
+                attribute->ignored = true;
+            }
+        }
         return;
     }
     const uint64_t mark = reader->scratch->length;
@@ -1573,7 +1597,6 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         memset(incompatible, 0, count);
     }
     uint32_t first_target = BUSTER_CHECK_NONE;
-    uint32_t target_default = BUSTER_CHECK_NONE;
     uint32_t first_clones = BUSTER_CHECK_NONE;
     uint32_t first_cpu = BUSTER_CHECK_NONE;
     uint32_t first_dispatch = BUSTER_CHECK_NONE;
@@ -1594,7 +1617,6 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         {
             case CHECK_ATTRIBUTE_TARGET:
                 first_target = first_target == BUSTER_CHECK_NONE ? i : first_target;
-                target_default = target_default == BUSTER_CHECK_NONE && check_input_attribute_equal(attribute->text, "default") ? i : target_default;
                 earlier = clones != BUSTER_CHECK_NONE ? clones : cpu != BUSTER_CHECK_NONE ? cpu : dispatch;
                 break;
             case CHECK_ATTRIBUTE_TARGET_CLONES:
@@ -1676,8 +1698,14 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         const uint32_t bad = check_input_attribute_multiversion_disallowed(previous, CHECK_MULTIVERSION_TARGET, NULL, BUSTER_CHECK_NONE, previous_inline);
         if (bad != BUSTER_CHECK_NONE)
         {
+            const uint32_t reports = reader->output->multiversion_report_count;
             check_input_report_multiversion(reader, previous_name, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, CHECK_MULTIVERSION_TARGET,
                                             previous->records[bad].name_token, name, CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED, 0);
+            if (reader->output->multiversion_report_count != reports)
+            {
+                // The earlier declaration's own deferred error is at this token too; clang emits both.
+                reader->output->multiversion_reports[reports].repeated = true;
+            }
             arena_pop_to(reader->scratch, mark);
             return;
         }
@@ -1721,6 +1749,14 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
+        // These spellings are standard C23 attributes, not GNU attributes clang's older C modes know: it warns and
+        // ignores them, so they don't conflict with multiversioning (#839's review).
+        if (!attribute->ignored && reader->pp->options.language.standard < 2023)
+        {
+            const String8 spelling = check_input_attribute_name(reader, attribute->name);
+            attribute->ignored |= check_input_attribute_equal(spelling, "nodiscard") || check_input_attribute_equal(spelling, "maybe_unused") ||
+                                  check_input_attribute_equal(spelling, "no_sanitize_undefined");
+        }
         const CheckInputAttributeKind kind = attribute->ignored ? CHECK_ATTRIBUTE_UNKNOWN : attribute->kind;
         attribute->ignored |= kind == CHECK_ATTRIBUTE_IFUNC && !subject.function;
         const bool aliasing = kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_IFUNC && subject.function) ||
