@@ -14,10 +14,20 @@
 // write takes once at most, so it never runs out.
 //
 // The lanes that read a unit's deferred bodies (c_check_deferred.c) write their own tokens of the same columns at once,
-// and two lanes' tokens can share 16. Where the pool is shared (CheckSparsePool.shared), a write claims the directory
-// entry it finds empty (BUSTER_CHECK_SPARSE_CLAIMED), takes a block, fills it and publishes it, and a write that finds the
-// entry claimed waits for the block. A read of a claimed entry reads block 0: a lane reads its own tokens alone, which it
-// hasn't written while the entry is claimed, since its write would have waited for the block.
+// and two lanes' tokens can share 16. Where the pool is shared (CheckSparsePool.shared):
+// - A value's write claims the directory entry it finds empty (BUSTER_CHECK_SPARSE_CLAIMED), takes a block, fills it and
+//   publishes it with a release store; another value's write that finds the entry claimed waits for the block. A write of
+//   NONE waits for nothing, as the entry's block, whichever, reads NONE there until a write of that token.
+// - A read of a directory entry is an acquire load, so that a block it finds published reads its fill. A read of a claimed
+//   entry reads block 0: a lane reads its own tokens alone, which it hasn't written while the entry is claimed, since its
+//   write would have waited for the block.
+// - The lanes take blocks one after another from the pool, so that two lanes' first writes can fall in one 2 MB region of
+//   the blocks, which no write has given a page yet. As with the rare columns (check_input_rare_claim, #764, #847), the
+//   first lane to fill a block in a region claims the region and faults it in, and every other lane that fills a block
+//   there waits for that (check_sparse_region), so that no two lanes clear a huge page for it at once. The directories
+//   are cleared on the reading's own thread before the lanes start (check_sparse_reserve), so their pages are in place.
+// - A lane's scan of the entries in its range (check_sparse_entries, the deferred merge's) loads a block's values in its
+//   range alone, as another lane writes the block's others.
 
 // The tokens of a directory entry's block, as a shift.
 #define BUSTER_CHECK_SPARSE_SHIFT 4u
@@ -33,9 +43,16 @@ struct CheckSparsePool
     uint32_t* blocks;
     // The blocks taken, block 0 among them.
     uint32_t count;
+    // At most BUSTER_CHECK_SPARSE_CLAIMED, so that no block's index has the claim's bit.
     uint32_t capacity;
+    // Where the pool is shared, a word per 2 MB region of `blocks`, from the region of block 0's: 0 unclaimed, 1 being
+    // faulted in, 2 in place (check_sparse_region). Null otherwise.
+    uint32_t* regions;
     // Whether lanes write the pool's columns at once (the deferred reader's), so that its writes take blocks atomically.
     bool shared;
+    // Whether a write found no block to take, which the reservation's capacity rules out: the reader reports it as a
+    // resource failure (check_input_run) rather than lose the value.
+    bool exhausted;
 };
 
 typedef struct CheckSparseColumn CheckSparseColumn;
@@ -64,7 +81,7 @@ static __attribute__((unused)) bool check_sparse_present(CheckSparseColumn colum
 // The value at `token`, which is at most the unit's count.
 static __attribute__((unused)) uint32_t check_sparse_get(CheckSparseColumn column, uint32_t token)
 {
-    const uint32_t block = __atomic_load_n(column.directory + (token >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_RELAXED) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+    const uint32_t block = __atomic_load_n(column.directory + (token >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
     return column.blocks[((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) | (token & (BUSTER_CHECK_SPARSE_TOKENS - 1))];
 }
 
@@ -73,8 +90,8 @@ static __attribute__((unused)) uint32_t check_sparse_get(CheckSparseColumn colum
 static __attribute__((unused)) __m512i check_sparse_vector(CheckSparseColumn column, uint32_t first)
 {
     const uint32_t* entry = column.directory + (first >> BUSTER_CHECK_SPARSE_SHIFT);
-    const uint32_t low = __atomic_load_n(entry, __ATOMIC_RELAXED) & ~BUSTER_CHECK_SPARSE_CLAIMED;
-    const uint32_t high = __atomic_load_n(entry + 1, __ATOMIC_RELAXED) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+    const uint32_t low = __atomic_load_n(entry, __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+    const uint32_t high = __atomic_load_n(entry + 1, __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
     const __m512i lows = _mm512_load_si512(column.blocks + ((uint64_t)low << BUSTER_CHECK_SPARSE_SHIFT));
     const __m512i highs = _mm512_load_si512(column.blocks + ((uint64_t)high << BUSTER_CHECK_SPARSE_SHIFT));
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -89,8 +106,29 @@ static __attribute__((unused)) uint32_t check_sparse_below(CheckSparseColumn col
     return _mm512_mask_cmplt_epu32_mask(lanes, check_sparse_vector(column, first), _mm512_set1_epi32((int)bound));
 }
 
+// Before a shared pool's first fill of `block`: the first lane to fill a block in the block's 2 MB region claims the
+// region (CheckSparsePool.regions), faults it in with a store into its own block, which no other lane writes, and every
+// other lane that fills a block there waits for that. A region holds a page once a fill wrote it, and its claim then costs
+// a load.
+static __attribute__((unused)) void check_sparse_region(CheckSparsePool* pool, uint32_t* block)
+{
+    uint32_t* const claim = pool->regions + (((uintptr_t)block / BUSTER_ARENA_HUGE_PAGE_BYTES) - ((uintptr_t)pool->blocks / BUSTER_ARENA_HUGE_PAGE_BYTES));
+    uint32_t state = __atomic_load_n(claim, __ATOMIC_ACQUIRE);
+    if (state == 0 && __atomic_compare_exchange_n(claim, &state, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+    {
+        *(volatile uint32_t*)block = BUSTER_CHECK_NONE;
+        __atomic_store_n(claim, 2, __ATOMIC_RELEASE);
+        state = 2;
+    }
+    while (state != 2)
+    {
+        _mm_pause();
+        state = __atomic_load_n(claim, __ATOMIC_ACQUIRE);
+    }
+}
+
 // A new block at `entry`, filled with NONEs, or the block another write published there; 0 where the pool has no room,
-// which it always has (check_sparse_reserve).
+// which the reservation rules out (check_sparse_reserve), with the pool marked exhausted.
 static __attribute__((unused)) uint32_t check_sparse_take(CheckSparsePool* pool, uint32_t* entry)
 {
     const bool shared = pool->shared;
@@ -100,9 +138,18 @@ static __attribute__((unused)) uint32_t check_sparse_take(CheckSparsePool* pool,
     {
         const uint32_t taken = shared ? __atomic_fetch_add(&pool->count, 1, __ATOMIC_RELAXED) : pool->count++;
         block = taken < pool->capacity ? taken : 0;
+        uint32_t* const values = pool->blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT);
+        if (block != 0 && shared)
+        {
+            check_sparse_region(pool, values);
+        }
         if (block != 0)
         {
-            _mm512_store_si512(pool->blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT), _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+            _mm512_store_si512(values, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+        }
+        else
+        {
+            __atomic_store_n(&pool->exhausted, true, __ATOMIC_RELAXED);
         }
         __atomic_store_n(entry, block, __ATOMIC_RELEASE);
     }
@@ -133,31 +180,41 @@ static __attribute__((unused)) void check_sparse_set(CheckSparsePool* pool, Chec
     }
 }
 
-// Room in `arena` for `columns` columns of `count` tokens and their pool, into `pool` and `column`s: the directories, zero
-// where `zero` says the arena's pages past its length are as the kernel mapped them (arena_untouched), and the pool,
-// with block 0's NONEs. Returns whether the arena had room.
+// Room in `arena` for `columns` columns of `count` tokens and their pool, into `pool` and `column`s: the directories, and
+// the pool, with block 0's NONEs, and with `shared` its regions' claims. The directories are cleared but where `zero` says
+// the arena's pages past its length are as the kernel mapped them (arena_untouched) and the pool isn't `shared`: a shared
+// pool's are cleared on this thread, so that the lanes find their pages in place. The pool has a block for each directory
+// entry of each column, which a write takes once at most, so it never runs out. Returns whether the arena had room.
 static __attribute__((unused)) bool check_sparse_reserve(Arena* arena, CheckSparsePool** pool, CheckSparseColumn* column, uint32_t columns, uint32_t count, bool zero, bool shared)
 {
     const uint64_t slots = check_sparse_slots(count);
     const uint64_t capacity = slots * columns + 1;
-    CheckSparsePool* result = capacity <= UINT32_MAX ? arena_push(arena, sizeof(CheckSparsePool), _Alignof(CheckSparsePool)) : NULL;
+    CheckSparsePool* result = capacity <= BUSTER_CHECK_SPARSE_CLAIMED ? arena_push(arena, sizeof(CheckSparsePool), _Alignof(CheckSparsePool)) : NULL;
     uint32_t* directories = result != NULL ? arena_push_array(arena, slots * columns, sizeof(uint32_t), 64) : NULL;
     uint32_t* blocks = directories != NULL ? arena_push_array(arena, capacity * BUSTER_CHECK_SPARSE_TOKENS, sizeof(uint32_t), 64) : NULL;
-    if (blocks != NULL)
+    const uint64_t block_bytes = capacity * BUSTER_CHECK_SPARSE_TOKENS * sizeof(uint32_t);
+    const uint64_t region_count = blocks != NULL ? ((uintptr_t)blocks + block_bytes - 1) / BUSTER_ARENA_HUGE_PAGE_BYTES - (uintptr_t)blocks / BUSTER_ARENA_HUGE_PAGE_BYTES + 1 : 0;
+    uint32_t* regions = blocks != NULL && shared ? arena_push_array(arena, region_count, sizeof(uint32_t), 64) : NULL;
+    const bool valid = blocks != NULL && (!shared || regions != NULL);
+    if (valid)
     {
-        if (!zero)
+        if (!zero || shared)
         {
             memset(directories, 0, slots * columns * sizeof(uint32_t));
         }
+        if (shared)
+        {
+            memset(regions, 0, region_count * sizeof(uint32_t));
+        }
         _mm512_store_si512(blocks, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
-        *result = (CheckSparsePool){ .blocks = blocks, .count = 1, .capacity = (uint32_t)capacity, .shared = shared };
+        *result = (CheckSparsePool){ .blocks = blocks, .count = 1, .capacity = (uint32_t)capacity, .regions = regions, .shared = shared };
         for (uint32_t c = 0; c < columns; c += 1)
         {
             column[c] = (CheckSparseColumn){ .directory = directories + slots * c, .blocks = blocks };
         }
         *pool = result;
     }
-    return blocks != NULL;
+    return valid;
 }
 
 // A column of `count` tokens with `values`' entries, for tokens 0 to `count` - 1, and NONE at the unit's count, in its own
@@ -188,13 +245,15 @@ static __attribute__((unused)) uint32_t check_sparse_entries(CheckSparseColumn c
         for (uint32_t first = begin; first < end; first = (first | (BUSTER_CHECK_SPARSE_TOKENS - 1)) + 1)
         {
             const uint32_t slot = first >> BUSTER_CHECK_SPARSE_SHIFT;
-            const uint32_t block = __atomic_load_n(column.directory + slot, __ATOMIC_RELAXED) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+            const uint32_t block = __atomic_load_n(column.directory + slot, __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
             if (block != 0)
             {
                 const uint32_t start = slot << BUSTER_CHECK_SPARSE_SHIFT;
                 const uint32_t stop = end - start < BUSTER_CHECK_SPARSE_TOKENS ? end - start : BUSTER_CHECK_SPARSE_TOKENS;
                 const uint32_t lanes = ((stop == BUSTER_CHECK_SPARSE_TOKENS ? 0x10000u : 1u << stop) - 1) & ~((1u << (first - start)) - 1);
-                const __m512i values = _mm512_load_si512(column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
+                // The block's values in the range alone: a lane of the deferred merge writes the others of a block that
+                // straddles its range's ends.
+                const __m512i values = _mm512_maskz_load_epi32((__mmask16)lanes, column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
                 for (uint32_t set = _mm512_mask_cmpneq_epu32_mask((__mmask16)lanes, values, _mm512_set1_epi32((int)BUSTER_CHECK_NONE)); set != 0; set &= set - 1)
                 {
                     positions[total] = start + (uint32_t)__builtin_ctz(set);

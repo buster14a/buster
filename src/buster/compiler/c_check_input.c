@@ -8739,6 +8739,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
             }
         }
+        // A sparse column's write that found no block (c_check_sparse.c), which the pool's capacity rules out, lost its value.
+        input->resource |= input->sparse_pool != NULL && input->sparse_pool->exhausted;
         valid = !input->resource && input->report_count == 0 && reader.bindings.valid;
         if (valid && environment)
         {
