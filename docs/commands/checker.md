@@ -85,7 +85,12 @@ and object emission and linking refuse what is left by name, as sanitizers
 below (#1138). Non-emitting commands keep its predefines. `-fsanitize-coverage=`
 and `-fsanitize-coverage=0` ask for nothing, a value clang doesn't know is
 clang's error, and the bare `-fsanitize-coverage`, which clang doesn't take, is
-refused by name. Negative flags retain their
+refused by name. The auxiliary `-fsanitize-coverage-*` options (such as
+`-fsanitize-coverage-allowlist=` and the cc1-only `-fsanitize-coverage-type=`)
+are not covered by the "auxiliary hardening options" above: they reach the
+generic `-f` handling, which accepts them, and are left to the wider `-f`/`-m`
+audit. An active coverage request they refine is still refused where code is
+emitted. Negative flags retain their
 existing handling. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
 Clang's last-option-wins policy. Unlike `-fstack-protector*` and
