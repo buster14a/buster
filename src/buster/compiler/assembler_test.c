@@ -81,7 +81,8 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86A
     const AsmOptions vector_options = {.vectorized = true};
     AsmResult scalar = asm_assemble(source, test->index, scalar_options, &test->scalar);
     AsmResult vector = asm_assemble(source, test->index, vector_options, &test->vector);
-    const bool same_error = (scalar.error == 0) == (vector.error == 0) && (scalar.error == 0 || (strcmp(scalar.error, vector.error) == 0 && scalar.location == vector.location));
+    bool same_error = (scalar.error == 0) == (vector.error == 0) && (scalar.error == 0 || (strcmp(scalar.error, vector.error) == 0 && scalar.location == vector.location));
+    same_error &= scalar.error_name.length == vector.error_name.length && (scalar.error_name.length == 0 || memcmp(scalar.error_name.pointer, vector.error_name.pointer, scalar.error_name.length) == 0);
     asm_test_check(test, same_error, "scalar/vector acceptance and diagnostic", vector.error);
     if (expected >= 0)
     {
@@ -650,15 +651,17 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
             for (uint32_t variant = 0; variant < 64; variant += 1)
             {
                 X86MatchRequest request = {.mnemonic = name, .count = count};
-                request.width = variant % 4 == 0 ? form->operand_bytes : 0;
-                request.broadcast = variant % 3 == 0 && (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
+                request.width = variant % 4 == 0 ? x86_match_suffix_width(form) : 0;
+                request.broadcast = variant % 3 == 0 && (form->evex & BUSTER_X86_EVEX_BROADCAST) ? (uint32_t)form->operand_bytes / form->disp8_scale : 0;
                 request.rounding = variant % 11 == 0;
                 request.decorations = variant % 7 == 0 ? variant & 0xff : 0;
                 for (uint32_t i = 0; i < count; i += 1)
                 {
                     X86Operand* operand = &request.operands[i];
                     const uint32_t role = roles[i];
-                    const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG ? form->reg : form->vvvv;
+                    const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG || role == X86_MATCH_IS4 ? form->reg
+                                              : role == X86_MATCH_XMM0                         ? BUSTER_X86_OPERAND_V
+                                                                                               : form->vvvv;
                     const uint64_t bits = asm_test_random(random);
                     operand->width = form->operand_bytes;
                     operand->value = values[(variant + i) % BUSTER_ARRAY_LENGTH(values)];
@@ -696,6 +699,11 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                             operand->class = role == X86_MATCH_CL ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 1 ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 2 ? BUSTER_X86_CLASS_GPR16 : form->operand_bytes == 4 ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64;
                             operand->reg = role == X86_MATCH_CL ? 1 : 0;
                         }
+                        // XMM0 written out, and every fourth variant another XMM register, which no form takes there.
+                        if (role == X86_MATCH_XMM0)
+                        {
+                            operand->reg = variant % 4 == 1 ? bits & 31 : 0;
+                        }
                         if (role == X86_MATCH_ACC && variant % 2 == 0)
                         {
                             operand->class = variant / 2 % 16;
@@ -728,15 +736,15 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
 
 static void asm_test_targets(AsmTest* test)
 {
-    // Every syntax-admitted row needs explicit ISA metadata, independently of the index's own filtering.
-    for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
+    // The syntax admits forms from the form table itself (#1134), and the target table, which fails closed, keeps out
+    // those it doesn't classify: every form any target's index holds has explicit ISA metadata, with every feature.
+    X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
+    x86_match_initialize(test->index, &everything);
+    test->architecture = X86_ARCH_OTHER;
+    for (uint32_t i = 0; i < test->index->begin[BUSTER_X86_MATCH_BUCKETS]; i += 1)
     {
-        uint8_t roles[4];
-        const X86FormDescription* form = &x86_form_descriptions[f];
-        if (x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4)
-        {
-            asm_test_check(test, x86_target_requirement(f) != 0, "matched form has ISA metadata", form->mnemonic);
-        }
+        const uint32_t f = test->index->forms[i];
+        asm_test_check(test, x86_target_requirement(f) != 0 && x86_match_supported(&x86_form_descriptions[f]), "indexed form is admitted and has ISA metadata", x86_form_descriptions[f].mnemonic);
     }
     const X86Target native = x86_target_native();
     for (X86Architecture architecture = X86_ARCH_BASELINE; architecture <= X86_ARCH_NATIVE; architecture += 1)
@@ -1284,6 +1292,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 
 #include "assembler_compat_test.c"
 #include "assembler_corpus_test.c"
+#include "assembler_round_trip_test.c"
 
 static int run_assembler_tests(int count, char** arguments)
 {
@@ -1533,6 +1542,9 @@ static int run_assembler_tests(int count, char** arguments)
         uint64_t random = seed != 0 ? seed : 1;
         uint64_t matcher_random = random;
         asm_test_matcher(&test, &matcher_random);
+        uint64_t round_trip_random = random;
+        asm_round_trip(&test, &round_trip_random, BUSTER_ASM_ROUND_TRIP_VARIANTS, 0, 0, 0, 0);
+        asm_round_trip_fixtures(&test, 0, false);
         asm_test_registers(&test);
         asm_test_register_diagnostics(&test);
         asm_test_numbers(&test);
@@ -1560,6 +1572,9 @@ static int run_assembler_tests(int count, char** arguments)
             if (cross_check)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
+                uint64_t cross_random = random ^ 1134;
+                asm_round_trip_cross_check(&test, directory, &cross_random);
+                asm_round_trip_fixtures(&test, directory, true);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nfixture: test al,200\ntest ax,200\ntest eax,200\ntest rax,200\nnop dword ptr [rax]\n", directory, 0);
                 // The unsigned spellings of sign-extended patterns, which #221's rule takes as GNU as does (the imm8 of
                 // add eax, 0xffffffff is -1), beside the values next to them, which need the wider field.

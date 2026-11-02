@@ -333,16 +333,19 @@ the unit's target. GNU as and clang's integrated assembler take any instruction
 in a template. The lowering makes the index on its scratch arena, once per unit
 with asm statements, and frees it after the planning.
 
-The matcher admits `cpuid`, `xgetbv`, `xchg`, `fnstcw`, `fldcw`, `fnstsw`,
-`fnclex`, `stmxcsr`, `ldmxcsr`, `fxsave` and `fxrstor` (and their `64` forms)
-and SSE2's `pcmpeqd`, which `main.c`'s statements use, and the `bswap` of
-`<linux/swab.h>`'s helpers. For `main.c`'s naked functions it also admits
-`pushfq`, `popfq`, SSE2's `movq`, the x87's `fld` and `fstp` of every width, the
-string instructions with their prefixes (`rep movsb`) and AVX-512F's
-`vmovdqa64` and `vmovdqu64`, and VEX's `kmovb/kmovw/kmovd/kmovq` with `k0`
-through `k7` as ordinary operands. The mask moves retain each form's target
-requirements. Its other families are in
-[the assembler's guide](assembler.md).
+The matcher admits every form the form table has whose operands the
+assembler's grammar reads (#1134: [the assembler's guide](assembler.md)'s "The
+admitted forms"): `main.c`'s statements' `cpuid`, `xgetbv`, `fnstcw`, `stmxcsr`
+and the others, its naked functions' `pushfq`, SSE2's `movq`, the x87's loads and
+stores, the string instructions with their prefixes and the mask moves, and the
+instructions common in inline assembly that it refused before: the bit tests,
+`popcnt`, `crc32`, `rdrand`, `rdseed`, `cmpxchg16b`, the prefetches, `movnti`,
+`clflushopt`, `movbe`, ADX's and BMI's, AES's, `pclmulqdq`, SSSE3's and SHA's,
+the scalar SSE family, `movd`, `pextrd`, `pinsrq`, and AVX's, AVX2's and
+AVX-512's (`vpbroadcastd`, `vpermq`, `vpternlogd`, `vpcompressd {%k1}`). The
+index has every feature, so the template's author chooses the instructions the
+CPU runs; among an instruction's encodings the matcher takes VEX's before
+EVEX's, so that an AVX instruction stays AVX's (its guide's choice of forms).
 The operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc` and `rdtscp`
 are also available (#798), with register outputs and CPU support chosen by the
 template's author.
@@ -352,7 +355,7 @@ including the eight mask saves and restores at the semantics harness's offsets.
 An `xchg` takes its memory operand first in Intel order, as the catalogue has
 it: `xchgl %ecx,(%rdi)`,
 not `xchgl (%rdi),%ecx`. An `xchg` of the accumulator with another register
-takes the two-byte form, where GNU as takes the one-byte one.
+takes the one-byte form, as GNU as does.
 
 For musl's templates (`arch/x86_64/atomic_arch.h`, `pthread_arch.h` and
 `src/math/x86_64`) the matcher also admits the `lock` prefix, as a statement of
@@ -362,7 +365,7 @@ destinations; `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
 SSE2's `psrlq` with their siblings; FMA3's scalar forms; the x87's operations on
 the stack's top (`fsqrt`, `fprem`, `frndint` and the rest), `fnstsw %ax` and
 `fistpll`. `rep; bsr` (dr_flac's spelling of `lzcnt`) is `lzcnt`'s form, its
-bytes. [The assembler's guide](assembler.md) lists the families, and the
+bytes. [The assembler's guide](assembler.md) has the admitted forms, and the
 bytes of a prefix written alone before a 16-bit instruction.
 
 ## The helper's frame
