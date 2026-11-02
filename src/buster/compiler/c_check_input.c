@@ -102,6 +102,9 @@ typedef enum CheckInputMessage
     // another multiversioning attribute, at the later attribute, with a note at the earlier one.
     CHECK_INPUT_MULTIVERSION_ATTRIBUTE,
     CHECK_INPUT_MULTIVERSION_INCOMPATIBLE,
+    CHECK_INPUT_MULTIVERSION_DUPLICATE,
+    // clang's no_builtin on a function declaration, which isn't a definition.
+    CHECK_INPUT_NO_BUILTIN_DEFINITION,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -168,6 +171,8 @@ static const char* const check_input_messages[] =
     "'musttail' attribute only applies to return statements",
     "attribute multiversioning cannot be combined with another attribute",
     "multiversioning attributes are not compatible",
+    "attribute cannot appear more than once on a declaration",
+    "no_builtin attribute is permitted on definitions only",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and

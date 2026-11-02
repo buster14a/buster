@@ -2267,7 +2267,9 @@ What the lowering covers past scalars (#145's programs):
   "function multiversioning caused by this declaration" note at the new one.
   A target declaration that makes a function multiversioned with an earlier one
   checks the canonical first declaration, as clang does, and a later version
-  repeats its error with the caused-here note. `cpu_specific` and `cpu_dispatch`
+  repeats its error with the caused-here note; a repeated `target_clones`,
+  `cpu_specific` or `cpu_dispatch` reports clang's cannot-appear-more-than-once
+  error with its conflicting-attribute note. `cpu_specific` and `cpu_dispatch`
   declarations without a `target` or `target_clones` attribute are refused as
   unsupported at `-fsyntax-only` (deliberately unlike clang, which accepts
   them), so their declaration-only uses cannot reach `-c` as a plain symbol;

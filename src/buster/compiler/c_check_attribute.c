@@ -1544,7 +1544,9 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
                                                const CheckInputAttributes* previous, uint32_t previous_name, bool inline_function,
                                                bool previous_inline)
 {
-    if (attributes == NULL || attributes->error != CHECK_ATTRIBUTE_ERROR_NONE)
+    // A subject error (no_builtin on a declaration, for one) doesn't keep clang from reporting the multiversioning
+    // conflict as well (#839's re-review).
+    if (attributes == NULL || (attributes->error != CHECK_ATTRIBUTE_ERROR_NONE && attributes->error != CHECK_ATTRIBUTE_ERROR_SUBJECT))
     {
         return;
     }
@@ -1597,6 +1599,7 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         const uint32_t cpu = first_cpu != BUSTER_CHECK_NONE && !incompatible[first_cpu] ? first_cpu : BUSTER_CHECK_NONE;
         const uint32_t dispatch = first_dispatch != BUSTER_CHECK_NONE && !incompatible[first_dispatch] ? first_dispatch : BUSTER_CHECK_NONE;
         uint32_t earlier = BUSTER_CHECK_NONE;
+        uint32_t duplicate = BUSTER_CHECK_NONE;
         switch (attribute->kind)
         {
             case CHECK_ATTRIBUTE_TARGET:
@@ -1604,19 +1607,29 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
                 earlier = clones != BUSTER_CHECK_NONE ? clones : cpu != BUSTER_CHECK_NONE ? cpu : dispatch;
                 break;
             case CHECK_ATTRIBUTE_TARGET_CLONES:
+                duplicate = first_clones;
                 first_clones = first_clones == BUSTER_CHECK_NONE ? i : first_clones;
                 earlier = target != BUSTER_CHECK_NONE ? target : cpu != BUSTER_CHECK_NONE ? cpu : dispatch;
                 break;
             case CHECK_ATTRIBUTE_CPU_SPECIFIC:
+                duplicate = first_cpu;
                 first_cpu = first_cpu == BUSTER_CHECK_NONE ? i : first_cpu;
                 earlier = target != BUSTER_CHECK_NONE ? target : clones != BUSTER_CHECK_NONE ? clones : dispatch;
                 break;
             case CHECK_ATTRIBUTE_CPU_DISPATCH:
+                duplicate = first_dispatch;
                 first_dispatch = first_dispatch == BUSTER_CHECK_NONE ? i : first_dispatch;
                 earlier = target != BUSTER_CHECK_NONE ? target : clones != BUSTER_CHECK_NONE ? clones : cpu;
                 break;
             default:
                 break;
+        }
+        if (duplicate != BUSTER_CHECK_NONE)
+        {
+            check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_DUPLICATE, 0, attribute->name_token,
+                                            attributes->records[duplicate].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
+            incompatible[i] = true;
+            continue;
         }
         if (earlier != BUSTER_CHECK_NONE && !incompatible[i])
         {
@@ -1772,7 +1785,13 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
             valid = !subject.function || subject.function_definition;
             if (!valid)
             {
-                check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
+                const uint32_t reports = reader->output->report_count;
+                check_input_report(reader, attribute->name_token, CHECK_INPUT_NO_BUILTIN_DEFINITION);
+                // clang reports the multiversioning conflict first; this declaration-only error follows it (#839).
+                if (reader->output->report_count != reports && check_input_attribute_multiversion_present(attributes))
+                {
+                    reader->output->reports[reports].sort = subject.name + 1;
+                }
             }
         }
         else if (kind == CHECK_ATTRIBUTE_WEAKREF && (subject.is_typedef || !subject.file))

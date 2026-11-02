@@ -5516,6 +5516,12 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             .standard = 2023
         },
+        {
+            "multiversioning: no_builtin on a declaration still reports the conflict",
+            "__attribute__((no_builtin(\"printf\"), always_inline, target(\"default\"))) int h(void);\n",
+            true,
+            false
+        },
     };
     enum
     {

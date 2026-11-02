@@ -112,6 +112,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
+        case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
+        case CHECK_INPUT_NO_BUILTIN_DEFINITION: result = "no_builtin attribute is permitted on definitions only"; break;
     }
     return result;
 }
@@ -1098,15 +1100,27 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                      kind == CHECK_INPUT_WEAKREF_CONTEXT ? "be in a global context" : "also have an alias attribute");
                             }
                         }
-                        else if (phase == 0 && (kind == CHECK_INPUT_MULTIVERSION_ATTRIBUTE || kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE) &&
+                        else if (phase == 0 && (kind == CHECK_INPUT_MULTIVERSION_ATTRIBUTE || kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE ||
+                                                kind == CHECK_INPUT_MULTIVERSION_DUPLICATE) &&
                                  input->reports[index].attribute != BUSTER_CHECK_NONE)
                         {
                             // GNU's function multiversioning (#839), as clang's messages spell it: the attribute it refuses
-                            // at the function's name, or the two incompatible attributes at the later one, with clang's
-                            // note at the earlier or at the declaration that caused multiversioning.
+                            // at the function's name, the two incompatible attributes at the later one, or a repeated
+                            // attribute, with clang's note at the earlier one or the declaration that caused
+                            // multiversioning.
                             const CheckInputReport* report = input->reports + index;
                             const String8 later = check_driver_attribute_spelling(parser, pp, report->attribute, false);
-                            if (kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE)
+                            if (kind == CHECK_INPUT_MULTIVERSION_DUPLICATE)
+                            {
+                                const String8 attribute = check_driver_attribute_spelling(parser, pp, report->attribute, true);
+                                const PPOutputDiagnosticNote note = {
+                                    .token = report->note_token < count ? parser->tokens.sources[report->note_token] : source,
+                                    .message = "conflicting attribute is here",
+                                };
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1,
+                                    "attribute '%.*s' cannot appear more than once on a declaration", (int)attribute.length, attribute.pointer);
+                            }
+                            else if (kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE)
                             {
                                 const String8 earlier = check_driver_attribute_spelling(parser, pp, report->note_token, true);
                                 const PPOutputDiagnosticNote note = {
