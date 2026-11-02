@@ -1626,7 +1626,8 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     {
         pop = class != BUSTER_TYPED_CLASS_VOID;
     }
-    else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_JUMP_VALUE)
+    // A FENCE (#1059) neither pops nor pushes, as a jump's own stack doesn't change.
+    else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_JUMP_VALUE && kind != BUSTER_TYPED_FENCE)
     {
         pop = 2;
         push = true;

@@ -711,7 +711,10 @@ checks each function's `FENCE` entries and values, its calls, and Tier 0's
 records by both twins as `x86_semantics.c` reads them (an `mfence` between a
 store and a load where the source has a `seq_cst` fence there, none for the
 other orders), and the plan's counts, then runs them natively against clang -O0's
-build. `test-checker-driver`'s fence unit (`c_check_fence_driver_test.c`) is the
+build. A function with a statement expression has fences over a live value: its
+lowering tracks its stack (`check_lower_track`, as every function of a program
+with a terminal helper does), where a `FENCE` neither pops nor pushes; the
+compiler's own `main.c` by `-c` and `--lower-all` is the larger case. `test-checker-driver`'s fence unit (`c_check_fence_driver_test.c`) is the
 concurrent control a sequential interpreter can't be: a store-buffering litmus,
 built by both paths, by Tier 0 and by `--tier1` (every function Tier 1's),
 whose threads each store, fence and load, run 100,000 iterations without a

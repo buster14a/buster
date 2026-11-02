@@ -7,9 +7,9 @@
 // resolved effects (x86_instructions_effects) and the form's own (x86_effects: BUSTER_X86_MEMORY_EFFECT_FENCE) read
 // it; a fence of a dynamic or out-of-range order, of an argument with an effect, or of a scoped family keeps its
 // helper, and the plan counts both (CheckProgramHelpers.direct and .helper); and natively against clang, fences of every
-// order and scope in statements, in expressions and in a loop, with the helpers' among them. test-checker-driver runs
-// the concurrent controls (c_check_fence_driver_test.c). Include after c_check_program_folds_test.c, whose summary of a
-// function's accesses this test extends.
+// order and scope in statements, in expressions, in a statement expression and in a loop, with the helpers' among them.
+// test-checker-driver runs the concurrent controls (c_check_fence_driver_test.c). Include after
+// c_check_program_folds_test.c, whose summary of a function's accesses this test extends.
 
 // A function's fences: its FENCE entries and their values (4 bits each, the first lowest), its CALL entries, and its
 // records' accesses to memory other than its frame's and its fences, in order: 'r' a read, 'w' a write, 'm' both in one
@@ -76,7 +76,8 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
                                  "int dynamic(int o){__atomic_thread_fence(o);return o;}"
                                  "void invalid(void){__atomic_thread_fence(7);}"
                                  "void effect(void){__c11_atomic_thread_fence((g++,__ATOMIC_SEQ_CST));}"
-                                 "void scoped(void){__scoped_atomic_thread_fence(__ATOMIC_SEQ_CST,0);}";
+                                 "void scoped(void){__scoped_atomic_thread_fence(__ATOMIC_SEQ_CST,0);}"
+                                 "int tracked(int n){return n+({__atomic_thread_fence(__ATOMIC_SEQ_CST);__atomic_signal_fence(__ATOMIC_ACQUIRE);n*2;});}";
     typedef struct CheckTestFenceCase CheckTestFenceCase;
     struct CheckTestFenceCase
     {
@@ -87,7 +88,8 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         const char* trace;
     };
     // A signal fence's value has BUSTER_TYPED_FENCE_SIGNAL (8). A helper's call ends the trace of each function that
-    // keeps one; `effect`'s increment is its argument's, before the call, which no trace here pins.
+    // keeps one; `effect`'s increment is its argument's, before the call, which no trace here pins. `tracked`'s
+    // statement expression makes its lowering track its stack (CheckLowerWriter.track), with fences over a live value.
     static const CheckTestFenceCase cases[] = {
         { "sequential", 1, 0x5, 0, "f" },
         { "weaker", 5, 0x01432, 0, "" },
@@ -98,6 +100,7 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         { "invalid", 0, 0, 1, "c" },
         { "effect", 0, 0, 1, NULL },
         { "scoped", 0, 0, 1, "c" },
+        { "tracked", 2, 0xa5, 0, "f" },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     static InternTable identifiers;
@@ -135,7 +138,7 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         char description[192];
         snprintf(description, sizeof(description), "fences: the functions lower by the %s path", way);
         check_test_expect(test, ready && code.lowered.count == count, description);
-        // The plan: eleven fences direct, four with their helper, one signature for them all (the thread fence's).
+        // The plan: thirteen fences direct, four with their helper, one signature for them all (the thread fence's).
         const CheckProgramHelpers* helpers = &code.lowered.helpers;
         uint32_t planned = 0;
         for (uint32_t h = 0; ready && h < helpers->count; h += 1)
@@ -144,7 +147,7 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         }
         snprintf(description, sizeof(description), "fences (%s path): the plan takes %u fences directly and %u by their helper, of %u signatures", way,
                  ready ? helpers->direct[CHECK_PROGRAM_HELPER_FENCE] : 0, ready ? helpers->helper[CHECK_PROGRAM_HELPER_FENCE] : 0, planned);
-        check_test_expect(test, ready && helpers->direct[CHECK_PROGRAM_HELPER_FENCE] == 11 && helpers->helper[CHECK_PROGRAM_HELPER_FENCE] == 4 && planned == 1,
+        check_test_expect(test, ready && helpers->direct[CHECK_PROGRAM_HELPER_FENCE] == 13 && helpers->helper[CHECK_PROGRAM_HELPER_FENCE] == 4 && planned == 1,
                           description);
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
@@ -171,14 +174,15 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
     }
     pp_release(&pp);
     intern_release(&identifiers);
-    // Natively against clang: every order and scope, a fence in an expression and in a loop, and the helpers' fences (a
-    // dynamic order, an order past seq_cst and an argument whose increment runs once) beside the direct ones.
+    // Natively against clang: every order and scope, a fence in an expression, in a statement expression and in a loop,
+    // and the helpers' fences (a dynamic order, an order past seq_cst and an argument whose increment runs once) beside
+    // the direct ones.
     check_test_program_source(test,
                               "int g;static int k;int order(int o){__atomic_thread_fence(o);return o;}"
                               "int tested(int n){int a=0;g=n;__atomic_thread_fence(__ATOMIC_SEQ_CST);a+=g;__atomic_thread_fence(__ATOMIC_ACQUIRE);"
                               "__atomic_signal_fence(__ATOMIC_RELEASE);a+=(__atomic_thread_fence(__ATOMIC_ACQ_REL),g*2);__sync_synchronize();"
                               "__c11_atomic_thread_fence(__ATOMIC_SEQ_CST);__c11_atomic_signal_fence(__ATOMIC_RELAXED);"
                               "__c11_atomic_thread_fence((k++,__ATOMIC_SEQ_CST));__atomic_thread_fence(7);__atomic_thread_fence(__ATOMIC_CONSUME);"
-                              "a+=order(n&3)+k;for(int i=0;i<n%5;i++){__atomic_thread_fence(__ATOMIC_SEQ_CST);a+=i;__atomic_signal_fence(__ATOMIC_SEQ_CST);}return a;}",
+                              "a+=order(n&3)+k;a+=n*({__atomic_thread_fence(__ATOMIC_SEQ_CST);__atomic_signal_fence(__ATOMIC_ACQUIRE);g+1;});for(int i=0;i<n%5;i++){__atomic_thread_fence(__ATOMIC_SEQ_CST);a+=i;__atomic_signal_fence(__ATOMIC_SEQ_CST);}return a;}",
                               "fences-direct-and-helper-orders-and-scopes", clang);
 }
