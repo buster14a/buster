@@ -210,9 +210,10 @@ consumer too: an indirect jump's edge moves at each label's block, or in a stub
 after the jump, and each label's symbol where the jump enters it. So do variadic
 definitions (#789): the frame's register save area, which the prologue fills
 from the argument registers, and the overflow area past the incoming stack
-arguments. Still refused: floating point, narrow call arguments (the IR doesn't
-keep their signedness, which the callee's extension needs), stack arguments,
-switches and aggregates by value.
+arguments. A narrow call argument reaches Tier 1 as the `i32` the lowering
+extends it to by its class, and a narrow parameter as an `i32` it truncates (#141,
+the [IR guide](ir.md)'s "Typed-stream lowering"). Still refused: floating point,
+stack arguments, switches and aggregates by value.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
