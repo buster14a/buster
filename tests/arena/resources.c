@@ -175,12 +175,13 @@ static bool memory_pool_fit(void)
     bool valid = one.base != 0 && four.base != 0 && twin.base != 0;
     arena_release(&one);
     arena_release(&four);
-    // 2 MB, which the 1 MB mapping hasn't room for, takes the 4 MB one, and then 512 KB the 1 MB one.
-    Arena two = arena_reserve(2 << 20);
+    // With both in the pool, 512 KB takes the 1 MB mapping, though the 4 MB one was released after it.
     Arena half = arena_reserve(512 << 10);
-    valid = valid && two.base == addresses[1] && two.capacity == (2 << 20);
-    valid = valid && half.base == addresses[0] && half.capacity == (512 << 10) && pool.count == 0;
+    valid = valid && half.base == addresses[0] && half.capacity == (512 << 10) && pool.count == 1;
+    // With both in the pool again, 2 MB, which the 1 MB mapping hasn't room for, takes the 4 MB one.
     arena_release(&half);
+    Arena two = arena_reserve(2 << 20);
+    valid = valid && two.base == addresses[1] && two.capacity == (2 << 20) && pool.count == 1;
     arena_release(&twin);
     Arena later = arena_reserve(1 << 20);
     Arena earlier = arena_reserve(1 << 20);
