@@ -110,17 +110,20 @@ static void check_test_label_prefix_capacity(CheckTest* test)
         for (uint32_t path = 0; path < 2; path += 1)
         {
             parser.options.scalar = path == 0;
-            uint32_t bodies[count];
             uint32_t targets[count];
             CheckInputReport reports[32] = { 0 };
-            memset(bodies, 0xff, sizeof(bodies));
             memset(targets, 0xff, sizeof(targets));
+            Arena columns = arena_reserve(UINT64_C(1) << 20);
+            CheckSparseColumn sparse[2] = { 0 };
+            CheckSparsePool* pool = NULL;
+            const bool reserved = check_sparse_reserve(&columns, &pool, sparse, BUSTER_ARRAY_LENGTH(sparse), count, false, false);
             CheckInput input =
             {
                 .reports = reports,
                 .report_capacity = BUSTER_ARRAY_LENGTH(reports),
-                .declaration_bodies = bodies,
-                .label_targets = targets,
+                .sparse_pool = pool,
+                .declaration_bodies = sparse[0],
+                .label_targets = sparse[1],
                 .asm_ids = asm_ids,
                 .expression_regions = regions,
                 .attributes = attributes,
@@ -137,8 +140,8 @@ static void check_test_label_prefix_capacity(CheckTest* test)
                 .first_child = first,
                 .fragment_end = count,
             };
-            check_test_expect(test, scratch.base != NULL, "label prefix fixture has scratch space");
-            if (scratch.base != NULL)
+            check_test_expect(test, scratch.base != NULL && reserved, "label prefix fixture has scratch space");
+            if (scratch.base != NULL && reserved)
             {
                 if (prefix != 0)
                 {
@@ -148,6 +151,7 @@ static void check_test_label_prefix_capacity(CheckTest* test)
                 {
                     check_input_controls(&reader);
                 }
+                check_sparse_values(input.label_targets, count, targets);
                 check_test_expect(test, !input.resource && scratch.length == 0 && reader.fragment_end == count,
                                   "label capacity fits the insertion bound and restores scratch and fragment limits");
                 check_test_expect(test, input.report_count == (prefix != 0 ? 0 : addresses) && input.label_address_count == (prefix != 0 ? addresses : 0),
@@ -166,6 +170,7 @@ static void check_test_label_prefix_capacity(CheckTest* test)
             }
             scratch.capacity = capacity;
             arena_release(&scratch);
+            arena_release(&columns);
         }
     }
 }
@@ -373,14 +378,19 @@ static void check_test_control_walks(CheckTest* test)
         {
             parser.options.scalar = path == 0;
             Arena scratch = arena_reserve(8192);
+            Arena columns = arena_reserve(UINT64_C(1) << 20);
+            CheckSparseColumn sparse[3] = { 0 };
+            CheckSparsePool* pool = NULL;
+            const bool reserved = check_sparse_reserve(&columns, &pool, sparse, BUSTER_ARRAY_LENGTH(sparse), count, false, false);
             inputs[path] = (CheckInput)
             {
                 .deferred_tokens = variant == 0 ? NULL : deferred,
                 .reports = reports[path],
                 .report_capacity = 32,
-                .declaration_bodies = bodies[path],
-                .label_targets = targets[path],
-                .control_owners = owners[path],
+                .sparse_pool = pool,
+                .declaration_bodies = sparse[0],
+                .label_targets = sparse[1],
+                .control_owners = sparse[2],
                 .asm_ids = asm_ids,
                 .expression_regions = regions,
                 .attributes = attributes,
@@ -393,13 +403,17 @@ static void check_test_control_walks(CheckTest* test)
                 .first_child = first,
                 .fragment_end = count,
             };
-            check_test_expect(test, scratch.base != NULL, "control walk comparison has scratch space");
-            if (scratch.base != NULL)
+            check_test_expect(test, scratch.base != NULL && reserved, "control walk comparison has scratch space");
+            if (scratch.base != NULL && reserved)
             {
                 check_input_controls(&reader);
+                check_sparse_values(inputs[path].declaration_bodies, count, bodies[path]);
+                check_sparse_values(inputs[path].label_targets, count, targets[path]);
+                check_sparse_values(inputs[path].control_owners, count, owners[path]);
             }
             indirect[path] = reader.indirect_gotos;
             arena_release(&scratch);
+            arena_release(&columns);
         }
         bool equal = !inputs[0].resource && !inputs[1].resource && inputs[0].report_count == inputs[1].report_count &&
                      inputs[0].label_address_count == inputs[1].label_address_count && indirect[0] == indirect[1] &&
