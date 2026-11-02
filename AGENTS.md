@@ -310,8 +310,6 @@ translation units, build order, baked tables or code-placement experiments.
 
 ## Current repository and exact smoke commands
 
-- `build/` is disposable output. Do not commit generated binaries or captures.
-
 From the repository root, on the approved Linux Ryzen 7 9700X host:
 
 ```sh
@@ -411,9 +409,8 @@ preprocessor's predefines give as clang's do for the same options
 ## Command and module index
 
 Source entry points below are relative to `src/buster/compiler/`, except
-`tools/` paths. Each guide contains the full test/benchmark commands, owning
-files, flags and acceptance boundaries; the entries here are compact starting
-points. [Detailed section index](docs/commands/README.md#detailed-sections).
+`tools/` paths; each guide has the full commands, owning files, flags and
+acceptance boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 
 - `test-assembler, benchmark-assembler` — `assembler.c` — [guide](docs/commands/assembler.md).
 - `test-bind, benchmark-bind` — `bind.c` — [guide](docs/commands/bind.md).
@@ -436,9 +433,8 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-diagnostics, benchmark-diagnostics` — `diagnostic.c` — [guide](docs/commands/determinism.md).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
-- `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
+- `test-emission-metadata`, `test-emitted-code` — `emission_metadata.c`, `emitted_code.c` — [guides](docs/commands/emission-metadata.md), [emission](docs/commands/emission.md).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
-- `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
 - `benchmark-floors` — `link_benchmark.c` — [guide](docs/commands/floors.md).
@@ -461,6 +457,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
 - `benchmark-link` — `link_benchmark.c` — [guide](docs/commands/link-benchmark.md).
 - `test-lowering, benchmark-lowering-source` — `c_lowering.c` — [guide](docs/commands/lowering.md).
+- `measure-lowering-templates`, `test-lowering-templates` — `c_check_lower_inventory.c`, `c_check_program_templates.c` — [guide](docs/commands/lowering.md#node-templates-1048).
 - `test-object-writer, benchmark-object-writer` — `object_writer.c` — [guide](docs/commands/object-writer.md).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
 - `parallel, test-parallel` — `parallel.c` — [guide](docs/commands/parallel.md).
