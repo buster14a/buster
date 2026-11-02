@@ -47,11 +47,11 @@
 //   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
 //   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
 // - The units' memory (#1109, check_units_test_memory): the budget read from files of the test's own for each branch of
-//   check_units_memory_read (without MemAvailable, the free pages: neither none nor unbounded); two equal units by two
+//   check_units_memory_read (without MemAvailable, the free pages: a page at least, bounded); two equal units by two
 //   lanes with a byte of memory, one of which must wait for the other's (unless the process may run on one CPU, where
-//   the command runs one lane), each object its own alone; and a unit of 16 MiB of comments beside a tiny one, by two lanes with a byte and
-//   with one unit's memory, each object its own alone, where a lane that kept its memory while it helped on the board
-//   deadlocked with the slow unit's waiting for it (the children's alarm fails the run).
+//   the command runs one lane), each object its own alone; and a unit of 16 MiB of comments beside a tiny one, by two
+//   lanes with a byte and with one unit's memory, each object its own alone, where a lane that kept its memory while it
+//   helped on the board deadlocked with the slow unit's waiting for it (the children's alarm fails the run).
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -1275,9 +1275,10 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
             .bounded = true,
         },
     };
-    // Without MemAvailable the read is the free pages, which change as the test runs: some (a running machine always has
-    // free pages), and no more than the machine's memory or the case's bound.
-    const uint64_t machine = (uint64_t)sysconf(_SC_PHYS_PAGES) * (uint64_t)sysconf(_SC_PAGESIZE);
+    // Without MemAvailable the read is the free pages, which change as the test runs: a page at least (a running machine
+    // always has free pages), and no more than the machine's memory or the case's bound.
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t machine = (uint64_t)sysconf(_SC_PHYS_PAGES) * page;
     for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         char case_directory[PATH_MAX];
@@ -1296,7 +1297,7 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
             made = check_units_test_memory_file(root, cases[c].files[f][0], cases[c].files[f][1]);
         }
         const uint64_t read = made ? check_units_memory_read(meminfo_path, cgroup_path, root) : UINT64_MAX;
-        const bool right = cases[c].bounded ? read != 0 && read <= cases[c].expected && read <= machine : read == cases[c].expected;
+        const bool right = cases[c].bounded ? read >= page && read <= cases[c].expected && read <= machine : read == cases[c].expected;
         check_units_test_expect(tally, made && right, "the units' memory read from the machine's files", cases[c].name);
     }
     // Two equal units, each with its object alone.
