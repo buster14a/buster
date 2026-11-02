@@ -1145,7 +1145,8 @@ their branch records (`perf record -e ex_ret_near_ret:u -j any_ret,u`, the recor
 caller) named the hot calls, and 46 callees on the checker's paths are now always inlined, each with the caller it
 saves. Among them are the graph's per-node `check_graph_pure`, `check_graph_scalar_node` (with `check_graph_action`,
 `check_graph_store` and `check_graph_leaf`), `check_action_compute`, the reader's `check_input_add_node`, and the
-declarators' and literals' helpers. `check_graph_scalar_node` calls `check_action_compute` itself, rather than through
+declarators' and literals' helpers. `check_graph_scalar_node`'s body, `check_graph_node_action` since #1050 gave the
+memoized transitions an out-of-line copy of it, calls `check_action_compute` itself, rather than through
 `check_action_scalar`, whose 15 other callers keep that call out of line. Out of the 4.91 M calls, 2.36 M are left; the
 profile left 1.96 M.
 
