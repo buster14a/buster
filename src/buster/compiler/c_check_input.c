@@ -205,6 +205,9 @@ struct CheckInputKrDiagnostic
 {
     uint32_t token;
     uint32_t warning;
+    // A definition diagnostic's body opening, where clang completes the warning when the function's checking does:
+    // its body's own diagnostics publish first, ahead of the same boundary's deferred and return ones (#992).
+    uint32_t body;
 };
 
 // The class codes the visits byte's bits 2 to 6 hold (CheckInputExpressionCode, BUSTER_CHECK_EXPRESSION_CODE_MASK).
@@ -455,8 +458,10 @@ struct CheckInput
     CBindingStatistics parser_binding_statistics;
     uint32_t parser_binding_event_count;
     // The tokens the scalar path's walks act at that the vector path's would have skipped (#529): the walk in source
-    // order's tokens that no mark made (check_input_visit), and the expressions' walk's that its classes left out
-    // (check_input_expression_class). Always 0 on the vector path; the tests require 0 of the scalar path too.
+    // order's tokens that no mark made (check_input_visit), the expressions' walk's that its classes left out
+    // (check_input_expression_class), and the tokens whose sparse mark the columns contradict (#628,
+    // CheckInputReader.sparse_marks), which the vector path's classes read. Always 0 on the vector path; the tests
+    // require 0 of the scalar path too.
     uint32_t visit_misses;
     // The tokens the walk in source order and the expressions' walk visited: every token of their ranges on the scalar
     // path, and on the vector path those they act at, which the tests require to be fewer.
@@ -476,8 +481,10 @@ struct CheckInput
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
-    // Only a rejected unit whose declaration/body resolution completed can have these per-token diagnostic cuts.
-    // Each top-level declaration keeps its original safe prefix; independent declarations retain their full graph.
+    // Only a rejected unit whose declaration/body resolution completed, and whose reports are all missing operand
+    // names, can have these per-token diagnostic cuts (check_input_diagnostic_recover): each token's is the first report
+    // at or after its subtree's first token in its declaration, so that every construct without a missing name keeps
+    // its graph, and declarations without one their whole graph.
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
     bool diagnostic_graph;
@@ -983,6 +990,11 @@ struct CheckInputReader
     // walk in source order's marks (BUSTER_CHECK_RESOLVE_*), then the expressions' walk's classes (BUSTER_CHECK_EXPRESSION_*).
     // Lanes (#113) share it, each writing its own body's.
     uint8_t* visits;
+    // A bit a token, (count + 64) / 64 words: whether one of the sparse columns the expressions' walk tests first has an
+    // entry for it (check_input_expression_sparse), kept by every write of those columns (check_input_sparse_mark). The
+    // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
+    // columns take memory only where they're written (#628, #529). Lanes share it, as they do the columns.
+    uint64_t* sparse_marks;
     uint32_t* parameters;
     uint32_t* parameter_next;
     uint32_t* parameter_seen;
@@ -1002,9 +1014,9 @@ struct CheckInputReader
     TypeId* tag_types;
     uint32_t* tag_ends;
     unsigned __int128* enum_values;
-    // The token columns of check_input_run's arena of rare columns, from the first to the end of the last; and where
-    // more than one lane writes them in huge pages, a word per 2 MB region from rare_begin's, which a lane claims before
-    // its first write into the region (check_input_rare_claim, #847), and otherwise 0.
+    // The token columns in the huge pages of check_input_run's arena of rare columns, from the first to the end of the
+    // last; and where more than one lane writes them in huge pages, a word per 2 MB region from rare_begin's, which a lane
+    // claims before its first write into the region (check_input_rare_claim, #847), and otherwise 0.
     uint8_t* rare_begin;
     uint8_t* rare_end;
     uint32_t* rare_claims;
@@ -1086,6 +1098,38 @@ struct CheckInputReader
     bool lane_unsupported;
 };
 
+// Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
+// group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
+static bool check_input_expression_sparse(const CheckInputReader* reader, uint32_t token)
+{
+    const CheckInput* input = reader->output;
+    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
+           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
+}
+
+// After a write of one of those columns at `token`: its bit in CheckInputReader.sparse_marks says again whether one has an
+// entry for it. Every write but a selection's makes an entry, which sets the bit; a selection proved without its runtime
+// operand isn't one, and only its write reads the others (a proof's write that replaces another proof's, in
+// c_check_constant.c, leaves the bit as it was, and marks nothing). Lanes write their bodies' bits at once, a word of
+// which two bodies may share: the bits change by atomic operations, which the walk's classes, after the lanes, read
+// plainly.
+static void check_input_sparse_mark(const CheckInputReader* reader, uint32_t token, bool entry)
+{
+    uint64_t* const marks = reader->sparse_marks;
+    if (marks != NULL)
+    {
+        const uint64_t bit = UINT64_C(1) << (token & 63);
+        if (entry || check_input_expression_sparse(reader, token))
+        {
+            __atomic_fetch_or(marks + (token >> 6), bit, __ATOMIC_RELAXED);
+        }
+        else
+        {
+            __atomic_fetch_and(marks + (token >> 6), ~bit, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 // A lazy library declaration belongs to the translation unit, although its ordinary binding event was made at a
 // block's first use. Rebuild that event only when a later semantic use or declaration needs it after a restore.
 // Existing local bindings win, and the original library declaration, rather than a closed block's later prototype,
@@ -1107,11 +1151,12 @@ static uint32_t check_input_library_binding(CheckInputReader* reader, uint32_t n
 // faulted in, 2: in place), faults it in with a store of the byte the lane is about to write, and every other lane that
 // writes the region waits for that, so that no two lanes clear a huge page for it at once (#764, #847). A region holds
 // a page once the top level's walk wrote it, and its claim then costs a store; a region no lane writes is never faulted
-// in, and its reads take the huge zero page. Anywhere else (source order, one lane, base pages) it does nothing.
+// in, and its reads take the huge zero page. Anywhere else (source order, one lane, base pages, a column in the arena's
+// base pages) it does nothing.
 static void check_input_rare_claim(const CheckInputReader* reader, const void* entry)
 {
     uint32_t* const claims = reader->rare_claims;
-    if (claims != 0)
+    if (claims != 0 && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry < reader->rare_end)
     {
         uint32_t* const claim = claims + (((uintptr_t)entry >> 21) - ((uintptr_t)reader->rare_begin >> 21));
         uint32_t state = __atomic_load_n(claim, __ATOMIC_ACQUIRE);
@@ -1224,6 +1269,121 @@ static void check_input_warning_once(CheckInputReader* reader, const CheckWarnin
 
 #include "c_check_warning_queries.c"
 
+// A declaration's typedef-name specifier's own declaration, for a warning's type spelling (#992): scan the
+// declarator's name backward over its declarator and specifiers for the identifier that resolves to a typedef.
+// The scan may cross sibling declarators, their initializers and parameter commas — a declarator's own name and
+// `,`/`=` can sit between the name and the shared specifiers (`S a, *b`, `f(T x, U y)`) — while a `;`, `:`,
+// brace or group close cannot. `declaration` is the declaration's name token; 0 says its base was spelled
+// directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
+// then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
+static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t result = 0;
+    bool found = declaration < input->token_count;
+    for (uint32_t token = declaration; found && result == 0 && token > 0;)
+    {
+        token -= 1;
+        if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+        {
+            const uint32_t resolved = input->declarations != 0 ? input->declarations[token] : 0;
+            if (resolved != 0 && resolved != token && resolved < input->token_count && input->declaration_kinds != 0 &&
+                input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+            {
+                result = resolved;
+            }
+            // Any other identifier is a sibling declarator's or use's name: cross it for the shared specifiers.
+        }
+        else
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            const uint8_t role = parser->tree.roles[token];
+            found = kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE &&
+                    kind != PARSE_KIND_COLON && role != PARSE_ROLE_TERMINATOR &&
+                    role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
+        }
+    }
+    return result;
+}
+
+// The printed type and its typedef specifier's declaration for a warning operand that names `token`'s
+// declaration (#992): its declared type as written, with the qualifiers a conversion's type strips, and the
+// typedef's declaration or 0. `fallback` is the operand's own (converted) type where `token` names nothing, and
+// also where the declaration's type isn't that one's unqualified self (a member's lvalue names the object, not
+// the member: only the conversion type is right there). `declared` supplies the declaration's type where a
+// caller holds it — an INITIALIZE node's own graph type is its declaration's — and 0 takes `declared_types`'s.
+static TypeId check_input_object_spelling(const TypeTable* types, const CheckInput* input, const Parser* parser,
+                                          uint32_t token, TypeId declared, TypeId fallback, uint32_t* spelling)
+{
+    const uint32_t declaration = token < input->token_count && input->declarations != 0 ? input->declarations[token] : 0;
+    TypeId result = fallback;
+    *spelling = 0;
+    if (declared == 0 && declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count &&
+        input->declared_types != 0)
+    {
+        declared = input->declared_types[declaration];
+    }
+    if (type_is_valid(types, declared) && type_is_valid(types, fallback) &&
+        type_unqualified(type_strip_aligned(types, declared)) == type_unqualified(type_strip_aligned(types, fallback)))
+    {
+        result = declared;
+        // A declarationless token is still a scan start: an initializer's `=` reads its declaration's
+        // specifiers backward as the name's own token does.
+        *spelling = check_input_typedef_spelling(input, parser,
+                                                 declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
+                                                 declaration : token);
+    }
+    return result;
+}
+
+// One ordered-comparison operand's typedef-specifier declaration for its warning spelling (#992): the
+// BUSTER_CHECK_NONE sentinel where its expression was a sizeof/alignof — clang's `__size_t` there — else the
+// typedef naming its operand declaration's specifier, else 0. `node` is the operand's own graph node, from the
+// graph walk directly or `token_nodes` at an action's token.
+static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    uint32_t result = 0;
+    if (node < graph->count)
+    {
+        if (graph->ops[node] == CHECK_OP_SIZEOF || graph->ops[node] == CHECK_OP_ALIGNOF)
+        {
+            result = BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            const uint32_t token = graph->tokens[node];
+            if (graph->ops[node] == CHECK_OP_CAST && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+            {
+                // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself
+                // the typedef-name use, so its resolution is the specifier's declaration — no declaration to
+                // scan back from as a named object's would.
+                uint32_t open = token;
+                while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
+                {
+                    open -= 1;
+                }
+                for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
+                {
+                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && reader->output->declarations != 0 ?
+                                              reader->output->declarations[type_name] : 0;
+                    if (resolved != 0 && resolved < reader->output->token_count && reader->output->declaration_kinds != 0 &&
+                        reader->output->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+                    {
+                        result = resolved;
+                    }
+                }
+            }
+            else
+            {
+                result = token < reader->output->token_count && reader->output->declarations != 0 ?
+                         check_input_typedef_spelling(reader->output, reader->parser, reader->output->declarations[token]) : 0;
+            }
+        }
+    }
+    return result;
+}
+
 static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
                                       uint32_t first, uint32_t end, uint32_t completion)
 {
@@ -1232,6 +1392,23 @@ static void check_input_null_warning(CheckInputReader* reader, TypeId destinatio
     {
         event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
         event.payload.token = reader->warning_bound_open;
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// The same, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
+// shows (the declaration's written type, qualifiers kept) and `spelling` its typedef specifier's declaration,
+// or BUSTER_CHECK_NONE for `__size_t`, or 0 for no sugar.
+static void check_input_null_spelling(CheckInputReader* reader, TypeId destination, TypeId printed, uint32_t spelling,
+                                      const CheckValue* value, uint32_t first, uint32_t end, uint32_t completion)
+{
+    CheckWarningEvent event;
+    if (check_warning_null_event(reader->parser, reader->types, destination, value, first, end, completion, &event))
+    {
+        event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
+        event.payload.token = reader->warning_bound_open;
+        event.payload.first_type = printed != 0 ? printed : destination;
+        event.payload.data = spelling;
         check_input_warning_once(reader, &event);
     }
 }
@@ -1378,9 +1555,15 @@ static uint32_t check_input_expression_limit(const CheckInputReader* reader, uin
 }
 
 // Missing ordinary names are found by the binding handoff after the whole ordered declaration walk has completed.
-// That state can check independent declarations without inventing a value for a missing operand. Propagate each
-// report's cut to its top-level root, then back to that declaration's tokens: two bounded forest passes, only on a
-// rejected unit. Other reader failures retain the conservative whole-unit prefix and never enter this recovery.
+// That state can check every expression that doesn't contain a missing name without inventing a value for it, as
+// clang's RecoveryExpr does: it suppresses the diagnostics of the operators, calls and statements that contain the name,
+// and keeps checking their other operands and the statements after them (#1077). A token's limit is the first report at
+// or after its subtree's first token, in its top-level declaration, or the count where there is none: a consumer that
+// compares a position in or at the end of the token's construct with the limit then finds whether the construct up to
+// that position holds a report. Its subtree's first token is a bounded forest pass up the postorder (the subtree is
+// contiguous in token order: check_input_range_root), and each token's next report a backward scan over the tokens that
+// restarts at each declaration's first token. Only a rejected unit pays for these, so they have no vector twin. Other
+// reader failures retain the conservative whole-unit prefix and never enter this recovery.
 static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolved)
 {
     CheckInput* input = reader->output;
@@ -1395,37 +1578,54 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
     }
     if (recoverable)
     {
-        input->diagnostic_limits = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count);
-        input->resource |= input->diagnostic_limits == NULL;
-        if (!input->resource)
+        const uint64_t mark = reader->arena->length;
+        uint32_t* limits = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count);
+        const uint64_t kept = reader->arena->length;
+        // Per token: bit 0 for a declaration's first token, bit 1 for a report's; then the first report at or after it.
+        uint32_t* next = limits != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count) : NULL;
+        input->resource |= next == NULL;
+        if (input->resource)
+        {
+            arena_pop_to(reader->arena, mark);
+        }
+        else
         {
             for (uint32_t token = 0; token < count; token += 1)
             {
-                input->diagnostic_limits[token] = count;
-            }
-            for (uint32_t report = 0; report < input->report_count; report += 1)
-            {
-                const uint32_t token = input->reports[report].token;
-                input->diagnostic_limits[token] = token;
+                limits[token] = token;
+                next[token] = 0;
             }
             for (uint32_t order = 0; order < count; order += 1)
             {
                 const uint32_t token = reader->postorder[order];
                 const uint32_t parent = parser->tree.parents[token];
-                if (parent < count && input->diagnostic_limits[token] < input->diagnostic_limits[parent])
+                if (parent < count && limits[token] < limits[parent])
                 {
-                    input->diagnostic_limits[parent] = input->diagnostic_limits[token];
+                    limits[parent] = limits[token];
+                }
+                else if (parent >= count)
+                {
+                    next[limits[token]] |= 1;
                 }
             }
-            for (uint32_t order = count; order-- > 0;)
+            for (uint32_t report = 0; report < input->report_count; report += 1)
             {
-                const uint32_t token = reader->postorder[order];
-                const uint32_t parent = parser->tree.parents[token];
-                if (parent < count && input->diagnostic_limits[parent] < input->diagnostic_limits[token])
-                {
-                    input->diagnostic_limits[token] = input->diagnostic_limits[parent];
-                }
+                next[input->reports[report].token] |= 2;
             }
+            uint32_t following = count;
+            for (uint32_t token = count; token-- > 0;)
+            {
+                const uint32_t marks = next[token];
+                following = (marks & 2) != 0 ? token : following;
+                next[token] = following;
+                following = (marks & 1) != 0 ? count : following;
+            }
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                limits[token] = next[limits[token]];
+            }
+            arena_pop_to(reader->arena, kept);
+            input->diagnostic_limits = limits;
             input->diagnostic_report_count = input->report_count;
         }
     }
@@ -1460,7 +1660,7 @@ static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t tok
 
 // Only source diagnostics that cannot be carried by a retained expression need this list. Type-only queries
 // may revisit a call; adjacent repetitions coalesce here, and the report collector coalesces by source token.
-static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, uint32_t warning)
+static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, uint32_t warning, uint32_t body)
 {
     CheckInput* input = reader->output;
     const uint32_t count = input->kr_diagnostic_count;
@@ -1489,7 +1689,7 @@ static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, 
         }
         if (!input->resource)
         {
-            input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning };
+            input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning, .body = body };
         }
     }
 }
@@ -3855,7 +4055,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                             .completion = after,
-                            .payload = { .first_type = value.type, .name = value.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                            // data: the member's typedef specifier's own declaration, or 0 — clang's 'S'
+                            // (aka 'struct S') spelling (#992).
+                            .payload = { .first_type = value.type, .name = value.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                         .data = check_input_typedef_spelling(reader->output, parser, members[member].token) },
                         };
                         valid = check_input_warning_event(reader, &event, NULL, 0);
                     }
@@ -4778,7 +4981,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (body < count)
                 {
-                    check_input_kr_diagnostic(reader, name, CHECK_WARNING_KR_DEFINITION);
+                    check_input_kr_diagnostic(reader, name, CHECK_WARNING_KR_DEFINITION, body);
                 }
                 valid = body < count && check_input_kr_declarations(reader, parameters, i, body);
                 uint32_t parameter_count = 0;
@@ -5635,9 +5838,9 @@ static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_
 // Whether the walk in source order tests at `token` the columns a write marks with `reason` (BUSTER_CHECK_RESOLVE_*), or
 // the token's syntax for BUSTER_CHECK_RESOLVE_SYNTAX: at every token on the scalar path, and on the vector path where a
 // mark gives the reason, read when the walk tests the columns, after its earlier steps at the token, which may mark it.
-static bool check_input_resolve_tests(const CheckInputReader* reader, uint32_t token, uint8_t reason)
+static bool check_input_resolve_tests(uint8_t mark, bool scalar, uint8_t reason)
 {
-    return reader->parser->options.scalar || (reader->visits[token] & reason) != 0;
+    return scalar || (mark & reason) != 0;
 }
 
 // Whether the walk in source order arrives at `token` where it acts for a reason that no mark gives the token
@@ -5674,6 +5877,7 @@ static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t 
 static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
+    const bool scalar = parser->options.scalar;
     uint32_t visits = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
@@ -5689,8 +5893,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         reader->position = i;
         type_changes_at(reader->types, i);
+        // Every test below precedes the declaration step, the only step that marks the token's own visit; so the mark is
+        // read once and tested for each reason (#889).
+        uint8_t mark = reader->visits[i];
         // A lane's opening and the token after its closing are the top level's, which finished their initializers.
-        const bool finishes = !(reader->lane && (i == begin || i == end)) && check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_FINISH);
+        const bool finishes = !(reader->lane && (i == begin || i == end)) && check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_FINISH);
         for (uint32_t declaration = finishes ? reader->initializer_finish_heads[i] : BUSTER_CHECK_NONE; declaration != BUSTER_CHECK_NONE;
              declaration = reader->initializer_finish_next[declaration])
         {
@@ -5703,7 +5910,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             break;
         }
-        const bool scopes = check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_SCOPE);
+        const bool scopes = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SCOPE);
         while (scopes && reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
         {
             reader->scope_count -= 1;
@@ -5742,11 +5949,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             i = parser->tree.parents[i];
             continue;
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
         {
             break;
         }
-        CheckInputSpecifierJob* job = check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) ? reader->specifier_finishes[i] : 0;
+        CheckInputSpecifierJob* job = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) ? reader->specifier_finishes[i] : 0;
         if (job != 0 && !job->ready)
         {
             CheckValue value = { 0 };
@@ -5771,6 +5978,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             if (job->result != 0)
             {
                 check_input_declaration(reader, job->first);
+                // The declaration step can mark this token's own visit, so the tests after it must read the mark again.
+                mark = reader->visits[i];
             }
             else if (reader->output->report_count == 0 && !reader->output->resource)
             {
@@ -5782,7 +5991,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const uint32_t parent = parser->tree.parents[i];
         const uint8_t syntax = reader->syntax[i];
         // The tests of the token's syntax, of a token its syntax marks on the vector path.
-        const bool syntactic = check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_SYNTAX);
+        const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
             // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes.
@@ -5829,20 +6038,20 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
             }
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
         {
             check_input_selection_type(reader, i);
         }
-        const bool activations = !(reader->lane && i == begin) && check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_ACTIVATE);
+        const bool activations = !(reader->lane && i == begin) && check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_ACTIVATE);
         for (uint32_t token = activations ? reader->activate[i] : BUSTER_CHECK_NONE; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
         {
             check_input_bind(reader, token, i);
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
         {
             check_input_vararg_type(reader, i);
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
         {
             check_input_builtin_type(reader, i);
         }
@@ -5850,7 +6059,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             check_input_statement_attributes(reader, i);
         }
-        if (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 && reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
+        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 && reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
             if (reader->output->initializer_ends[declaration] > reader->resolve_limit)
@@ -5871,7 +6080,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
              (kind == PARSE_KIND_EXTENSION && i + 1 < parser->tokens.count && (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER ||
               parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)))) ||
-            (check_input_resolve_tests(reader, i, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
+            (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
         {
             if (kind == PARSE_KIND_LABEL && !reader->ignored[i])
             {
@@ -6130,9 +6339,11 @@ static __attribute__((noinline)) uint32_t check_input_labeled_region(const Check
 
 static uint32_t check_input_expression_end(const CheckInputReader* reader, uint32_t token)
 {
-    // The condition's parser subtree also owns its statement body. Its semantic action depends only on the
-    // expression ending at this parenthesis, so later statements must not extend its visibility or diagnostic cut.
-    return reader->parser->tree.roles[token] == PARSE_ROLE_CLOSE_CONDITION ? token + 1 : reader->ends[token] + 1;
+    // The condition's parser subtree also owns its statement body, and a case label's colon its labeled statement. Their
+    // semantic actions depend only on the expression ending at this parenthesis or colon, so later statements must not
+    // extend their visibility or diagnostic cut: a missing name in a case's statement keeps its value (#1077).
+    const uint8_t role = reader->parser->tree.roles[token];
+    return role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_CASE ? token + 1 : reader->ends[token] + 1;
 }
 
 // A node of `op` at `token` with operands a, b and c (check_graph_add's, its checks and columns), the end of its value
@@ -6299,14 +6510,6 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
 
 #include "c_check_region_input.c"
 
-// Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
-// group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
-static bool check_input_expression_sparse(const CheckInputReader* reader, uint32_t token)
-{
-    const CheckInput* input = reader->output;
-    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
-           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
-}
 
 // The walk's class of `token` (CheckInputExpressionCode), by its own tests in their order: the twin of
 // check_input_role_codes' lookups. `sparse` says a sparse column has an entry for it and `list` that its role is one an
@@ -6435,16 +6638,16 @@ static uint8_t check_input_expression_class(const CheckInputReader* reader, uint
 
 // The expressions' walk's classes of every token, into CheckInputReader.visits, as check_input_expression_class gives
 // them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests, check_input_role_codes)
-// and 16 tokens' sparse columns, type queries and first children at a time; on the scalar path, its twin's, a token at a
-// time, with the class codes only for the coded walk (all but --scalar's, which reads none). Each token the walk
-// doesn't act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path
-// skips it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
+// and their sparse entries in a word of marks (CheckInputReader.sparse_marks, which every write of the sparse columns
+// keeps), 16 tokens' type queries and first children at a time; on the scalar path, its twin's, a token at a time,
+// with the class codes only for the coded walk (all but --scalar's, which reads none). Each token the walk doesn't
+// act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path skips
+// it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
 // reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
 // (CheckInput.visit_misses). Returns the number of tokens the walk acts at.
 static uint32_t check_input_expression_classes(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
-    const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
     const __m512i role_tests_low = _mm512_load_si512(check_input_role_tests);
     const __m512i role_tests_high = _mm512_load_si512(check_input_role_tests + 64);
@@ -6468,6 +6671,8 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t taken = (skipped & _mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_LIST))) |
                                (~skipped & (_mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_EXPRESSION)) |
                                             _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_EXPRESSION))));
+        // The 64 tokens' sparse entries, a word of their marks (CheckInputReader.sparse_marks).
+        const uint64_t sparse = reader->sparse_marks[token >> 6] & lanes;
         // The classes: the role's, an operand's by its kind, a role no test takes a DROP but for the refused kinds, and an
         // ignored token's a LIST of a list role and a DROP otherwise.
         const __m512i role_codes = _mm512_permutex2var_epi8(role_codes_low, role, role_codes_high);
@@ -6485,31 +6690,19 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         codes = _mm512_mask_mov_epi8(codes, skipped & ~list, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
         codes = _mm512_mask_mov_epi8(codes, skipped & list, _mm512_set1_epi8(CHECK_INPUT_CODE_LIST));
         uint64_t acts = 0;
-        uint64_t sparse = 0;
         uint64_t specified = 0;
         for (uint32_t part = 0; part < length; part += 16)
         {
             const __mmask16 parts = (__mmask16)_bzhi_u32(UINT32_MAX, length - part < 16 ? length - part : 16);
             const uint32_t at = token + part;
-            const __m512i regions = _mm512_maskz_loadu_epi32(parts, input->expression_regions + at);
-            const __m512i constants = _mm512_maskz_loadu_epi32(parts, reader->constant_present + at);
-            const __m512i varargs = _mm512_maskz_loadu_epi32(parts, reader->vararg_calls + at);
-            const __m512i designators = _mm512_maskz_loadu_epi32(parts, reader->designator_tokens + at);
-            const __m512i bounds = _mm512_maskz_loadu_epi32(parts, reader->vla_ends + at);
-            const __m512i statements = input->asm_ids != NULL ? _mm512_maskz_loadu_epi32(parts, input->asm_ids + at) : _mm512_setzero_si512();
-            const __m512i entries = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(regions, constants), _mm512_or_si512(varargs, designators)),
-                                                    _mm512_or_si512(bounds, statements));
-            const __mmask16 selected = _mm512_mask_cmplt_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->selected_tokens + at), _mm512_set1_epi32((int32_t)count));
-            const __mmask16 part_sparse = _mm512_mask_test_epi32_mask(parts, entries, entries) | selected;
             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
-            const __mmask16 part_acts = children | part_sparse | (__mmask16)(taken >> part);
+            const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
             // The type queries that finish at the tokens, 8 pointers at a time.
             const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, reader->specifier_finishes + at);
             const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), reader->specifier_finishes + at + 8);
             const uint32_t part_specified = (uint32_t)_mm512_test_epi64_mask(jobs_low, jobs_low) | (uint32_t)_mm512_test_epi64_mask(jobs_high, jobs_high) << 8;
             acts |= (uint64_t)part_acts << part;
-            sparse |= (uint64_t)part_sparse << part;
             specified |= (uint64_t)part_specified << part;
         }
         codes = _mm512_mask_mov_epi8(codes, sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
@@ -6530,6 +6723,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             reader->first_value[token] = BUSTER_CHECK_NONE;
         }
         result += (reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
+        // The twin reads the columns: a mark that says otherwise is one the vector path's classes would take amiss.
+        const bool marked = reader->sparse_marks != NULL && ((reader->sparse_marks[token >> 6] >> (token & 63)) & 1) != 0;
+        reader->output->visit_misses += reader->sparse_marks != NULL && marked != ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_SPARSE) != 0);
     }
     return result;
 }
@@ -8014,13 +8210,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.defined = input->defined;
     reader.parameters = input->parameters;
     reader.parameter_next = input->parameter_next;
+    // The graph's byte columns before the others, which start huge pages of their own (check_graph_column): here they
+    // share a huge page with the output columns' end, where they would take one of their own after the graph (#628).
+    uint8_t* recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+    uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+    valid &= warning_suppressed != NULL;
     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
-    input->graph.recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
-    valid &= input->graph.recorded_pure != NULL;
+    input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.const_values = &input->const_values;
-    input->graph.warning_suppressed = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : 0;
-    valid &= input->graph.warning_suppressed != 0;
+    input->graph.warning_suppressed = valid ? warning_suppressed : NULL;
     input->graph.argument_tokens = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
     valid &= input->graph.argument_tokens != 0;
     if (valid && vector_members != 0)
@@ -8082,68 +8281,77 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // a few at its start, in an arena of their own that the reader unmaps when it returns (#572). Its pages are new and
     // zero, so a column that is zero where nothing is written needs no clearing, and takes memory only where the walk
     // writes it: where the walk only reads it, the kernel maps its zero page. In the scratch, which the later stages take
-    // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
-    // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
-    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, and the
-    // binding table, whose events the walk appends and reads no further than the last, are in base pages at the arena's
-    // start. Where more than one lane reads the deferred bodies of a large unit, the arena is base pages throughout
-    // (check_input_sparse_arena, #764, #847).
+    // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The columns
+    // that the walk reads where it never wrote, at every token of a kind, are in huge pages, where those reads take the
+    // huge zero page: in base pages each read would fault its page, 9,600 on sqlite3.c. The others are in base pages at
+    // the arena's start, where they take only the pages the walk writes, since only the tokens that write them read them:
+    // the scope stacks, the enumeration constants' values, the specifiers, tags, sizeof types, designators and the
+    // initializers' finishes that a declaration or an expression writes and reads; the cached constants, va_arg calls,
+    // designators and variable arrays' bounds, which the expressions' walk tests only where the sparse marks say (the
+    // marks themselves: a bit a token, CheckInputReader.sparse_marks); and the binding table, whose events the walk appends
+    // and reads no further than the last. In huge pages the few hundred tokens each of those writes on sqlite3.c, spread
+    // over the unit, took every huge page of its column (#628). Where more than one lane reads the deferred bodies of a
+    // large unit, the arena is base pages throughout (check_input_sparse_arena, #764, #847).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
     X(scope_openings, uint32_t) \
-    X(enum_values, unsigned __int128)
+    X(enum_values, unsigned __int128) \
+    X(constant_present, uint32_t) \
+    X(vararg_calls, uint32_t) \
+    X(designator_tokens, uint32_t) \
+    X(vla_ends, uint32_t) \
+    X(declaration_specifiers, uint32_t) \
+    X(declaration_deduced, TypeId) \
+    X(initializer_finish_next, uint32_t) \
+    X(designator_indices, uint64_t) \
+    X(designator_ranges, uint32_t) \
+    X(selection_types, TypeId) \
+    X(sizeof_types, TypeId) \
+    X(vla_bounds, uint32_t) \
+    X(parameter_shapes, uint8_t) \
+    X(parameter_declaration_next, uint32_t) \
+    X(tag_types, TypeId) \
+    X(tag_ends, uint32_t)
 #define BUSTER_CHECK_SPARSE_COLUMNS(X) \
     X(specifier_jobs, CheckInputSpecifierJob*) \
     X(specifier_finishes, CheckInputSpecifierJob*) \
     X(attribute_bases, CheckInputAttributes*) \
-    X(declaration_specifiers, uint32_t) \
-    X(declaration_deduced, TypeId) \
     X(declaration_bases, TypeId) \
     X(declaration_storage, uint32_t) \
     X(declaration_flags, uint8_t) \
     X(declaration_abis, uint8_t) \
     X(static_initializers, uint8_t) \
-    X(initializer_finish_next, uint32_t) \
     X(incomplete_array_types, TypeId) \
-    X(designator_indices, uint64_t) \
     X(designator_valid, uint8_t) \
-    X(designator_tokens, uint32_t) \
-    X(designator_ranges, uint32_t) \
     X(selection_type_ends, uint32_t) \
-    X(selection_types, TypeId) \
-    X(constant_present, uint32_t) \
-    X(sizeof_types, TypeId) \
     X(builtins, uint16_t) \
     X(builtin_type_ends, uint32_t) \
-    X(vararg_calls, uint32_t) \
     X(vararg_types, uint32_t) \
-    X(vla_bounds, uint32_t) \
-    X(vla_ends, uint32_t) \
     X(vla_scope_ends, uint32_t) \
-    X(warning_suppressed, uint8_t) \
-    X(parameter_shapes, uint8_t) \
-    X(parameter_declaration_next, uint32_t) \
-    X(tag_types, TypeId) \
-    X(tag_ends, uint32_t)
+    X(warning_suppressed, uint8_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
     const uint64_t binding_bytes = c_bindings_bytes(pp->table->count, count * 4 + 1);
-    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + binding_bytes + BUSTER_ARENA_PAGE_BYTES - 1) &
-                                  ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t mark_words = ((uint64_t)count + 64) / 64;
+    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + mark_words * sizeof(uint64_t) + 63 + binding_bytes +
+                                   BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
 #undef BUSTER_CHECK_SPARSE_BYTES
     input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
     Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
 #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+    reader.sparse_marks = valid ? arena_push_array(&sparse, mark_words, sizeof(uint64_t), 64) : 0;
+    valid &= reader.sparse_marks != 0;
     // The binding table in the base pages too (#628): each of its nine event columns has room for four events a token, of
     // which the walk writes a prefix (sqlite3.c's 167,456 of 2.86 million) and reads no further, so that in huge pages each
     // column's first touch cleared one or two 2 MB pages for a few hundred kilobytes, 11 of the arena's 34 huge pages.
     valid = valid && c_bindings_initialize(&reader.bindings, &sparse, pp->table->count, count * 4 + 1);
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
 #undef BUSTER_CHECK_SPARSE_ARRAY
+    // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).
     reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
-    reader.rare_end = valid ? (uint8_t*)(reader.tag_ends + count + 1) : 0;
+    reader.rare_end = valid ? (uint8_t*)(reader.warning_suppressed + count + 1) : 0;
 #undef BUSTER_CHECK_SPARSE_COLUMNS
 #undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];

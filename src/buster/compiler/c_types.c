@@ -595,6 +595,15 @@ struct TypeNames
     const uint8_t* const* bytes;
     const uint32_t* lengths;
     uint32_t count;
+    // Diagnostic spelling sugar (#992): an alias prints `alias_names[i]` where a specifier level's unqualified
+    // type is `alias_types[i]` (a typedef's own type in a declaration's sugar, or a builtin one like
+    // `__size_t`), and `anonymous` gives an unnamed tag's printed name by tag index — the first typedef naming
+    // it or `(unnamed at file:line:col)` — else `(unnamed)`.
+    const TypeId* alias_types;
+    const String8* alias_names;
+    uint32_t alias_count;
+    const String8* anonymous;
+    uint32_t anonymous_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool).
@@ -5498,6 +5507,18 @@ static bool type_print_can_prefix(const TypeTable* table, TypeId type)
     return kind != BUSTER_TYPE_KIND_POINTER && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR;
 }
 
+// A sugar alias (TypeNames.alias_*) replaces a specifier level's whole spelling, as a typedef's name does in
+// clang's diagnostics. `type` compares exactly, qualifiers and all (#992). Returns its index, or NONE.
+static uint32_t type_print_alias(const TypeNames* names, TypeId type)
+{
+    uint32_t result = UINT32_MAX;
+    for (uint32_t a = 0; names != 0 && a < names->alias_count; a += 1)
+    {
+        result = names->alias_types[a] == type ? a : result;
+    }
+    return result;
+}
+
 // The specifiers, and printBefore of each kind; `type` is unqualified and not ALIGNED.
 static void type_print_before_kind(TypePrinter* printer, TypeId type)
 {
@@ -5532,13 +5553,27 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
     {
         const uint32_t name = table->tags.name[table->types.index[index]];
-        type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
+        const String8 spelling = printer->names != 0 && printer->names->anonymous != 0 &&
+                                 table->types.index[index] < printer->names->anonymous_count ?
+                                 printer->names->anonymous[table->types.index[index]] : (String8){ 0 };
         if (name != 0 && printer->names != 0 && name < printer->names->count)
         {
+            type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
             type_print_bytes(printer, (const char*)printer->names->bytes[name], printer->names->lengths[name]);
+        }
+        else if (spelling.length != 0)
+        {
+            // A `(unnamed at file:line:col)` row keeps the keyword; a typedef's own name replaces it, as clang's
+            // `T` does for the record it names (#992).
+            if (spelling.length != 0 && *spelling.pointer == '(')
+            {
+                type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
+            }
+            type_print_bytes(printer, spelling.pointer, spelling.length);
         }
         else
         {
+            type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
             type_print_text(printer, "(unnamed)");
         }
         type_print_space(printer);
@@ -5589,7 +5624,9 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
-        if (type_kind_is_array(type_kind(table, type_strip_aligned(table, base))))
+        const TypeId pointee = type_strip_aligned(table, base);
+        if (type_kind_is_array(type_kind(table, pointee)) && type_print_alias(printer->names, pointee) == UINT32_MAX &&
+            type_print_alias(printer->names, type_unqualified(pointee)) == UINT32_MAX)
         {
             type_print_text(printer, ")");
         }
@@ -5657,20 +5694,39 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     else if (frame.operation == BUSTER_TYPE_PRINT_BEFORE)
     {
         const TypeId type = type_strip_aligned(table, frame.type);
-        const uint32_t qualifiers = type_qualifiers(type);
-        const bool prefix = type_print_can_prefix(table, type);
-        if (prefix && qualifiers != 0)
+        const TypeId unqualified = type_unqualified(type);
+        const uint32_t whole = type_print_alias(printer->names, type);
+        const uint32_t sugar = whole != UINT32_MAX ? whole : type_print_alias(printer->names, unqualified);
+        if (sugar != UINT32_MAX)
         {
-            type_print_qualifiers(printer, qualifiers);
-            type_print_text(printer, " ");
+            // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
+            // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
+            if (whole == UINT32_MAX && type_qualifiers(type) != 0)
+            {
+                type_print_qualifiers(printer, type_qualifiers(type));
+                type_print_text(printer, " ");
+            }
+            const String8 alias = printer->names->alias_names[sugar];
+            type_print_bytes(printer, (const char*)alias.pointer, alias.length);
+            type_print_space(printer);
         }
-        const bool after = !prefix && qualifiers != 0;
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE_END, type, printer->empty, after, 0);
-        if (after)
+        else
         {
-            printer->empty = false;
+            const uint32_t qualifiers = type_qualifiers(type);
+            const bool prefix = type_print_can_prefix(table, type);
+            if (prefix && qualifiers != 0)
+            {
+                type_print_qualifiers(printer, qualifiers);
+                type_print_text(printer, " ");
+            }
+            const bool after = !prefix && qualifiers != 0;
+            type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE_END, type, printer->empty, after, 0);
+            if (after)
+            {
+                printer->empty = false;
+            }
+            type_print_before_kind(printer, unqualified);
         }
-        type_print_before_kind(printer, type_unqualified(type));
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_BEFORE_END)
     {
@@ -5686,12 +5742,21 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_AFTER)
     {
-        type_print_after_kind(printer, type_unqualified(type_strip_aligned(table, frame.type)));
+        // An aliased level's name already covers its own declarator suffix (`A` for `int[4]`, `P` for `int *`),
+        // including under another level's qualifiers (#992).
+        const TypeId type = type_strip_aligned(table, frame.type);
+        const TypeId unqualified = type_unqualified(type);
+        if (type_print_alias(printer->names, type) == UINT32_MAX && type_print_alias(printer->names, unqualified) == UINT32_MAX)
+        {
+            type_print_after_kind(printer, unqualified);
+        }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)
     {
         const TypeId pointee = type_strip_aligned(table, table->types.base[type_index(frame.type)]);
-        type_print_text(printer, type_kind_is_array(type_kind(table, pointee)) ? "(*" : "*");
+        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && type_print_alias(printer->names, pointee) == UINT32_MAX &&
+                             type_print_alias(printer->names, type_unqualified(pointee)) == UINT32_MAX;
+        type_print_text(printer, wrapped ? "(*" : "*");
         printer->empty = frame.saved;
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_FUNCTION_END)

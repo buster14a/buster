@@ -412,6 +412,20 @@ static bool ir_typed_signed(uint8_t class)
     return ir_typed_signed_classes[class & 15] != 0;
 }
 
+// A narrow integer class (a char's, a short's, a _Bool's), which a call boundary widens to 32 bits (#141): an argument is
+// extended by its class, sign or zero, as clang's callers extend it, and a parameter arrives as an I32 that the callee
+// truncates, relying on no caller's extension (ir_typed_boundary_class).
+static bool ir_typed_narrow(uint8_t class)
+{
+    return class == BUSTER_TYPED_CLASS_I8 || class == BUSTER_TYPED_CLASS_U8 || class == BUSTER_TYPED_CLASS_I16 || class == BUSTER_TYPED_CLASS_U16;
+}
+
+// The class a value of `class` crosses a call boundary in: a narrow one's 32-bit class of its signedness, any other its own.
+static uint8_t ir_typed_boundary_class(uint8_t class)
+{
+    return ir_typed_narrow(class) ? (ir_typed_signed(class) ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U32) : class;
+}
+
 static bool ir_typed_floating(uint8_t class)
 {
     return ir_typed_floating_classes[class & 15] != 0;
@@ -904,11 +918,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     const uint32_t abi = aggregate ? (uint32_t)sink->sizes.abi_call_count : BUSTER_IR_NONE;
     const uint32_t passed = (uint32_t)sink->sizes.passed_count;
     const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
-    for (uint32_t a = 0; input->argument_sizes != 0 && a < count; a += 1)
+    // An aggregate's argument is its address; a narrow one is extended to 32 bits by its class (ir_typed_narrow).
+    for (uint32_t a = 0; a < count; a += 1)
     {
-        if (input->argument_sizes[input->call_first[call] + a] != 0)
+        const uint32_t argument = input->call_first[call] + a;
+        const uint8_t class = input->argument_classes[argument];
+        if (input->argument_sizes != 0 && input->argument_sizes[argument] != 0)
         {
             arguments[a] = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, arguments[a], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        else
+        {
+            arguments[a] = ir_typed_convert(sink, arguments[a], class, ir_typed_boundary_class(class));
         }
     }
     if (sink->output != 0)
@@ -928,7 +949,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
             const uint32_t argument = input->call_first[call] + a;
             const uint32_t size = input->argument_sizes != 0 ? input->argument_sizes[argument] : 0;
             output->extra[first + a] = arguments[a];
-            output->call_types[type_first + a] = size != 0 ? IR_PTR : ir_typed_types[input->argument_classes[argument]];
+            output->call_types[type_first + a] = size != 0 ? IR_PTR : ir_typed_types[ir_typed_boundary_class(input->argument_classes[argument])];
             if (aggregate)
             {
                 output->passed[passed + a] = (IrPassed){

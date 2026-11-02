@@ -41,7 +41,11 @@ static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser*
     return first;
 }
 
-static void check_warning_graph_null(CheckInputReader* reader, const CheckStream* stream, uint32_t source, TypeId destination, uint32_t completion)
+// `lvalue` is the token naming the conversion's destination — an INITIALIZE's `=` (whose graph type carries
+// the declared type, so `declared` passes it), an ASSIGN's left operand's root, or 0 where no declaration is
+// reachable (#992).
+static void check_warning_graph_null(CheckInputReader* reader, const CheckStream* stream, uint32_t source, TypeId destination,
+                                     uint32_t lvalue, TypeId declared, uint32_t completion)
 {
     const CheckGraph* graph = &reader->output->graph;
     const CheckValue value = source < graph->count ? check_stream_value(stream, source) : (CheckValue){ 0 };
@@ -76,7 +80,11 @@ static void check_warning_graph_null(CheckInputReader* reader, const CheckStream
                 reader->warning_bound_open = bound->bound_begin;
             }
         }
-        check_input_null_warning(reader, destination, &value, first, end, completion);
+        // The destination operand's own spelling (#992): the lvalue's declared type, qualifiers kept, and its
+        // typedef specifier's declaration where its base was a typedef name.
+        uint32_t spelling = 0;
+        const TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser, lvalue, declared, destination, &spelling);
+        check_input_null_spelling(reader, destination, printed, spelling, &value, first, end, completion);
     }
 }
 
@@ -143,6 +151,10 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     CheckWarningEvent event;
                     if (check_warning_ordered_event(types, &action, &checked, token, completion, &event))
                     {
+                        // Each operand's own spelling (#992): `__size_t` for a sizeof/alignof operand's result,
+                        // a typedef specifier's declaration where a named object's base was a typedef name.
+                        event.payload.name = check_input_operand_spelling(&reader, graph->operand0[node]);
+                        event.payload.data = check_input_operand_spelling(&reader, graph->operand1[node]);
                         check_input_warning_once(&reader, &event);
                     }
                 }
@@ -150,14 +162,22 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 {
                     const uint32_t slot = op == CHECK_OP_ASSIGN ? 1 : 0;
                     const uint32_t source = slot == 0 ? graph->operand0[node] : graph->operand1[node];
-                    check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, completion);
+                    // The destination operand's naming token (#992): an INITIALIZE's `=` scans back to its
+                    // specifiers and its node's type is the declared type; an ASSIGN's is its left operand's
+                    // root; a CONVERT's is none (a `return` or cast).
+                    const uint32_t lvalue_node = slot == 0 ? graph->operand1[node] : graph->operand0[node];
+                    const uint32_t lvalue = op == CHECK_OP_INITIALIZE ? graph->tokens[node] :
+                        op == CHECK_OP_ASSIGN && lvalue_node < graph->count ? graph->tokens[lvalue_node] : 0;
+                    const TypeId declared = op == CHECK_OP_INITIALIZE ? graph->types[node] : 0;
+                    check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion);
                 }
                 else if (op == CHECK_OP_CALL)
                 {
                     const uint32_t begin = graph->argument_offsets[node];
                     for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                     {
-                        check_warning_graph_null(&reader, stream, graph->argument_nodes[begin + i], stream->argument_conversions[begin + i].type, token);
+                        check_warning_graph_null(&reader, stream, graph->argument_nodes[begin + i], stream->argument_conversions[begin + i].type,
+                                                 0, 0, token);
                     }
                 }
             }

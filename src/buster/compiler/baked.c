@@ -29,6 +29,18 @@
 #define BUSTER_BAKE_REPORTED 16
 #define BUSTER_BAKE_RANGES 16
 #define BUSTER_BAKE_SKIPPED 77
+// ThreadSanitizer and MemorySanitizer keep their runtimes' state (the metadata of the globals they instrument, among it)
+// in the executable's .bss and write it as instrumented accesses run, so the initializers' writes outside buster_baked
+// can't be told from theirs there. The outside check is the compiler's annotation of its tables, which every other build
+// checks; these builds skip it and still check the section's bytes and, when baked, its file.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define BUSTER_BAKE_RUNTIME_STATE 1
+#endif
+#endif
+#ifndef BUSTER_BAKE_RUNTIME_STATE
+#define BUSTER_BAKE_RUNTIME_STATE 0
+#endif
 
 extern char __start_buster_baked[] __attribute__((weak));
 extern char __stop_buster_baked[] __attribute__((weak));
@@ -241,18 +253,23 @@ static int bake_read_image(BakeImage* image)
 }
 
 // Zeroes the section and runs the five initializers, which must succeed and write nothing in the image's writable
-// memory outside it (but the GOT). Returns whether they did.
+// memory outside it (but the GOT). Returns whether they did. A TSan or MSan build checks the first part alone
+// (BUSTER_BAKE_RUNTIME_STATE).
 static bool bake_build(const BakeImage* image)
 {
-    const uint64_t pages = bake_hashes(image, NULL, NULL);
-    uint64_t* before = malloc((pages + 1) * sizeof(uint64_t));
-    bool valid = before != NULL;
+    const bool outside_checked = !BUSTER_BAKE_RUNTIME_STATE;
+    const uint64_t pages = outside_checked ? bake_hashes(image, NULL, NULL) : 0;
+    uint64_t* before = outside_checked ? malloc((pages + 1) * sizeof(uint64_t)) : NULL;
+    bool valid = !outside_checked || before != NULL;
     if (valid)
     {
-        bake_hashes(image, before, NULL);
+        if (outside_checked)
+        {
+            bake_hashes(image, before, NULL);
+        }
         memset(__start_buster_baked, 0, bake_section_size());
         const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize();
-        const uint64_t changed = bake_hashes(image, NULL, before);
+        const uint64_t changed = outside_checked ? bake_hashes(image, NULL, before) : 0;
         valid = built && changed == 0;
         if (!valid)
         {
@@ -458,7 +475,8 @@ static int run_baked_tables_test(int argc, char** argv)
                                      : initialized ? (current ? "partially initialized, the same as built" : "PARTIALLY INITIALIZED, NOT AS BUILT")
                                                    : "not baked (built when it runs)";
         printf("baked tables: %llu bytes, %s; built twice, %s; nothing written outside them: %s; build ID: %s\n",
-               (unsigned long long)bake_section_size(), state, same ? "the same bytes" : "DIFFERENT BYTES", built_twice ? "yes" : "NO",
+               (unsigned long long)bake_section_size(), state, same ? "the same bytes" : "DIFFERENT BYTES",
+               BUSTER_BAKE_RUNTIME_STATE ? "not checked (the sanitizer runtime's state)" : built_twice ? "yes" : "NO",
                !initialized ? "not checked" : build_id ? "current" : "STALE");
         result = built_twice && same && current && build_id ? 0 : 1;
     }
