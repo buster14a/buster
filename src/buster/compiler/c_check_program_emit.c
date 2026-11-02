@@ -2232,7 +2232,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const CheckLowerRuntime runtime = (CheckLowerRuntime)result->lowered.runtime_order[r];
         const char* spelling = check_lower_runtime_names[runtime];
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
-        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) ==
+        // libgcc's CPU model's objects are data, every other runtime entry a function (check_lower_runtime_object).
+        const uint8_t kind = check_lower_runtime_object(runtime) ? BUSTER_LINK_SYMBOL_NOTYPE : BUSTER_LINK_SYMBOL_FUNCTION;
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | kind, BUSTER_LINK_SOURCE_NONE) ==
                                  result->lowered.runtime_symbols[runtime];
     }
     // The jump tables' symbols, then their labels' (CheckProgramLowered.case_symbol_base): local, with names a source

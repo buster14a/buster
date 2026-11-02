@@ -178,6 +178,124 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
 // plain declaration's strcmp of constants, which folds to clang's -1 where the name is a builtin and calls the library's
 // otherwise, by -fno-builtin, -fno-builtin-strcmp and -ffreestanding; __builtin_strcmp's fold, which no option turns
 // off; and __builtin_abort.
+static void check_test_library_run(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name,
+                                   const char* program_source, const char* standard, const char* option);
+
+// __builtin_cpu_supports and __builtin_cpu_is of every name of the table (c_builtin_cpu.inc) against clang's code (#148):
+// a program that defines libgcc's model itself, sets each bit of each feature word alone and each value from 0 to 63 of
+// the vendor, the type and the subtype, and prints which make each name's test true, built by clang and by this
+// executable (check_test_library_run), so that any name's word, bit, field or value other than clang's shows.
+static void check_test_cpu_model_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const features[] = {
+#define BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit) name,
+#define BUSTER_CBUILTIN_CPU_NAME(name, field, value)
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_NAME
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+    };
+    static const char* const names[] = {
+#define BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit)
+#define BUSTER_CBUILTIN_CPU_NAME(name, field, value) name,
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_NAME
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+    };
+    enum { CAPACITY = 32768 };
+    char* source = malloc(CAPACITY);
+    uint32_t length = source != NULL ? (uint32_t)snprintf(source, CAPACITY,
+        "int printf(const char*,...);struct M{unsigned vendor,type,subtype;unsigned features[1];}__cpu_model;unsigned __cpu_features2[3];\n"
+        "static void clear(void){__cpu_model.vendor=__cpu_model.type=__cpu_model.subtype=__cpu_model.features[0]=0;"
+        "__cpu_features2[0]=__cpu_features2[1]=__cpu_features2[2]=0;}\nstatic int feature(int i){switch(i){\n") : 0;
+    for (uint32_t i = 0; source != NULL && i < BUSTER_ARRAY_LENGTH(features) && length < CAPACITY; i += 1)
+    {
+        length += (uint32_t)snprintf(source + length, CAPACITY - length, "case %u:return __builtin_cpu_supports(\"%s\");\n", i, features[i]);
+    }
+    length += source != NULL && length < CAPACITY ? (uint32_t)snprintf(source + length, CAPACITY - length, "}return -1;}\nstatic int name(int i){switch(i){\n") : 0;
+    for (uint32_t i = 0; source != NULL && i < BUSTER_ARRAY_LENGTH(names) && length < CAPACITY; i += 1)
+    {
+        length += (uint32_t)snprintf(source + length, CAPACITY - length, "case %u:return __builtin_cpu_is(\"%s\");\n", i, names[i]);
+    }
+    length += source != NULL && length < CAPACITY ? (uint32_t)snprintf(source + length, CAPACITY - length,
+        "}return -1;}\nint main(void){for(int i=0;i<%u;i++){int found=0;for(int w=0;w<4;w++)for(int b=0;b<32;b++){clear();"
+        "if(w==0)__cpu_model.features[0]=1u<<b;else __cpu_features2[w-1]=1u<<b;if(feature(i)){printf(\"f%%d %%d %%d\\n\",i,w,b);found+=1;}}"
+        "if(found!=1)printf(\"f%%d found %%d\\n\",i,found);}\nfor(int i=0;i<%u;i++){int found=0;for(int f=0;f<3;f++)for(unsigned v=0;v<64;v++){"
+        "clear();if(f==0)__cpu_model.vendor=v;else if(f==1)__cpu_model.type=v;else __cpu_model.subtype=v;if(name(i)){printf(\"n%%d %%d %%u\\n\",i,f,v);found+=1;}}"
+        "if(found!=1)printf(\"n%%d found %%d\\n\",i,found);}\nclear();printf(\"%%d %%d\\n\",__builtin_cpu_supports(\"not-a-feature\"),"
+        "(int)sizeof(__builtin_cpu_is(\"intel\")));return 0;}\n", (uint32_t)BUSTER_ARRAY_LENGTH(features), (uint32_t)BUSTER_ARRAY_LENGTH(names)) : 0;
+    check_test_expect(test, source != NULL && length < CAPACITY, "the cpu builtins' program fits");
+    if (source != NULL && length < CAPACITY)
+    {
+        check_test_library_run(test, clang, executable, directory, "the cpu builtins of every name over libgcc's model", source, "-std=gnu17", NULL);
+    }
+    free(source);
+}
+
+// One program built by clang and by this executable, by both paths, which must exit alike and print the same: `source`
+// in `directory`, with `standard` and `option` (NULL for none).
+static void check_test_library_run(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name,
+                                   const char* program_source, const char* standard, const char* option)
+{
+    char source[512];
+    char built[3][512];
+    snprintf(source, sizeof(source), "%s/library-run.c", directory);
+    for (uint32_t b = 0; b < 3; b += 1)
+    {
+        snprintf(built[b], sizeof(built[b]), "%s/library-run-%u", directory, b);
+    }
+    const bool written = parse_test_write(source, program_source, strlen(program_source));
+    int statuses[3] = { -1, -1, -1 };
+    char* outputs[3] = { NULL, NULL, NULL };
+    for (uint32_t b = 0; written && b < 3; b += 1)
+    {
+        char* arguments[10] = { (char*)(b == 0 ? clang : executable), (char*)standard, "-w", source, "-o", built[b], "-lm" };
+        uint32_t count = 7;
+        if (option != NULL)
+        {
+            arguments[count++] = (char*)option;
+        }
+        if (b == 2)
+        {
+            arguments[count++] = "--scalar";
+        }
+        arguments[count] = NULL;
+        char* diagnostics = NULL;
+        unlink(built[b]);
+        const int compiled = check_test_driver_spawn(arguments, &diagnostics);
+        free(diagnostics);
+        if (compiled == 0)
+        {
+            // The status of a run, then, for a program that exits (not __builtin_abort's, whose core the runner turns
+            // off), what a second run prints.
+            char* run[] = { built[b], NULL };
+            statuses[b] = check_test_fortify_execute(built[b]);
+            if (statuses[b] >= 0 && statuses[b] < 128)
+            {
+                check_test_driver_spawn_stream(run, &outputs[b], true);
+            }
+            else
+            {
+                outputs[b] = strdup("");
+            }
+        }
+    }
+    for (uint32_t b = 1; written && b < 3; b += 1)
+    {
+        char description[384];
+        snprintf(description, sizeof(description), "%s, %s: exit %d and output \"%s\" (clang %d, \"%s\")", name, b == 2 ? "scalar" : "vector",
+                 statuses[b], outputs[b] != NULL ? outputs[b] : "", statuses[0], outputs[0] != NULL ? outputs[0] : "");
+        check_test_expect(test, statuses[0] >= 0 && statuses[b] == statuses[0] && outputs[0] != NULL && outputs[b] != NULL &&
+                                strcmp(outputs[0], outputs[b]) == 0, description);
+    }
+    check_test_expect(test, written, "library programs: source written");
+    for (uint32_t b = 0; b < 3; b += 1)
+    {
+        free(outputs[b]);
+        unlink(built[b]);
+    }
+    unlink(source);
+}
+
 static void check_test_library_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -237,71 +355,15 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             NULL,
         },
     };
-    char source[512];
-    char built[3][512];
-    snprintf(source, sizeof(source), "%s/library-run.c", directory);
-    for (uint32_t b = 0; b < 3; b += 1)
-    {
-        snprintf(built[b], sizeof(built[b]), "%s/library-run-%u", directory, b);
-    }
     for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(programs); p += 1)
     {
-        const bool written = parse_test_write(source, programs[p].source, strlen(programs[p].source));
-        int statuses[3] = { -1, -1, -1 };
-        char* outputs[3] = { NULL, NULL, NULL };
-        for (uint32_t b = 0; written && b < 3; b += 1)
-        {
-            char* arguments[10] = { (char*)(b == 0 ? clang : executable), (char*)programs[p].standard, "-w", source, "-o", built[b], "-lm" };
-            uint32_t count = 7;
-            if (programs[p].option != NULL)
-            {
-                arguments[count++] = (char*)programs[p].option;
-            }
-            if (b == 2)
-            {
-                arguments[count++] = "--scalar";
-            }
-            arguments[count] = NULL;
-            char* diagnostics = NULL;
-            unlink(built[b]);
-            const int compiled = check_test_driver_spawn(arguments, &diagnostics);
-            free(diagnostics);
-            if (compiled == 0)
-            {
-                // The status of a run, then, for a program that exits (not __builtin_abort's, whose core the runner turns
-                // off), what a second run prints.
-                char* run[] = { built[b], NULL };
-                statuses[b] = check_test_fortify_execute(built[b]);
-                if (statuses[b] >= 0 && statuses[b] < 128)
-                {
-                    check_test_driver_spawn_stream(run, &outputs[b], true);
-                }
-                else
-                {
-                    outputs[b] = strdup("");
-                }
-            }
-        }
-        for (uint32_t b = 1; written && b < 3; b += 1)
-        {
-            char description[384];
-            snprintf(description, sizeof(description), "%s, %s: exit %d and output \"%s\" (clang %d, \"%s\")", programs[p].name, b == 2 ? "scalar" : "vector",
-                     statuses[b], outputs[b] != NULL ? outputs[b] : "", statuses[0], outputs[0] != NULL ? outputs[0] : "");
-            check_test_expect(test, statuses[0] >= 0 && statuses[b] == statuses[0] && outputs[0] != NULL && outputs[b] != NULL &&
-                                    strcmp(outputs[0], outputs[b]) == 0, description);
-        }
-        check_test_expect(test, written, "library programs: source written");
-        for (uint32_t b = 0; b < 3; b += 1)
-        {
-            free(outputs[b]);
-            unlink(built[b]);
-        }
+        check_test_library_run(test, clang, executable, directory, programs[p].name, programs[p].source, programs[p].standard, programs[p].option);
     }
-    unlink(source);
 }
 
 static void check_test_driver_library(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_library_implicit(test, clang, executable, directory);
     check_test_library_runs(test, clang, executable, directory);
+    check_test_cpu_model_runs(test, clang, executable, directory);
 }

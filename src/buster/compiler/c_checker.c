@@ -341,6 +341,8 @@ struct CheckBuiltinMiscEffect
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    // cpu_supports's word and bit, or cpu_is's field and value (CheckBuiltinMiscResult.cpu_test).
+    uint64_t cpu_test;
 };
 
 typedef struct CheckBuiltinFloatEffect CheckBuiltinFloatEffect;
@@ -1926,6 +1928,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .allocates_stack = checked.allocates_stack,
             .alignment_offset_known = checked.alignment_offset_known,
+            .cpu_test = checked.cpu_test,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_FLOAT)

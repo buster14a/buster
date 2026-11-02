@@ -62,7 +62,8 @@
 // 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa, launder, the alloca variants, allow_runtime_check,
 // allow_sanitize_check, annotation, addressof, function_start, complex, __arithmetic_fence and the xray events
 // (c_check_builtin_misc.c's) 0x3f0 to 0x3ff, and __warn_memset_zero_len, trivially_relocate,
-// operator_new and operator_delete and the pointer authentication builtins (its too) 0x440 to 0x44e. Those
+// operator_new and operator_delete, the pointer authentication builtins and cpu_init, cpu_is and cpu_supports (its too)
+// 0x440 to 0x451. Those
 // last families are the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
 // least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
@@ -457,7 +458,10 @@
     X(PTRAUTH_SIGN_GENERIC_DATA, 0x44bu, "__builtin_ptrauth_sign_generic_data", BUSTER_CBUILTIN_SOURCE) \
     X(PTRAUTH_SIGN_UNAUTHENTICATED, 0x44cu, "__builtin_ptrauth_sign_unauthenticated", BUSTER_CBUILTIN_SOURCE) \
     X(PTRAUTH_STRING_DISCRIMINATOR, 0x44du, "__builtin_ptrauth_string_discriminator", BUSTER_CBUILTIN_CONSTANT) \
-    X(PTRAUTH_STRIP, 0x44eu, "__builtin_ptrauth_strip", BUSTER_CBUILTIN_SOURCE)
+    X(PTRAUTH_STRIP, 0x44eu, "__builtin_ptrauth_strip", BUSTER_CBUILTIN_SOURCE) \
+    X(CPU_INIT, 0x44fu, "__builtin_cpu_init", BUSTER_CBUILTIN_SOURCE) \
+    X(CPU_IS, 0x450u, "__builtin_cpu_is", BUSTER_CBUILTIN_SOURCE) \
+    X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -684,7 +688,7 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 // around the scoped atomics' (0x400 to 0x43c), which a range of ids from the first to the last would take in.
 static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
-    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_PTRAUTH_STRIP);
+    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CPU_SUPPORTS);
 }
 
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
@@ -697,7 +701,8 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 // fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
-    const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION);
+    const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
+                        id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS;
     return result;
 }
 

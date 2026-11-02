@@ -7591,6 +7591,9 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_PTRAUTH_SIGN_UNAUTHENTICATED, "__builtin_ptrauth_sign_unauthenticated", false, true, false },
         { CBUILTIN_PTRAUTH_STRING_DISCRIMINATOR, "__builtin_ptrauth_string_discriminator", false, true, true },
         { CBUILTIN_PTRAUTH_STRIP, "__builtin_ptrauth_strip", false, true, false },
+        { CBUILTIN_CPU_INIT, "__builtin_cpu_init", false, true, false },
+        { CBUILTIN_CPU_IS, "__builtin_cpu_is", false, true, false },
+        { CBUILTIN_CPU_SUPPORTS, "__builtin_cpu_supports", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

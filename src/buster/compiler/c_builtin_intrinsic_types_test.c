@@ -207,13 +207,26 @@ static void builtin_intrinsic_type_test_invalid(BuiltinIntrinsicTypeTest* test, 
         builtin_intrinsic_type_test_expect(test, result.status == BUILTIN_INTRINSIC_TYPES_INVALID && builtin_intrinsic_type_test_unpublished(&result),
             "malformed descriptors publish no partial type or ICE metadata");
     }
-    const char* unsupported[] = { "", "vP", "vJ", "vSJ", "vK", "vF", "vG", "vH", "vM", "vp", "vq4i", "vQa", "vm", "va", "vA", "vi&", "vi*0", "vi*4", "vh", "Xh", "vXh", "V4Xh" };
+    const char* unsupported[] = { "", "vP", "vJ", "vSJ", "vK", "vF", "vG", "vH", "vM", "vq4i", "vQa", "vm", "va", "vA", "vi&", "vi*0", "vi*4", "vh", "Xh", "vXh", "V4Xh" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unsupported); i += 1)
     {
         const BuiltinIntrinsicTypeResult result = builtin_intrinsic_type_test_decode(table, unsupported[i]);
         builtin_intrinsic_type_test_expect(test, result.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED && result.unsupported != 0 &&
             builtin_intrinsic_type_test_unpublished(&result), "context/reference/address-space/target gaps are explicit without guessed substitutions");
     }
+    // pid_t is clang's int on x86-64 Linux, and P, SJ and K the unit's FILE, sigjmp_buf and ucontext_t where it has them
+    // (#148): as their types, an array decayed as a parameter.
+    const BuiltinIntrinsicTypeResult pid = builtin_intrinsic_type_test_decode(table, "vp");
+    builtin_intrinsic_type_test_expect(test, pid.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && pid.parameter_count == 1 && pid.parameters[0] == BUSTER_TYPE_INT,
+        "pid_t decodes as clang's int");
+    const TypeId buffer = type_array(table, BUSTER_TYPE_LONG, 8);
+    const BuiltinIntrinsicTypeInput unit = { .encoding = "iP*SJK*", .encoding_length = 7, .file_type = BUSTER_TYPE_SHORT, .sigjmp_buf_type = buffer,
+                                             .ucontext_type = BUSTER_TYPE_DOUBLE };
+    BuiltinIntrinsicTypeResult named;
+    builtin_intrinsic_types_decode(table, &unit, &named);
+    builtin_intrinsic_type_test_expect(test, named.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && named.parameter_count == 3 &&
+        named.parameters[0] == type_pointer(table, BUSTER_TYPE_SHORT) && named.parameters[1] == type_pointer(table, BUSTER_TYPE_LONG) &&
+        named.parameters[2] == type_pointer(table, BUSTER_TYPE_DOUBLE), "the unit's FILE, sigjmp_buf and ucontext_t decode as their types");
     const char nul[] = { 'i', 0, 'i' };
     BuiltinIntrinsicTypeInput input = { .encoding = nul, .encoding_length = sizeof(nul) };
     BuiltinIntrinsicTypeResult result;

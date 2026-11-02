@@ -1187,6 +1187,26 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
   authentication"), the latter's after their arity. `__has_builtin` answers 1
   for them, as clang's does, and `__has_constexpr_builtin` as clang's.
 
+`__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
+to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
+calls `__cpu_indicator_init`, which is also the model's constructor;
+`cpu_supports(s)`, a `bool`, tests the bit of the feature the string literal s
+names in its word (`__cpu_model.features[0]` at 12, or `__cpu_features2`'s),
+and is false for a feature clang doesn't know, where clang also warns
+(pending here); `cpu_is(s)` compares the model's vendor, type or subtype with
+the value of the name s, which clang must know (an error otherwise). The names
+and their words, bits, fields and values are `c_builtin_cpu.inc`, generated
+data: the candidates are the strings of LLVM 23's `X86TargetParser.def`, and
+every value is read from clang's -O0 code of a call of it. The lowering reads
+the model through the runtime's symbols `__cpu_model` and `__cpu_features2`
+(`check_lower_runtime`, data symbols: `check_lower_runtime_object`), which
+libgcc.a's `cpuinfo.o` defines, and calls `__cpu_indicator_init` as a runtime
+function. `test-checker-driver` builds a program that defines the model itself
+and tests every name over each bit of each word and each value from 0 to 63 of
+each field, by clang and by both paths, which must print the same
+(`check_test_cpu_model_runs`), and `test-checker` runs `cpu_init` and some
+tests of this host's model against clang's build.
+
 `__builtin_infer_alloc_token` stays out: clang's value is a hash of the type it
 infers from a `sizeof` among its arguments (0 without one), which its front end
 folds.

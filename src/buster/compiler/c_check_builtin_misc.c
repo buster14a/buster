@@ -87,6 +87,10 @@ struct CheckBuiltinMiscResult
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    // __builtin_cpu_supports's test, its word (0 __cpu_model.features[0], 1 to 3 __cpu_features2's) in the high 32 bits
+    // and its bit's mask in the low ones, 0 for a feature clang doesn't know, whose call is 0; or __builtin_cpu_is's, its
+    // field of __cpu_model (0 vendor, 1 type, 2 subtype) and the value it must have (c_builtin_cpu.inc).
+    uint64_t cpu_test;
 };
 
 static bool check_builtin_misc_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinMiscAction* action)
@@ -968,6 +972,46 @@ static bool check_builtin_misc_relocatable(const TypeTable* table, TypeId type)
            kind == BUSTER_TYPE_KIND_NULLPTR;
 }
 
+// The names of __builtin_cpu_supports and __builtin_cpu_is (c_builtin_cpu.inc), each with its test of libgcc's model.
+typedef struct CheckBuiltinCpuName CheckBuiltinCpuName;
+struct CheckBuiltinCpuName
+{
+    const char* name;
+    uint8_t place;
+    uint32_t value;
+};
+
+static const CheckBuiltinCpuName check_builtin_cpu_features[] =
+{
+#define BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit) { name, word, UINT32_C(1) << (bit) },
+#define BUSTER_CBUILTIN_CPU_NAME(name, field, value)
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_NAME
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+};
+
+static const CheckBuiltinCpuName check_builtin_cpu_names[] =
+{
+#define BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit)
+#define BUSTER_CBUILTIN_CPU_NAME(name, field, value) { name, field, value },
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_NAME
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+};
+
+// The test of a name `bytes` of `length` among `names`' `count`: its place in the high 32 bits and its value in the low
+// ones, or 0 for a name none has.
+static uint64_t check_builtin_cpu_lookup(const CheckBuiltinCpuName* names, uint32_t count, const uint8_t* bytes, uint32_t length)
+{
+    uint64_t result = 0;
+    for (uint32_t i = 0; i < count && result == 0; i += 1)
+    {
+        const bool same = strlen(names[i].name) == length && memcmp(names[i].name, bytes, length) == 0;
+        result = same ? (uint64_t)names[i].place << 32 | names[i].value : 0;
+    }
+    return result;
+}
+
 // The last of clang's generic builtins of #148 that its Sema checks itself:
 // - __arithmetic_fence(x): x, lvalue-converted, of a floating type, a complex one or a vector of either (its type before
 //   conversion: an _Atomic one is refused), a constant where x is; at -O0 a fence keeps nothing apart;
@@ -978,7 +1022,11 @@ static bool check_builtin_misc_relocatable(const TypeTable* table, TypeId type)
 //   relocatable type that isn't const and s of d's type, both as written (an array is no pointer), and n converted to
 //   size_t;
 // - __builtin_operator_new and __builtin_operator_delete, C++'s alone, and the pointer authentication builtins, which
-//   every call refuses (after the latter's arity, as clang's Sema checks it).
+//   every call refuses (after the latter's arity, as clang's Sema checks it);
+// - __builtin_cpu_init(): libgcc's __cpu_indicator_init's call, which fills its CPU model;
+// - __builtin_cpu_supports(s): whether the model has the feature the string literal s names, a bool: the bit of its
+//   word, or false for a feature clang doesn't know (which clang warns of); __builtin_cpu_is(s), whether the model's
+//   vendor, type or subtype is the one s names, a name clang must know. Neither is a constant expression.
 static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
 {
     const CBuiltinId id = input->id;
@@ -1018,6 +1066,28 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     else if (id == CBUILTIN_WARN_MEMSET_ZERO_LEN)
     {
         output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+    }
+    else if (id == CBUILTIN_CPU_INIT)
+    {
+        output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT };
+        output->writes_memory = true;
+    }
+    else if (id == CBUILTIN_CPU_SUPPORTS || id == CBUILTIN_CPU_IS)
+    {
+        const bool supports = id == CBUILTIN_CPU_SUPPORTS;
+        output->cpu_test = !input->string_known ? 0 : supports ? check_builtin_cpu_lookup(check_builtin_cpu_features, BUSTER_ARRAY_LENGTH(check_builtin_cpu_features),
+                                                                                       input->string_bytes, input->string_length) :
+                           check_builtin_cpu_lookup(check_builtin_cpu_names, BUSTER_ARRAY_LENGTH(check_builtin_cpu_names), input->string_bytes, input->string_length);
+        if (!input->string_known || (!supports && output->cpu_test == 0))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else
+        {
+            output->action.value = (CheckValue){ .type = BUSTER_TYPE_BOOL, .category = CHECK_RVALUE };
+            output->evaluated_operands = 0;
+            output->reads_memory = true;
+        }
     }
     else if (id == CBUILTIN_TRIVIALLY_RELOCATE)
     {
@@ -1098,7 +1168,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_TRIVIALLY_RELOCATE: minimum = maximum = 3; break;
         case CBUILTIN_ARITHMETIC_FENCE: minimum = maximum = 1; break;
         case CBUILTIN_DWARF_CFA:
-        case CBUILTIN_WARN_MEMSET_ZERO_LEN: minimum = maximum = 0; break;
+        case CBUILTIN_WARN_MEMSET_ZERO_LEN:
+        case CBUILTIN_CPU_INIT: minimum = maximum = 0; break;
+        case CBUILTIN_CPU_IS:
+        case CBUILTIN_CPU_SUPPORTS: minimum = maximum = 1; break;
         case CBUILTIN_OPERATOR_NEW:
         case CBUILTIN_OPERATOR_DELETE: minimum = 0; maximum = UINT32_MAX; break;
         default:
@@ -1141,7 +1214,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // the xray events' arguments, lvalue-converted here, convert to their parameters (check_builtin_misc_last).
         const bool refused = input->id >= CBUILTIN_OPERATOR_NEW && input->id <= CBUILTIN_PTRAUTH_STRIP;
         const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
-                              input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || refused;
+                              input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || input->id == CBUILTIN_CPU_IS ||
+                              input->id == CBUILTIN_CPU_SUPPORTS || refused;
         if (classify && !refused && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);

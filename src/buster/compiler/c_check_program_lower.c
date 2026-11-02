@@ -170,6 +170,11 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_POWIDF2,
     CHECK_LOWER_RUNTIME_POWISF2,
     CHECK_LOWER_RUNTIME_POWIXF2,
+    // libgcc's CPU model (#148's __builtin_cpu_init, cpu_is and cpu_supports): its initializer and its two objects, which
+    // the emission's symbols of take as data (check_lower_runtime_object).
+    CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT,
+    CHECK_LOWER_RUNTIME_CPU_MODEL,
+    CHECK_LOWER_RUNTIME_CPU_FEATURES2,
     CHECK_LOWER_RUNTIME_LIBRARY,
     CHECK_LOWER_RUNTIMES = CHECK_LOWER_RUNTIME_LIBRARY + CBUILTIN_LIBRARY_COUNT,
 } CheckLowerRuntime;
@@ -223,11 +228,17 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
 #define BUSTER_CHECK_LOWER_LIBM_NAME(id, name) name "f", name, name "l",
     BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_NAME)
 #undef BUSTER_CHECK_LOWER_LIBM_NAME
-    "fmaxl", "fminl", "ldexpl", "__powidf2", "__powisf2", "__powixf2",
+    "fmaxl", "fminl", "ldexpl", "__powidf2", "__powisf2", "__powixf2", "__cpu_indicator_init", "__cpu_model", "__cpu_features2",
 #define BUSTER_CBUILTIN_LIBRARY_CALL(id, name) name,
 #include "c_builtin_library_calls.inc"
 #undef BUSTER_CBUILTIN_LIBRARY_CALL
 };
+
+// Whether a runtime entry is an object rather than a function: libgcc's CPU model's (#148), whose symbols are data.
+static __attribute__((unused)) bool check_lower_runtime_object(uint32_t runtime)
+{
+    return runtime == CHECK_LOWER_RUNTIME_CPU_MODEL || runtime == CHECK_LOWER_RUNTIME_CPU_FEATURES2;
+}
 
 // The runtime function a library builtin's call calls (#148): the lowering's own of its function's name where it has one
 // before the library's (fmax, mempcpy, strcpy, sprintf, ...), so that a unit has one symbol of each name, or else the
@@ -6852,6 +6863,47 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     else if (runtime == CBUILTIN_XRAY_CUSTOMEVENT || runtime == CBUILTIN_XRAY_TYPEDEVENT || runtime == CBUILTIN_WARN_MEMSET_ZERO_LEN)
     {
         // Nothing, as clang's code has them without -fxray-instrument: their arguments never run.
+    }
+    else if (runtime == CBUILTIN_CPU_INIT)
+    {
+        // libgcc's call, which fills the model (it is also its constructor, of priority 101).
+        const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT, BUSTER_TYPE_VOID, NULL, 0, BUSTER_CHECK_NONE);
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
+    }
+    else if (runtime == CBUILTIN_CPU_SUPPORTS || runtime == CBUILTIN_CPU_IS)
+    {
+        // The model's word, masked and compared with the mask, or its field compared with the name's value, as clang's code
+        // tests them: word 0 is __cpu_model.features[0], at 12, and words 1 to 3 __cpu_features2's; a feature clang doesn't
+        // know is false.
+        const uint64_t test = stream->misc[selected].cpu_test;
+        const uint32_t place = (uint32_t)(test >> 32);
+        const uint32_t value = (uint32_t)test;
+        const bool supports = runtime == CBUILTIN_CPU_SUPPORTS;
+        if (supports && test == 0)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U8, 0);
+        }
+        else
+        {
+            const bool features = supports && place != 0;
+            const SymbolId symbol = check_lower_runtime(writer, features ? CHECK_LOWER_RUNTIME_CPU_FEATURES2 : CHECK_LOWER_RUNTIME_CPU_MODEL);
+            const uint64_t offset = !supports ? (uint64_t)place * 4 : features ? (uint64_t)(place - 1) * 4 : 12;
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, value);
+            if (supports)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U32, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, value);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U32, 0);
+            if (offset != 0)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, symbol);
+        }
     }
     else if (runtime == CBUILTIN_ANNOTATION)
     {

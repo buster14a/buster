@@ -167,6 +167,15 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: ptrauth_sign_unauthenticated", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_sign_unauthenticated(p, 0, 0);\n}\n", .rejected = true },
         { .name = "generic: ptrauth_string_discriminator", .source = "static unsigned long x = __builtin_ptrauth_string_discriminator(\"abc\");\n", .rejected = true },
         { .name = "generic: ptrauth_strip", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_strip(p, 0);\n}\n", .rejected = true },
+        { .name = "generic: cpu_is of an unknown name", .source = "int f(void)\n{\nreturn __builtin_cpu_is(\"bogus\");\n}\n", .rejected = true },
+        { .name = "generic: cpu_is of a vendor's two", .source = "int f(void)\n{\nreturn __builtin_cpu_is(\"intel\", 1);\n}\n", .rejected = true },
+        { .name = "generic: cpu_is of a wide string", .source = "int f(void)\n{\nreturn __builtin_cpu_is(L\"intel\");\n}\n", .rejected = true },
+        { .name = "generic: cpu_supports of a variable", .source = "int f(const char* p)\n{\nreturn __builtin_cpu_supports(p);\n}\n", .rejected = true },
+        { .name = "generic: cpu_supports in static data", .source = "static int x = __builtin_cpu_supports(\"avx\");\n", .rejected = true },
+        { .name = "generic: cpu_supports in a static assertion", .source = "_Static_assert(__builtin_cpu_supports(\"avx\") || 1, \"\");\n", .rejected = true },
+        { .name = "generic: cpu_supports of an unknown feature", .source = "int f(void)\n{\nreturn __builtin_cpu_supports(\"not-a-feature\") + __builtin_cpu_supports((\"avx\"));\n}\n" },
+        { .name = "generic: cpu_init of an argument", .source = "void f(void)\n{\n__builtin_cpu_init(1);\n}\n", .rejected = true },
+        { .name = "generic: cpu_init's value", .source = "int f(void)\n{\nreturn __builtin_cpu_init();\n}\n", .rejected = true },
         { .name = "generic: complex of qualified and aligned operands", .source =
           "typedef double D __attribute__((aligned(16)));\nvolatile D v;\nconst double c;\n_Complex double f(void)\n{\nreturn __builtin_complex(v, c);\n}\n" },
     };
@@ -341,10 +350,24 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         , "generic-fence-events-and-relocate", clang);
 }
 
+// __builtin_cpu_init with libgcc's model, of this host, against clang's build (the table's every name is
+// test-checker-driver's, c_check_library_driver_test.c's check_test_cpu_model_runs).
+static __attribute__((noinline)) void check_test_generic_cpu_programs(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+        "int tested(int n){h=(unsigned)n;__builtin_cpu_init();mix(__builtin_cpu_supports(\"sse2\"));mix(__builtin_cpu_supports(\"avx2\"));"
+        "mix(__builtin_cpu_supports(\"avx512f\"));mix(__builtin_cpu_supports(\"x86-64-v3\"));mix(__builtin_cpu_supports(\"x86-64-v4\"));"
+        "mix(__builtin_cpu_is(\"intel\"));mix(__builtin_cpu_is(\"amd\"));mix(__builtin_cpu_is(\"znver5\"));mix(__builtin_cpu_is(\"amdfam1ah\"));"
+        "return (int)(h^(h>>32));}",
+        "generic-cpu-init", clang);
+}
+
 static __attribute__((noinline)) void check_test_generic_builtins(CheckTest* test, const char* clang)
 {
     check_test_generic_builtin_sources(test, clang);
     check_test_generic_builtin_programs(test, clang);
+    check_test_generic_cpu_programs(test, clang);
 }
 
 #endif
