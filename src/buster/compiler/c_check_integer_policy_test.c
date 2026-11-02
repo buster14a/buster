@@ -27,14 +27,14 @@ static void check_test_integer_policy_actions(CheckTest* test, TypeTable* table)
                                strict.value.fault == (i < 6 ? CHECK_FAULT_SIGNED_OVERFLOW : i < 8 ? CHECK_FAULT_SHIFT_COUNT : CHECK_FAULT_SHIFT_VALUE) &&
                                strict.value.fault_node == action.node && strict.warnings == 0,
                           "strict action and vector lanes preserve the original overflow or shift fault");
-        action.extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
+        action.context.extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
         const CheckActionResult gnu = check_test_action(test, table, action);
         check_test_expect(test, gnu.diagnostic == CHECK_DIAG_NONE && gnu.value.constant_kind == CHECK_CONSTANT_INTEGER &&
                                gnu.value.integer == expected[i] && gnu.value.fault == CHECK_FAULT_NONE &&
                                (gnu.value.flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_ICE_FORM)) ==
                                    (BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_ICE_FORM) &&
                                gnu.warnings == warnings[i] && ((gnu.value.flags & BUSTER_CHECK_GNU_DIVISION) != 0) == (i == 4 || i == 5) &&
-                               check_action_integer_constant(&gnu.value, action.extensions) && !check_action_integer_constant(&gnu.value, 0),
+                               check_action_integer_constant(&gnu.value, action.context.extensions) && !check_action_integer_constant(&gnu.value, 0),
                           "explicit GNU policy publishes oracle-qualified bits with exact operation warnings and lexical ICE provenance");
         wrapped = i == 1 ? gnu.value : wrapped;
     }
@@ -43,7 +43,7 @@ static void check_test_integer_policy_actions(CheckTest* test, TypeTable* table)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ancestors); i += 1)
     {
         const CheckAction action = { .op = ancestors[i], .operands = { wrapped, check_test_integer(BUSTER_TYPE_INT, 1), wrapped },
-                                    .type = BUSTER_TYPE_LONG, .extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT };
+                                    .type = BUSTER_TYPE_LONG, .context.extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT };
         const CheckActionResult result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 &&
                                (result.value.flags & BUSTER_CHECK_GNU_CONSTANT) != 0 && (result.value.flags & BUSTER_CHECK_ICE) == 0 &&
@@ -51,11 +51,11 @@ static void check_test_integer_policy_actions(CheckTest* test, TypeTable* table)
                           "GNU witness survives ancestors without repeated warnings while comma and regions clear lexical ICE form");
     }
     CheckAction divide = { .op = CHECK_OP_DIVIDE, .operands = { wrapped, check_test_integer(BUSTER_TYPE_INT, 0) },
-                           .extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT, .node = 217 };
+                           .context.extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT, .node = 217 };
     const CheckActionResult failed = check_test_action(test, table, divide);
     check_test_expect(test, failed.value.fault == CHECK_FAULT_DIVIDE_BY_ZERO && failed.value.fault_node == divide.node &&
                            failed.value.constant_kind == CHECK_CONSTANT_NONE && failed.warnings == 0 &&
-                           !check_action_integer_constant(&failed.value, divide.extensions),
+                           !check_action_integer_constant(&failed.value, divide.context.extensions),
                       "GNU overflow policy does not suppress fatal division faults or fabricate constants");
     divide.op = CHECK_OP_ADD;
     divide.operands[0] = check_test_integer(BUSTER_TYPE_INT, INT32_MAX);
@@ -63,13 +63,13 @@ static void check_test_integer_policy_actions(CheckTest* test, TypeTable* table)
     divide.operands[1] = check_test_integer(BUSTER_TYPE_INT, 1);
     const CheckActionResult effect = check_test_action(test, table, divide);
     check_test_expect(test, (effect.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
-                           !check_action_integer_constant(&effect.value, divide.extensions),
+                           !check_action_integer_constant(&effect.value, divide.context.extensions),
                       "a known GNU folded result never hides an evaluated side effect from constant-context validation");
     const TypeId complex_type = type_complex(table, BUSTER_TYPE_INT);
     const CheckAction complex = { .op = CHECK_OP_MULTIPLY,
                                  .operands = { check_test_integer_complex_value(complex_type, 50000, 0),
                                                check_test_integer_complex_value(complex_type, 50000, 0) },
-                                 .extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT, .node = 218 };
+                                 .context.extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT, .node = 218 };
     const CheckActionResult product = check_test_action(test, table, complex);
     check_test_expect(test, product.value.fault == CHECK_FAULT_NONE && product.value.constant_kind == CHECK_CONSTANT_COMPLEX &&
                            product.value.integer == 2500000000u && product.warnings == 0 &&

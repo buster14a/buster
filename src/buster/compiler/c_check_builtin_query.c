@@ -97,10 +97,7 @@ struct CheckBuiltinQueryAction
     const CheckValue* arguments;
     uint32_t argument_count;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
+    CheckContext context;
     bool string_literal_start;
     bool absolute_address_constant;
     bool complex_constant;
@@ -285,10 +282,7 @@ static __attribute__((unused)) void check_builtin_query_one(TypeTable* table, co
             .arguments = input->arguments,
             .argument_count = input->argument_count,
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
+            .context = input->context,
         };
         CheckBuiltinMiscResult checked = { 0 };
         CheckValue values[2] = { 0 };

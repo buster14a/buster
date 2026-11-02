@@ -22,18 +22,7 @@ struct CheckBuiltinAction
     CheckValue operands[3];
     uint32_t argument_count;
     uint32_t node;
-    // Optional immutable tag-completion token positions; null uses the current table for direct action callers.
-    // source_position is the exclusive expression end, independently of the diagnostic node identity.
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
-    // The unit's constant objects' receipts and whether the action is in a constant context, whose operand
-    // conversions' lvalue read loads a const object's constant initializer as clang's evaluator does (a builtin
-    // call it folds to an integer constant without side effects is an integer constant expression there); an
-    // ordinary call's runtime view doesn't request the read and loads none.
-    const CheckConstValues* const_values;
-    bool constant_evaluated;
+    CheckContext context;
 };
 
 typedef struct CheckBuiltinResult CheckBuiltinResult;
@@ -94,21 +83,7 @@ static TypeId check_builtin_parameter(CBuiltinId id)
 
 static bool check_builtin_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinAction* action)
 {
-    bool complete = type_is_complete(table, type);
-    if (complete && action->tag_completions != NULL)
-    {
-        TypeId base = type_strip_aligned(table, type);
-        while (type_kind_is_array(type_kind(table, base)))
-        {
-            base = type_strip_aligned(table, type_element(table, base));
-        }
-        const uint8_t kind = type_kind(table, base);
-        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
-        {
-            const uint32_t tag = table->types.index[type_index(base)];
-            complete = tag < action->tag_completion_count && action->tag_completions[tag] <= action->source_position;
-        }
-    }
+    const bool complete = check_context_source_complete(table, type, &action->context);
     return complete;
 }
 
@@ -160,12 +135,7 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
     }
     CheckAction action = {
         .node = input->node,
-        .tag_completions = input->tag_completions,
-        .tag_completion_count = input->tag_completion_count,
-        .source_position = input->source_position,
-        .extensions = input->extensions,
-        .const_values = input->const_values,
-        .constant_evaluated = input->constant_evaluated,
+        .context = input->context,
     };
     for (uint32_t i = 0; i < count && result->diagnostic == CHECK_DIAG_NONE; i += 1)
     {
@@ -213,9 +183,9 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
                 batch->a[lane] = (uint64_t)values[0].integer;
                 // Clang's builtin constant-expression rule admits folded arguments, including comma expressions
                 // and converted floating constants. Their original expressions still retain all effects/faults.
-                if (ready && (result->value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+                if (ready)
                 {
-                    result->value.flags |= BUSTER_CHECK_ICE;
+                    check_action_builtin_ice(&result->value);
                 }
             }
         }
