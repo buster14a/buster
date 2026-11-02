@@ -2016,8 +2016,9 @@ static String8 runtime_libraries_read(RuntimeLibraries* libraries, const char* p
 }
 
 // Finds -l `name` into `path`: lib<name>.so, or else lib<name>.a, in the first directory that has one, the -L ones in
-// order, then the library directories. Whether one was found, and in *archive whether it is the archive.
-static bool runtime_libraries_find(String8 name, const String8* directories, uint32_t directory_count, char* path, bool* archive)
+// order, then the library directories. Static output considers only archives, never a .so fallback. Whether one
+// was found, and in *archive whether it is the archive.
+static bool runtime_libraries_find(String8 name, const String8* directories, uint32_t directory_count, char* path, bool* archive, bool static_only)
 {
     const uint32_t total = directory_count + (uint32_t)BUSTER_ARRAY_LENGTH(runtime_library_directories);
     bool found = false;
@@ -2028,7 +2029,7 @@ static bool runtime_libraries_find(String8 name, const String8* directories, uin
             .pointer = (char*)runtime_library_directories[d - directory_count],
             .length = strlen(runtime_library_directories[d - directory_count]),
         };
-        for (uint32_t kind = 0; !found && kind < 2; kind += 1)
+        for (uint32_t kind = static_only ? 1 : 0; !found && kind < 2; kind += 1)
         {
             const int length = snprintf(path, BUSTER_RUNTIME_PATH_BYTES, "%.*s/lib%.*s%s", (int)directory.length, directory.pointer, (int)name.length,
                                         name.pointer, kind == 0 ? ".so" : ".a");
@@ -2361,7 +2362,7 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
     {
         char path[BUSTER_RUNTIME_PATH_BYTES];
         bool archive = false;
-        if (!runtime_libraries_find(names[n], directories, directory_count, path, &archive))
+        if (!runtime_libraries_find(names[n], directories, directory_count, path, &archive, runtime->kind == RUNTIME_KIND_STATIC || runtime->kind == RUNTIME_KIND_STATIC_PIE))
         {
             result = RUNTIME_ERROR_MISSING;
             snprintf(libraries->failed, sizeof(libraries->failed), "-l%.*s", (int)names[n].length, names[n].pointer);

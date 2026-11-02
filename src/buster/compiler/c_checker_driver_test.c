@@ -5,6 +5,8 @@
 // the driver runs in a child so its real diagnostic renderer and return status are observed together. Supplying
 // --executable also tests the production command's default C route, independently of its explicit check command.
 
+#include "c_driver_compatibility_test.c"
+
 typedef struct CheckDriverFixture CheckDriverFixture;
 struct CheckDriverFixture
 {
@@ -1131,67 +1133,94 @@ static void check_test_driver_damaged_snapshot(CheckTest* test, const char* exec
 {
     static const char name[] = "__udivti3";
     static const uint8_t ones[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    static const struct
+    {
+        RuntimeKind kind;
+        const char* label;
+        const char* slug;
+    } cases[] = {
+        { RUNTIME_KIND_DYNAMIC, "dynamic PIE", "dynamic" },
+        { RUNTIME_KIND_STATIC, "static executable", "static" },
+        { RUNTIME_KIND_STATIC_PIE, "static PIE", "static-pie" },
+    };
     char cache[256];
     char place[320];
-    char snapshot[512];
     char source[256];
-    char output[256];
     snprintf(cache, sizeof(cache), "%s/cache", directory);
     snprintf(place, sizeof(place), "%s/buster", cache);
-    snprintf(snapshot, sizeof(snapshot), "%s/%s", place, snapshot_name(RUNTIME_KIND_DYNAMIC));
     snprintf(source, sizeof(source), "%s/damaged.c", directory);
-    snprintf(output, sizeof(output), "%s/damaged", directory);
     const char* previous = getenv("XDG_CACHE_HOME");
     char* saved = previous != NULL ? strdup(previous) : NULL;
     const bool written = mkdir(cache, 0700) == 0 && setenv("XDG_CACHE_HOME", cache, 1) == 0 &&
                          parse_test_write(source, check_test_libgcc_program, sizeof(check_test_libgcc_program) - 1);
     check_test_expect(test, written, "a damaged snapshot's cache and program written");
-    char* const arguments[] = { (char*)executable, "-o", output, source, NULL };
-    char* text = NULL;
-    const int first = written ? check_test_driver_spawn(arguments, &text) : -1;
-    free(text);
-    char before[256];
-    const bool ran = first == 0 && check_test_driver_capture(output, before, sizeof(before));
-    check_test_expect(test, ran, "the libgcc program linked, writing the snapshot");
-    uint64_t length = 0;
-    uint8_t* good = ran ? check_test_driver_read_aligned(snapshot, &length) : NULL;
-    // The places of the member's first atom's alignment and size in the file, by the layout of a view of a copy, which the
-    // test's own reading of it (snapshot_test_piece_at) must find the piece's records.
-    uint8_t* copy = good != NULL ? aligned_alloc(64, (length + 63) / 64 * 64) : NULL;
-    Runtime view = { 0 };
-    if (copy != NULL)
+    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
-        memcpy(copy, good, length);
-        snapshot_view(&view, copy, length);
+        const RuntimeKind kind = cases[c].kind;
+        const char* const label = cases[c].label;
+        char snapshot[512];
+        char output[320];
+        char description[256];
+        snprintf(snapshot, sizeof(snapshot), "%s/%s", place, snapshot_name(kind));
+        snprintf(output, sizeof(output), "%s/damaged-%s", directory, cases[c].slug);
+        char* const dynamic_arguments[] = { (char*)executable, "-o", output, source, NULL };
+        char* const static_arguments[] = { (char*)executable, "-static", "-o", output, source, NULL };
+        char* const static_pie_arguments[] = { (char*)executable, "-static-pie", "-o", output, source, NULL };
+        char* const* arguments = kind == RUNTIME_KIND_STATIC ? static_arguments : kind == RUNTIME_KIND_STATIC_PIE ? static_pie_arguments : dynamic_arguments;
+        char* text = NULL;
+        const int first = check_test_driver_spawn(arguments, &text);
+        free(text);
+        char before[256];
+        const bool ran = first == 0 && check_test_driver_capture(output, before, sizeof(before));
+        snprintf(description, sizeof(description), "the %s libgcc program linked, writing the snapshot", label);
+        check_test_expect(test, ran, description);
+        uint64_t length = 0;
+        uint8_t* good = ran ? check_test_driver_read_aligned(snapshot, &length) : NULL;
+        // The places of the member's first atom's alignment and size in the file, by the layout of a view of a copy, which the
+        // test's own reading of it (snapshot_test_piece_at) must find the piece's records.
+        uint8_t* copy = good != NULL ? aligned_alloc(64, (length + 63) / 64 * 64) : NULL;
+        Runtime view = { 0 };
+        if (copy != NULL)
+        {
+            memcpy(copy, good, length);
+            snapshot_view(&view, copy, length);
+        }
+        const SnapshotHeader* header = (const SnapshotHeader*)copy;
+        const uint32_t entry = copy != NULL ? runtime_find_global_name(&view.global_names, (const uint8_t*)name, sizeof(name) - 1, link_hash((const uint8_t*)name, sizeof(name) - 1)) : 0;
+        const uint32_t member = entry != 0 ? view.global_names.member[entry - 1] : 0;
+        const uint32_t piece = member != 0 ? RUNTIME_OBJECTS + member - 1 : UINT32_MAX;
+        const AtomId atom = piece != UINT32_MAX ? view.pieces[piece].begin.atoms : 0;
+        const uint64_t alignment = piece != UINT32_MAX ? snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_ALIGNMENT, atom) : 0;
+        const uint64_t size = piece != UINT32_MAX ? snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_SIZE, atom) : 0;
+        const bool placed = piece != UINT32_MAX && view.pieces[piece].end.atoms > atom && snapshot_test_piece_at(header, &view, alignment) == piece &&
+                            snapshot_test_piece_at(header, &view, size) == piece;
+        snprintf(description, sizeof(description), "the __udivti3 member's first atom's alignment and size in the %s snapshot", label);
+        check_test_expect(test, placed, description);
+        const int file = placed ? open(snapshot, O_WRONLY | O_CLOEXEC) : -1;
+        const bool damaged = file >= 0 && snapshot_test_pwrite(file, ones, 1, alignment) && snapshot_test_pwrite(file, ones, sizeof(ones), size);
+        if (file >= 0)
+        {
+            close(file);
+        }
+        snprintf(description, sizeof(description), "the member's records damaged in the %s snapshot", label);
+        check_test_expect(test, damaged, description);
+        const int second = damaged ? check_test_driver_spawn(arguments, &text) : -1;
+        snprintf(description, sizeof(description), "a damaged %s piece: the link imports the runtime again, without a word", label);
+        check_test_expect(test, second == 0 && text != NULL && text[0] == 0, description);
+        free(text);
+        char after[256];
+        snprintf(description, sizeof(description), "the %s program runs as before", label);
+        check_test_expect(test, second == 0 && check_test_driver_capture(output, after, sizeof(after)) && strcmp(before, after) == 0, description);
+        uint64_t again_length = 0;
+        uint8_t* again = second == 0 ? check_test_driver_read_aligned(snapshot, &again_length) : NULL;
+        snprintf(description, sizeof(description), "the %s snapshot written again as the first link wrote it", label);
+        check_test_expect(test, again != NULL && again_length == length && memcmp(again, good, length) == 0, description);
+        free(again);
+        free(copy);
+        free(good);
+        unlink(snapshot);
+        unlink(output);
     }
-    const SnapshotHeader* header = (const SnapshotHeader*)copy;
-    const uint32_t entry = copy != NULL ? runtime_find_global_name(&view.global_names, (const uint8_t*)name, sizeof(name) - 1, link_hash((const uint8_t*)name, sizeof(name) - 1)) : 0;
-    const uint32_t member = entry != 0 ? view.global_names.member[entry - 1] : 0;
-    const uint32_t piece = member != 0 ? RUNTIME_OBJECTS + member - 1 : UINT32_MAX;
-    const AtomId atom = piece != UINT32_MAX ? view.pieces[piece].begin.atoms : 0;
-    const uint64_t alignment = piece != UINT32_MAX ? snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_ALIGNMENT, atom) : 0;
-    const uint64_t size = piece != UINT32_MAX ? snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_SIZE, atom) : 0;
-    const bool placed = piece != UINT32_MAX && view.pieces[piece].end.atoms > atom && snapshot_test_piece_at(header, &view, alignment) == piece &&
-                        snapshot_test_piece_at(header, &view, size) == piece;
-    check_test_expect(test, placed, "the __udivti3 member's first atom's alignment and size in the snapshot");
-    const int file = placed ? open(snapshot, O_WRONLY | O_CLOEXEC) : -1;
-    const bool damaged = file >= 0 && snapshot_test_pwrite(file, ones, 1, alignment) && snapshot_test_pwrite(file, ones, sizeof(ones), size);
-    if (file >= 0)
-    {
-        close(file);
-    }
-    check_test_expect(test, damaged, "the member's records damaged in the snapshot");
-    const int second = damaged ? check_test_driver_spawn(arguments, &text) : -1;
-    check_test_expect(test, second == 0 && text != NULL && text[0] == 0, "a damaged piece: the link imports the runtime again, without a word");
-    free(text);
-    char after[256];
-    check_test_expect(test, second == 0 && check_test_driver_capture(output, after, sizeof(after)) && strcmp(before, after) == 0, "the program runs as before");
-    uint64_t again_length = 0;
-    uint8_t* again = second == 0 ? check_test_driver_read_aligned(snapshot, &again_length) : NULL;
-    check_test_expect(test, again != NULL && again_length == length && memcmp(again, good, length) == 0, "the snapshot written again as the first link wrote it");
-    free(again);
-    free(copy);
-    free(good);
     if (saved != NULL)
     {
         setenv("XDG_CACHE_HOME", saved, 1);
@@ -1201,11 +1230,9 @@ static void check_test_driver_damaged_snapshot(CheckTest* test, const char* exec
         unsetenv("XDG_CACHE_HOME");
     }
     free(saved);
-    unlink(snapshot);
     rmdir(place);
     rmdir(cache);
     unlink(source);
-    unlink(output);
 }
 
 // Complex values' products and quotients in the direct path (#493's review): a program that multiplies and divides
@@ -2777,8 +2804,9 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     char* const end_options[] = { compiler, "--", "-E", source, NULL };
     text = NULL;
     const int end_status = check_test_driver_spawn(end_options, &text);
-    check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "unknown argument: --") != NULL,
-                      "-E after -- does not select preprocessing; unsupported -- is diagnosed");
+    check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "can't read '-E'") != NULL &&
+                              strstr(text, "unknown argument: --") == NULL,
+                      "an input after -- is not an option; -E is read as a file");
     free(text);
     unlink(operand);
     unlink(output);
@@ -2786,11 +2814,13 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 }
 
 #include "c_check_pic_driver_test.c"
+#include "c_check_instrumentation_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
 {
     check_test_driver_pic(test, executable, directory);
+    check_test_driver_instrumentation(test, executable, directory);
     static const char source_text[] = "int main(void) { return 0; }\n";
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
@@ -3052,9 +3082,14 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
     uint64_t expression_nodes = 0;
     uint64_t batch_nodes = 0;
+    uint64_t template_nodes = 0;
     const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
-    const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
-    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes && (BUSTER_HOST_VECTOR ? batch_nodes != 0 : batch_nodes == 0),
+    const char* templates = coverage != NULL ? strstr(coverage, "\ttemplates=") : NULL;
+    const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2 &&
+                         templates != NULL && sscanf(templates, "\ttemplates=%" SCNu64, &template_nodes) == 1;
+    // The vector path's fragments (#624) and node templates (#1048) take some of the nodes; the scalar path's take none.
+    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes + template_nodes &&
+                                (BUSTER_HOST_VECTOR ? batch_nodes + template_nodes != 0 : batch_nodes == 0 && template_nodes == 0),
                       "--time-stages reports evaluated expressions and the host's template share");
     free(text);
     text = NULL;
@@ -5395,6 +5430,8 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
     unlink(object);
 }
 
+#include "c_check_hardening_driver_test.c"
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -5706,6 +5743,20 @@ static int run_checker_driver_tests(int argc, char** argv)
             "#pragma STDC FENV_ACCESS MAYBE\nint value;\n",
             false,
             1,
+        },
+        {
+            .name = "file-scope GCC unroll names its source pragma at the directive",
+            .source = "#pragma GCC unroll 4\nint x;\n",
+            .rejected = true,
+            .message = "invalid '#pragma GCC unroll' directive",
+            .column = 1,
+        },
+        {
+            .name = "a misplaced GCC unroll uses clang's normalized name at the statement",
+            .source = "int f(void){\n#pragma GCC unroll 4\nreturn 0;}\n",
+            .rejected = true,
+            .message = "expected a for, while, or do-while loop to follow '#pragma unroll'",
+            .column = 1,
         },
         {
             "unknown complex pragma state can be promoted at end of file",
@@ -6230,7 +6281,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_expect(&test, driver_compatibility_tests(executable, clang) == 0, "CC dependency, stdin, probe and link-mode compatibility");
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_unsupported_codegen(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_hardening(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
