@@ -77,6 +77,8 @@ struct Tier1PipelineTest
     uint32_t native_results;
     uint32_t clang_results;
     uint32_t resolved_calls;
+    // The bottom-up rewrite's twins on every function planned (tier1_burs_check_function, #141).
+    Tier1BursCheck burs;
     // The CFG consumer's functions, and what their edges took.
     uint32_t general;
     uint64_t edge_moves;
@@ -1242,6 +1244,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_again(&function, &dominance, &plan, true, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
                                                          "the verified function's plan is the verifying plan's");
+                        const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
+                        tier1_burs_check_function(&test->burs, &function, &test->arenas[TIER1_PIPELINE_SCRATCH]);
+                        ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,
+                                                         "the bottom-up rewrite's twins classify, label and choose alike, every covered class with a candidate");
                     }
                     Tier1EmitResult* emitted = &bodies[f];
                     if (ok)
@@ -1534,6 +1540,8 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
+        printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " twin mismatches\n", test.burs.functions,
+               test.burs.nodes, test.burs.matched, test.burs.fallbacks, test.burs.mismatches);
         printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {

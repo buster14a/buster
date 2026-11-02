@@ -1239,9 +1239,10 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 build.sh has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
-and their marked copies, the x86 semantics' tables, and the checker unit's
-copies of Tier 0's tables, the Zen 5 cost model's tables and the unwind
-templates, with their initialized flags, all in a section of their own
+and their marked copies, the x86 semantics' tables, Tier 1's selection state
+tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
+are), and the checker unit's copies of Tier 0's tables, the Zen 5 cost model's
+tables and the unwind templates, with their initialized flags, all in a section of their own
 (`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
 with them built, at their fixed addresses, and reads the pages it touches from
 the page cache, shared with every other process.

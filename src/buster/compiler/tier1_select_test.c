@@ -3778,6 +3778,8 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+#include "buster/compiler/tier1_select_burs_test.c"
+
 static int run_tier1_select_tests(int argc, char** argv)
 {
     int result = 1;
@@ -3833,6 +3835,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_indirect(&test);
             tier1_select_test_indirect_review(&test);
             tier1_select_test_variadic(&test);
+            tier1_select_test_burs(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);

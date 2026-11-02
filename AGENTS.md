@@ -219,7 +219,12 @@ designs and the compilers already built this way.
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Bounded direct scalar calls preserve live caller registers and
+  records. Its vector path covers the integer core by bottom-up rewriting over
+  state tables `tier1_select_initialize` compiles from a grammar of the
+  candidates' patterns (`tier1_select_burs.c`, baked; labeled 16 nodes a depth
+  level), maximal munch its scalar twin and its fallback; `test-tier1-select`
+  checks the tables and the kernels' twins, which `test-tier1-pipeline` and
+  `benchmark-tier1-select-source` check on every function they plan. Bounded direct scalar calls preserve live caller registers and
   publish symbolic CALL references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
   self-loops. Every other function, general CFGs with loops and phis, goes
@@ -590,8 +595,9 @@ designs and the compilers already built this way.
   reaches compiles there; a unit without `main.c` (a benchmark's) gets
   `static`. A command then runs in two units' copies of the code, so a home
   must share no static variable with its callers' units: `main.c`'s units share
-  one lane context (`lane.c`) and the x86 encoder's templates
-  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`), and `./build.sh check-call-graph`
+  one lane context (`lane.c`), the x86 encoder's templates
+  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`) and Tier 1's selection tables
+  (`tier1_select_burs.c`'s `BUSTER_TIER1_SHARED`), and `./build.sh check-call-graph`
   reports any variable a command reaches in two units ("Call graph check"). A
   function to home is a module's entry point that several units compile, coarse enough
   that a call from another unit costs nothing, which keeps its state in its
@@ -659,8 +665,9 @@ designs and the compilers already built this way.
   process.
   Each executable it links then writes itself with the backend's tables built
   (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
-  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize` and
-  `unwind_initialize` write is in a section of its own (`buster_baked`:
+  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
+  `unwind_initialize` and `tier1_select_initialize` write is in a section of
+  its own (`buster_baked`:
   `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
   module's statics, baked in the checker's unit, the C driver's), so a compile
   starts with them built; the file's build ID is recomputed over the baked

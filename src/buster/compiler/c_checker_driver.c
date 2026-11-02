@@ -338,6 +338,10 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 #include "c_check_warning_render.c"
 
+// Tier 1's selection state tables (tier1_select_burs.c), which main.c includes after this file: --tier1 builds them before
+// any lane compiles a unit.
+static bool tier1_select_initialize(void);
+
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
 static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -3474,7 +3478,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
         if (lanes.tier1 && !check_tier1_ready)
         {
-            check_tier1_ready = x86_zen5_initialize();
+            check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
         }
         // The command runs on its session's lanes (#905), which start here, after its options and before any source is
         // read (check_driver_run).

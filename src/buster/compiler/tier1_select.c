@@ -1592,8 +1592,9 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 // canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it keeps its clearing
 // move and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
-// probes (tier1_narrow_test.c) check the supported producers natively.
-static void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, uint8_t* canonical)
+// probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
+// rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
+static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, uint8_t* canonical)
 {
     const uint32_t count = function->instruction_count;
     for (uint32_t node = 0; node < count; node += 1)
@@ -1968,7 +1969,7 @@ static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t pa
 
 // A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory,
 // call nor access a volatile object (no barrier between them), and itself not volatile.
-static bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
+static inline __attribute__((always_inline)) bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
 {
     const IrFunction* function = forest->function;
     return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load;
@@ -1979,7 +1980,7 @@ static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, 
     pattern->fold_count += tier1_select_tree_child(forest, parent, value) ? 1 : 0;
 }
 
-static void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+static inline __attribute__((always_inline)) void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
 {
     assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
     uint32_t cost = pattern.intrinsic_cost;
@@ -2234,7 +2235,7 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
 
 // The memory operand of `node`'s access through `pointer`, in values[first] and values[first + 1] (its base and index),
 // with its scale and displacement. Returns whether the walk took anything.
-static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
+static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
 {
     const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE });
     pattern->values[first] = address.base;
@@ -2246,7 +2247,14 @@ static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, 
     return address.folds != 0;
 }
 
-static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node)
+// Inlined at each of its two calls, the scalar path's batch (tier1_select_cover_munch) and the bottom-up path's pattern
+// (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
+// tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
+// 356 bytes returned through memory, and inlined fewer of its helpers: the scalar path's selection took 304 core cycles
+// per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
+// and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
+// for both calls took 300 and 815.
+static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node)
 {
     const IrFunction* function = forest->function;
     const uint32_t op = function->op[node];
@@ -3013,7 +3021,7 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
 // power-of-two multiply's shift before its three-operand immediate IMUL; the costed cover may choose the latter. A
 // division by a register ranks below every rule for a constant divisor, which covers its constant even where the
 // constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
-static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
+static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
 {
     uint32_t chosen = 0;
     uint32_t priority = 0;
@@ -3066,6 +3074,72 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
         }
     }
     return chosen;
+}
+
+#include "buster/compiler/tier1_select_burs.c"
+
+// The pattern of `node` on the bottom-up path (#141): the candidate its rule names (tier1_burs_pick; a node whose operator
+// the grammar doesn't cover, munch's), its cost the candidate's, made once. Returns whether the node has a candidate.
+// Not inlined at its three calls, so that the candidates' body it inlines is compiled once for the bottom-up path, and
+// apart from the plan's own registers.
+static __attribute__((noinline)) bool tier1_select_burs_pattern(const Tier1SelectForest* forest, const uint32_t* rules, uint8_t* built, Tier1SelectPlan* plan, uint32_t node)
+{
+    bool valid = true;
+    if (built[node] == 0)
+    {
+        built[node] = 1;
+        const Tier1SelectCandidates candidates = tier1_select_candidates(forest, node);
+        bool munched = false;
+        const uint32_t chosen = tier1_burs_pick(&candidates, rules[node], &munched);
+        valid = chosen < candidates.count;
+        if (valid)
+        {
+            plan->patterns[node] = candidates.patterns[chosen];
+            plan->costs[node] = candidates.costs[chosen];
+        }
+    }
+    return valid;
+}
+
+// The scalar path's cover, and a host's without the vector path: each node's candidates, a depth level at a time, 16 nodes
+// a batch, and maximal munch's choice (tier1_select_munch). Returns the first node in the levels' order without a
+// candidate as the error's. A function of its own (#141): inside the plan, where the bottom-up path's columns are live
+// across it, its inlined candidates spilled, 37 more instructions per IR instruction on the frozen sqlite3.c.
+static __attribute__((noinline)) Tier1SelectError tier1_select_cover_munch(const Tier1SelectForest* forest, const uint32_t* level_offsets, const uint32_t* level_nodes, uint32_t maximum_depth,
+                                                                           Tier1SelectPlan* plan, uint32_t* failed_node)
+{
+    Tier1SelectError error = TIER1_SELECT_OK;
+    for (uint32_t level = 0; error == TIER1_SELECT_OK && level <= maximum_depth; level += 1)
+    {
+        for (uint32_t first = level_offsets[level]; error == TIER1_SELECT_OK && first < level_offsets[level + 1]; first += BUSTER_TIER1_SELECT_LANES)
+        {
+            const uint32_t remaining = level_offsets[level + 1] - first;
+            const uint32_t lanes = remaining < BUSTER_TIER1_SELECT_LANES ? remaining : BUSTER_TIER1_SELECT_LANES;
+            Tier1SelectCandidates batch[BUSTER_TIER1_SELECT_LANES];
+            uint32_t chosen[BUSTER_TIER1_SELECT_LANES] = {0};
+            for (uint32_t lane = 0; error == TIER1_SELECT_OK && lane < lanes; lane += 1)
+            {
+                const uint32_t node = level_nodes[first + lane];
+                batch[lane] = tier1_select_candidates(forest, node);
+                if (batch[lane].count == 0)
+                {
+                    error = TIER1_SELECT_ERROR_UNSUPPORTED;
+                    *failed_node = node;
+                }
+                else
+                {
+                    chosen[lane] = tier1_select_munch(&batch[lane]);
+                }
+            }
+            for (uint32_t lane = 0; error == TIER1_SELECT_OK && lane < lanes; lane += 1)
+            {
+                const uint32_t node = level_nodes[first + lane];
+                plan->patterns[node] = batch[lane].patterns[chosen[lane]];
+                plan->costs[node] = batch[lane].costs[chosen[lane]];
+            }
+        }
+    }
+    return error;
 }
 
 // Function/plan/scratch storage is disjoint. `dominance` is required for any cross-block value use: the structural IR
@@ -3151,10 +3225,13 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     uint32_t* positions = 0;
     uint8_t* canonical = 0;
     uint32_t* pending = 0;
+    // Each node's last user, its only one where it has a single use: the bottom-up path's classes read it.
+    uint32_t* users = 0;
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
         blocks = ir_allocate(scratch, count, 4, &ok);
+        users = ir_allocate(scratch, count, 4, &ok);
         uses = ir_allocate(scratch, count, 4, &ok);
         barriers = ir_allocate(scratch, count, 4, &ok);
         depths = ir_allocate(scratch, count, 4, &ok);
@@ -3224,6 +3301,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             else
             {
                 uses[operand.value] += 1;
+                users[operand.value] = node;
             }
         }
         for (uint32_t p = 0; error == TIER1_SELECT_OK && op != IR_PHI && p < operand_count; p += 1)
@@ -3240,6 +3318,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             else
             {
                 uses[operand.value] += 1;
+                users[operand.value] = node;
                 const uint32_t next = operand.value < node ? depths[operand.value] + 1 : 0;
                 depths[node] = next > depths[node] ? next : depths[node];
             }
@@ -3297,58 +3376,58 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .barriers = barriers,
         .canonical = canonical,
     };
-    for (uint32_t level = 0; error == TIER1_SELECT_OK && level <= maximum_depth; level += 1)
+    // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
+    // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
+    // are munch's, made here in the levels' order, as the scalar path makes every node's, so that a node either path
+    // refuses is refused at the same place; the others' are made as the code needs them, in the walk below.
+    // A host without the vector path (BUSTER_VECTOR_PATH) takes the scalar path's munch alone.
+    const bool burs = error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector);
+    uint32_t* classes = 0;
+    uint32_t* rules = 0;
+    uint8_t* built = 0;
+#if BUSTER_HOST_VECTOR
+    uint32_t* kids = 0;
+    uint32_t* states = 0;
+    uint32_t* words = 0;
+    if (burs)
     {
-        for (uint32_t first = level_offsets[level]; error == TIER1_SELECT_OK && first < level_offsets[level + 1]; first += BUSTER_TIER1_SELECT_LANES)
+        bool ok = tier1_select_initialize();
+        error = ok ? error : TIER1_SELECT_ERROR_LIMIT;
+        classes = ir_allocate(scratch, count, 4, &ok);
+        kids = ir_allocate(scratch, (uint64_t)count * 2, 4, &ok);
+        states = ir_allocate(scratch, count, 4, &ok);
+        rules = ir_allocate(scratch, count, 4, &ok);
+        built = ir_allocate(scratch, count, 1, &ok);
+        words = ir_allocate(scratch, count, 4, &ok);
+        error = ok || error != TIER1_SELECT_OK ? error : TIER1_SELECT_ERROR_MEMORY;
+    }
+    if (burs && error == TIER1_SELECT_OK)
+    {
+        tier1_burs_classify_vector(&forest, users, words, classes, kids);
+        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
+        tier1_burs_rules_vector(count, classes, states, rules);
+        const Tier1SelectPattern none = {
+            .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
+            .stack_object = BUSTER_IR_NONE,
+        };
+        for (uint32_t node = 0; node < count; node += 1)
         {
-            const uint32_t remaining = level_offsets[level + 1] - first;
-            const uint32_t lanes = remaining < BUSTER_TIER1_SELECT_LANES ? remaining : BUSTER_TIER1_SELECT_LANES;
-            Tier1SelectCandidates batch[BUSTER_TIER1_SELECT_LANES];
-            uint32_t chosen[BUSTER_TIER1_SELECT_LANES] = {0};
-            uint32_t cost_columns[BUSTER_TIER1_SELECT_MAX_CANDIDATES][BUSTER_TIER1_SELECT_LANES];
-            memset(cost_columns, 0xff, sizeof(cost_columns));
-            for (uint32_t lane = 0; error == TIER1_SELECT_OK && lane < lanes; lane += 1)
-            {
-                const uint32_t node = level_nodes[first + lane];
-                batch[lane] = tier1_select_candidates(&forest, node);
-                if (batch[lane].count == 0)
-                {
-                    error = TIER1_SELECT_ERROR_UNSUPPORTED;
-                    failed_node = node;
-                }
-                else
-                {
-                    for (uint32_t p = 0; p < batch[lane].count; p += 1)
-                    {
-                        cost_columns[p][lane] = batch[lane].costs[p];
-                    }
-                    if (!BUSTER_VECTOR_PATH(vector))
-                    {
-                        chosen[lane] = tier1_select_munch(&batch[lane]);
-                    }
-                }
-            }
-            if (error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector))
-            {
-                __m512i best_cost = _mm512_set1_epi32(-1);
-                __m512i best_rule = _mm512_setzero_si512();
-                for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_MAX_CANDIDATES; p += 1)
-                {
-                    const __m512i candidate_cost = _mm512_loadu_si512(cost_columns[p]);
-                    const __mmask16 better = _mm512_cmplt_epu32_mask(candidate_cost, best_cost);
-                    best_cost = _mm512_mask_mov_epi32(best_cost, better, candidate_cost);
-                    best_rule = _mm512_mask_set1_epi32(best_rule, better, (int)p);
-                }
-                const __mmask16 active = (__mmask16)((1u << lanes) - 1);
-                _mm512_mask_storeu_epi32(chosen, active, best_rule);
-            }
-            for (uint32_t lane = 0; error == TIER1_SELECT_OK && lane < lanes; lane += 1)
-            {
-                const uint32_t node = level_nodes[first + lane];
-                plan.patterns[node] = batch[lane].patterns[chosen[lane]];
-                plan.costs[node] = batch[lane].costs[chosen[lane]];
-            }
+            plan.patterns[node] = none;
         }
+    }
+#endif
+    for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
+    {
+        const uint32_t node = level_nodes[position];
+        if (classes[node] == TIER1_BURS_OP_REG && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+        {
+            error = TIER1_SELECT_ERROR_UNSUPPORTED;
+            failed_node = node;
+        }
+    }
+    if (!burs && error == TIER1_SELECT_OK)
+    {
+        error = tier1_select_cover_munch(&forest, level_offsets, level_nodes, maximum_depth, &plan, &failed_node);
     }
     if (error == TIER1_SELECT_OK)
     {
@@ -3372,28 +3451,39 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 needed[value] |= function->op[value] != IR_UNDEF ? 1 : 0;
             }
         }
+        // On the bottom-up path, a node's pattern is made as the walk finds it needed (tier1_select_burs_pattern).
         uint32_t pending_count = 0;
-        for (uint32_t reverse = count; reverse != 0; reverse -= 1)
+        for (uint32_t reverse = count; error == TIER1_SELECT_OK && reverse != 0; reverse -= 1)
         {
             const uint32_t node = reverse - 1;
             const uint32_t op = function->op[node];
             needed[node] |= tier1_select_barrier(function, node) || op == IR_BR || op == IR_CBR || op == IR_BR_INDIRECT || op == IR_RET || op == IR_UNREACHABLE || op == IR_PARAM || uses[node] == 0 ? 1 : 0;
-            if (needed[node] != 0)
+            if (needed[node] != 0 && burs && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+            {
+                error = TIER1_SELECT_ERROR_UNSUPPORTED;
+                failed_node = node;
+            }
+            if (needed[node] != 0 && error == TIER1_SELECT_OK)
             {
                 pending_count = tier1_select_need_values(function, &plan.patterns[node], node, false, needed, pending, pending_count);
             }
         }
-        while (pending_count != 0)
+        while (error == TIER1_SELECT_OK && pending_count != 0)
         {
             pending_count -= 1;
             const uint32_t node = pending[pending_count];
-            pending_count = tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count);
+            if (burs && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+            {
+                error = TIER1_SELECT_ERROR_UNSUPPORTED;
+                failed_node = node;
+            }
+            pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
             plan.covered[node] = needed[node] ^ 1;
         }
-        for (uint32_t node = 0; node < count; node += 1)
+        for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
         {
             plan.effective_use_offsets[node] = plan.effective_use_count;
             if (plan.covered[node] == 0)
@@ -3427,7 +3517,10 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         }
         plan.effective_use_offsets[count] = plan.effective_use_count;
         plan.arena_bytes = output->length - output_mark;
-        *result = plan;
+        if (error == TIER1_SELECT_OK)
+        {
+            *result = plan;
+        }
     }
     if (arguments)
     {

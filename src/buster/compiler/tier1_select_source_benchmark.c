@@ -8,9 +8,11 @@
 // selection refuses, or that either path's selection refuses, is left out of both variants and counted by the step. Any
 // other failure fails the benchmark, which then reports no time. Each variant's run selects every function once, after a
 // warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which path runs first; --only times one alone, back to
-// back, and --after-scalar MS runs the scalar path, untimed, for MS ms before each of the vector path's passes. Include
-// after tier1_cfg_source_benchmark.c and tier0_benchmark_measure.c, whose clock, counters and medians it takes. Run it
-// under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
+// back, and --after-scalar MS runs the scalar path, untimed, for MS ms before each of the vector path's passes. Before the
+// time, each selected function's bottom-up rewrite (tier1_select_burs.c) is checked against its twins and the walks'
+// candidates (tier1_burs_check_function), and a difference fails the benchmark. Include after tier1_cfg_source_benchmark.c,
+// tier0_benchmark_measure.c, whose clock, counters and medians it takes, and tier1_select_burs_test.c. Run it under the
+// 9700X's lock pinned to one CPU (taskset -c 2 ...).
 //
 //   build/compiler benchmark-tier1-select-source [--only select|select-scalar] [--after-scalar MS] [preprocessor options] file...
 
@@ -37,6 +39,8 @@ struct Tier1SelectSourceCorpus
     uint64_t refused;
     uint64_t entries;
     uint64_t instructions;
+    // The bottom-up rewrite's twins on each function selected (tier1_select_burs_test.c), outside the time.
+    Tier1BursCheck burs;
 };
 
 static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
@@ -119,6 +123,10 @@ static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, con
             const uint64_t output_mark = output->length;
             selected = tier1_select_plan(&optimized.function, &dominance, output, scratch, path == 0, &plan, &node) == TIER1_SELECT_OK;
             arena_pop_to(output, output_mark);
+        }
+        if (selected)
+        {
+            tier1_burs_check_function(&corpus->burs, &optimized.function, scratch);
         }
         corpus->seen += 1;
         corpus->unprepared += !prepared;
@@ -297,7 +305,11 @@ static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, 
     {
         printf("benchmark-tier1-select-source: files=%" PRIu64 " functions=%" PRIu64 " selected=%u unprepared=%" PRIu64 " refused=%" PRIu64 " entries=%" PRIu64 " instructions=%" PRIu64 "\n", corpus.files, corpus.seen, corpus.count,
                corpus.unprepared, corpus.refused, corpus.entries, corpus.instructions);
-        measured = corpus.count != 0 && corpus.instructions != 0 && tier1_select_source_measure(&corpus, &output, &scratch, only, after_scalar);
+        printf("benchmark-tier1-select-source: bottom-up rewrite functions=%" PRIu64 " nodes=%" PRIu64 " mismatches=%" PRIu64 " uncovered=%" PRIu64 " matched=%" PRIu64 " munched=%" PRIu64 "\n", corpus.burs.functions,
+               corpus.burs.nodes, corpus.burs.mismatches, corpus.burs.uncovered, corpus.burs.matched, corpus.burs.fallbacks);
+        // A difference between the twins, or a class the grammar covers without a candidate, fails the run.
+        const bool twins = corpus.burs.functions == corpus.count && corpus.burs.mismatches == 0 && corpus.burs.uncovered == 0;
+        measured = twins && corpus.count != 0 && corpus.instructions != 0 && tier1_select_source_measure(&corpus, &output, &scratch, only, after_scalar);
     }
     else if (!valid)
     {

@@ -336,9 +336,63 @@ groups ready nodes by depth. All nodes in a depth are ready before the next
 depth begins. Candidate generation checks the bounded C patterns and their
 operand, type, immediate, memory-order and single-use constraints.
 
-The vector path chooses the cheapest candidate for sixteen independent ready
-nodes at a time, with unsigned comparisons over contiguous cost columns. The
-final batch is masked. A reverse node pass then marks what the code computes:
+The vector path covers the integer core by bottom-up rewriting
+(`tier1_select_burs.c`, #141's design: Pelegrí-Llopart and Graham's BURS, as
+iburg and burg build it). Its grammar is a C table of 69 patterns, each
+a nonterminal's derivation from an operator and its children's nonterminals, or
+from another nonterminal, at the structural cost below; a pattern stands for one
+candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
+an immediate, a scaled index, a truth value's link) folding into its root's. Its
+eighteen nonterminals are a statement, a register, the constants' classes (an
+immediate, a lea's scale, a power of two, 3, 5 or 9, a shift's count, zero, a
+disp32), a load a consumer folds, a shift a lea scales, addresses without an
+index and with one, an index, and the comparisons a branch or a truth value
+takes, integer and floating, and their zero extensions.
+
+`tier1_select_initialize` compiles the grammar into state tables once, by burg's
+algorithm: a state is each nonterminal's cheapest rule and its cost, normalized
+to the cheapest and closed under the chain rules; each operator's child position
+projects a child's state onto the nonterminals the operator reads there (its
+representer); and each operator's table gives the state of each pair of
+representers. The grammar isn't finite-state as it stands (a chain of additions
+grows a register's cost against a fold's zero without bound), so normalized
+costs saturate at 8, past which a difference no longer picks another rule in
+these patterns. The tables have 582 states, 172 rules and a pool of 18,705
+16-bit entries for the operators' maps and tables, and are in the baked section
+(`baked.c`), so a compile starts with them built; `--tier1` and
+`test-baked-tables` build them where the executable isn't baked. The bound and
+table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gave 346 states, 12 gave
+942 and 16 gave 1,430.
+
+A plan then takes four passes over the function's nodes, each 16 nodes a
+vector with an exact scalar twin (`tier1_burs_*_scalar`):
+
+1. classes: each node's operator, from its IR operation and type and what the
+   candidates' rules read of its operands (a constant's class bits, whether a
+   right operand is a constant, a load or a shift, whether a load folds into its
+   single user past no barrier, whether an address's displacement fits 32 bits);
+   and its visible children, those a pattern may fold (a tree child, a constant,
+   or a frame object's single address in the entry block), any other operand
+   being the register leaf's state. A frame object's address, and an address
+   whose constant index or offset doesn't fit 32 bits, take the scalar rule;
+2. labels: each node's state, a table lookup on its operator and its children's
+   representers, gathered, a depth level at a time;
+3. rules: each node's rule for its goal, a statement's or a register's;
+4. patterns: the node's candidate of its rule's kind, which
+   `tier1_select_candidates`' walks fill (`tier1_burs_pick`). A node of an
+   operator the grammar doesn't cover (calls, phis, floating arithmetic, masks
+   and the rest) takes maximal munch's, made for every such node in the levels'
+   order, as the scalar twin makes every node's, so that a node either path
+   refuses is refused at the same place; the covered nodes' patterns are made
+   as the walk below needs them. A rule whose candidate the walks didn't make (a
+   walk past `BUSTER_TIER1_SELECT_WALK`) takes munch's too.
+
+The cover is the cheapest the grammar has for each tree, and the grammar has
+every candidate the generator makes for the operators it covers, so it is never
+costlier than munch's. On Lua 5.4.8's 1,081 functions as `--tier1` plans them,
+80,411 of 98,565 nodes take their rule's candidate and 42 munch's.
+
+A reverse node pass then marks what the code computes:
 the nodes with an effect (stores, calls, terminators, volatile loads), the
 parameters, the phis and their operands, the nodes nothing uses (an unused load
 or division the optimizer kept for the fault it may raise), and each value a
@@ -368,12 +422,9 @@ division by a constant's reciprocal costs 7, below `div`'s 8, though its records
 (up to 13) may outnumber `div`'s, since `div`'s and `idiv`'s latency, which no
 count of records sees, is the larger.
 
-Candidate generation, depth construction, top-down covering and metadata
-emission still use scalar loops. This is a working bounded bottom-up selector,
-not the full startup-compiled pattern-state automaton proposed by #141. The
-benchmark exposes the difference between a narrow dependency chain and a wide
-ready frontier. No scalar-stage performance exemption is claimed before the
-approved-host evidence and representative source workloads exist.
+Candidate generation for the patterns the walk needs, depth construction and
+metadata emission still use scalar loops. The benchmark exposes the difference
+between a narrow dependency chain and a wide ready frontier.
 
 ## Records and downstream consumers
 
@@ -660,6 +711,22 @@ unsupported operations, missing allocation, target exclusion and arena
 exhaustion. Empty functions and guarded, unpadded columns cover lengths around
 16 and 32 lanes; wide frontiers and dependency chains cover distinct groupings.
 
+The bottom-up rewrite has checks of its own (`tier1_select_burs_test.c`, in
+`test-tier1-select`): the tables' invariants (the register leaf's state first,
+every state's rule of a nonterminal one that derives it, every map and table
+entry a state, each constant class deriving exactly its nonterminals); the
+labeling and the rule choice against their scalar twins on 64 rounds of random
+columns, with child states drawn from every state, 16-lane tails and lone
+levels; the IR's text fixtures (`tests/ir`, `tests/ir/optimize`); and addresses
+around a disp32's edges, constant indices and offsets inside and past 32 bits at
+every scale, among them pairs past it whose sum fits. On each function
+(`tier1_burs_check_function`) the vector classifier's classes and visible
+children must be the scalar one's, both kernels' states and rules alike, and
+every node of a class the grammar covers must have a candidate. The same check
+runs on every function `test-tier1-pipeline` plans and every function
+`benchmark-tier1-select-source` selects, outside its time, where a difference
+fails the benchmark.
+
 `test-tier1-select --manifest` writes CSV with separate origins for actual
 `plan` emission, direct `expansion` fixtures and test `wrapper` records. Every
 record includes form, mnemonic, all memory/register/immediate fields, model ID
@@ -731,7 +798,7 @@ refuses, or either path's selection refuses, is left out of both and counted;
 any other failure fails the command, which then reports no time. `--only` times
 one path alone, and `--after-scalar MS` runs the scalar path before each of the
 vector path's passes. Of the frozen `sqlite3.c`'s 2,668 functions, both paths
-select the 2,181 that the driver's `--tier1-report` gives Tier 1 (244,036 IR
+select the 2,666 that the driver's `--tier1-report` gives Tier 1 (478,163 IR
 instructions).
 
 Run each build, test and measurement on the approved 9700X under its shared
@@ -769,16 +836,25 @@ heads and at its merge with main, `cc3387f`:
   scripts against 10,763 M and 4,281 M. Each program's hottest function
   (`sqlite3VdbeExec`, `luaV_execute`) is still Tier 0's.
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
-  the frozen `sqlite3.c`: 243 by the vector path and 253 by the scalar twin,
-  since the plan no longer verifies the optimizer's verified result
-  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01));
-  with that verification they were 338 and 340.
+  the frozen `sqlite3.c`, since the bottom-up rewrite (medians of five processes
+  of both paths interleaved, CPU 2): 225.0 by the vector path and 277.2 by the
+  scalar twin, against 261.7 and 275.2 at `d1e8a5f` before it, on its 2,666
+  functions (478,163 IR instructions); the vector path's instructions per IR
+  instruction 503.2 against 690.0, the twin's 751.6 against 747.3. On #1001's
+  2,181 functions they were 243 and 253 once the plan stopped verifying the
+  optimizer's verified result
+  ([record](https://github.com/buster14a/buster-performance/tree/0aa27457a95dd2ee4e9b5ac26e67429c2490380b/docs/measurements/tier1-plan-verification-141-2026-11-01)),
+  and 338 and 340 with that verification. `--tier1 -c` of the frozen
+  `sqlite3.c` took 475.2 ms against 476.6 (`ab` of `time-runs`, 5 rounds of 21
+  runs), 6,345.3 M instructions against 6,438.6 M, and its 2,666 functions'
+  records are 346,741 against 346,753; speedtest1's and Lua's code by `--tier1`
+  ran alike (3,865.1 M instructions in speedtest1 by both).
 - **#142**: 240 Csmith and YARPGen programs at `e0ae799c` and `cc3387f`, with
   `--tier1` and with `--tier1 --scalar`: 195 pass at both tiers, and the 45
   others fail in clang's own steps (links past the small code model, which
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-Full pattern-state generation, the remaining scalar/ABI/spill consumers, and
-whole-C integration (the functions selection refuses whole: switches among them)
-are outstanding.
+The remaining scalar/ABI/spill consumers and whole-C integration (the
+functions selection refuses whole, as `sqlite3.c`'s `sqlite3Multiply128` and
+`sqlite3Multiply160`, a constant of each) are outstanding.
