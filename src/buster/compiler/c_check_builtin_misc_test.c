@@ -64,7 +64,7 @@ static CheckBuiltinMiscResult check_builtin_misc_test_action(TypeTable* table, C
         .arguments = arguments,
         .argument_count = count,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
     };
     CheckBuiltinMiscResult output;
     check_builtin_misc_one(table, &input, &output);
@@ -230,7 +230,7 @@ static CheckBuiltinMiscResult check_builtin_misc_test_witnessed(TypeTable* table
         .arguments = arguments,
         .argument_count = 2,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .pointer_object = object,
         .pointer_alignment = alignment,
     };
@@ -248,7 +248,7 @@ static CheckBuiltinMiscResult check_builtin_misc_test_evaluated(TypeTable* table
         .arguments = arguments,
         .argument_count = 2,
         .node = 148,
-        .source_position = UINT32_MAX,
+        .context.source_position = UINT32_MAX,
         .alignment_evaluated = true,
         .alignment_side_effects = effects,
         .alignment_value = value,
@@ -624,13 +624,13 @@ static void check_builtin_misc_test_constraints(CheckBuiltinMiscTest* test, Type
             .arguments = arguments,
             .argument_count = 2,
             .node = 999,
-            .tag_completions = completions,
-            .tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
-            .source_position = 19,
+            .context.tag_completions = completions,
+            .context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
+            .context.source_position = 19,
         };
         check_builtin_misc_one(table, &action, &result);
         check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "late enum completion is not visible at earlier source position");
-        action.source_position = 20;
+        action.context.source_position = 20;
         check_builtin_misc_one(table, &action, &result);
         check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.integer == 1,
                                       "enum completion and diagnostic node use distinct unsigned source fields");
