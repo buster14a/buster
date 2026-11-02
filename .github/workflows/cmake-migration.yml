@@ -1,0 +1,24 @@
+name: CMake migration validation
+
+on:
+  push:
+    branches: [work/1182-cmake-multi-config]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Prepare tracked-source snapshot for isolated validation
+        run: git archive --format=tar HEAD -o "$RUNNER_TEMP/buster-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buster-source
+          path: ${{ runner.temp }}/buster-source.tar
+          retention-days: 1
