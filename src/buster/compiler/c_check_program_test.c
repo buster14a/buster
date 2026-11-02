@@ -27,6 +27,8 @@ static void check_test_program_addressed(CheckTest* test)
         }
     }
     check_test_expect(test, ready, "label address columns have protected tails");
+    // The sparse label targets (c_check_sparse.c) the guarded columns' values make.
+    Arena sparse = arena_reserve(UINT64_C(1) << 20);
     for (uint32_t count = 0; ready && count <= 129; count += 1)
     {
         uint8_t* kinds = mappings[0] + page - count;
@@ -48,11 +50,13 @@ static void check_test_program_addressed(CheckTest* test)
         Parser parser = { 0 };
         parser.tokens.kinds = kinds;
         parser.tree.roles = roles;
-        const CheckInput input = { .token_count = count, .label_targets = targets };
+        const uint64_t mark = sparse.length;
+        const CheckInput input = { .token_count = count, .label_targets = check_sparse_from_values(&sparse, targets, count) };
         check_program_addressed(&parser, &input, scalar, true);
         check_program_addressed(&parser, &input, vector, false);
-        check_test_expect(test, memcmp(scalar, expected, count + 1) == 0 && memcmp(vector, expected, count + 1) == 0,
+        check_test_expect(test, check_sparse_present(input.label_targets) && memcmp(scalar, expected, count + 1) == 0 && memcmp(vector, expected, count + 1) == 0,
                           "label addresses exclude logical && and non-prefix tokens, including every guarded vector tail");
+        arena_pop_to(&sparse, mark);
     }
     for (uint32_t column = 0; column < 3; column += 1)
     {
@@ -61,6 +65,7 @@ static void check_test_program_addressed(CheckTest* test)
             munmap(mappings[column], page * 2);
         }
     }
+    arena_release(&sparse);
 }
 
 #define BUSTER_CHECK_TEST_SCAN_COLUMNS 24u
@@ -101,7 +106,8 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     }
     CheckInput input = *base;
     input.compound_objects = compound_objects;
-    input.initializer_begins = initializer_begins;
+    Arena sparse = arena_reserve(UINT64_C(1) << 20);
+    input.initializer_begins = check_sparse_from_values(&sparse, initializer_begins, count);
     const CheckInitializers initializers = { .declaration_tokens = declaration_tokens, .count = plans, .token_count = count };
     const CheckInitializers* given = listed ? &initializers : NULL;
     uint32_t* next = listed ? plan_next : NULL;
@@ -174,6 +180,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     check_test_expect(test, same && compound == expected_compound && program.status == expected_status && program.token == expected_token,
                       listed ? "check_program's plans link each statement's initializers in order and mark exactly those statements"
                              : "check_program's plans write and mark nothing for a unit without initializer plans");
+    arena_release(&sparse);
 }
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
@@ -198,6 +205,9 @@ static void check_test_program_scans(CheckTest* test)
     }
     CheckTestTypes types = { 0 };
     ready = check_test_types_open(&types) && ready;
+    // The sparse columns (c_check_sparse.c) the guarded columns' values make, for each count's variants.
+    Arena sparse = arena_reserve(UINT64_C(1) << 22);
+    ready = sparse.base != NULL && ready;
     check_test_expect(test, ready, "check_program's scanned columns have protected tails");
     // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked);
     // and a target attribute, one ignored and target_clones (CheckProgramTargetEvents).
@@ -304,9 +314,9 @@ static void check_test_program_scans(CheckTest* test)
                 .static_objects = static_objects,
                 .defined = defined,
                 .tentative = tentative,
-                .initializer_nodes = initializer_nodes,
-                .body_declarations = body_declarations,
-                .declaration_bodies = declaration_bodies,
+                .initializer_nodes = check_sparse_from_values(&sparse, initializer_nodes, count),
+                .body_declarations = check_sparse_from_values(&sparse, body_declarations, count),
+                .declaration_bodies = check_sparse_from_values(&sparse, declaration_bodies, count),
                 .attributes = attributes,
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
@@ -445,6 +455,7 @@ static void check_test_program_scans(CheckTest* test)
         }
     }
     check_test_types_close(&types);
+    arena_release(&sparse);
     for (uint32_t column = 0; column < BUSTER_CHECK_TEST_SCAN_COLUMNS; column += 1)
     {
         if (mappings[column] != MAP_FAILED)
@@ -659,6 +670,8 @@ static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, 
 static void check_test_program_declaring(CheckTest* test)
 {
     check_test_runtime_scan(test);
+    // The sparse columns (c_check_sparse.c) the guarded columns' values make, for each case.
+    Arena sparse = arena_reserve(UINT64_C(1) << 22);
     static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
     uint64_t checked = 0;
     bool all = true;
@@ -703,9 +716,12 @@ static void check_test_program_declaring(CheckTest* test)
                         expected[want++] = t;
                     }
                 }
+                const uint64_t mark = sparse.length;
+                const CheckSparseColumn sparse_nodes = check_sparse_from_values(&sparse, nodes, count);
+                all &= check_sparse_present(sparse_nodes);
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
-                    const uint32_t got = check_program_declaring(declarations, with_nodes != 0 ? nodes : 0, limit, count, tokens, path == 0);
+                    const uint32_t got = check_program_declaring(declarations, with_nodes != 0 ? &sparse_nodes : 0, limit, count, tokens, path == 0);
                     const bool same = got == want && memcmp(tokens, expected, (uint64_t)want * sizeof(uint32_t)) == 0;
                     all &= same;
                     checked += 1;
@@ -715,6 +731,7 @@ static void check_test_program_declaring(CheckTest* test)
                                path == 0 ? "scalar" : "vector", got, want);
                     }
                 }
+                arena_pop_to(&sparse, mark);
             }
             // The declarations with initializers (check_init_declarations, #592): room for exactly `count`.
             uint32_t* begins = (uint32_t*)check_test_program_guarded(&maps[7], &sizes[7], (uint64_t)count * sizeof(uint32_t));
@@ -730,9 +747,12 @@ static void check_test_program_declaring(CheckTest* test)
                 expected[begun] = t;
                 begun += has;
             }
+            const uint64_t begins_mark = sparse.length;
+            const CheckSparseColumn sparse_begins = ready ? check_sparse_from_values(&sparse, begins, count) : (CheckSparseColumn){ 0 };
+            ready &= check_sparse_present(sparse_begins);
             for (uint32_t path = 0; ready && path < 2; path += 1)
             {
-                const CheckInput input = { .initializer_begins = begins, .token_count = count };
+                const CheckInput input = { .initializer_begins = sparse_begins, .token_count = count };
                 const uint32_t got = check_init_declarations(&input, count, initialized, path == 0);
                 const bool same = got == begun && memcmp(initialized, expected, (uint64_t)begun * sizeof(uint32_t)) == 0;
                 all &= same;
@@ -742,6 +762,7 @@ static void check_test_program_declaring(CheckTest* test)
                     printf("  initialized declarations: count %u density %u %s path: %u tokens, expected %u\n", count, density, path == 0 ? "scalar" : "vector", got, begun);
                 }
             }
+            arena_pop_to(&sparse, begins_mark);
             const uint32_t objects = count + 1;
             uint32_t want = 0;
             for (uint32_t object = 1; ready && object < objects; object += 1)
@@ -787,6 +808,7 @@ static void check_test_program_declaring(CheckTest* test)
             }
         }
     }
+    arena_release(&sparse);
     printf("  declaring tokens and needed objects: %llu cases, both paths at PROT_NONE pages\n", (unsigned long long)checked);
     check_test_expect(test, all, "declaring tokens and needed objects agree with the contract by both paths, at every count and density");
 }
@@ -1496,7 +1518,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                 result->objects[at] = (CheckDataObject){
                     .type = type,
                     .object = object,
-                    .initializer = input->initializer_nodes[selected],
+                    .initializer = check_sparse_get(input->initializer_nodes, selected),
                     .token = selected,
                     .initializer_plan = plan,
                     .alignment_log2 = check_data_declared_alignment(input, types, object, type, alignments[object]),
@@ -2181,7 +2203,7 @@ static bool check_test_program_locals(const CheckProgram* program, const CheckLo
         {
             openings[opening] = 1;
         }
-        for (uint32_t parameter = input->parameters[opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+        for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
         {
             const uint32_t object = input->objects[parameter];
             if (object <= count)
@@ -2192,7 +2214,7 @@ static bool check_test_program_locals(const CheckProgram* program, const CheckLo
     }
     for (uint32_t token = 0; same && token < count; token += 1)
     {
-        const uint32_t body = input->declaration_bodies[token];
+        const uint32_t body = check_sparse_get(input->declaration_bodies, token);
         const uint32_t object = input->objects[token];
         if (input->declarations[token] == token && body < count && openings[body] != 0 && input->declaration_kinds[token] == C_BINDING_OBJECT &&
             input->static_objects[token] == 0 && object <= count)
@@ -2491,6 +2513,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
 #include "c_check_program_folds_test.c"
+#include "c_check_program_fence_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -3197,6 +3220,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
         check_test_program_folds(test, clang);
+        check_test_program_fences(test, clang);
         check_test_program_batch(test);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
@@ -3966,6 +3990,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
             "float x=1.0+0x1p-24;int a=x>1.0f;int f=fp_state();change_rounding(0);return a*100+f;}",
             "fenv-implicit-narrowing-conversion", clang);
+        // The Microsoft spelling maps to STDC FENV_ACCESS's runtime policy: clang compiles the STDC oracle, ours
+        // the extension spelling, and both builds must agree under each runtime rounding mode.
+        check_test_program_against(test,
+            "#pragma fenv_access(on)\n"
+            "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
+            "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
+            "#pragma STDC FENV_ACCESS ON\n"
+            "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
+            "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
+            false, "fenv-access-extension-matches-stdc", clang);
     }
     if (!check_test_program_daz())
     {

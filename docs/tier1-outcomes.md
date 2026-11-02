@@ -49,8 +49,12 @@ retain the body's source declaration, rather than pretending to map an IR
 index back to a token.
 
 Selection keeps its refused operation separately. The emitter's optional
-`Tier1EmitDiagnostic` preserves nested liveness, IR CFG, allocator and frame
-errors before its public error wraps them; the outcome keeps both codes.
+`Tier1EmitDiagnostic` preserves nested liveness, IR CFG, allocator, frame and
+allocation-certificate errors before its public error wraps them; the outcome
+keeps both codes. The certificate checker runs only where `--verify` asks for
+it (`Tier1EmitOptions.certify`, #939). Its refusal (`TIER1_EMIT_CERTIFICATE`,
+cause `certificate`) is an allocation the allocator got wrong, so it is
+internal; its capacity is a resource failure.
 Neither the diagnostic nor the refused result borrows an arena pointer.
 
 Failure restores the publication arena, clears code/count outputs, and
@@ -82,10 +86,11 @@ call boundary doesn't take, by the selector's own predicates
 (`check_tier1_call_kinds`), so the report follows the boundary as it grows:
 
 - `indirect` and `variadic`;
-- `abi-record`, a by-value aggregate's ABI record;
-- `stack-arguments`: arguments past the boundary's six
-  (`BUSTER_TIER1_SELECT_CALL_ARGUMENTS`), not every argument the ABI would pass
-  on the stack;
+- `abi-record`: an ABI record the boundary refuses, the call's (its result,
+  its outgoing area) or an argument's;
+- `stack-arguments`: arguments past the boundary's limit
+  (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
+  the stack, which Tier 1 takes below it;
 - `floating-`, `long-double-`, `narrow-` and `other-argument`;
 - `floating-`, `long-double-` and `other-result`;
 - `argument-count`: arguments that don't match the parameters.

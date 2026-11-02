@@ -7,7 +7,9 @@
 // are decoded from the rewritten stream; opcode/immediate/effect identify ALL
 // non-location semantics. This module is not an x86 byte decoder.
 //
-// One location per value is certified at a block entry. Equal-width aliases at
+// One location per value is certified at a block entry. An operand the source
+// marks BUSTER_CERT_RECIPE may instead be its value's integer recipe itself (an
+// immediate, or a definition no location keeps): location BUSTER_CERT_NONE. Equal-width aliases at
 // the same location are supported, as are arbitrary copies after entry. Each
 // byte carries an identity and lane. Definitions change the value's identity,
 // not every old home. A frame recipe binds the base incarnation current when
@@ -28,6 +30,9 @@
 #define BUSTER_CERT_MAX_OPERANDS 8
 #define BUSTER_CERT_MAX_WIDTH 64
 #define BUSTER_CERT_MEMORY 1u
+// The source allows the operand to be its value's integer recipe rather than a
+// location: an immediate for a use, no location at all for a definition.
+#define BUSTER_CERT_RECIPE 2u
 #define BUSTER_CERT_AVX512F 1u
 #define BUSTER_CERT_AVX512DQ 2u
 #define BUSTER_CERT_AVX512BW 4u
@@ -143,6 +148,9 @@ struct Tier1CertInstruction
     uint8_t op;
 };
 
+// A phi's value along an edge: its destination takes its source's. A source of BUSTER_CERT_NONE is an undefined operand
+// (the IR's undef, #141's blocks' lifetimes): any bits are the phi's value along that edge, so the successor's fact for
+// the destination needs no proof there.
 typedef struct Tier1CertRename Tier1CertRename;
 struct Tier1CertRename
 {
@@ -251,14 +259,19 @@ static bool tier1_cert_recipe(const Tier1CertProgram* program, uint32_t value)
     if (valid)
     {
         const Tier1CertValue v = program->values[value];
-        valid = v.class == TIER1_CERT_GPR && (v.width == 4 || v.width == 8);
+        const bool general = v.class == TIER1_CERT_GPR && (v.width == 4 || v.width == 8);
         if (v.recipe == TIER1_CERT_INTEGER_RECIPE)
         {
-            valid = valid && (v.width == 8 || v.payload <= UINT32_MAX);
+            // A general register's constant is its payload. A vector or opmask
+            // value's constant is materialized within its own class; the payload
+            // identifies the producer's justified constant.
+            const bool vector = v.class == TIER1_CERT_VECTOR && (v.width == 16 || v.width == 32 || v.width == 64);
+            const bool mask = v.class == TIER1_CERT_MASK && (v.width == 1 || v.width == 2 || v.width == 4 || v.width == 8);
+            valid = (general && (v.width == 8 || v.payload <= UINT32_MAX)) || vector || mask;
         }
         else if (v.recipe == TIER1_CERT_FRAME_RECIPE)
         {
-            valid = valid && v.width == 8 && v.stable && v.dependency < program->value_count;
+            valid = general && v.width == 8 && v.stable && v.dependency < program->value_count;
             valid = valid && (v.payload <= INT32_MAX || v.payload >= (uint64_t)(int64_t)INT32_MIN);
             if (valid)
             {
@@ -306,7 +319,7 @@ static bool tier1_cert_code_valid(const Tier1CertProgram* program, const Tier1Ce
             valid = valid && !edge && in.operand_count <= BUSTER_CERT_MAX_OPERANDS;
             for (uint32_t j = 0; valid && j < in.operand_count; j += 1)
             {
-                valid = in.locations[j] < program->location_count;
+                valid = in.locations[j] < program->location_count || in.locations[j] == BUSTER_CERT_NONE;
             }
         }
         else
@@ -408,8 +421,17 @@ static bool tier1_cert_valid(const Tier1CertProgram* program)
             for (uint32_t o = 0; valid && o < count; o += 1)
             {
                 const Tier1CertOperand operand = source.operands[o];
-                valid = operand.value < program->value_count && (operand.flags & ~BUSTER_CERT_MEMORY) == 0;
+                valid = operand.value < program->value_count && (operand.flags & ~(BUSTER_CERT_MEMORY | BUSTER_CERT_RECIPE)) == 0;
                 valid = valid && operand.tie <= (o < source.use_count ? 0 : source.use_count);
+                // A recipe operand has no location: it can't be tied, tied to, or a copy's.
+                if (valid && (operand.flags & BUSTER_CERT_RECIPE) != 0)
+                {
+                    valid = program->values[operand.value].recipe == TIER1_CERT_INTEGER_RECIPE && operand.tie == 0 && !source.copy;
+                }
+                if (valid && operand.tie != 0)
+                {
+                    valid = (source.operands[operand.tie - 1].flags & BUSTER_CERT_RECIPE) == 0;
+                }
                 // Distinct output identities are part of the normalized source contract.
                 for (uint32_t d = source.use_count; valid && d < o; d += 1)
                 {
@@ -440,8 +462,8 @@ static bool tier1_cert_valid(const Tier1CertProgram* program)
             for (uint32_t r = 0; valid && r < edge.rename_count; r += 1)
             {
                 const Tier1CertRename rename = edge.renames[r];
-                valid = rename.source < program->value_count && rename.destination < program->value_count;
-                if (valid)
+                valid = (rename.source < program->value_count || rename.source == BUSTER_CERT_NONE) && rename.destination < program->value_count;
+                if (valid && rename.source != BUSTER_CERT_NONE)
                 {
                     const Tier1CertValue s = program->values[rename.source];
                     const Tier1CertValue d = program->values[rename.destination];
@@ -509,7 +531,8 @@ static bool tier1_cert_edit(const Tier1CertProgram* program, Tier1CertInstructio
     if (in.op == TIER1_CERT_CONSTANT || in.op == TIER1_CERT_FRAME_ADDRESS)
     {
         const Tier1CertValue v = program->values[in.value];
-        valid = valid && a.class == TIER1_CERT_GPR && a.width == v.width && in.immediate == v.payload;
+        // A constant goes to a register of its value's class; a frame address to a general one.
+        valid = valid && a.class == (in.op == TIER1_CERT_CONSTANT ? v.class : TIER1_CERT_GPR) && a.class != TIER1_CERT_STACK && a.width == v.width && in.immediate == v.payload;
         valid = valid && v.recipe == (in.op == TIER1_CERT_CONSTANT ? TIER1_CERT_INTEGER_RECIPE : TIER1_CERT_FRAME_RECIPE);
         if (valid && in.op == TIER1_CERT_FRAME_ADDRESS)
         {
@@ -550,17 +573,19 @@ static bool tier1_cert_correspondence(const Tier1CertProgram* program, const Tie
     bool valid = in.op == TIER1_CERT_ORIGINAL && in.operand_count == count && in.opcode == source->opcode && in.immediate == source->immediate && in.effect == source->effect;
     for (uint32_t o = 0; valid && o < count; o += 1)
     {
-        valid = tier1_cert_operand(program, source->operands[o], in.locations[o]);
+        const bool recipe = in.locations[o] == BUSTER_CERT_NONE;
+        valid = recipe ? (source->operands[o].flags & BUSTER_CERT_RECIPE) != 0 : tier1_cert_operand(program, source->operands[o], in.locations[o]);
         const uint32_t tie = source->operands[o].tie;
         if (valid && tie != 0)
         {
+            // Validation keeps recipe operands out of ties, so both are locations.
             const Tier1CertLocation a = program->locations[in.locations[o]];
             const Tier1CertLocation b = program->locations[in.locations[tie - 1]];
-            valid = a.unit == b.unit && a.width == b.width && a.class == b.class;
+            valid = in.locations[tie - 1] != BUSTER_CERT_NONE && a.unit == b.unit && a.width == b.width && a.class == b.class;
         }
-        for (uint32_t d = source->use_count; valid && d < o; d += 1)
+        for (uint32_t d = source->use_count; valid && !recipe && d < o; d += 1)
         {
-            valid = tier1_cert_disjoint(program->locations[in.locations[d]], program->locations[in.locations[o]]);
+            valid = in.locations[d] == BUSTER_CERT_NONE || tier1_cert_disjoint(program->locations[in.locations[d]], program->locations[in.locations[o]]);
         }
     }
     return valid;
@@ -746,14 +771,16 @@ static bool tier1_cert_prove(Tier1CertState* state, const Tier1CertFact* facts, 
         {
             value = state->renames[value].token;
         }
-        if (fact.location != BUSTER_CERT_NONE)
-        {
-            valid = tier1_cert_match(state, value, fact.location);
-        }
-        else
+        if (fact.location == BUSTER_CERT_NONE)
         {
             valid = tier1_cert_recipe(state->program, fact.value);
         }
+        else if (value != BUSTER_CERT_NONE)
+        {
+            valid = tier1_cert_match(state, value, fact.location);
+        }
+        // Else an undefined phi operand (BUSTER_CERT_NONE, a rename's source): its location holds the fact whatever it
+        // holds.
         state->report->facts += 1;
     }
     return valid;
@@ -848,7 +875,8 @@ static bool tier1_cert_original(Tier1CertState* state, const Tier1CertSource* so
     }
     for (uint32_t i = 0; valid && i < source->use_count; i += 1)
     {
-        valid = tier1_cert_match(state, source->operands[i].value, in.locations[i]);
+        // A recipe operand is the integer recipe itself, a constant: nothing to read.
+        valid = in.locations[i] == BUSTER_CERT_NONE || tier1_cert_match(state, source->operands[i].value, in.locations[i]);
         if (i == 0)
         {
             copy_token = tier1_cert_token(state, source->operands[i].value);
@@ -869,7 +897,11 @@ static bool tier1_cert_original(Tier1CertState* state, const Tier1CertSource* so
             .stamp = state->epoch,
             .base = defined.recipe == TIER1_CERT_FRAME_RECIPE ? tier1_cert_token(state, defined.dependency) : 0,
         };
-        tier1_cert_put(state, in.locations[i], token);
+        // A definition no location keeps leaves its value to its recipe.
+        if (in.locations[i] != BUSTER_CERT_NONE)
+        {
+            tier1_cert_put(state, in.locations[i], token);
+        }
     }
     state->report->instructions += 1;
     state->report->operands += count;

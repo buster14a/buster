@@ -1083,7 +1083,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             needed = function->call_argument_counts[value];
             pushed = class != BUSTER_TYPED_CLASS_VOID && needed == 0;
         }
-        else if (kind != BUSTER_TYPED_JUMP && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID))
+        else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_FENCE && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID))
         {
             needed = 1;
         }
@@ -1092,7 +1092,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             result->status = needed > top - frame->stack_base ? INTERPRETER_INVALID : INTERPRETER_VALUE_LIMIT;
             break;
         }
-        if (class == BUSTER_TYPED_CLASS_VOID && kind != BUSTER_TYPED_CALL && kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_RETURN && kind != BUSTER_TYPED_COPY)
+        if (class == BUSTER_TYPED_CLASS_VOID && kind != BUSTER_TYPED_CALL && kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_RETURN && kind != BUSTER_TYPED_COPY &&
+            kind != BUSTER_TYPED_FENCE)
         {
             result->status = INTERPRETER_INVALID;
             break;
@@ -1106,7 +1107,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             continue;
         }
         bool shape = true;
-        if (kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE)
+        if (kind == BUSTER_TYPED_FENCE)
+        {
+            shape = class == BUSTER_TYPED_CLASS_VOID && tier0_fence_valid(value);
+        }
+        else if (kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE)
         {
             shape = class == BUSTER_TYPED_CLASS_U64 && value == 0 && (kind == BUSTER_TYPED_STACK_SAVE || classes[top - 1] == BUSTER_TYPED_CLASS_U64);
         }
@@ -1387,6 +1392,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         }
         case BUSTER_TYPED_DISCARD:
             top -= 1;
+            break;
+        case BUSTER_TYPED_FENCE:
+            // One thread's accesses in program order, as this interpreter runs them, are already what any fence orders
+            // them into: a fence (#1059) has nothing of its own to do here. A concurrent model would need more than this.
             break;
         case BUSTER_TYPED_COPY:
             result->status = interpreter_typed_copy(&runtime, stack[top - 2].low, stack[top - 1].low, value);

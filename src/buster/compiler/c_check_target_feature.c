@@ -207,7 +207,8 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
                 result.always_inline |= attribute->kind == CHECK_ATTRIBUTE_ALWAYS_INLINE;
                 result.flatten |= attribute->kind == CHECK_ATTRIBUTE_FLATTEN;
                 result.noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN;
-                result.versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES;
+                result.versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                                   attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
                 int32_t cpu = -1;
                 // What clang ignores with a warning isn't the function's attribute at all.
                 const PredefinesTargetAttribute kind = attribute->kind == CHECK_ATTRIBUTE_TARGET && attribute->text.length < UINT32_MAX ?
@@ -964,7 +965,7 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
                 uint32_t first = token;
                 uint8_t bits = role == PARSE_ROLE_LABEL ? BUSTER_CHECK_TARGET_FEATURE_LABEL :
                                role == PARSE_ROLE_DO ? BUSTER_CHECK_TARGET_FEATURE_DO : 0;
-                uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? input->control_owners[token] : BUSTER_CHECK_NONE;
+                uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? check_sparse_get(input->control_owners, token) : BUSTER_CHECK_NONE;
                 for (uint32_t child = emission->first_child[token]; child != BUSTER_CHECK_NONE; child = emission->next_child[child])
                 {
                     first = emission->extent_first[child] < first ? emission->extent_first[child] : first;

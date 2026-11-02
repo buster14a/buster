@@ -56,7 +56,7 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
     for (uint32_t token = first; valid && token < end; token += 1)
     {
         const uint8_t declaration_kind = input->declaration_kinds[token];
-        if (input->declarations[token] == token && input->declaration_bodies[token] == body &&
+        if (input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) == body &&
             declaration_kind != C_BINDING_ENUMERATOR && declaration_kind != C_BINDING_TAG_KIND)
         {
             // The range also contains member names, prototype parameters and declarations in nested
@@ -78,7 +78,7 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
             }
             found = true;
             valid = input->declaration_kinds[token] == C_BINDING_OBJECT && label &&
-                    input->initializer_begins[token] == input->initializer_ends[token];
+                    check_sparse_get(input->initializer_begins, token) == check_sparse_get(input->initializer_ends, token);
         }
     }
     return found && valid;
@@ -193,7 +193,7 @@ static uint32_t check_input_naked_parameter(CheckInputReader* reader, const Chec
         else if (parser->tree.roles[token] == PARSE_ROLE_OPERAND)
         {
             const uint32_t declaration = input->declarations[token];
-            if (declaration < body && input->declaration_bodies[declaration] == body &&
+            if (declaration < body && check_sparse_get(input->declaration_bodies, declaration) == body &&
                 input->declaration_kinds[declaration] == C_BINDING_OBJECT)
             {
                 result = token;
@@ -211,9 +211,19 @@ static void check_input_naked_finish(CheckInputReader* reader)
     CheckInputNakedDiagnostic diagnostic = { .position = BUSTER_CHECK_NONE };
     CheckInputMessage message = CHECK_INPUT_NAKED_STATEMENT;
     uint32_t statement = 0;
-    for (uint32_t body = 0; reader->naked_functions && !input->resource && body < reader->expression_limit && diagnostic.position == BUSTER_CHECK_NONE; body += 1)
+    // A naked function's non-ASM statement is clang's error after an earlier attribute error too (#839), so a
+    // multiversioning report lets this walk the parser's whole body; otherwise it stops at the reader's expression
+    // limit as before.
+    bool multiversion = false;
+    for (uint32_t report = 0; report < input->report_count; report += 1)
     {
-        const uint32_t declaration = input->body_declarations[body];
+        const CheckInputMessage kind = input->reports[report].message;
+        multiversion |= kind == CHECK_INPUT_MULTIVERSION_ATTRIBUTE || kind == CHECK_INPUT_MULTIVERSION_INCOMPATIBLE;
+    }
+    const uint32_t body_limit = multiversion ? parser->tokens.count : reader->expression_limit;
+    for (uint32_t body = 0; reader->naked_functions && !input->resource && body < body_limit && diagnostic.position == BUSTER_CHECK_NONE; body += 1)
+    {
+        const uint32_t declaration = check_sparse_get(input->body_declarations, body);
         if (parser->tree.roles[body] != PARSE_ROLE_OPEN_BODY || declaration == BUSTER_CHECK_NONE ||
             (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NAKED) == 0 ||
             (input->deferred_tokens != NULL && input->deferred_tokens[body] != 0))
@@ -227,7 +237,8 @@ static void check_input_naked_finish(CheckInputReader* reader)
             continue;
         }
         diagnostic.attribute = attribute->name_token;
-        for (uint32_t child = closing < check_input_expression_limit(reader, closing) ? reader->first_child[closing] : BUSTER_CHECK_NONE;
+        const uint32_t closing_limit = multiversion ? parser->tokens.count : check_input_expression_limit(reader, closing);
+        for (uint32_t child = closing < closing_limit ? reader->first_child[closing] : BUSTER_CHECK_NONE;
              child != BUSTER_CHECK_NONE && diagnostic.position == BUSTER_CHECK_NONE; child = reader->next_child[child])
         {
             const uint32_t first = check_input_first_token(reader, child);
@@ -247,7 +258,8 @@ static void check_input_naked_finish(CheckInputReader* reader)
         for (; statement < input->asm_count && input->asm_statements[statement].token < closing; statement += 1)
         {
             const CheckInputAsm* assembly = input->asm_statements + statement;
-            if (assembly->body == body && assembly->closing < check_input_expression_limit(reader, assembly->closing) && assembly->closing < diagnostic.position)
+            const uint32_t assembly_limit = multiversion ? parser->tokens.count : check_input_expression_limit(reader, assembly->closing);
+            if (assembly->body == body && assembly->closing < assembly_limit && assembly->closing < diagnostic.position)
             {
                 for (uint32_t i = 0; i < assembly->output_count + assembly->input_count; i += 1)
                 {
@@ -275,6 +287,8 @@ static void check_input_naked_finish(CheckInputReader* reader)
             if (input->report_count != before)
             {
                 input->reports[before].completion = diagnostic.position;
+                input->reports[before].note_token = diagnostic.attribute;
+                input->reports[before].note_kind = CHECK_INPUT_NOTE_ATTRIBUTE_HERE;
             }
         }
     }

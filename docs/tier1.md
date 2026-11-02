@@ -95,6 +95,26 @@ link set. Timings are pinned to CPU 2. Repeat frozen-input comparisons in
 alternating order across fresh processes; measure sustained vector execution
 and execution following lighter work. CI retains priority between runs.
 
+## Optimization flags and backend selection (#1132)
+
+**Tier 0 is the default regardless of `-O`.** The conventional Clang-compatible
+`-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz`, `-Og`, `-Ofast` and `-O` options
+currently configure preprocessing state (including `__OPTIMIZE__`,
+`__OPTIMIZE_SIZE__` and `__NO_INLINE__`), **not** backend optimization passes.
+In particular, `buster -O2 -c file.c` uses Tier 0, not the Tier 1 pipeline
+benchmarked against Clang `-O2`. Macro-dependent source/header paths can
+nonetheless produce different code between `-O0` and `-O2`.
+
+Use `buster --tier1 -O2 -c file.c` explicitly to request Tier 1; `--tier1`
+wins even with `-O0`, and a function unsupported by Tier 1 takes its
+documented Tier 0 fallback unless `--tier1-strict` forbids that fallback.
+`--tier1` currently rejects `-g` because its source-row debug information is
+not implemented. The driver deliberately does not map standard `-O` flags
+to Tier 1 until #138's correctness and compile-/run-time gates and #1116's
+code-quality gates qualify it for ordinary Release builds. The driver
+regression in `test-checker-driver` pins this selection policy; changing the
+mapping requires updating that test and re-evaluating these gates.
+
 ## The C driver's `--tier1`
 
 `./build/compiler --tier1 [options] file.c...`
@@ -222,8 +242,30 @@ definitions (#789): the frame's register save area, which the prologue fills
 from the argument registers, and the overflow area past the incoming stack
 arguments. A narrow call argument reaches Tier 1 as the `i32` the lowering
 extends it to by its class, and a narrow parameter as an `i32` it truncates (#141,
-the [IR guide](ir.md)'s "Typed-stream lowering"). Still refused: floating point,
-stack arguments, switches and aggregates by value.
+the [IR guide](ir.md)'s "Typed-stream lowering"). Arguments and parameters past
+the six registers (#141) go through the CFG consumer too: a call stores each
+argument in its slot of the outgoing area, from wherever its value is, and the
+entry loads each parameter from its incoming slot. Floating values (#141), `F32`
+and `F64`, go through the CFG consumer too, in the vector class's registers by
+SSE2's scalar forms: their arithmetic, comparisons, conversions, loads, stores,
+phis, parameters, arguments and results ([the selection guide](tier1-selection.md)'s
+"Floating values" and [the allocation guide](tier1-allocation.md)'s "The vector
+class's floating values"). So do by-value aggregates' ABI records (#789): a call
+passes each aggregate's bytes where its record says, in registers or in its
+stack slots, and stores an aggregate result into its object; a function stores
+each aggregate parameter's registers into a frame object at its entry, and
+returns an aggregate's parts or copies it through the hidden pointer (the
+selection guide's "By-value aggregates"). So does the dynamic stack (#141):
+variable-length arrays' and `alloca`'s allocations, and the stack's position
+saved and restored around their scopes, in a frame with a frame pointer whose
+places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
+from rsp around it (the selection guide's "The dynamic stack"). Still refused:
+long double and the 128-bit integers (`sqlite3.c`'s `sqlite3Multiply128` and
+`sqlite3Multiply160`), vectors, and the convention's rarer aggregate shapes (a
+part in a stack slot, a high or low eightbyte alone, a vector's or the x87's
+register). The IR's switches and selects of floating values are refused too,
+but the C driver's lowering makes neither: a `switch` comes as compares or a
+jump table, which Tier 1 takes, and `?:` as branches.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
@@ -244,7 +286,7 @@ slot carries values of several types stay in memory (single-type ones promote
 since #983); a frame
 object's address is a `lea` rather than part of its users' memory operands; the
 pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
-function, is Tier 0's (its switch). 80 of #142's programs, 40 per generator, gave
+function, was Tier 0's then (its switch). 80 of #142's programs, 40 per generator, gave
 66 passes at both tiers and 14 failures, all in clang's own steps, and 40 more by
 the scalar path alone 36 passes and 4 such failures. The default path's compile
 time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
@@ -277,7 +319,8 @@ its own broader branch subset and explicitly refuses unsupported allocations
 and phis.
 
 Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
-arguments and a void or matching scalar result. The native consumer preserves
+arguments (sixteen through the CFG consumer, those past the sixth on the stack:
+#141) and a void or matching scalar result. The native consumer preserves
 live caller registers, resolves argument cycles, aligns the stack and publishes
 ordinary symbolic CALL references. Independent hostile helpers test clobbers,
 return widths, memory effects and frame safety. Full builtin/source acceptance

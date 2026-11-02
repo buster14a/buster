@@ -49,6 +49,8 @@ typedef enum CheckTier1Cause
     CHECK_TIER1_CAUSE_ALLOCATION,
     CHECK_TIER1_CAUSE_CFG_ALLOCATION,
     CHECK_TIER1_CAUSE_FRAME,
+    // Tier1EmitOptions.certify's checker (#939): its Tier1CertError.
+    CHECK_TIER1_CAUSE_CERTIFICATE,
     CHECK_TIER1_CAUSE_COUNT,
 } CheckTier1Cause;
 
@@ -63,7 +65,8 @@ typedef enum CheckTier1Fallback
 // result that the selector's call boundary doesn't take (tier1_select_call_supported's predicates), so that a corpus's
 // refusals say which shape to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell
 // apart. A call has every kind it has, so the kinds' counts can sum past the calls'. Stack arguments are the arguments
-// past the boundary's six (BUSTER_TIER1_SELECT_CALL_ARGUMENTS), not every argument the ABI would pass on the stack.
+// past the boundary's limit (BUSTER_TIER1_SELECT_MAX_ARGUMENTS), not every argument the ABI passes on the stack, which
+// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's.
 typedef enum CheckTier1CallKind
 {
     CHECK_TIER1_CALL_INDIRECT,
@@ -127,7 +130,7 @@ struct CheckTier1Fault
 
 static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn" };
 static const char* const check_tier1_category_names[CHECK_TIER1_CATEGORY_COUNT] = { "unattempted", "compiled", "unsupported", "resource", "internal" };
-static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame" };
+static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame", "certificate" };
 
 static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Cause cause, uint32_t error, uint32_t instruction, uint32_t detail);
 

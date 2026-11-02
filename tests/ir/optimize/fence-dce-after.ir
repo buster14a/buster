@@ -1,0 +1,13 @@
+function (i64) -> i64 {
+  slot $0 size=8 align=8 type=i64 flags=0x01
+b0:
+  %0 = param.i64 0
+  %1 = stack_addr.ptr $0
+  %2 = store.void %1, %0 align=8
+  %3 = fence.void seq_cst
+  %4 = fence.void acquire signal
+  %5 = load.i64 %1 align=8
+  %6 = fence.void relaxed
+  %7 = fence.void release
+  %8 = ret.void %5
+}

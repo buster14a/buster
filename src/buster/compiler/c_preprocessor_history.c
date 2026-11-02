@@ -596,7 +596,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             pp_diagnostic_append(&diagnostic, "note: expanded from here\n");
         }
     }
-    if (note != 0 && !pp->fatal)
+    if (note != 0)
     {
         pp_diagnostic_place(pp, &diagnostic, note->location);
         if (note->macro != 0)

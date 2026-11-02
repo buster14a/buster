@@ -37,6 +37,8 @@ struct Tier1CfgSourceCorpus
 {
     Tier1CfgInput* problems;
     Tier1AllocationInput* intervals;
+    // Optional (benchmark-tier1-certificate's): each function's vector-path allocation, in the kept arena.
+    Tier1CfgAllocation* allocations;
     uint32_t count;
     uint32_t capacity;
     uint64_t files;
@@ -92,7 +94,7 @@ static Tier0BenchmarkReading tier1_cfg_source_run(uint32_t variant, const Tier1C
 static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const char* name, char** options, uint32_t option_count, Arena* lowered, Arena* table, Arena* kept, Arena* ir, Arena* output, Arena* scratch)
 {
     IrSourceFile file;
-    ir_source_prepare(&file, name, options, option_count, lowered, table, false);
+    ir_source_prepare(&file, name, options, option_count, lowered, table, false, false);
     bool valid = file.status == IR_SOURCE_PREPARED;
     if (!valid)
     {
@@ -128,6 +130,10 @@ static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const cha
             {
                 corpus->problems[corpus->count] = problem.input;
                 corpus->intervals[corpus->count] = results[0].intervals;
+                if (corpus->allocations != 0)
+                {
+                    corpus->allocations[corpus->count] = results[0];
+                }
                 corpus->count += 1;
                 corpus->entries += source->function->count;
                 corpus->instructions += problem.instructions;

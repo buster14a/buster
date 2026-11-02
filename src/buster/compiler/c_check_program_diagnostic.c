@@ -238,7 +238,7 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     {
         valid = input->token_count == parser->tokens.count && stream->count == input->graph.count && stream->status == CHECK_STATUS_OK &&
                 !input->resource && (input->report_count == 0 || input->diagnostic_graph) &&
-                (input->token_count == 0 || (input->token_nodes != 0 && input->control_owners != 0 && input->case_ranges != 0 &&
+                (input->token_count == 0 || (input->token_nodes != 0 && check_sparse_present(input->control_owners) && check_sparse_present(input->case_ranges) &&
                  parser->tokens.kinds != 0 && parser->tree.roles != 0 && parser->tree.parents != 0)) &&
                 (input->report_count == 0 || input->reports != 0) && (stream->report_count == 0 || stream->reports != 0) &&
                 (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != 0 && input->graph.ops != 0 && input->graph.tokens != 0 &&
@@ -313,7 +313,7 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
         const bool label = parser->tree.roles[token] == PARSE_ROLE_OPEN_CASE && end < cutoff && end < local && parser->tree.roles[end] == PARSE_ROLE_CLOSE_CASE;
         if (selection || label)
         {
-            const uint32_t owner = selection ? end : input->control_owners[end];
+            const uint32_t owner = selection ? end : check_sparse_get(input->control_owners, end);
             const uint32_t condition = owner < cutoff ? input->token_nodes[owner] : BUSTER_CHECK_NONE;
             uint32_t width = 0;
             bool sign = false;
@@ -329,13 +329,13 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
                     // statements hold one, as clang checks a switch's cases at its end (#1077); the switch's end, where
                     // its conflicts are published, must come before the unit's cutoff.
                     const uint32_t node = input->token_nodes[end];
-                    const uint32_t high = input->case_ranges[end] != BUSTER_CHECK_NONE ? input->case_ranges[end] : node;
+                    const uint32_t high = check_sparse_get(input->case_ranges, end) != BUSTER_CHECK_NONE ? check_sparse_get(input->case_ranges, end) : node;
                     const bool fallback = parser->tokens.kinds[token] == PARSE_KIND_DEFAULT;
                     const bool checked = fallback ? node == BUSTER_CHECK_NONE : node < stream->count && high < stream->count && complete[node] && complete[high];
                     if (checked)
                     {
                         CheckProgramCase item = { .type = check_stream_type(stream, condition), .token = end, .owner = owner,
-                                                  .fallback = fallback, .range = input->case_ranges[end] != BUSTER_CHECK_NONE };
+                                                  .fallback = fallback, .range = check_sparse_get(input->case_ranges, end) != BUSTER_CHECK_NONE };
                         if (!fallback && (!check_program_case_value(&program, node, item.type, &item.lower) ||
                             !check_program_case_value(&program, high, item.type, &item.upper)))
                         {

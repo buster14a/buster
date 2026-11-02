@@ -16,7 +16,9 @@ requirements. [Command index](README.md).
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
-  "The coded walk"); `c_check_binding.c` publishes each use's retained answer from those events
+  "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
+  an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
+  "The sparse output columns", #628); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
@@ -64,3 +66,80 @@ requirements. [Command index](README.md).
   records the actual contract and the remaining declaration/initializer,
   control-flow, corpus and downstream integration still needed
   for #133; this module does not establish whole-compiler semantic coverage.
+
+## Object and linkage options (#1124)
+
+The C driver refuses an effective `-fcommon`, `-ffunction-sections`,
+`-fdata-sections`, non-default `-fvisibility=hidden|protected|internal`, or
+`-fvisibility-ms-compat` when writing an object (`-c`, including `check -c`)
+or linking an executable. The diagnostic names the option:
+`error: unsupported code generation option '…'`. This is an explicit
+unsupported boundary, not implementation of these features. The refusal
+precedes input processing and output creation, including multi-file commands,
+and preserves an existing destination in both Tier 0 and Tier 1.
+
+Each family has independent last-option-wins state. `-fno-common`,
+`-fno-function-sections`, `-fno-data-sections` and `-fvisibility=default`
+retain the current output and cancel an earlier request in their own family.
+For visibility, the last of `-fvisibility=…` and `-fvisibility-ms-compat`
+decides, as clang's driver reads them: an earlier malformed value is ignored,
+a malformed last value keeps clang's `invalid value` diagnostic, and an
+effective `-fvisibility-ms-compat` (clang's hidden default) is refused by name.
+Option values consumed by another option (such as `-include -fcommon`) are
+filenames, not code-generation requests.
+
+Valid requests remain accepted for preprocessing, syntax checking, `check`,
+and typed/static dumps, which emit neither an object nor an executable.
+Explicit source visibility attributes and pragmas are unaffected. The real-driver
+regressions in `c_check_pic_driver_test.c`, included by `test-checker-driver`,
+cover these boundaries, both option orders, the effective visibility spelling,
+`-fvisibility-ms-compat`, scalar/default paths, both tiers, output preservation
+and the original two-unit tentative-definition example.
+
+## Unsupported hardening requests
+
+The semantic C driver refuses the option families `-ftrivial-auto-var-init`,
+`-ftrapv`, `-fzero-call-used-regs`, `-fsplit-stack` and `-mcmodel` by name
+(#1125). It does not yet implement the requested automatic initialization,
+overflow traps, return-register clearing, split-stack prologues or alternative
+code models. Family-prefix matching also refuses bare flags, empty or unknown
+values and auxiliary hardening options; unknown values never silently select a
+weaker default.
+
+Only the complete spellings `-ftrivial-auto-var-init=uninitialized`,
+`-fzero-call-used-regs=skip` and `-mcmodel=small` are admitted as the existing
+inactive/default behavior.
+
+`-fsanitize-coverage=` isn't one of these families: its features resolve as
+clang's do, after every option, a later `-fno-sanitize-coverage=` among them,
+and object emission and linking refuse what is left by name, as sanitizers
+below (#1138). Non-emitting commands keep its predefines. `-fsanitize-coverage=`
+and `-fsanitize-coverage=0` ask for nothing, a value clang doesn't know is
+clang's error, and the bare `-fsanitize-coverage`, which clang doesn't take, is
+refused by name. The auxiliary `-fsanitize-coverage-*` options (such as
+`-fsanitize-coverage-allowlist=` and the cc1-only `-fsanitize-coverage-type=`)
+are not covered by the "auxiliary hardening options" above: they reach the
+generic `-f` handling, which accepts them, and are left to the wider `-f`/`-m`
+audit. An active coverage request they refine is still refused where code is
+emitted. Negative flags retain their
+existing handling. Within these families, any unsupported request is an error
+even when a later option requests an inactive/default form; this is not
+Clang's last-option-wins policy. Unlike `-fstack-protector*` and
+`-fcf-protection=*`, which are resolved separately and do honor a later
+disabling spelling, a later inactive spelling cannot cancel an earlier request.
+The diagnostic retains the first unsupported spelling from this refusal table.
+
+Refusal happens before reading a translation unit or opening an output, for
+both tiers, the scalar and vector paths, `-c`, direct linking and the explicit
+`check` command. Syntax-only checks and typed/static dumps use the same refusal
+policy. Pure preprocessing (`-E`) remains a separate action and is not a promise
+of code-generation support. Option values such as `-include -ftrapv` remain
+filenames, not hardening requests.
+
+`c_check_hardening_driver_test.c`, included in `test-checker-driver --executable
+./build/compiler`, checks all six reported options, missing and existing output
+files, a missing source, option-looking include and output names, both tiers
+and paths, non-emitting actions, malformed/auxiliary forms and exact inactive
+defaults. This closes these option families, not the driver's entire unknown
+`-f`/`-m` acceptance policy; the wider allowlist audit and #1112 and #1123
+remain separate work. The object and linkage options of #1124 are above.

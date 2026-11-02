@@ -28,7 +28,8 @@ requirements. [Command index](README.md).
   and `--tier1-no-rematerialize` compiles them without rematerialization and
   `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure
-  outcomes](../../docs/tier1-outcomes.md)), `--id-order N` handing the unit's identifiers their
+  outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
+  optimization macros, not the tier; Tier 0 is the default), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
@@ -89,8 +90,9 @@ requirements. [Command index](README.md).
   reaches compiles there; a unit without `main.c` (a benchmark's) gets
   `static`. A command then runs in two units' copies of the code, so a home
   must share no static variable with its callers' units: `main.c`'s units share
-  one lane context (`lane.c`) and the x86 encoder's templates
-  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`), and `./build.sh check-call-graph`
+  one lane context (`lane.c`), the x86 encoder's templates
+  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`) and Tier 1's selection tables
+  (`tier1_select_burs.c`'s `BUSTER_TIER1_SHARED`), and `./build.sh check-call-graph`
   reports any variable a command reaches in two units ([Call graph check](call-graph.md#call-graph-check)). A
   function to home is a module's entry point that several units compile, coarse enough
   that a call from another unit costs nothing, which keeps its state in its
@@ -122,3 +124,16 @@ requirements. [Command index](README.md).
   No benchmark's timed code calls these tests.
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
+
+## Build-system integration (#1113)
+
+Dependency files (`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`),
+buffered standard input (`-`), the explicit `-static`/`-static-pie`/`-pie`
+link modes, stderr-only `-v`, and the common `-print-*` and numeric-version
+probes are handled by the driver. `c_dependency_driver.c` owns dependency
+collection, naming and publication; `c_driver_information.c` owns the
+information probes; `string8.h` is the bounded byte slice those modules share
+with the preprocessor. The [CC driver guide](../../docs/cc-driver.md) records
+the contract, publication guarantees and the remaining compatibility limits,
+and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
+executable invocations against Clang and GNU Make.

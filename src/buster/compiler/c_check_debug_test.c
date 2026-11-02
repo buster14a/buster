@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-check-debug [--seed N] [--programs N] [--cross-check] [--keep]: the C driver's source rows and DWARF (#395,
 // c_check_debug.c).
@@ -7,7 +8,8 @@
 // - Raw rows: check_debug_rows against check_debug_rows_scalar on random functions (their entries' first records
 //   ascending, with runs of entries that start no code, and each record's offset after the one before), of every entry
 //   count to 130 and larger ones, with each column ending at a PROT_NONE page: the same rows, their offsets ascending
-//   and each below the function's length.
+//   and each below the function's length. The same rows through the tier-neutral source-event protocol (#1056): every
+//   valid function's layout and events are accepted and resolve to the raw rows, and a malformed layout is rejected.
 // - Kept rows: check_debug_keep against check_debug_keep_scalar on random rows (the function's file, others and none,
 //   lines in runs, some past INT32_MAX, the body's start at one of them or none), of every count to 130 and larger,
 //   ending at PROT_NONE pages.
@@ -41,6 +43,7 @@
 //   line, into programs that run, whose DWARF llvm-dwarfdump and gdb read as they read the -g executable's.
 // - Unwind tables, with --cross-check: c_check_unwind_test.c's.
 
+#include "buster/compiler/test_paths.h"
 typedef struct CheckDebugTestTally CheckDebugTestTally;
 struct CheckDebugTestTally
 {
@@ -160,6 +163,31 @@ static void check_debug_test_rows(CheckDebugTestTally* tally)
             }
             check_debug_test_expect(tally, meant, "the raw rows are the prologue's, the entries' that start code and the epilogue's, ascending", detail);
             rows_checked += scalar;
+            EmissionSourceEvent* events = calloc((uint64_t)entries + 1, sizeof(EmissionSourceEvent));
+            EmissionSourceRow* resolved = calloc((uint64_t)entries + 1, sizeof(EmissionSourceRow));
+            if (events != 0 && resolved != 0)
+            {
+                const bool accepted = check_debug_rows_protocol(entry_records, tokens, entries, offsets, records, length, declaration, closing, vector_offsets,
+                                                                vector_tokens, vector, false, events, resolved);
+                check_debug_test_expect(tally, accepted, "the source metadata protocol accepts the raw rows", detail);
+                uint32_t* bad_offsets = records >= 2 ? calloc((uint64_t)records + 1, sizeof(uint32_t)) : 0;
+                if (bad_offsets != 0)
+                {
+                    memcpy(bad_offsets, offsets, ((uint64_t)records + 1) * sizeof(uint32_t));
+                    bad_offsets[0] = 1;
+                    bad_offsets[1] = 0;
+                    const bool rejected = !check_debug_rows_protocol(entry_records, tokens, entries, bad_offsets, records, length, declaration, closing,
+                                                                     vector_offsets, vector_tokens, vector, false, events, resolved);
+                    check_debug_test_expect(tally, rejected, "the source metadata protocol rejects a malformed layout", detail);
+                    free(bad_offsets);
+                }
+            }
+            else
+            {
+                check_debug_test_expect(tally, false, "the source metadata protocol's test room", detail);
+            }
+            free(resolved);
+            free(events);
         }
         free(vector_tokens);
         free(vector_offsets);
@@ -1373,8 +1401,8 @@ static int run_check_debug_tests(int argc, char** argv)
     check_debug_test_expect(&tally, options, "options: [--seed N] [--programs N] [--cross-check] [--keep]", 0);
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     char directory[PATH_MAX];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-debug-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-debug-XXXXXX", temporary);
     const bool made = options && arena.base != 0 && mkdtemp(directory) != 0;
     check_debug_test_expect(&tally, made, "make the test's directory", directory);
     if (made)

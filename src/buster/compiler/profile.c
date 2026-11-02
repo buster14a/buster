@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The profiling tools: what the lexer's and the encoder's optimization rounds ran around perf and objdump on the 9700X,
 // as commands of this executable. docs/profiling.md has the method they serve and the perf and objdump commands that
@@ -56,6 +57,7 @@
 // spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
 // profile_time_compare, profile_time_make_copies, profile_time_runs), and the commands (run_profile_command).
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -2053,7 +2055,7 @@ static bool profile_time_compare(Arena* arena, ProfileReport* report, const Prof
 // copies' paths, executable by executable, or null after removing what it made.
 static char** profile_time_make_copies(Arena* arena, const ProfileTimeRuns* t, char* directory, uint64_t directory_bytes)
 {
-    const char* base = t->directory != 0 ? t->directory : getenv("TMPDIR");
+    const char* base = t->directory != 0 ? t->directory : oracle_temporary_directory();
     base = base != 0 && base[0] != 0 ? base : "/tmp";
     const int written = snprintf(directory, directory_bytes, "%s/buster-time-runs-XXXXXX", base);
     bool made = written > 0 && (uint64_t)written < directory_bytes && mkdtemp(directory) != 0;

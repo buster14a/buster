@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // #134's acceptance on real and generated C (test-ssa-source):
 //
-//   build/compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--keep]
-//                                  [preprocessor options] [file...]
+//   build/compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes]
+//                                  [--keep] [preprocessor options] [file...]
 //   build/compiler test-ssa-source --self-test [--keep]
 //
 // Each file's functions, as -c compiles them (ir_source_prepare, test-ir-source's preparation, with the program kept),
@@ -23,12 +24,17 @@
 // breaks and continues at depth): each is compiled by clang -O0 (--clang's, through the oracle cache) and run, and its
 // output and status are what each of its IR forms must give; then it is checked as a file is.
 //
+// --lifetimes asks each program for its blocks' objects' lifetimes, as the C driver's --tier1 does (#177): the lowered IR
+// has their markers, and promotion makes a local undefined at each start of its block's (#141), which the form with
+// every local in memory, whose markers read and write nothing, must agree with on every program C defines.
+//
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
 // with its functions, each path's phis and its runs, a line per failure, and the totals; the exit status is 1 on any
 // failure. It is a test outside the compile path, with no vector path of its own. Include after ir_source_test.c,
 // ssa_ir.c, interpreter_link.c, ir_interpreter.c, oracle_cache.c, c_testsuite.c (whose processes, files and directory
 // removal it takes) and ssa_source_generate.c.
 
+#include "buster/compiler/test_paths.h"
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -43,8 +49,14 @@
 #define BUSTER_SSA_SOURCE_FORMS 3
 // A run's time limit by default, in seconds, and its interpreter's steps, which bound a run first: c-testsuite's 8
 // queens (00040.c), 0.05 s natively at -O0, takes 1.35 billion steps with every local in memory, 27 s on a Zen 4
-// laptop, and a sanitizer's build (CI's) is several times slower. And a generated program's text's room.
+// laptop. A detector's build is many times slower: MSan's, which tracks origins, took from 226 s to past 600 s for that
+// run on CI's hosted runners, whose speed varies, so a detector's build waits three times as long. And a generated
+// program's text's room.
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define BUSTER_SSA_SOURCE_TIMEOUT 1800
+#else
 #define BUSTER_SSA_SOURCE_TIMEOUT 600
+#endif
 #define BUSTER_SSA_SOURCE_STEPS (UINT64_C(1) << 32)
 #define BUSTER_SSA_SOURCE_TEXT (UINT64_C(1) << 20)
 
@@ -93,6 +105,8 @@ struct SsaSourceLimits
 {
     uint32_t timeout;
     uint64_t steps;
+    // The programs' lifetimes (--lifetimes, ir_source_prepare's `lifetimes`).
+    bool lifetimes;
 };
 
 // What a run of a form gave: its process, its wait status (-1 if it couldn't be waited for), its output (malloc's), and
@@ -603,7 +617,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
                             const char* work, const SsaSourceLimits* limits, bool keep, int* statuses)
 {
     IrSourceFile file;
-    ir_source_prepare(&file, name, options, option_count, &arenas->lowered, &arenas->tables, true);
+    ir_source_prepare(&file, name, options, option_count, &arenas->lowered, &arenas->tables, true, limits->lifetimes);
     if (file.status != IR_SOURCE_PREPARED)
     {
         totals->left_out += file.status == IR_SOURCE_LEFT_OUT;
@@ -929,6 +943,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     uint64_t steps = BUSTER_SSA_SOURCE_STEPS;
     const char* clang = "clang";
     bool keep = false;
+    bool lifetimes = false;
     bool self_test = false;
     bool valid = options != 0 && files != 0;
     for (int i = 0; valid && i < count; i += 1)
@@ -962,6 +977,10 @@ static int run_ssa_source_tests(int count, char** arguments)
         {
             keep = true;
         }
+        else if (strcmp(arguments[i], "--lifetimes") == 0)
+        {
+            lifetimes = true;
+        }
         else if (arguments[i][0] != '-')
         {
             files[file_count++] = arguments[i];
@@ -989,12 +1008,12 @@ static int run_ssa_source_tests(int count, char** arguments)
         valid = valid && arenas.forms[form].base != 0;
     }
     valid = valid && arenas.lowered.base != 0 && arenas.tables.base != 0 && arenas.scratch.base != 0;
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char work[PATH_MAX];
     snprintf(work, sizeof(work), "%s/ssa-source-XXXXXX", temporary != 0 && temporary[0] == '/' ? temporary : "/tmp");
     valid = valid && mkdtemp(work) != 0;
     const bool epoch = valid && oracle_epoch_begin();
-    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps };
+    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps, .lifetimes = lifetimes };
     SsaSourceTotals totals = { 0 };
     const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work);
     for (uint32_t i = 0; valid && i < file_count; i += 1)
@@ -1026,7 +1045,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--keep] [preprocessor options] "
+        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes] [--keep] [preprocessor options] "
                         "[file...]\n       compiler test-ssa-source --self-test [--keep]\n");
     }
     oracle_epoch_end(epoch);

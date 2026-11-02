@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 // Original source fixtures for #1077: an undeclared identifier suppresses the diagnostics of the operators, calls and
 // statements that contain it, as clang's RecoveryExpr does, and of nothing else: the operands beside it, before it or
 // after it, and the statements after it, keep theirs. Each fixture is a translation unit of its own (the driver gives
@@ -9,6 +10,7 @@
 // clang's `invalid operands to binary expression`), which #1077 leaves. Clang's lines must also be the fixture's, so
 // that a fixture keeps testing what it says. Include after c_check_x86_diagnostic_test.c, whose helpers it uses.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_CHECK_UNDECLARED_TEXT 4096u
 
 // The diagnostics `text` gives for the file at `source`: each error and warning as `line:column: severity: message`,
@@ -248,8 +250,8 @@ static __attribute__((noinline)) void check_test_undeclared(CheckTest* test, con
           "2:22: error: -\n2:27: error: use of undeclared identifier 'undeclared'\n"
           "3:22: error: -\n", true },
     };
-    const char* temporary = getenv("TMPDIR");
-    const char* base = temporary != NULL && temporary[0] != 0 ? temporary : "/tmp";
+    const char* temporary = oracle_temporary_directory();
+    const char* base = temporary;
     // The directory and its files in one allocation each: a TMPDIR of any length, never a silently truncated template.
     const size_t room = strlen(base) + sizeof("/buster-undeclared-XXXXXX");
     char* directory = malloc(room);

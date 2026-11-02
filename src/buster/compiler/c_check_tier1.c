@@ -24,8 +24,9 @@ static const CheckTier1Cause check_tier1_emission_causes[] = {
     CHECK_TIER1_CAUSE_ALLOCATION,
     CHECK_TIER1_CAUSE_CFG_ALLOCATION,
     CHECK_TIER1_CAUSE_FRAME,
+    CHECK_TIER1_CAUSE_CERTIFICATE,
 };
-_Static_assert(BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_FRAME + 1, "every Tier1EmitCause has a CheckTier1Cause");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_CERTIFICATE + 1, "every Tier1EmitCause has a CheckTier1Cause");
 
 // The test control's raw emitter handoff, from the outcome's cause domain. A forced nested failure uses the same
 // outcome classification and wrapper path as a real Tier1EmitDiagnostic.
@@ -38,6 +39,7 @@ static Tier1EmitCause check_tier1_fault_emission_cause(CheckTier1Cause cause)
         case CHECK_TIER1_CAUSE_ALLOCATION: return TIER1_EMIT_CAUSE_ALLOCATION;
         case CHECK_TIER1_CAUSE_CFG_ALLOCATION: return TIER1_EMIT_CAUSE_CFG_ALLOCATION;
         case CHECK_TIER1_CAUSE_FRAME: return TIER1_EMIT_CAUSE_FRAME;
+        case CHECK_TIER1_CAUSE_CERTIFICATE: return TIER1_EMIT_CAUSE_CERTIFICATE;
         default: return TIER1_EMIT_CAUSE_NONE;
     }
 }
@@ -80,6 +82,10 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
         case CHECK_TIER1_CAUSE_FRAME:
             category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
+        case CHECK_TIER1_CAUSE_CERTIFICATE:
+            // A refused certificate is an allocation the allocator got wrong (#939): internal, never Tier 0's to hide.
+            category = error == TIER1_CERT_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
         default:
             break;
     }
@@ -111,6 +117,8 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
 // The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116): each shape of it
 // that the selector's call boundary doesn't take, by the selector's own predicates (tier1_select_call_supported's), so
 // that the report follows the boundary as it grows; and whether it is indirect or variadic, which the boundary takes.
+// An ABI record the boundary refuses, the call's or an argument's, is `abi-record`; an argument without one is named by
+// its type.
 static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
 {
     const bool call = node < ir->instruction_count && (ir->op[node] == IR_CALL || ir->op[node] == IR_CALL_INDIRECT) && ir->b[node] < ir->call_count;
@@ -121,13 +129,15 @@ static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
         const uint32_t result = ir->type[node];
         kinds |= (ir->op[node] == IR_CALL_INDIRECT ? 1u : 0) << CHECK_TIER1_CALL_INDIRECT;
         kinds |= (descriptor->variadic ? 1u : 0) << CHECK_TIER1_CALL_VARIADIC;
-        kinds |= (descriptor->abi != 0 ? 1u : 0) << CHECK_TIER1_CALL_ABI_RECORD;
-        kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_CALL_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
+        kinds |= (tier1_select_call_abi(ir, node, descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
+        kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_MAX_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
         kinds |= (tier1_select_call_arity(descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ARGUMENT_COUNT;
-        for (uint32_t argument = 0; argument < descriptor->argument_count && descriptor->type_first + argument < ir->call_type_count; argument += 1)
+        for (uint32_t argument = 0; argument < descriptor->argument_count && argument < BUSTER_TIER1_SELECT_MAX_ARGUMENTS; argument += 1)
         {
-            const uint32_t type = ir->call_types[descriptor->type_first + argument];
-            kinds |= tier1_select_call_argument(type) ? 0 : type == IR_F32 || type == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT : type == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT :
+            const uint32_t type = tier1_select_argument_type(ir, descriptor, argument);
+            const IrPassed* record = tier1_select_argument_record(ir, descriptor, argument);
+            kinds |= record != 0 ? (tier1_select_record_supported(record, type) ? 0 : 1u << CHECK_TIER1_CALL_ABI_RECORD) : tier1_select_call_argument(type) ? 0 :
+                     type == IR_F32 || type == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT : type == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT :
                      type == IR_I1 || type == IR_I8 || type == IR_I16 ? 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT : 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT;
         }
         kinds |= tier1_select_call_result(result) ? 0 : result == IR_F32 || result == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_RESULT : result == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT :
@@ -248,7 +258,7 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 }
 
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault)
+                                           bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault)
 {
     *code = (Tier0Code){ 0 };
     *counts = (CheckTier1Counts){ 0 };
@@ -353,6 +363,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
+            .certify = certify,
         };
         uint32_t node = BUSTER_IR_NONE;
         Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
