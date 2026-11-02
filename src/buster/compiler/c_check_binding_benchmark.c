@@ -538,6 +538,10 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
     const bool classes_timed = only == CHECK_INPUT_BINDING_MODES && after == 0 && !pipeline;
     static uint64_t class_ticks[BUSTER_CHECK_EXPRESSION_CODES][BUSTER_CHECK_SOURCE_MAX_PASSES];
     static uint64_t class_overheads[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    // And the graph by passes' numbering of the same runs (PPOptions.expression_numbering): its ticks a pass, the nodes
+    // it numbered and checked, and those that differ from the walk's.
+    static uint64_t numbering_ticks[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint32_t numbering[3] = { 0 };
     uint32_t class_tokens[BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     uint32_t class_left[BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     uint64_t timed_ticks = 0;
@@ -547,11 +551,17 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
         CheckInput input;
         uint64_t elapsed = 0;
         pp.options.expression_timing = true;
+        pp.options.expression_numbering = true;
         const uint64_t start = __rdtsc();
         valid = check_binding_benchmark_run(&benchmark, CHECK_INPUT_BINDINGS_DIRECT, &input, &elapsed);
         timed_ticks += __rdtsc() - start;
         timed_ns += elapsed;
         pp.options.expression_timing = false;
+        pp.options.expression_numbering = false;
+        numbering_ticks[pass] = input.expression_numbering_ticks;
+        numbering[0] = input.expression_numbering_nodes;
+        numbering[1] = input.expression_numbering_checked;
+        numbering[2] = input.expression_numbering_mismatches;
         for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
         {
             class_ticks[code][pass] = input.expression_class_ticks[code];
@@ -685,17 +695,27 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
                 class_ns[code] = ticks > 0 ? ticks / ticks_per_ns : 0;
                 total += class_ns[code];
             }
-            printf("expression-classes: mode=direct passes=%u tokens=%" PRIu64 " ns=%.0f ns_per_token=%.3f tsc_ticks_per_ns=%.4f timing_ticks_per_token=%.1f\n",
-                   samples, reached, total, total / (double)reached, ticks_per_ns, overhead);
+            // The timing's own cost a token is the table's resolution: a class whose residual a token is below it, or a
+            // run whose residual is below its whole timing's, is no measurement.
+            const double resolution = overhead / ticks_per_ns;
+            const bool resolved = total >= resolution * (double)reached;
+            printf("expression-classes: mode=direct passes=%u tokens=%" PRIu64 " ns=%.0f ns_per_token=%.3f tsc_ticks_per_ns=%.4f timing_ticks_per_token=%.1f"
+                   " resolution_ns_per_token=%.3f resolved=%s warm=yes\n",
+                   samples, reached, total, total / (double)reached, ticks_per_ns, overhead, resolution, resolved ? "yes" : "no");
             for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
             {
                 if (class_tokens[code] != 0)
                 {
                     const char* name = check_input_expression_code_names[code] != NULL ? check_input_expression_code_names[code] : "other";
-                    printf("expression-class: class=%s tokens=%u left=%u ns=%.0f ns_per_token=%.3f share=%.1f%%\n", name, class_tokens[code],
-                           class_left[code], class_ns[code], class_ns[code] / (double)class_tokens[code], total > 0 ? class_ns[code] * 100.0 / total : 0.0);
+                    const double per_token = class_ns[code] / (double)class_tokens[code];
+                    printf("expression-class: class=%s tokens=%u left=%u ns=%.0f ns_per_token=%.3f share=%.1f%% resolved=%s\n", name, class_tokens[code],
+                           class_left[code], class_ns[code], per_token, total > 0 ? class_ns[code] * 100.0 / total : 0.0,
+                           resolved && per_token >= resolution ? "yes" : "no");
                 }
             }
+            const double numbering_ns = (double)check_source_median(numbering_ticks, samples) / ticks_per_ns;
+            printf("expression-numbering: passes=%u nodes=%u checked=%u mismatches=%u ns=%.0f ns_per_node=%.3f\n", samples, numbering[0], numbering[1],
+                   numbering[2], numbering_ns, numbering[0] != 0 ? numbering_ns / (double)numbering[0] : 0.0);
         }
     }
     if (counter >= 0)

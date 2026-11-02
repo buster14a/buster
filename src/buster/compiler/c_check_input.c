@@ -508,6 +508,13 @@ struct CheckInput
     // report takes off every token's as the timing's own cost (benchmark-checker-bindings).
     uint64_t expression_class_ticks[BUSTER_CHECK_EXPRESSION_CODES];
     uint64_t expression_class_overhead;
+    // Under PPOptions.expression_numbering alone, the graph by passes' numbering of the coded walk's tokens
+    // (check_input_expression_numbering): its ticks, the nodes it numbered, those it checked against the walk's graph,
+    // and those whose token or first operand differ from the walk's.
+    uint64_t expression_numbering_ticks;
+    uint32_t expression_numbering_nodes;
+    uint32_t expression_numbering_checked;
+    uint32_t expression_numbering_mismatches;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -1119,6 +1126,9 @@ struct CheckInputReader
     // quadratic in its elements. The scalar reader walks the chains, as the twin of these counts.
     uint32_t* value_counts;
     uint32_t* value_next;
+    // Under PPOptions.expression_numbering alone, a byte a token: 1 where the coded walk's class action left it to the
+    // walk's visit (check_input_expression_numbering's barriers); null otherwise.
+    uint8_t* expression_declined;
     uint32_t* scope_marks;
     uint32_t* scope_ends;
     uint32_t* scope_openings;

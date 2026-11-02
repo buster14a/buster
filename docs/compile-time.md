@@ -1107,12 +1107,14 @@ report, on standard error after the command, a row per stage.
   - `prepare`, the coded walk's chunks' compaction and identifiers' leaves;
   - `actions`, the classes' own actions in the coded walk;
   - `visits`, the walk's own visits (`check_input_expression_visit`): in a
-    coded unit those of the tokens the classes' actions leave, and in a unit the
-    coded walk leaves to the visit throughout, or on the scalar path, all of the
-    walk past its classes.
+    coded unit those of the tokens the classes' actions leave, in a unit the
+    coded walk leaves to the visit throughout all of its chunks' actions, and
+    on the scalar path all of the walk past its classes.
 
   `prepare` and `actions` are the coded walk's: on the scalar path (`--scalar`)
-  they are `0.000`, which is no measurement. Then comes
+  both are `0.000`, which is no measurement, and in a unit the coded walk leaves
+  to the visit `actions` is, while `prepare` is its chunks' compaction. Then
+  comes
   `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the process's
   `getrusage(RUSAGE_SELF)` counters across the walk, low-confidence as the
   stages' are. They count every thread's, which in a one-lane compile (as the
@@ -1131,9 +1133,11 @@ report, on standard error after the command, a row per stage.
 - **The walk's clock is always on.** The walk's row and parts are read with or
   without the option: two TSC reads a unit for the walk, two for the classes'
   pass, three a chunk of 1,024 positions, two a visit in a coded unit, and two
-  `getrusage` calls a unit. On sqlite3.c (710,061 tokens: 694 chunks and
-  7,800 visits) that is some 18,000 TSC reads and two system calls, well under
-  a millisecond against a walk of about 30 ms on a 4-CPU VM; reading them
+  `getrusage` calls a unit. On sqlite 3.53.2's amalgamation with the 9700X
+  step's `-D` options (710,061 tokens: 694 chunks and 7,800 visits) that is
+  some 18,000 TSC reads and two system calls, well under a millisecond against
+  a walk of about 30 ms on a 4-CPU VM; the frozen corpus's `sqlite3.c` has
+  6,639 visits, about 15,000 reads. Reading them
   only under the option would take a flag through the reader for less than the
   run-to-run noise.
 - **Off by default.** Without the option the driver reads no clock, and each lap

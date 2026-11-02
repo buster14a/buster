@@ -591,15 +591,17 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
 
 // A number or a character operand, the chunk's literal `at`: its literal's VALUE node, or the report of an invalid one; in
 // a unit with overload tables, its token's head is its leaf's, none. A plain decimal's value the chunk's literals hold
-// (CheckInputLiterals); every other literal is parsed here. A function's name is the walk's, as its tests take it after
+// (CheckInputLiterals); every other literal is parsed here, and every literal where `literals` is null
+// (PPOptions.expression_parsed_literals). A function's name is the walk's, as its tests take it after
 // the literals.
 static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token, const CheckInputLiterals* literals, uint32_t at)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
     if (acted)
     {
-        CheckLiteral literal = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
-        if (literals->values[at] == BUSTER_CHECK_NONE)
+        const uint32_t plain = literals != NULL ? literals->values[at] : BUSTER_CHECK_NONE;
+        CheckLiteral literal = { .type = BUSTER_TYPE_INT, .integer = plain, .valid = true };
+        if (plain == BUSTER_CHECK_NONE)
         {
             check_input_literal(reader, token, &literal);
         }
@@ -896,7 +898,7 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
 // features every class leaves to the walk), else and where the class's action doesn't take it, the walk's visit. A
 // class's action that leaves the token has written only its first value, NONE, and its children's chains (value_next),
 // both of which the walk's visit writes again as they were. In a coded unit, the visit's ticks are added to `*visited`
-// (BUSTER_CHECK_EXPRESSION_PART_VISITS); in another, the caller times its whole chunk as visits.
+// (BUSTER_CHECK_EXPRESSION_PART_VISITS) unless it is null; in another, the caller times its whole chunk as visits.
 static void check_input_expression_coded(CheckInputReader* reader, uint32_t token, uint8_t classes, bool coded, const CheckInputIdentifiers* identifiers,
                                          uint32_t* identifier, const CheckInputLiterals* literals, uint32_t* literal, uint64_t* visited)
 {
@@ -981,9 +983,163 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
     if (!acted)
     {
         reader->output->expression_left[code] += coded;
-        const uint64_t start = coded ? __rdtsc() : 0;
+        if (reader->expression_declined != NULL)
+        {
+            reader->expression_declined[token] = 1;
+        }
+        const bool clocked = coded && visited != NULL;
+        const uint64_t start = clocked ? __rdtsc() : 0;
         check_input_expression_visit(reader, token, classes);
-        *visited += coded ? __rdtsc() - start : 0;
+        if (clocked)
+        {
+            *visited += __rdtsc() - start;
+        }
+    }
+}
+
+// Whether `token` passes its children's values on to its parent in the graph by passes' numbering: a LIST, a GROUP or a
+// SEPARATOR the walk's visit didn't take.
+static bool check_input_numbering_passes(const CheckInputReader* reader, uint32_t token)
+{
+    const uint32_t code = (reader->visits[token] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+    return (code == CHECK_INPUT_CODE_LIST || code == CHECK_INPUT_CODE_GROUP || code == CHECK_INPUT_CODE_SEPARATOR) && reader->expression_declined[token] == 0;
+}
+
+// Appends node `value` to the list of `consumer`'s values in the graph by passes' numbering.
+static void check_input_numbering_append(uint32_t* first, uint32_t* last, uint32_t* counts, uint32_t* next, uint32_t consumer, uint32_t value)
+{
+    if (counts[consumer] != 0)
+    {
+        next[last[consumer]] = value;
+    }
+    else
+    {
+        first[consumer] = value;
+    }
+    last[consumer] = value;
+    next[value] = BUSTER_CHECK_NONE;
+    counts[consumer] += 1;
+}
+
+// The graph by passes' numbering, measured (#1038's stages 2 and 4, under PPOptions.expression_numbering): after the coded
+// walk, its acting tokens numbered again in postorder from `base` (the graph's count before the walk), as such a pass
+// would number them before writing any node. Each value goes to its consumer's list: the nearest ancestor that doesn't pass
+// values on (check_input_numbering_passes). A token the walk's visit took (the scalar class, and those their classes'
+// actions left, CheckInputReader.expression_declined) is a barrier: it takes the walk's count of nodes at it and the walk's
+// chain of its values. A terminator makes a discard a value of its list; an identifier, a literal or a string a node where
+// the walk made one; a return one where it has a value; and every other class one, whose first operand is its list's
+// first. A condition's and a return's nodes are no values. The numbering, the chunks compacted again, is timed as written
+// plainly (CheckInput.expression_numbering_ticks), and each node it numbers is checked against the walk's: its token, and
+// but for a VALUE its first operand. The caller pops `tokens` and `classes`' scratch.
+static void check_input_expression_numbering(CheckInputReader* reader, uint32_t base, uint32_t* tokens, uint32_t* classes)
+{
+    CheckInput* input = reader->output;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = reader->parser->tokens.count;
+    const uint32_t* parents = reader->parser->tree.parents;
+    const uint32_t nodes = graph->count;
+    const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+    Arena* scratch = reader->scratch;
+    // Per token: its list's first and last values and their count, and the nodes the walk made at it. Per node: the next
+    // value of its list, and the token and first operand the numbering gives it.
+    uint32_t* first = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* last = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* counts = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* made = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* next = arena_push_array(scratch, (uint64_t)nodes + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* numbered = arena_push_array(scratch, (uint64_t)nodes + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* operands = arena_push_array(scratch, (uint64_t)nodes + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    if (first != NULL && last != NULL && counts != NULL && made != NULL && next != NULL && numbered != NULL && operands != NULL)
+    {
+        memset(counts, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(made, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(numbered, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
+        for (uint32_t n = base; n < nodes; n += 1)
+        {
+            made[graph->tokens[n] < count ? graph->tokens[n] : count] += 1;
+        }
+        const uint64_t start = __rdtsc();
+        uint32_t id = base;
+        for (uint32_t chunk = 0; chunk < count; chunk += BUSTER_CHECK_EXPRESSION_CHUNK)
+        {
+            const uint32_t end = count - chunk < BUSTER_CHECK_EXPRESSION_CHUNK ? count : chunk + BUSTER_CHECK_EXPRESSION_CHUNK;
+            const uint32_t acting = check_input_expression_compact(reader, chunk, end, tokens, classes, dropped, false);
+            for (uint32_t i = 0; i < acting; i += 1)
+            {
+                const uint32_t token = tokens[i];
+                const uint32_t code = (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+                const bool barrier = code == CHECK_INPUT_CODE_SCALAR || reader->expression_declined[token] != 0;
+                if (barrier || !check_input_numbering_passes(reader, token))
+                {
+                    uint32_t consumer = parents[token];
+                    while (consumer < count && check_input_numbering_passes(reader, consumer))
+                    {
+                        consumer = parents[consumer];
+                    }
+                    uint32_t value = BUSTER_CHECK_NONE;
+                    uint32_t chain = BUSTER_CHECK_NONE;
+                    uint32_t chained = 0;
+                    if (barrier)
+                    {
+                        id += made[token];
+                        chain = reader->first_value[token];
+                        chained = reader->value_counts[token];
+                    }
+                    else if (code == CHECK_INPUT_CODE_TERMINATOR)
+                    {
+                        uint32_t operand = first[token];
+                        for (uint32_t k = 0; k < counts[token]; k += 1)
+                        {
+                            numbered[id < nodes ? id : nodes] = token;
+                            operands[id < nodes ? id : nodes] = operand;
+                            id += 1;
+                            operand = next[operand];
+                        }
+                    }
+                    else if (code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_STRING)
+                    {
+                        if (input->token_nodes[token] != BUSTER_CHECK_NONE)
+                        {
+                            numbered[id < nodes ? id : nodes] = token;
+                            operands[id < nodes ? id : nodes] = BUSTER_CHECK_NONE;
+                            value = id;
+                            id += 1;
+                        }
+                    }
+                    else if (code != CHECK_INPUT_CODE_RETURN || counts[token] != 0)
+                    {
+                        numbered[id < nodes ? id : nodes] = token;
+                        operands[id < nodes ? id : nodes] = counts[token] != 0 ? first[token] : BUSTER_CHECK_NONE;
+                        value = code == CHECK_INPUT_CODE_CONDITION || code == CHECK_INPUT_CODE_RETURN ? BUSTER_CHECK_NONE : id;
+                        id += 1;
+                    }
+                    if (consumer < count && value < nodes)
+                    {
+                        check_input_numbering_append(first, last, counts, next, consumer, value);
+                    }
+                    for (uint32_t k = 0; consumer < count && k < chained && chain < nodes; k += 1)
+                    {
+                        const uint32_t after = reader->value_next[chain];
+                        check_input_numbering_append(first, last, counts, next, consumer, chain);
+                        chain = after;
+                    }
+                }
+            }
+        }
+        input->expression_numbering_ticks = __rdtsc() - start;
+        input->expression_numbering_nodes = id - base;
+        uint32_t checked = 0;
+        uint32_t mismatches = id != nodes;
+        for (uint32_t n = base; n < nodes && n < id; n += 1)
+        {
+            if (numbered[n] != BUSTER_CHECK_NONE)
+            {
+                checked += 1;
+                mismatches += graph->tokens[n] != numbered[n] || (graph->ops[n] != CHECK_OP_VALUE && graph->operand0[n] != operands[n]);
+            }
+        }
+        input->expression_numbering_checked = checked;
+        input->expression_numbering_mismatches = mismatches;
     }
 }
 
@@ -1004,6 +1160,18 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
     CheckInputLiterals literals;
+    // Without the literals' pass (PPOptions.expression_parsed_literals), every literal's action parses it.
+    const bool parsed = reader->pp->options.expression_parsed_literals;
+    const CheckInputLiterals* read = parsed ? NULL : &literals;
+    // The graph's nodes before the walk, from which the numbering's check counts (PPOptions.expression_numbering), and the
+    // tokens the classes' actions leave, which it takes as the walk's visits.
+    const uint32_t base = reader->output->graph.count;
+    const uint64_t scratch_mark = reader->scratch->length;
+    reader->expression_declined = coded && reader->pp->options.expression_numbering ? arena_push_array(reader->scratch, (uint64_t)count + 1, 1, 1) : NULL;
+    if (reader->expression_declined != NULL)
+    {
+        memset(reader->expression_declined, 0, (uint64_t)count + 1);
+    }
     // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
     // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms
     // that a chunk's run of one class doesn't make a chain of: those the classes' actions acted at are the rest of the
@@ -1022,7 +1190,10 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         if (coded)
         {
             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
-            check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
+            if (!parsed)
+            {
+                check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
+            }
         }
         const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
@@ -1032,16 +1203,17 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         {
             for (; i < acting && !reader->output->resource; i += 1)
             {
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, read, &literal, &visited);
             }
         }
         else
         {
-            // Each token's action timed by its class, and a pair of reads after it, whose ticks are the timing's own.
+            // Each token's action timed by its class, and a pair of reads after it, whose ticks are the timing's own. The
+            // visits aren't timed apart: their reads would be in their classes' ticks, which only these runs pay.
             for (; i < acting && !reader->output->resource; i += 1)
             {
                 const uint64_t before = __rdtsc();
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, read, &literal, NULL);
                 const uint64_t after = __rdtsc();
                 reader->output->expression_class_ticks[(classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += after - before;
                 reader->output->expression_class_overhead += __rdtsc() - after;
@@ -1065,6 +1237,12 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         const uint32_t tokens_reached = reached[0][code] + reached[1][code] + reached[2][code] + reached[3][code];
         reader->output->expression_acted[code] = tokens_reached - reader->output->expression_left[code];
     }
+    if (reader->expression_declined != NULL && !reader->output->resource)
+    {
+        check_input_expression_numbering(reader, base, tokens, classes);
+    }
+    reader->expression_declined = NULL;
+    arena_pop_to(reader->scratch, scratch_mark);
 }
 
 // The tokens the coded walk acted at by their classes' own actions: CheckInput.expression_acted's sum over the classes.
