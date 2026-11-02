@@ -2727,7 +2727,14 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             storage = C_NAME_AUTO;
         }
     }
-    valid &= saw && (base != 0 || integer_seen || longs || shorts || signedness || complex) && longs <= 2 && shorts <= 1 && !(longs && shorts);
+    // C90's declaration-specifiers may give no type (a storage class or qualifier alone), whose type is int (implicit
+    // int), and clang also takes a declarator with no specifier at all in its C89 modes (`x;`, `main() {}`, and
+    // `__extension__ x;`, whose marker is a specifier): `!typed` here. C99 and later make a missing type an error at
+    // its declarator's name instead (the parser's, before the checker sees it).
+    const bool typed = base != 0 || integer_seen || longs || shorts || signedness || complex;
+    const bool implicit_int = !typed && parser->language.standard < 1999;
+    valid &= implicit_int || (saw && typed);
+    valid &= longs <= 2 && shorts <= 1 && !(longs && shorts);
     valid &= !*is_typedef || (storage == 0 && !*is_inline && !thread_local);
     valid &= !thread_local || (storage == 0 || storage == C_NAME_STATIC || storage == C_NAME_EXTERN);
     const bool plain_complex = complex && base == 0 && !integer_seen && !longs && !shorts && !signedness;
@@ -6027,6 +6034,29 @@ static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t 
     return missed;
 }
 
+// Whether `token` belongs to a C89 file-scope declaration whose declarator has no specifier before it, as clang's
+// ParseImplicitInt takes `x;`, `main() {}`, `(x);` and `*p;` (block scope takes only a declaration a specifier starts,
+// which the walk reaches at the specifier). A top-level declaration starts the file or follows a `;` or a body's `}`.
+// A name there starts the declaration; a name in a group or after a `*` finds its declaration's first token, which is
+// a declarator rather than a specifier.
+static bool check_input_starts_implicit_declaration(const CheckInputReader* reader, uint32_t token, uint32_t* first)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t role = parser->tree.roles[token];
+    const uint8_t previous = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_NONE;
+    const bool adjacent = token == 0 || previous == PARSE_ROLE_TERMINATOR || previous == PARSE_ROLE_CLOSE_BODY;
+    const bool scope = parser->language.standard < 1999 && reader->function_body == BUSTER_CHECK_NONE;
+    const bool candidate = scope && role == PARSE_ROLE_OPERAND && (adjacent || previous == PARSE_ROLE_PREFIX || previous == PARSE_ROLE_OPEN_GROUP);
+    const uint32_t begin = candidate && !adjacent ? check_input_declaration_begin(parser, token) : token;
+    const uint8_t begin_role = parser->tree.roles[begin];
+    const uint8_t before_begin = begin != 0 ? parser->tree.roles[begin - 1] : PARSE_ROLE_NONE;
+    const bool boundary = begin == 0 || before_begin == PARSE_ROLE_TERMINATOR || before_begin == PARSE_ROLE_CLOSE_BODY;
+    const bool direct = adjacent && begin == token;
+    const bool declarator = begin < token && boundary && (begin_role == PARSE_ROLE_PREFIX || begin_role == PARSE_ROLE_OPEN_GROUP);
+    *first = begin;
+    return candidate && (direct || declarator);
+}
+
 // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
 // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
 // after its closing brace, where its scopes end and nothing else of the token is its. The vector path visits only the
@@ -6235,10 +6265,13 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 continue;
             }
         }
+        uint32_t implicit_first = BUSTER_CHECK_NONE;
+        const bool implicit = syntactic && !reader->ignored[i] && parser->language.standard < 1999 && check_input_starts_implicit_declaration(reader, i, &implicit_first);
         if ((syntactic && !reader->ignored[i] && (role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
              (kind == PARSE_KIND_EXTENSION && i + 1 < parser->tokens.count && (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER ||
               parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)))) ||
+            implicit ||
             (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
         {
             if (kind == PARSE_KIND_LABEL && !reader->ignored[i])
@@ -6247,7 +6280,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             }
             else
             {
-                check_input_declaration(reader, i);
+                check_input_declaration(reader, implicit ? implicit_first : i);
             }
         }
         if (syntactic && !reader->ignored[i] && (role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION))

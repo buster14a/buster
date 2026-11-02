@@ -76,6 +76,16 @@ with its identifier and `-Wimplicit-function-declaration`, as Clang does;
 apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
 Parenthesized identifiers and non-call uses of ordinary names do not acquire an implicit type.
 
+C89's implicit `int` is read too (#1121): a declaration whose specifiers give no
+type has type `int`, at file scope and in a block, for objects, functions,
+parameters, `register`/`auto`/`static`/`const` declarations and typedefs. A
+file-scope declaration with no specifier at all is such a declaration too
+(`x;`, `main() {}`, `f(a, b) {}`, `(x);`, `*p;`); a block-scope declaration
+needs a specifier to begin it, as `x;` there is an expression. C99 and later
+keep clang's missing-type diagnostic, which the parser reports before the
+checker runs; an old-style definition with a declared return type keeps its
+own undeclared-parameter diagnostic.
+
 Eligible library names are different (#804): their first undeclared use takes
 the library prototype from the frozen Clang builtin catalogue, then uses the
 ordinary C binding, argument-checking, ABI and external-symbol paths. The
