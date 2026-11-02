@@ -1542,8 +1542,15 @@ static void check_driver_lower_report(const CheckProgramCode* code, const CheckC
     {
         const uint64_t nodes = code->lowered.expression_nodes;
         const uint64_t batch = code->lowered.batch_nodes;
-        fprintf(stderr, "lowering-nodes\tevaluated=%" PRIu64 "\tbatched=%" PRIu64 "\tshare=%.2f%%\tclassified=%" PRIu64 "\n", nodes, batch,
-                nodes != 0 ? 100.0 * (double)batch / (double)nodes : 0.0, code->lowered.classified_nodes);
+        const uint64_t templates = code->lowered.template_nodes;
+        // #1048's node templates: the nodes and entries their closed subtrees gave, and the shares of the evaluated nodes
+        // and of the lowering's entries.
+        fprintf(stderr,
+                "lowering-nodes\tevaluated=%" PRIu64 "\tbatched=%" PRIu64 "\tshare=%.2f%%\tclassified=%" PRIu64 "\ttemplates=%" PRIu64
+                "\ttemplate-share=%.2f%%\ttemplate-entries=%" PRIu64 "\tentry-share=%.2f%%\n",
+                nodes, batch, nodes != 0 ? 100.0 * (double)batch / (double)nodes : 0.0, code->lowered.classified_nodes, templates,
+                nodes != 0 ? 100.0 * (double)templates / (double)nodes : 0.0, code->lowered.template_entries,
+                code->lowered.entries != 0 ? 100.0 * (double)code->lowered.template_entries / (double)code->lowered.entries : 0.0);
     }
 }
 

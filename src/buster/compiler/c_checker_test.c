@@ -5850,6 +5850,7 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_lowering_inventory(CheckTest* test);
+static void check_test_lowering_templates(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
@@ -6457,6 +6458,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_lowering_inventory(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_lowering_templates(&test);
             }
             if (check_test_takes())
             {

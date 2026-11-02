@@ -355,6 +355,60 @@ What the design takes from it:
   tracks every body, so its templates must keep the tracked stack, or tracking
   be decided per body.
 
+## Node templates over a body: the first path (#1048)
+
+`c_check_program_templates.c` is the template path in scalar form, with the
+task loop as its exact rules. Before a body's statements, a pass over its range
+of nodes from the last node down gives each node the context its parent's rule
+evaluates it in (address, discard, and its conversion's target), before the
+node's own turn classifies it and writes its entries and its conversion's into
+a slot of eight. A pass from the first node up gives each node its entries'
+offset in node order and decides whether its subtree is closed: a template
+whose evaluated operands are closed and converted, their entries in turn and
+the last ending where the node's own start. When the task loop pops a closed
+node in the context the pass gave it, it copies the slots of the node's subtree
+in node order (but the node's own conversion, which the task under it writes)
+instead of expanding the node and its operands task by task, and leaves the
+writer as its tasks would (the locals whose addresses it takes, the token, the
+counts). The table takes a `VALUE`'s read and address, folded constants, `&x`,
+the casts and conversions, `*p`, member accesses, the unary and binary
+operators of the classes I8 to F64, the truth tests, the comma, pointer
+arithmetic and subscripts, and scalar assignments and initializations; never an
+atomic, complex, bit-field or `_BitInt` value, an overload, a compound literal,
+a variable-length array, a body with `-g`'s tokens or a tracked stack.
+
+`test-lowering-templates [--passes N] [-E's options] file...` lowers each
+file's selected program by the tasks alone and with the templates
+(`check_program_lower_templates`, on any host), and requires the same entries,
+locals, calls and arguments in every function; `--passes N` times both.
+`test-checker` runs it on original fixtures of every template
+(`c_check_program_templates_test.c`).
+
+| | functions | evaluated nodes taken | entries taken |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 2,668, all the same | 75.5% | 60.9% |
+| Lua 5.4.8 (34 units) | 1,104, all the same | 68.7% | 55.0% |
+| c-testsuite's subset (220) | 430, all the same | 65.4% | 43.1% |
+
+`main.c`'s functions are the same too, with none taken: every body tracks its
+stack.
+
+It is slower than the tasks: on this session's host (an Intel Xeon whose build
+is the scalar host path), `sqlite3.c`'s lowering took 54 to 62 ms by the tasks
+and 73 to 81 ms with the templates, 1.30 to 1.37 times (21 passes, 3 runs,
+pinned). The splices save about 23 ms of the tasks' work, and the body pass
+costs more: about 300 cycles a node of its range, 304,000 nodes a lowering.
+callgrind on Lua's units (a baseline build) puts it at about 450 instructions a
+node, spread over the rules' checks with no one of them more than a few percent:
+classifying a node rule by rule costs what expanding it did. So no compile
+takes the templates (`CheckLowerShared.templates` is set only by
+`check_program_lower_templates`), and the default compile's objects are the
+same as before (`sqlite3.c`'s byte for byte). What remains is the issue's
+point: the classification by tables, 64 nodes at a time (the contexts from each
+parent's op and operand index, the template ids from #570's classes and facts),
+whose results this path's passes and splice then take, checked against the
+tasks by the same command.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

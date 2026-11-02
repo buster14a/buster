@@ -313,6 +313,9 @@ struct CheckProgramLowered
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
+    // The evaluated nodes and the entries the closed subtrees of #1048's node templates gave (c_check_program_templates.c).
+    uint64_t template_nodes;
+    uint64_t template_entries;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
     // (Tier0Code.label_records). A jump table's labels are among them, at its dispatch (check_lower_switch_dispatch).
@@ -754,6 +757,33 @@ struct CheckLowerWriter
     uint64_t first_classification;
     // #1048's inventory: each entry's owner in place of its token (CheckLowerOwners), with `sources`; null otherwise.
     CheckLowerOwners* owners;
+    // #1048's node templates (c_check_program_templates.c): whether the writer takes them (`templates`, its columns
+    // allocated), and whether the body being lowered has them ready (`template_ready`), for its nodes from
+    // `template_first_node`, `template_span` of them, at most `template_capacity`. Each node's state, context, template
+    // and conversion target, its evaluated operands (two each), its own entries' count and with its conversion's, its
+    // entries' offset in node order, its subtree's first node, evaluated nodes and the node whose token the tasks' loop
+    // would have last set in it, and its slot of entries (BUSTER_CHECK_LOWER_TEMPLATE_MOST each); and what the splices took.
+    bool templates;
+    bool template_ready;
+    uint32_t template_first_node;
+    uint32_t template_span;
+    uint32_t template_capacity;
+    uint8_t* template_states;
+    uint8_t* template_contexts;
+    uint8_t* template_ids;
+    uint8_t* template_own;
+    uint8_t* template_total;
+    TypeId* template_targets;
+    uint32_t* template_children;
+    uint32_t* template_offsets;
+    uint32_t* template_first;
+    uint32_t* template_nodes;
+    uint32_t* template_last;
+    uint8_t* template_slot_kinds;
+    uint8_t* template_slot_classes;
+    uint64_t* template_slot_values;
+    uint64_t template_spliced_nodes;
+    uint64_t template_spliced_entries;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -9451,6 +9481,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 }
 
 #include "c_check_program_batch.c"
+#include "c_check_program_templates.c"
 
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
@@ -9555,7 +9586,11 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
         if (__builtin_expect(kind <= CHECK_LOWER_INSTRUCTION, 1))
         {
-            if (kind == CHECK_LOWER_EXPRESSION)
+            if (kind == CHECK_LOWER_EXPRESSION && !sources && !bit_ints && writer->template_ready && check_lower_template_splice(writer, node, flags))
+            {
+                // A closed subtree of #1048's node templates: its entries copied from the body's pass (c_check_program_templates.c).
+            }
+            else if (kind == CHECK_LOWER_EXPRESSION)
             {
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
                 const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
@@ -10909,6 +10944,11 @@ struct CheckLowerShared
     uint32_t integer_builtin_count;
     bool terminal;
     bool scalar;
+    // #1048's node templates (c_check_program_templates.c): whether the program may take them (no -g tokens, _BitInt
+    // type or overloaded address), and whether its writers do: on the vector path, or where the caller asks
+    // (check_program_lower_templates).
+    bool templates_allowed;
+    bool templates;
     // The runtime's functions: each one's symbol where the unit declares it (check_lower_runtime), 0 for none, and the
     // first of the provisional symbols the lowering's own take until check_lower_finish numbers them, the helpers' end.
     SymbolId declared_runtimes[CHECK_LOWER_RUNTIMES];
@@ -10950,6 +10990,8 @@ struct CheckLowerPart
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
+    uint64_t template_nodes;
+    uint64_t template_entries;
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
@@ -11369,6 +11411,11 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                           BUSTER_SCALAR_PATH(scalar));
         }
     }
+    // #1048's node templates are verified against the tasks (test-lowering-templates) but no compile takes them yet: this
+    // scalar classification costs about as much as the tasks it saves (docs/c-lowering.md's "Node templates over a body:
+    // the first path"), which a data-parallel one must not.
+    shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0;
+    shared->templates = false;
     return valid;
 }
 
@@ -11481,6 +11528,31 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
+    // #1048's node templates (c_check_program_templates.c): columns for a body's range of nodes, at most
+    // BUSTER_CHECK_LOWER_TEMPLATE_NODES of them, and its scratch entries. Address space alone until a body touches it.
+    writer->templates = valid && shared->templates;
+    if (writer->templates)
+    {
+        const uint32_t graph_nodes = program->input->graph.count;
+        const uint32_t template_room = graph_nodes < BUSTER_CHECK_LOWER_TEMPLATE_NODES ? graph_nodes + 1 : BUSTER_CHECK_LOWER_TEMPLATE_NODES;
+        const uint64_t template_slots = (uint64_t)template_room * BUSTER_CHECK_LOWER_TEMPLATE_MOST;
+        writer->template_capacity = template_room;
+        BUSTER_CHECK_LOWER_COLUMN(template_states, uint8_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_contexts, uint8_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_ids, uint8_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_own, uint8_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_total, uint8_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_targets, TypeId, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_children, uint32_t, 2 * (uint64_t)template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_offsets, uint32_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_first, uint32_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_nodes, uint32_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_last, uint32_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_slot_kinds, uint8_t, template_slots);
+        BUSTER_CHECK_LOWER_COLUMN(template_slot_classes, uint8_t, template_slots);
+        BUSTER_CHECK_LOWER_COLUMN(template_slot_values, uint64_t, template_slots);
+        writer->templates = valid;
+    }
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -11594,6 +11666,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->expression_nodes = 0;
     writer->batch_nodes = 0;
     writer->classified_nodes = 0;
+    writer->template_spliced_nodes = 0;
+    writer->template_spliced_entries = 0;
     for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
@@ -11916,6 +11990,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 }
                 writer->local_map[input->objects[declaration]] = local;
             }
+        }
+        // #1048's node templates: the body's nodes' contexts and closed subtrees' entries, before its statements.
+        writer->template_ready = false;
+        if (writer->templates && !bare && status->status == CHECK_PROGRAM_OK)
+        {
+            check_lower_template_body(writer, program->bodies + b);
         }
         // Each statement's nodes are prefetched a statement before the tasks' loop expands them, the first two's before the
         // first (check_lower_prefetch).
@@ -12242,6 +12322,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->expression_nodes = writer->expression_nodes;
     part->batch_nodes = writer->batch_nodes;
     part->classified_nodes = writer->classified_nodes;
+    part->template_nodes = writer->template_spliced_nodes;
+    part->template_entries = writer->template_spliced_entries;
     memcpy(part->runtimes, writer->runtimes, (uint64_t)writer->runtime_count * sizeof(uint16_t));
 }
 
@@ -12311,6 +12393,8 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         lowered->expression_nodes += parts[p].expression_nodes;
         lowered->batch_nodes += parts[p].batch_nodes;
         lowered->classified_nodes += parts[p].classified_nodes;
+        lowered->template_nodes += parts[p].template_nodes;
+        lowered->template_entries += parts[p].template_entries;
         for (uint32_t i = 0; i < parts[p].runtime_count; i += 1)
         {
             const uint32_t runtime = parts[p].runtimes[i];
@@ -12367,7 +12451,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
 // source tokens too (CheckProgramLowered.entry_tokens). Its bodies are one part, lowered by one writer
 // (check_lower_part).
 static inline __attribute__((always_inline)) bool check_program_lower_body(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
-                                                                          CheckLowerOwners* owners, Arena* output, Arena* scratch)
+                                                                          CheckLowerOwners* owners, bool templates, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -12379,6 +12463,8 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     CheckProgramLowered status;
     CheckLowerPart part = { .first = 0, .end = program->body_count };
     bool valid = check_lower_prepare(&shared, lowered, program, BUSTER_SCALAR_PATH(scalar), sources, output, scratch);
+    // #1048's node templates where the caller asks for them on any path (check_program_lower_templates).
+    shared.templates = shared.templates || (templates && shared.templates_allowed);
     if (valid && !check_lower_writer_begin(&writer, &abi, &status, &shared, sources, scratch))
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -12414,7 +12500,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
 {
     (void)scalar;
 
-    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), false, NULL, output, scratch);
+    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), false, NULL, false, output, scratch);
 }
 
 // The lowering with each function's entries' source tokens (CheckProgramLowered.entry_tokens), for -g's rows: a copy of
@@ -12424,7 +12510,7 @@ static __attribute__((noinline)) bool check_program_lower_sources(CheckProgramLo
 {
     (void)scalar;
 
-    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), true, NULL, output, scratch);
+    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), true, NULL, false, output, scratch);
 }
 
 // The lowering of #1048's inventory (c_check_lower_inventory.c): the scalar path's, with each entry's owner in
@@ -12432,5 +12518,12 @@ static __attribute__((noinline)) bool check_program_lower_sources(CheckProgramLo
 static __attribute__((noinline)) bool check_program_lower_owners(CheckProgramLowered* lowered, const CheckProgram* program, CheckLowerOwners* owners,
                                                                  Arena* output, Arena* scratch)
 {
-    return check_program_lower_body(lowered, program, true, true, owners, output, scratch);
+    return check_program_lower_body(lowered, program, true, true, owners, false, output, scratch);
+}
+
+// The lowering with #1048's node templates (c_check_program_templates.c) on any host's path, which the tests compare with
+// the tasks' lowering (check_program_lower's scalar path): every function's entries must be the same.
+static __attribute__((noinline)) bool check_program_lower_templates(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
+{
+    return check_program_lower_body(lowered, program, true, false, NULL, true, output, scratch);
 }

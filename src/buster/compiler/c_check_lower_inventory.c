@@ -590,14 +590,31 @@ static void lower_inventory_body(LowerInventory* inventory, LowerInventoryScratc
     }
 }
 
-// File `file`, read with `options`, prepared and lowered as -c lowers it, counted into `inventory`: whether it was.
-static bool lower_inventory_file(LowerInventory* inventory, const char* file, char** options, uint32_t option_count)
+// A source file prepared as -c prepares it, up to its selected program (check_program_select_mode's
+// C_LOWERING_REACHABLE): the stages that succeeded, and what each made. lower_source_close releases it.
+typedef struct LowerSource LowerSource;
+struct LowerSource
 {
-    static InternTable identifiers;
-    static Preprocessor pp;
-    static Parser parser;
-    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
-    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
+    InternTable identifiers;
+    Preprocessor pp;
+    Parser parser;
+    Arena option_arena;
+    CheckCorpusPath path;
+    CheckDataPrepared data;
+    CheckProgram program;
+    CheckProgramSelection selected;
+    bool valid;
+    bool preprocessed;
+    bool accepted;
+    bool prepared;
+};
+
+// Opens `file`, read with `options`, into `source`, with the backend's tables built: whether its options could be read
+// (source->prepared says whether it reached its selected program).
+static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count)
+{
+    source->option_arena = arena_reserve(UINT64_C(1) << 24);
+    char** own = BUSTER_ARENA_PUSH_ARRAY(&source->option_arena, char*, (uint64_t)option_count + 2);
     bool valid = own != 0;
     for (uint32_t i = 0; valid && i < option_count; i += 1)
     {
@@ -611,27 +628,58 @@ static bool lower_inventory_file(LowerInventory* inventory, const char* file, ch
     {
         own[option_count] = (char*)file;
     }
-    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
+    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &source->option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
     pp_options.semantic_pragmas = true;
-    CheckCorpusPath path = { 0 };
-    const bool preprocessed = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
-    const bool accepted = preprocessed && check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
-    CheckDataPrepared data = { 0 };
-    CheckProgram program = { 0 };
-    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
+    source->path = (CheckCorpusPath){ 0 };
+    source->data = (CheckDataPrepared){ 0 };
+    source->program = (CheckProgram){ 0 };
+    source->selected = (CheckProgramSelection){ 0 };
+    source->valid = valid;
+    source->preprocessed = valid && intern_initialize(&source->identifiers) && pp_initialize(&source->pp, &pp_options, &source->identifiers) && pp_run(&source->pp, input);
+    source->accepted = source->preprocessed && check_corpus_check_policy(&source->path, &source->parser, &source->pp, false, pp_options.quiet);
+    CheckCorpusPath* path = &source->path;
+    bool prepared = source->accepted && check_data_prepare(&source->data, &path->input, &path->stream, &path->initializers, &path->types,
+                                                           source->parser.options.scalar, &path->output_arena, &path->scratch);
     const CheckProgramOptions program_options = {
-        .initializers = &path.initializers,
-        .asms = &path.asms,
-        .identifiers = pp.table,
-        .initializer_references = data.references,
-        .initializer_reference_count = data.reference_count,
-        .target = pp.options.target,
-        .predefines = &pp.options.predefines,
+        .initializers = &path->initializers,
+        .asms = &path->asms,
+        .identifiers = source->pp.table,
+        .initializer_references = source->data.references,
+        .initializer_reference_count = source->data.reference_count,
+        .target = source->pp.options.target,
+        .predefines = &source->pp.options.predefines,
     };
-    prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
-    CheckProgramSelection selected = { 0 };
-    prepared = prepared && check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
-    prepared = prepared && (tier0_initialized || (x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize()));
+    prepared = prepared && check_program(&source->program, &source->parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
+    prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, &path->output_arena, &path->scratch);
+    source->prepared = prepared && (tier0_initialized || (x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize()));
+    return valid;
+}
+
+static void lower_source_close(LowerSource* source)
+{
+    check_corpus_close(&source->path);
+    parse_release(&source->parser);
+    pp_release(&source->pp);
+    intern_release(&source->identifiers);
+    arena_release(&source->option_arena);
+}
+
+// What stopped `source` before its selected program, for a report.
+static const char* lower_source_failure(const LowerSource* source)
+{
+    return !source->preprocessed ? "it couldn't be preprocessed" : !source->accepted ? "the checker rejected it" : "its program couldn't be prepared";
+}
+
+// File `file`, read with `options`, prepared and lowered as -c lowers it, counted into `inventory`: whether it was.
+static bool lower_inventory_file(LowerInventory* inventory, const char* file, char** options, uint32_t option_count)
+{
+    static LowerSource source;
+    const bool valid = lower_source_open(&source, file, options, option_count);
+    const bool preprocessed = source.preprocessed;
+    const bool accepted = source.accepted;
+    const bool prepared = source.prepared;
+    CheckCorpusPath* path_pointer = &source.path;
+    CheckProgramSelection selected = source.selected;
     // The log of the tasks' pops: a node is popped again only for what its first pop finds (a compound literal's
     // initializer, a _BitInt's operation), so four per node of the program's stream leaves room; a fuller log fails.
     const uint64_t log_capacity = prepared ? 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
@@ -639,10 +687,10 @@ static bool lower_inventory_file(LowerInventory* inventory, const char* file, ch
     CheckLowerOwners owners = { .capacity = log_capacity };
     owners.pops = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, CheckLowerOwnerPop, owners.capacity) : 0;
     CheckProgramLowered lowered = { 0 };
-    const bool lowering = prepared && owners.pops != 0 && check_program_lower_owners(&lowered, &selected.program, &owners, &path.output_arena, &path.scratch);
+    const bool lowering = prepared && owners.pops != 0 && check_program_lower_owners(&lowered, &selected.program, &owners, &path_pointer->output_arena, &path_pointer->scratch);
     // The owners change no entry: the plain lowering's, function for function, are the same.
     CheckProgramLowered plain = { 0 };
-    const bool lowered_plain = lowering && check_program_lower(&plain, &selected.program, true, &path.output_arena, &path.scratch);
+    const bool lowered_plain = lowering && check_program_lower(&plain, &selected.program, true, &path_pointer->output_arena, &path_pointer->scratch);
     uint32_t differing = lowered_plain ? 0 : 1;
     for (uint32_t b = 0; lowered_plain && b < selected.program.body_count; b += 1)
     {
@@ -718,11 +766,7 @@ static bool lower_inventory_file(LowerInventory* inventory, const char* file, ch
         }
     }
     arena_release(&log_arena);
-    check_corpus_close(&path);
-    parse_release(&parser);
-    pp_release(&pp);
-    intern_release(&identifiers);
-    arena_release(&option_arena);
+    lower_source_close(&source);
     return valid;
 }
 
@@ -1155,6 +1199,10 @@ static int run_lowering_inventory(int count, char** arguments)
         else if (strcmp(arguments[i], "--keys") == 0)
         {
             valid = i + 1 < count && check_corpus_number(arguments[++i], &key_limit) && key_limit != 0 && key_limit <= UINT32_MAX;
+        }
+        else if (strcmp(arguments[i], "--no-default-config") == 0)
+        {
+            // Clang's option, which the corpora's command lines take: nothing for pp_parse_options to read.
         }
         else if (arguments[i][0] != '-')
         {
