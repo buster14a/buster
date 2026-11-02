@@ -1243,6 +1243,12 @@ static bool asm_register(String8 spelling, X86Operand* operand)
             }
         }
     }
+    if (x86_match_name(name, "st"))
+    {
+        // The x87's stack's top; asm_read_register reads st(i) after it.
+        *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .width = 0, .reg = 0};
+        found = true;
+    }
     if (name.length == 2 && name.pointer[1] == 'h' && name.pointer[0] >= 'a' && name.pointer[0] <= 'd')
     {
         const uint8_t high[] = {X86_REGISTER_AH, X86_REGISTER_BH, X86_REGISTER_CH, X86_REGISTER_DH};
@@ -1335,6 +1341,21 @@ static bool asm_read_register(AsmParser* parser, uint32_t end, X86Operand* opera
     if (found)
     {
         parser->at = at + 1;
+    }
+    // The x87's st(i), 0 to 7, as GNU as reads it after st, in either syntax (`%st(1)`, `st(1)`).
+    if (found && operand->class == BUSTER_X86_CLASS_ST && at + 3 < end && parser->tokens[at + 1].kind == '(' &&
+        parser->tokens[at + 2].kind == BUSTER_ASM_WORD && parser->tokens[at + 3].kind == ')')
+    {
+        const String8 digit = asm_token_text(parser, at + 2);
+        if (digit.length == 1 && digit.pointer[0] >= '0' && digit.pointer[0] <= '7')
+        {
+            operand->reg = (uint8_t)(digit.pointer[0] - '0');
+            parser->at = at + 4;
+        }
+        else
+        {
+            asm_fail(parser, parser->tokens[at + 2].start, "invalid x87 register (st(0) through st(7))");
+        }
     }
     return found;
 }
@@ -1438,12 +1459,13 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
     }
     if (!immediate && parser->options.intel)
     {
-        static const char* const names[] = {"byte", "word", "dword", "qword", "xmmword", "ymmword", "zmmword"};
+        // tbyte the x87's 10 bytes of an extended value (#147: fld tbyte ptr [rax]).
+        static const char* const names[] = {"byte", "word", "dword", "qword", "xmmword", "ymmword", "zmmword", "tbyte"};
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
         {
             if (asm_is_case(parser, parser->at, names[i]))
             {
-                operand->width = 1u << i;
+                operand->width = i == 7 ? 10 : 1u << i;
                 parser->at += 1;
                 if (!asm_is_case(parser, parser->at, "ptr"))
                 {
@@ -1689,6 +1711,75 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
         }
     }
     return found;
+}
+
+// The x87's instructions on its stack registers as GNU as reads them (#147), on a request in Intel's operand order: the
+// operands it leaves out (fxch, fcom, fcomp, fucom and fucomp of st(1); fadd st(i) as fadd st(0), st(i); faddp alone as
+// faddp st(1), st(0), and faddp st(i) as faddp st(i), st(0); fcomi st(i) as fcomi st(0), st(i)), and AT&T's subtraction
+// and division with st(i) the destination, which GNU as and clang assemble as Intel's reversed ones (`fsub %st, %st(1)`
+// is Intel's fsubr st(1), st(0), and `fsubp` Intel's fsubrp): the System V assembler's convention, which GNU as keeps.
+static void asm_x87_operands(const AsmParser* parser, X86MatchRequest* request)
+{
+    static const char* const one[] = { "fxch", "fcom", "fcomp", "fucom", "fucomp" };
+    static const char* const arithmetic[] = { "fadd", "fmul", "fsub", "fsubr", "fdiv", "fdivr" };
+    static const char* const popping[] = { "faddp", "fmulp", "fsubp", "fsubrp", "fdivp", "fdivrp" };
+    static const char* const compares[] = { "fcomi", "fcomip", "fucomi", "fucomip" };
+    // Each of fsub, fsubr, fdiv and fdivr's (and their popping forms') reversed mnemonic.
+    static const char* const reversed[][2] = {
+        { "fsub", "fsubr" }, { "fsubr", "fsub" }, { "fdiv", "fdivr" }, { "fdivr", "fdiv" },
+        { "fsubp", "fsubrp" }, { "fsubrp", "fsubp" }, { "fdivp", "fdivrp" }, { "fdivrp", "fdivp" },
+    };
+    const X86Operand top = { .kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .reg = 0 };
+    const X86Operand next = { .kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .reg = 1 };
+    const bool stack = request->count == 0 || (request->count <= 2 && request->operands[0].kind == X86_OPERAND_REGISTER && request->operands[0].class == BUSTER_X86_CLASS_ST &&
+                                               (request->count == 1 || (request->operands[1].kind == X86_OPERAND_REGISTER && request->operands[1].class == BUSTER_X86_CLASS_ST)));
+    bool popped = false;
+    for (uint32_t i = 0; stack && i < BUSTER_ARRAY_LENGTH(one); i += 1)
+    {
+        if (x86_match_name(request->mnemonic, one[i]) && request->count == 0)
+        {
+            request->operands[request->count++] = next;
+        }
+    }
+    for (uint32_t i = 0; stack && i < BUSTER_ARRAY_LENGTH(arithmetic); i += 1)
+    {
+        if (x86_match_name(request->mnemonic, arithmetic[i]) && request->count == 1)
+        {
+            request->operands[1] = request->operands[0];
+            request->operands[0] = top;
+            request->count = 2;
+        }
+    }
+    for (uint32_t i = 0; stack && i < BUSTER_ARRAY_LENGTH(popping); i += 1)
+    {
+        popped |= x86_match_name(request->mnemonic, popping[i]);
+        if (x86_match_name(request->mnemonic, popping[i]) && request->count < 2)
+        {
+            request->operands[0] = request->count == 0 ? next : request->operands[0];
+            request->operands[1] = top;
+            request->count = 2;
+        }
+    }
+    for (uint32_t i = 0; stack && i < BUSTER_ARRAY_LENGTH(compares); i += 1)
+    {
+        if (x86_match_name(request->mnemonic, compares[i]) && request->count < 2)
+        {
+            request->operands[1] = request->count == 0 ? next : request->operands[0];
+            request->operands[0] = top;
+            request->count = 2;
+        }
+    }
+    // AT&T's st(i) destination: a popping form always, another where st(i) isn't st(0) (fsub %st, %st is Intel's fsub
+    // st(0), st(0), the form of st(0)'s destination, as GNU as takes it).
+    const bool destination = stack && request->count == 2 && request->operands[1].reg == 0 && (popped || request->operands[0].reg != 0);
+    for (uint32_t i = 0; destination && !parser->options.intel && i < BUSTER_ARRAY_LENGTH(reversed); i += 1)
+    {
+        if (x86_match_name(request->mnemonic, reversed[i][0]))
+        {
+            request->mnemonic = (String8){ .pointer = (char*)reversed[i][1], .length = strlen(reversed[i][1]) };
+            break;
+        }
+    }
 }
 
 // A locked instruction as the catalogue spells it (`lock cmpxchg`, one mnemonic, whose forms take memory): the prefix
@@ -1985,6 +2076,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
                 instruction->expressions[j] = expression;
             }
         }
+        asm_x87_operands(parser, &instruction->request);
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;
@@ -2506,6 +2598,8 @@ static bool asm_parse_vector_batch(AsmParser* parser)
             };
             instruction->expressions[operand].value = value;
         }
+        // The x87's operands GNU as leaves out (fxch alone, fadd st), as asm_instruction gives them.
+        asm_x87_operands(parser, &instruction->request);
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;

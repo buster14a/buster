@@ -337,6 +337,19 @@ bytes of a prefix written alone before a 16-bit instruction.
 `unwind_tier0_frame` describes it (`Tier0Code.frame_saved` and `frame_size`):
 an asm goto's branches are inside the frame, and its exits share one epilogue.
 
+## The x87's f
+
+An input of `f`, an x87 register of the compiler's choice (clang refuses `f`
+for an output), takes the shallowest depth no `t` or `u` input, and no `f`
+input before it, holds at the template's start, in the operands' order. A
+template names it by `%N`, which prints its depth's register, so the depth is
+the lowering's to choose, as clang's register allocation chooses it. As LLVM's
+stackifier has it, the template doesn't pop it, and the helper pops it after
+the stores. GCC's rules require the outputs beside an `f` input to be
+early-clobbered; clang's code for a pushed output without the `&` pops the
+wrong register after the template, so such a statement's result is clang's
+own mistake, not a lowering to follow.
+
 ## Flag outputs
 
 A flag output, `"=@ccz"(r)` (clang's 28 conditions: `a`, `ae`, `b`, `be`, `c`,
@@ -401,13 +414,12 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   sets the condition into after the template), of a size no integer store
   covers, and with another alternative (`"=r@ccz"`, which clang takes as `r`);
 - MMX's, the opmasks' and the rax and rdx pair's constraints (`y`, `k`, `A`),
-  `f` (an x87 register of the compiler's choice), and the other letters it
-  doesn't place;
+  and the other letters it doesn't place;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
   at st(0), a clobber below the outputs), which clang's code refuses too; two
-  operands at one depth, which clang compiles as one register's; an integer in
-  an x87 register; and an x87 register named in the template (`%st`,
-  `%st(1)`), whose registers the assembler's operand grammar doesn't take;
+  operands at one depth, which clang compiles as one register's; and an
+  integer in an x87 register. An x87 operand named in the template prints as
+  its depth's register, `%st` or `%st(1)`, as GCC and clang print it;
 - symbolic immediates, and constants outside their letter's range;
 - operands of types no general or XMM register holds by value, outside memory,
   but a vector in a template of no instructions that doesn't refer to it;
@@ -543,6 +555,13 @@ has the commands, the logs and the default path's numbers against main.
     width, a 32-bit name, outputs of a register's and a memory constraint, a
     `+` operand in rbx, a matching input in its variable's register, an XMM
     register's, and a template of no instructions;
+  - `f`'s inputs, below the fixed operands, each in a register of its own,
+    beside a `+t` operand, early-clobbered outputs the template pushes, and a
+    template of no instructions;
+  - the x87's registers named in templates: `%0` of `t` as `%st` and of `u`
+    as `%st(1)`, `fxch`, `fadd %%st(1), %%st`, `fld %%st(0)` and `fstp
+    %%st(1)`, AT&T's reversed `fsubp %%st, %%st(1)` popping a clobbered st(1),
+    and `fcomi` into a flag output;
   - the x87's operands: the shapes of musl's long double functions, in
     functions of the test's own (`fabs`, `fsqrt` and `frndint` on `+t`, fprem's
     and fprem1's loops with the status word in `%ax`, a remainder's quotient bits
@@ -576,10 +595,8 @@ What the lowering still refuses of what GCC and clang take:
   function's own code; this compiler's helper design refuses it by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
-- the matcher's gaps: `fstp` without a suffix (GNU as assumes `fstps`), Intel's
-  `tbyte ptr`, MMX's `movq`, the x87's stack registers as operands
-  (`fxch %st(1)`, and an x87 operand named in a template), `lock xchg`, and the
-  instructions outside its families;
-- `f`'s x87 registers of the compiler's choice, two operands at one x87
-  depth, and explicit register variables in the registers the helper doesn't
-  place them in.
+- the matcher's gaps: MMX's `movq`, `lock xchg`, `ffreep`, and the
+  instructions outside its families (an x87 memory operand without a width,
+  `fstp (%rax)`, is refused as clang refuses it);
+- two operands at one x87 depth, and explicit register variables in the
+  registers the helper doesn't place them in.

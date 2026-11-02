@@ -24,6 +24,8 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
         [11] = 'c' | 'x' << 8,
         [12] = 'd' | 'x' << 8,
         [14] = 's' | 'i' << 8,
+        // The x87's stack, st (its top; asm_read_register reads st(i) after it).
+        [15] = 's' | 't' << 8,
         [18] = 'b' | 'p' << 8,
         [25] = 'a' | 'h' << 8,
         [26] = 'b' | 'h' << 8,
@@ -43,6 +45,7 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
         [11] = 1 | BUSTER_X86_CLASS_GPR16 << 8,
         [12] = 2 | BUSTER_X86_CLASS_GPR16 << 8,
         [14] = 6 | BUSTER_X86_CLASS_GPR16 << 8,
+        [15] = 0 | BUSTER_X86_CLASS_ST << 8,
         [18] = 5 | BUSTER_X86_CLASS_GPR16 << 8,
         [25] = X86_REGISTER_AH | BUSTER_X86_CLASS_GPR8 << 8,
         [26] = X86_REGISTER_BH | BUSTER_X86_CLASS_GPR8 << 8,
@@ -71,7 +74,9 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
     __m512i class = _mm512_mask_mov_epi64(root_class, prefix & eax, _mm512_set1_epi64(BUSTER_X86_CLASS_GPR32));
     class = _mm512_mask_mov_epi64(class, prefix & rex, _mm512_set1_epi64(BUSTER_X86_CLASS_GPR64));
     class = _mm512_mask_mov_epi64(class, suffix, _mm512_set1_epi64(BUSTER_X86_CLASS_GPR8));
-    const __m512i width = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_sub_epi64(class, _mm512_set1_epi64(1)));
+    // The x87's registers have no width (asm_register's).
+    const __mmask8 stack = _mm512_cmpeq_epi64_mask(class, _mm512_set1_epi64(BUSTER_X86_CLASS_ST));
+    const __m512i width = _mm512_maskz_sllv_epi64(~stack, _mm512_set1_epi64(1), _mm512_sub_epi64(class, _mm512_set1_epi64(1)));
     __m512i descriptions = _mm512_or_si512(_mm512_set1_epi64(X86_OPERAND_REGISTER), _mm512_or_si512(_mm512_slli_epi64(reg, 8), _mm512_or_si512(_mm512_slli_epi64(class, 16), _mm512_slli_epi64(width, 24))));
     descriptions = _mm512_maskz_mov_epi64(short_name, descriptions);
 

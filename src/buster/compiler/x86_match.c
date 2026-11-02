@@ -100,6 +100,8 @@ enum
     X86_MATCH_ACC,
     X86_MATCH_CL,
     X86_MATCH_ONE,
+    // The x87's st(0), which an ST_RM or RM_ST form names beside its st(i) (#147).
+    X86_MATCH_ST0,
 };
 
 static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
@@ -191,6 +193,17 @@ static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
         roles[2] = X86_MATCH_RM;
         roles[3] = X86_MATCH_IMM;
         count = 4;
+        break;
+    case X86_SYNTAX_ST_RM:
+        // fadd st(0), st(i), in Intel's order (the AT&T parser reverses its operands).
+        roles[0] = X86_MATCH_ST0;
+        roles[1] = X86_MATCH_RM;
+        count = 2;
+        break;
+    case X86_SYNTAX_RM_ST:
+        roles[0] = X86_MATCH_RM;
+        roles[1] = X86_MATCH_ST0;
+        count = 2;
         break;
     default:
         break;
@@ -389,6 +402,15 @@ static bool x86_match_supported(const X86FormDescription* form)
             "fist",
             "fistp",
             "fisttp",
+            // And the x87's compares of st(0) and st(1) that pop both (#147).
+            "fcompp",
+            "fucompp",
+    };
+    // The x87's instructions on its stack's registers (#147), in their forms of st(i) alone.
+    static const char* const stack[] = {
+        "fadd", "fmul", "fsub", "fsubr", "fdiv", "fdivr", "faddp", "fmulp", "fsubp", "fsubrp", "fdivp", "fdivrp", "fld", "fst", "fstp",
+        "fxch", "fcom", "fcomp", "fucom", "fucomp", "fcomi", "fcomip", "fucomi", "fucomip", "ffree", "fcmovb", "fcmove",
+        "fcmovbe", "fcmovu", "fcmovnb", "fcmovne", "fcmovnbe", "fcmovnu",
     };
     // The instructions a lock prefix takes (`lock cmpxchg`, the catalogue's mnemonic for the prefixed forms, whose
     // operand is memory): the exchanges and the arithmetic of musl's atomics and of GCC's and clang's.
@@ -524,10 +546,14 @@ static bool x86_match_supported(const X86FormDescription* form)
         {
             allowed = name[0] == integer[i][0] && strcmp(name, integer[i]) == 0;
         }
-        // Of movq, SSE2's forms alone, and of fld and fstp the memory ones: MMX's registers and the x87's stack aren't
-        // the parser's.
+        // Of movq, SSE2's forms alone: MMX's registers aren't the parser's.
         allowed &= strcmp(name, "movq") != 0 || form->reg == BUSTER_X86_OPERAND_V;
-        allowed &= (strcmp(name, "fld") != 0 && strcmp(name, "fstp") != 0) || form->rm == BUSTER_X86_OPERAND_M;
+        // The x87's stack registers (#147): the forms of st(i) (fld %st(1), fadd %st(1), %st, faddp %st, %st(2), fxch,
+        // the compares and fcmovcc), whose memory forms with other widths than fld's and fstp's aren't admitted.
+        for (uint32_t i = 0; !allowed && form->rm == BUSTER_X86_OPERAND_ST && i < BUSTER_ARRAY_LENGTH(stack); i += 1)
+        {
+            allowed = name[0] == stack[i][0] && strcmp(name, stack[i]) == 0;
+        }
         for (uint32_t i = 0; !allowed && i < BUSTER_ARRAY_LENGTH(sse); i += 1)
         {
             allowed = name[0] == sse[i][0] && strcmp(name, sse[i]) == 0;
@@ -722,6 +748,12 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 {
                     kinds = 1u << X86_OPERAND_IMMEDIATE;
                 }
+                else if (role == X86_MATCH_ST0)
+                {
+                    kinds = 1u << X86_OPERAND_REGISTER;
+                    class = BUSTER_X86_CLASS_ST;
+                    fixed = 1;
+                }
                 else if (role == X86_MATCH_ACC || role == X86_MATCH_CL)
                 {
                     kinds = 1u << X86_OPERAND_REGISTER;
@@ -868,6 +900,9 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
             break;
         case X86_MATCH_ONE:
             result = operand->kind == X86_OPERAND_IMMEDIATE && !operand->symbolic && operand->value == 1;
+            break;
+        case X86_MATCH_ST0:
+            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_ST && operand->reg == 0;
             break;
         default:
             result = false;

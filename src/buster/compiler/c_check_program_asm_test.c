@@ -696,8 +696,16 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     // stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
     // top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,
     // which the assembler doesn't parse.
-    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"f\"(x));return n;}",
-                                       "asm-x87-any", true, false, 0, 1, "inline assembly operands in x87 registers the compiler chooses");
+    // f's inputs (#147): below the fixed operands, each in a register of its own that the template names, none popped;
+    // with outputs the template pushes early-clobbered, as GCC's rules for f inputs require (clang's code without the &
+    // pops the wrong register after the template).
+    check_test_program_source(test,
+        "static long double add_any(long double a, long double b){__asm__(\"fadd %1, %0\" : \"+t\"(a) : \"f\"(b));return a;}"
+        "static long double pick(long double a, long double b, long double c){long double r,s;__asm__(\"fld %2\" : \"=&t\"(r) : \"f\"(a), \"f\"(b));"
+        "__asm__(\"fld %1\\n\\tfmul %%st(0), %%st\" : \"=&t\"(s) : \"f\"(c));return r*16+s;}"
+        "static long double barrier(long double a){__asm__ volatile(\"\" : : \"f\"(a));return a+1;}"
+        "int tested(int n){long double a=n*0.25L+2,b=n-1.5L;return (int)(add_any(a,b)*8)+(int)(pick(a,b,3.0L)*4)+(int)barrier(b);}",
+        "asm-x87-any", clang);
     check_test_program_boundary_reason(test, "int tested(int n){int i=n;__asm__(\"\" : \"+t\"(i));return i;}",
                                        "asm-x87-integer", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"u\"(x));return n;}",
@@ -706,8 +714,16 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-doubled", true, false, 0, 2, "inline assembly's x87 operands and clobbers off the stack's top");
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
                                        "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
-    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__(\"fsqrt # %0\" : \"+t\"(x));return (int)x;}",
-                                       "asm-x87-named", true, false, 0, 1, "x87 registers named in inline assembly templates");
+    // x87 registers named in templates (#147): %0 of t as %st, of u as %st(1), the stack's registers by name, an
+    // exchange, AT&T's reversed subtraction with a pop, and a compare into the flags.
+    check_test_program_source(test,
+        "static long double swap_sub(long double a, long double b){__asm__(\"fxch %1\\n\\tfsub %1, %0\" : \"+t\"(a), \"+u\"(b));return a*3+b;}"
+        "static long double add_top(long double a, long double b){__asm__(\"fadd %%st(1), %%st\" : \"+t\"(a) : \"u\"(b));return a;}"
+        "static long double square(long double a){__asm__(\"fld %%st(0)\\n\\tfmul %%st(1), %%st\\n\\tfstp %%st(1)\" : \"+t\"(a));return a;}"
+        "static long double reversed(long double a, long double b){long double r;__asm__(\"fsubp %%st, %%st(1)\" : \"=t\"(r) : \"0\"(a), \"u\"(b) : \"st(1)\");return r;}"
+        "static int below(long double a, long double b){int r;__asm__(\"fcomi %%st(1), %%st\" : \"=@ccb\"(r) : \"t\"(a), \"u\"(b));return r;}"
+        "int tested(int n){long double a=n*0.5L+1,b=n-2.25L;return (int)(swap_sub(a,b)*8)+(int)(add_top(a,b)*4)+(int)square(a)+(int)(reversed(a,b)*16)+below(a,b)*1000+below(b,a)*3000;}",
+        "asm-x87-named", clang);
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",

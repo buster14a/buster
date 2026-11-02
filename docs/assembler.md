@@ -136,7 +136,22 @@ The admitted families are:
   `fsin`, `fcos`, `fsincos`, `fxam`, `ftst` and the constants `fld1` to
   `fldln2`) and its integer loads and stores `fild/fist/fistp/fisttp`, whose
   AT&T suffixes are the integer's: `s` 16 bits, `l` 32, `ll` and `q` 64
-  (`fistpll`). The x87's stack registers (`%st(1)`) aren't the parser's;
+  (`fistpll`);
+- the x87's stack registers (#147): `%st` and `%st(i)` (Intel's `st` and
+  `st(i)`), in every form of st(i) of `fadd/fmul/fsub/fsubr/fdiv/fdivr` and
+  their popping forms, `fld/fst/fstp`, `fxch`, `fcom/fcomp/fucom/fucomp`,
+  `fcompp/fucompp`, `fcomi/fcomip/fucomi/fucomip`, `ffree` and the eight
+  `fcmovcc`, with the operands GNU as leaves out (`fxch`, `fcom` and `fucom`
+  alone of st(1); `fadd %st(i)` of st(0) and st(i); `faddp` alone of st(1) and
+  st(0), `faddp %st(i)` of st(i); `fcomi %st(i)` of st(0) and st(i)). In AT&T
+  syntax a subtraction or division whose destination is st(i) (`fsub
+  %st, %st(1)`, `fsubp`, and every popping form) assembles as Intel's reversed
+  one, as GNU as and clang assemble it (the System V assembler's convention:
+  `fsub %st, %st(1)` is Intel's `fsubr st(1), st`); Intel syntax takes them as
+  Intel's manual has them. `ffreep` is refused, as the target tables have no
+  ISA for it. Intel's `tbyte ptr` sizes the x87's 10-byte memory operands. An
+  x87 memory operand without a width (`fstp (%rax)`), which GNU as takes with a
+  warning as its default width, is refused, as clang refuses it (ambiguous);
 - operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc`, and `rdtscp`
   (#798). The assembler requires a target with RDTSCP for `rdtscp`; inline
   templates admit it independently of the target, so their author is responsible
