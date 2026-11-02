@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  split:
+  validate:
     if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/agent/1105-bootstrap'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -16,35 +16,25 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 1
-      - name: Split the reviewed documentation without changing compiler code
+      - name: Validate the split and remove the redundant corpus paragraph
         shell: bash
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           set -euo pipefail
-          test "$(git hash-object AGENTS.md)" = 4275633ecec326fd87ea551dfc3751491a4b0a11
-          cc -std=c17 -Wall -Wextra -Werror -g -fsanitize=address,undefined .github/issue1105-split.c -o "$RUNNER_TEMP/split-guide"
-          "$RUNNER_TEMP/split-guide"
-          for path in docs/commands/*.md; do
-              awk '{ lines[NR]=$0; if ($0 !~ /^[[:space:]]*$/) last=NR } END { for (i=1; i<=last; ++i) print lines[i] }' "$path" > "$RUNNER_TEMP/guide"
-              cat "$RUNNER_TEMP/guide" > "$path"
-          done
-          grep -n -A8 -B3 '1,357\|token-identical' docs/commands/preprocessor.md || true
-          base=06bcc8980b3ab331a545a860f556b3bf1527d48f
-          git fetch --no-tags --depth=1 origin "$base"
-          git read-tree "$base"
-          git add AGENTS.md CLAUDE.md docs/commands
-          git diff --cached --check
-          while IFS= read -r path; do
-              case "$path" in
-                  AGENTS.md|CLAUDE.md|docs/commands/*.md) ;;
-                  *) echo "Unexpected output path: $path"; exit 1 ;;
-              esac
-          done < <(git diff --cached --name-only "$base")
-          git diff --cached --stat "$base"
+          cc -std=c17 -Wall -Wextra -Werror -g -fsanitize=address,undefined .github/issue1105-check.c -o "$RUNNER_TEMP/check-guide"
+          cp AGENTS.md "$RUNNER_TEMP/original-agents.md"
+          expected=ef64246d04ddd8b120dae3334d7ddbaf4a073e88
+          git fetch --no-tags --depth=1 origin agent/1105-guide-split
+          test "$(git rev-parse FETCH_HEAD)" = "$expected"
+          git checkout --detach "$expected"
+          "$RUNNER_TEMP/check-guide" "$RUNNER_TEMP/original-agents.md" AGENTS.md CLAUDE.md docs/commands/*.md
+          git diff --check
+          git add docs/commands/preprocessor.md
+          git diff --cached --stat
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           tree=$(git write-tree)
-          commit=$(printf '%s\n' 'docs: split agent guidance into command-specific guides (#1105)' '' 'Preserve the shared rules and smoke commands; move detailed module, test' 'and benchmark guidance into docs/commands with corrected relative links.' '' 'Generated from AGENTS.md blob 4275633ecec326fd87ea551dfc3751491a4b0a11.' 'No compiler source or behavior changes. Maintainer DCO certification pending.' 'Agent: OpenAI / GPT-6 Astra Pro (session URL/ID unavailable).' | git commit-tree "$tree" -p "$base")
+          commit=$(printf '%s\n' 'docs: remove redundant preprocessor corpus paragraph' '' 'Preserve the fuller paragraph including --tables src; verify local links' 'and unchanged shared policies, smoke commands, cores and memory guidance.' '' 'Maintainer DCO certification pending.' 'Agent: OpenAI / GPT-6 Astra Pro (session URL/ID unavailable).' | git commit-tree "$tree" -p "$expected")
           git push origin "$commit:refs/heads/agent/1105-guide-split"
           printf 'OUTPUT_COMMIT=%s\n' "$commit"
