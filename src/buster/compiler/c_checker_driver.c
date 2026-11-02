@@ -3555,13 +3555,15 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
     }
-    // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
-    // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested.
-    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, false);
     // Syntax-only takes precedence over -c, whichever came first.
     emit_object = emit_object && !syntax_only;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
+    // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
+    // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
+    // where it emits code, the object and linkage options its producer doesn't implement (#1124: common definitions, a
+    // command line's default visibility, per-definition sections), before any input or output is opened.
+    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, emit_object || link);
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
     const char* path = 0;

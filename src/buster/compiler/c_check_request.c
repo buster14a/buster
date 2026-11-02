@@ -46,6 +46,14 @@ struct CheckRequestScan
     const char* stack_protector;
     // The last -fcf-protection or -fcf-protection=VALUE, unless it is -fcf-protection=none.
     const char* cf_protection;
+    // The object and linkage options the producer doesn't implement, refused where the request emits code (#1124), each
+    // family's last option deciding: -fcommon unless -fno-common follows it, the last -fvisibility= or
+    // -fvisibility-ms-compat (check_request_visibility), and -ffunction-sections and -fdata-sections unless their -fno-
+    // forms follow them.
+    const char* common;
+    const char* visibility;
+    const char* function_sections;
+    const char* data_sections;
     // The last -fshort-enums, unless -fno-short-enums follows it.
     const char* short_enums;
     // Clang's packing: the last -fpack-struct=N decides when there is one (`pack_value`), packing when N isn't 0
@@ -62,8 +70,9 @@ struct CheckRequestScan
 typedef enum CheckRequestError
 {
     CHECK_REQUEST_ACCEPTED,
-    // Code generation the driver doesn't implement: the first option of check_request_codegen_option's, else the stack
-    // protector's or -fcf-protection's that decides.
+    // Code generation the driver doesn't implement: the first option of check_request_codegen_option's (or a bare
+    // -fvisibility), else the stack protector's or -fcf-protection's that decides, else, for a request that emits code,
+    // the object and linkage options' (#1124).
     CHECK_REQUEST_CODEGEN,
     // Instrumentation the driver doesn't implement, for a request that emits code, from the resolved predefines rather
     // than from an enabling option, which a later -fno-sanitize= or -fno-openmp may have cancelled (#1112): a sanitizer,
@@ -190,10 +199,20 @@ static bool check_request_pack_value(const char* digits, uint64_t* value)
     return valid;
 }
 
+// Whether the last -fvisibility= or -fvisibility-ms-compat, `option` (or null), changes the default visibility the
+// producer doesn't implement: -fvisibility-ms-compat, and hidden, protected or internal. Only the last counts, as clang's
+// driver reads them; a malformed last value is pp_parse_options' clang-compatible invalid-value error.
+static bool check_request_visibility(const char* option)
+{
+    const char* value = option != NULL ? option + sizeof("-fvisibility") - 1 : "";
+    return option != NULL && (strcmp(option, "-fvisibility-ms-compat") == 0 || strcmp(value, "=hidden") == 0 || strcmp(value, "=protected") == 0 ||
+                              strcmp(value, "=internal") == 0);
+}
+
 // Reads `argument`, one that is no option's value (pp_option_takes_value's), into `scan`: whether it goes on to
 // pp_parse_options. Only an option that asks for code generation the driver doesn't implement stays apart, since the
-// preprocessor doesn't model it; the stack protector's, -fcf-protection's and the layout options go on, for their
-// predefined macros.
+// preprocessor doesn't model it; the stack protector's, -fcf-protection's, the layout options and the object and
+// linkage options go on, for their predefined macros, and so does a bare -fvisibility, which clang doesn't take.
 static bool check_request_scan(CheckRequestScan* scan, const char* argument)
 {
     bool passed = true;
@@ -222,6 +241,26 @@ static bool check_request_scan(CheckRequestScan* scan, const char* argument)
     {
         scan->cf_protection = strcmp(argument, "-fcf-protection=none") == 0 ? NULL : argument;
     }
+    else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
+    {
+        scan->common = strcmp(argument, "-fcommon") == 0 ? argument : NULL;
+    }
+    else if (strcmp(argument, "-ffunction-sections") == 0 || strcmp(argument, "-fno-function-sections") == 0)
+    {
+        scan->function_sections = strcmp(argument, "-ffunction-sections") == 0 ? argument : NULL;
+    }
+    else if (strcmp(argument, "-fdata-sections") == 0 || strcmp(argument, "-fno-data-sections") == 0)
+    {
+        scan->data_sections = strcmp(argument, "-fdata-sections") == 0 ? argument : NULL;
+    }
+    else if (strcmp(argument, "-fvisibility-ms-compat") == 0 || strncmp(argument, "-fvisibility=", sizeof("-fvisibility=") - 1) == 0)
+    {
+        scan->visibility = argument;
+    }
+    else if (strcmp(argument, "-fvisibility") == 0)
+    {
+        scan->codegen = scan->codegen != NULL ? scan->codegen : argument;
+    }
     else if (check_request_codegen_option(argument))
     {
         scan->codegen = scan->codegen != NULL ? scan->codegen : argument;
@@ -230,14 +269,18 @@ static bool check_request_scan(CheckRequestScan* scan, const char* argument)
     return passed;
 }
 
-// What the request scanned into `scan` asks for that the driver doesn't implement: with `options` (null before they
-// are parsed: then only code generation's options, which the driver reports before a usage error), its instrumentation
-// and its position-independent code when `emits` (-c, or a link), its layout and its language and target too, the
-// first that applies in that order.
+// What the request scanned into `scan` asks for that the driver doesn't implement: code generation's options, with the
+// object and linkage options' when `emits` (-c, or a link), which the driver reports before a usage error; then, with
+// `options` (null before they are parsed), its instrumentation and its position-independent code when `emits`, its
+// layout and its language and target too, the first that applies in that order.
 static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, const PPOptions* options, bool emits)
 {
     CheckRequestRefusal result = { .error = CHECK_REQUEST_ACCEPTED };
-    const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector : scan->cf_protection;
+    const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
+    const char* object = !emits ? NULL : scan->common != NULL ? scan->common : visibility != NULL ? visibility :
+                         scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
+    const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector :
+                          scan->cf_protection != NULL ? scan->cf_protection : object;
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
     const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
     const bool parallel = options != NULL && emits && options->predefines.openmp_enabled;
