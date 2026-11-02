@@ -94,12 +94,16 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     return chain;
 }
 
+// The callee-saved registers that values live across a call may take (tier1_emit_cfg_callee): rbp among them where the
+// frame keeps no frame pointer in it (#1116), which the frame's reservations say before allocation.
+#define BUSTER_TIER1_EMIT_CFG_CALLEE ((1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15))
+
 // A register the CFG consumer's values may be in: the selector's caller-saved ones, and the callee-saved ones that values
-// live across a call take (tier1_emit_cfg_callee); never rsp, rbp or the scratch register.
+// live across a call take (tier1_emit_cfg_callee); never rsp or the scratch register, and rbp only where the frame
+// doesn't reserve it.
 static bool tier1_emit_cfg_register(uint8_t reg)
 {
-    const uint32_t callee = (1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15);
-    return tier1_select_register_allowed(reg) || (reg < 16 && ((callee >> reg) & 1) != 0);
+    return tier1_select_register_allowed(reg) || (reg < 16 && ((BUSTER_TIER1_EMIT_CFG_CALLEE >> reg) & 1) != 0);
 }
 
 // Whether node's value is in a register of its class at `location` (the emitter's view, by location): a mask in k1 to
@@ -413,9 +417,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         prepared->reserved_registers = requirements.reserved_registers | (1u << BUSTER_TIER1_SELECT_SCRATCH);
     }
     const uint32_t registers = options->register_mask & ~prepared->reserved_registers;
-    // The callee-saved registers values live across a call may take, but those the frame reserves (tier1_emit_cfg_callee).
-    const uint32_t callee = (1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15);
-    emitted->callee_registers = prepared->call_count != 0 ? callee & ~prepared->reserved_registers : 0;
+    // The callee-saved registers values live across a call may take, but those the frame reserves (tier1_emit_cfg_callee):
+    // rbp where it is the frame pointer, r15 where it is a realigned dynamic frame's base.
+    emitted->callee_registers = prepared->call_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE & ~prepared->reserved_registers : 0;
     ok = error == TIER1_EMIT_OK;
     uint32_t* block_starts = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* successor_offsets = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
@@ -1496,14 +1500,28 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         }
         const uint32_t first = b < added ? 0 : function->block_offsets[b - added];
         const uint32_t end = b < added ? 0 : function->block_offsets[b - added + 1];
+        // The calls' saves in this block (Tier1EmitSaves, #1116). Control enters a block from elsewhere, so none carry in.
+        Tier1EmitSaves saves;
+        tier1_emit_saves_reset(&saves);
         for (uint32_t node = first; error == TIER1_EMIT_OK && node < end; node += 1)
         {
             const uint32_t op = function->op[node];
             const uint32_t use = base + 2 * node;
             const uint32_t v = emitted->node_values[node];
             const bool selected = !plan->covered[node] && op != IR_PHI && op != IR_PARAM;
+            const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
             code->node_first[node] = buffer.count;
-            error = tier1_emit_phase(&emitted->prepared, &view, &emitted->frame, &transitions, use, &buffer, emitted);
+            // The owed loads this node needs, first. Its definition's register is its interval's first, a call's result's
+            // excepted: the call drops the owed values it doesn't save. A return's other owed values are dead.
+            const bool leaves = op == IR_RET || op == IR_UNREACHABLE;
+            if (saves.owed != 0)
+            {
+                const uint32_t defined_interval = selected && !calls && v != BUSTER_TIER1_CFG_NONE && tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_GPR ? tier1_cfg_interval_at(cfg, v, use + 1) : BUSTER_TIER1_CFG_NONE;
+                const uint8_t defined = defined_interval != BUSTER_TIER1_CFG_NONE ? allocation->registers[allocation->fragment_offsets[defined_interval]] : UINT8_MAX;
+                const uint32_t repaid = tier1_emit_owed(plan, &emitted->prepared, allocation, &transitions, node, use, defined, node + 1 == end && !leaves, saves.owed);
+                error = repaid != 0 ? tier1_emit_repay(emitted, &saves, repaid, &buffer) : error;
+            }
+            error = error == TIER1_EMIT_OK ? tier1_emit_phase(&emitted->prepared, &view, &emitted->frame, &transitions, use, &buffer, emitted) : error;
             // A definition writes its interval's first register; a parameter and a phi are where the entry state put
             // them.
             if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected)
@@ -1514,7 +1532,6 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 const uint32_t base_location = 32 * tier1_emit_class(&emitted->prepared, node);
                 transitions.registers[node] = error == TIER1_EMIT_OK ? (uint8_t)(base_location + allocation->registers[allocation->fragment_offsets[interval]]) : UINT8_MAX;
             }
-            const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
             Tier1SelectHoles holes = { 0 };
             // The arguments' registers, and an indirect call's callee's after them.
             uint32_t argument_registers[BUSTER_ABI_INTEGER_ARGUMENTS + 1] = { 0 };
@@ -1590,7 +1607,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     }
                     if (error == TIER1_EMIT_OK && pass == 0)
                     {
-                        error = tier1_emit_call(plan, node, argument_registers, saved, transitions.registers[node], &buffer, scratch, emitted);
+                        error = tier1_emit_call(plan, node, argument_registers, saved, tier1_emit_kept(&saves, &transitions, saved), transitions.registers[node], &buffer, scratch, emitted);
+                        tier1_emit_saved(&saves, &transitions, saved);
                     }
                 }
             }
@@ -1633,6 +1651,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
             {
                 error = tier1_emit_cfg_fixed(emitted, &transitions, node, use, &holes, &buffer);
+                tier1_emit_fixed_rows(&saves, tier1_select_fixed_registers(plan->patterns[node].rule));
             }
             else if (error == TIER1_EMIT_OK && selected && dropped[node] != 0)
             {
@@ -1728,11 +1747,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 transitions.owners[transitions.registers[node]] = node;
             }
+            saves.owed = leaves ? 0 : saves.owed;
             if (error != TIER1_EMIT_OK && error_node != 0)
             {
                 *error_node = node;
             }
         }
+        // The block's last node took every owed value back, or left the function.
+        error = saves.owed == 0 ? error : TIER1_EMIT_INVALID;
         // The added entry's single edge: its moves, then it falls through into the IR's entry.
         if (error == TIER1_EMIT_OK && b < added && cfg->edge_placements[0] == TIER1_CFG_EDGE_PREDECESSOR)
         {

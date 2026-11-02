@@ -1710,8 +1710,8 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
 
 static void tier1_select_test_copy_elision(Tier1SelectTest* test)
 {
-    // Issue #981: a copy from canonical storage in its own register is nothing, but a 32-bit copy that may
-    // come from a parameter or call result keeps its clearing move. Truncations and zero extensions always emit.
+    // Issue #981: a copy from canonical storage in its own register is nothing. Issue #1116: so is a 32-bit copy of an
+    // I32 and a truncation to I32, whose upper half is unspecified. Zero extensions and narrow truncations always emit.
     for (uint32_t width = 4; width <= 8; width += 4)
     {
         const Tier1SelectHoles same =
@@ -1722,8 +1722,7 @@ static void tier1_select_test_copy_elision(Tier1SelectTest* test)
             .destination = X86_REGISTER_RAX,
             .left = X86_REGISTER_RAX,
         };
-        const bool clears = width == 4;
-        tier1_select_test_expect(test, tier1_select_expand(&same).count == (clears ? 1 : 0), "same-register copy keeps its move only where it may clear dirty bits");
+        tier1_select_test_expect(test, tier1_select_expand(&same).count == 0, "same-register copy emits nothing at either width");
         Tier1SelectHoles moved = same;
         moved.left = X86_REGISTER_RCX;
         const Tier1SelectRecords copy = tier1_select_expand(&moved);
@@ -1770,12 +1769,19 @@ static void tier1_select_test_copy_elision(Tier1SelectTest* test)
         Tier1SelectHoles truncated =
         {
             .rule = TIER1_RULE_TRUNCATE,
-            .width = source == 4 ? 4 : source,
+            .width = source,
             .destination = X86_REGISTER_RAX,
             .left = X86_REGISTER_RAX,
         };
         const Tier1SelectRecords trunc = tier1_select_expand(&truncated);
-        tier1_select_test_expect(test, trunc.count == 1, "same-register truncation still clears bits past its width");
+        const uint16_t clear = source == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16;
+        tier1_select_test_expect(test, source == 4 ? trunc.count == 0 : trunc.count == 1 && trunc.records[0].form == clear,
+                                 "same-register narrow truncation clears bits past its width, and one to I32 emits nothing");
+        truncated.left = X86_REGISTER_RCX;
+        const Tier1SelectRecords trunc_moved = tier1_select_expand(&truncated);
+        tier1_select_test_expect(test, trunc_moved.count == 1 && trunc_moved.records[0].form == (source == 4 ? X86_FORM_MOV_R32_RM32 : clear) &&
+                                 trunc_moved.records[0].reg == X86_REGISTER_RAX && trunc_moved.records[0].rm == X86_REGISTER_RCX,
+                                 "truncation to another register moves or clears into it");
     }
 }
 

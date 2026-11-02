@@ -75,7 +75,19 @@ body never contributes success counters. The source-order failure selection
 and lane-completion protocol remain the emission's existing ones.
 
 `--tier1-refusals` gives each permitted fallback's category, cause, original
-error/location, operation and disposition. Multi-unit refusals use each unit's
+error/location, operation and disposition. Where selection refused a call, a
+last field, `call=`, lists the call's kinds (#1116):
+
+- `indirect` and `variadic`, which the selector takes;
+- `abi-record` (a by-value aggregate's ABI record) and `stack-arguments` (past
+  six);
+- `floating-`, `long-double-`, `narrow-` and `other-argument`;
+- `floating-`, `long-double-` and `other-result`;
+- `argument-count` (arguments that don't match the parameters).
+
+`--tier1-report` counts the refused calls by kind as `selection.call.KIND`, a
+call under each kind it has. So a corpus's `selection.call` total says which
+shape to take first. Multi-unit refusals use each unit's
 buffered diagnostic stream, so concurrent units cannot interleave them.
 Fatal failures go through the normal source diagnostic. Histogram bounds
 never truncate the complete per-body outcome or alias unknown errors modulo

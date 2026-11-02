@@ -320,6 +320,8 @@ struct CheckTier1Report
     uint32_t stages[CHECK_TIER1_STAGE_COUNT];
     uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
     uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
+    // The refused calls by kind (CheckTier1CallKind), a call counted under each kind it has (#1116).
+    uint32_t calls[CHECK_TIER1_CALL_KIND_COUNT];
     // The counts of Tier 1's bodies, summed.
     uint64_t records;
     uint64_t spill_stores;
@@ -3009,6 +3011,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         if (stage == CHECK_TIER1_SELECTION && operation < BUSTER_CHECK_TIER1_OPERATIONS)
         {
             lanes->tier1_report.operations[operation] += 1;
+        }
+        for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+        {
+            lanes->tier1_report.calls[k] += (outcome.call_kinds >> k) & 1;
         }
         if (stage == CHECK_TIER1_EMISSION && outcome.emission_error != 0 && outcome.emission_error < BUSTER_CHECK_TIER1_OPERATIONS)
         {

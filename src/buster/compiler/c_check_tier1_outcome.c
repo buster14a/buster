@@ -59,6 +59,31 @@ typedef enum CheckTier1Fallback
     CHECK_TIER1_FALLBACK_FORBIDDEN,
 } CheckTier1Fallback;
 
+// What a call selection refused has (#1116), as bits of CheckTier1Outcome.call_kinds: the shapes its arguments and result
+// take, against the selector's call boundary (tier1_select_call_supported), so that a corpus's refusals say which shape
+// to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell apart.
+typedef enum CheckTier1CallKind
+{
+    CHECK_TIER1_CALL_INDIRECT,
+    CHECK_TIER1_CALL_VARIADIC,
+    CHECK_TIER1_CALL_ABI_RECORD,
+    CHECK_TIER1_CALL_STACK_ARGUMENTS,
+    CHECK_TIER1_CALL_FLOATING_ARGUMENT,
+    CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT,
+    CHECK_TIER1_CALL_NARROW_ARGUMENT,
+    CHECK_TIER1_CALL_OTHER_ARGUMENT,
+    CHECK_TIER1_CALL_FLOATING_RESULT,
+    CHECK_TIER1_CALL_LONG_DOUBLE_RESULT,
+    CHECK_TIER1_CALL_OTHER_RESULT,
+    CHECK_TIER1_CALL_ARGUMENT_COUNT,
+    CHECK_TIER1_CALL_KIND_COUNT,
+} CheckTier1CallKind;
+
+static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT] = {
+    "indirect", "variadic", "abi-record", "stack-arguments", "floating-argument", "long-double-argument", "narrow-argument", "other-argument",
+    "floating-result", "long-double-result", "other-result", "argument-count",
+};
+
 // These two domains have no upstream error enum: the adapter's exact refusal/capacity reason.
 #define BUSTER_CHECK_TIER1_NAKED 1u
 #define BUSTER_CHECK_TIER1_ARENA_RESERVE 1u
@@ -80,6 +105,8 @@ struct CheckTier1Outcome
     uint32_t emission_error;
     // The full IrCheck, including whether its dominance obligation was checked.
     bool dominance_checked;
+    // Where selection refused a call, the call's kinds (1 << CheckTier1CallKind); zero for any other outcome.
+    uint32_t call_kinds;
 };
 
 // Caller-owned regression control, immutable during a run. After a stage succeeds, substitute this raw error at its

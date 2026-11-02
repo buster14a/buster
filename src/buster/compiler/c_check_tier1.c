@@ -108,6 +108,33 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
     return error == 0 ? success : check_tier1_failure(stage, cause, error, instruction, detail);
 }
 
+// The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116).
+static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
+{
+    const bool call = node < ir->instruction_count && (ir->op[node] == IR_CALL || ir->op[node] == IR_CALL_INDIRECT) && ir->b[node] < ir->call_count;
+    uint32_t kinds = 0;
+    if (call)
+    {
+        const IrCall* descriptor = &ir->calls[ir->b[node]];
+        const uint32_t result = ir->type[node];
+        kinds |= (ir->op[node] == IR_CALL_INDIRECT ? 1u : 0) << CHECK_TIER1_CALL_INDIRECT;
+        kinds |= (descriptor->variadic ? 1u : 0) << CHECK_TIER1_CALL_VARIADIC;
+        kinds |= (descriptor->abi != 0 ? 1u : 0) << CHECK_TIER1_CALL_ABI_RECORD;
+        kinds |= (descriptor->argument_count > BUSTER_ABI_INTEGER_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
+        kinds |= (descriptor->variadic ? descriptor->parameter_count > descriptor->argument_count : descriptor->parameter_count != descriptor->argument_count) ? 1u << CHECK_TIER1_CALL_ARGUMENT_COUNT : 0;
+        for (uint32_t argument = 0; argument < descriptor->argument_count && descriptor->type_first + argument < ir->call_type_count; argument += 1)
+        {
+            const uint32_t type = ir->call_types[descriptor->type_first + argument];
+            kinds |= type == IR_F32 || type == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT : type == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT :
+                     type == IR_I1 || type == IR_I8 || type == IR_I16 ? 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT :
+                     type == IR_I32 || type == IR_I64 || type == IR_PTR ? 0 : 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT;
+        }
+        kinds |= result == IR_F32 || result == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_RESULT : result == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT :
+                 result == IR_VOID || (result >= IR_I1 && result <= IR_I64) || result == IR_PTR ? 0 : 1u << CHECK_TIER1_CALL_OTHER_RESULT;
+    }
+    return kinds;
+}
+
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome)
 {
     // This is only the legacy bounded histogram. The outcome itself never truncates an error or a location.
@@ -311,6 +338,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
         outcome.operation = refused;
+        outcome.call_kinds = selected == TIER1_SELECT_ERROR_UNSUPPORTED ? check_tier1_call_kinds(ir, node) : 0;
         stage = outcome.stage;
     }
     Tier1EmitResult emitted = { 0 };
@@ -452,11 +480,19 @@ static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_
 {
     const char* operation = outcome.stage == CHECK_TIER1_SELECTION && outcome.operation < IR_OP_COUNT ? ir_op_names[outcome.operation] :
                             outcome.stage == CHECK_TIER1_SELECTION && outcome.operation == IR_OP_COUNT ? "function" : "none";
+    // A refused call's kinds, comma-separated, past the fields every refusal has (#1116).
+    char kinds[256] = { 0 };
+    uint32_t used = 0;
+    for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+    {
+        const int written = ((outcome.call_kinds >> k) & 1) != 0 ? snprintf(kinds + used, sizeof(kinds) - used, "%s%s", used == 0 ? "\tcall=" : ",", check_tier1_call_kind_names[k]) : 0;
+        used += written > 0 && used + (uint32_t)written < sizeof(kinds) ? (uint32_t)written : 0;
+    }
     fprintf(stream, "tier1-refused\t%.*s\t%s\tcategory=%s\tcause=%s\terror=%" PRIu32 "\tinstruction=%" PRIu32 "\tdetail=%" PRIu32
-                    "\toperation=%s\temission_error=%" PRIu32 "\tdominance_checked=%" PRIu32 "\tfallback=%s\n",
+                    "\toperation=%s\temission_error=%" PRIu32 "\tdominance_checked=%" PRIu32 "\tfallback=%s%s\n",
             (int)length, (const char*)name, check_tier1_stage_names[outcome.stage], check_tier1_category_names[outcome.category],
             check_tier1_cause_names[outcome.cause], outcome.error, outcome.instruction, outcome.detail, operation, outcome.emission_error,
-            (uint32_t)outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden");
+            (uint32_t)outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden", kinds);
 }
 
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report)
@@ -484,6 +520,13 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
         else if (report->operations[k] != 0)
         {
             fprintf(stream, "\tselection.error%" PRIu32 "=%" PRIu32, k - IR_OP_COUNT, report->operations[k]);
+        }
+    }
+    for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+    {
+        if (report->calls[k] != 0)
+        {
+            fprintf(stream, "\tselection.call.%s=%" PRIu32, check_tier1_call_kind_names[k], report->calls[k]);
         }
     }
     for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_OPERATIONS; k += 1)

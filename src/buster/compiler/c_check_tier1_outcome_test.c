@@ -136,6 +136,77 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
                             "the speculative callee-saved preference ignores constraint and capacity", NULL);
 }
 
+// A refused call's kinds (#1116): each shape a call's descriptor can have, a node that isn't a call, and the refusal
+// line and report that print them.
+static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
+{
+    Arena arena = arena_reserve(1u << 20);
+    const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .call_count = 4, .call_type_count = 16 };
+    IrFunction function;
+    const bool created = arena.base != NULL && ir_create(&arena, &sizes, &function) == IR_OK;
+    check_lanes_test_expect(tally, created, "create the call kinds' IR", NULL);
+    if (created)
+    {
+        // f(int, double, long double) -> double; (*p)(short, ...) of eight arguments -> __int128; g(long) of an ABI record
+        // -> void; h(long) of two parameters -> long double; and a constant.
+        static const uint8_t types[16] = { IR_I32, IR_F64, IR_F80, IR_I16, IR_I64, IR_I64, IR_I64, IR_I64, IR_I64, IR_I64, IR_PTR, IR_I64, IR_I64 };
+        memcpy(function.call_types, types, sizeof(types));
+        function.calls[0] = (IrCall){ .type_first = 0, .argument_count = 3, .parameter_count = 3, .result_type = IR_F64 };
+        function.calls[1] = (IrCall){ .type_first = 3, .argument_count = 8, .parameter_count = 1, .result_type = IR_I128, .variadic = true };
+        function.calls[2] = (IrCall){ .type_first = 11, .argument_count = 1, .parameter_count = 1, .result_type = IR_VOID, .abi = 1 };
+        function.calls[3] = (IrCall){ .type_first = 12, .argument_count = 1, .parameter_count = 2, .result_type = IR_F80 };
+        static const uint8_t ops[5] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CONST };
+        static const uint8_t results[5] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_I32 };
+        for (uint32_t node = 0; node < 5; node += 1)
+        {
+            function.op[node] = ops[node];
+            function.type[node] = results[node];
+            function.b[node] = node < 4 ? node : 0;
+        }
+        const uint32_t expected[5] = {
+            1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT | 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT | 1u << CHECK_TIER1_CALL_FLOATING_RESULT,
+            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
+                1u << CHECK_TIER1_CALL_OTHER_RESULT,
+            1u << CHECK_TIER1_CALL_ABI_RECORD,
+            1u << CHECK_TIER1_CALL_ARGUMENT_COUNT | 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT,
+            0,
+        };
+        for (uint32_t node = 0; node < 5; node += 1)
+        {
+            check_lanes_test_expect(tally, check_tier1_call_kinds(&function, node) == expected[node], "a refused call's kinds are its descriptor's shapes", ir_op_names[ops[node]]);
+        }
+        CheckTier1Outcome outcome = check_tier1_failure(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 1, 0);
+        outcome.operation = IR_CALL_INDIRECT;
+        outcome.call_kinds = expected[1];
+        char line[512] = { 0 };
+        FILE* stream = fmemopen(line, sizeof(line) - 1, "w");
+        if (stream != NULL)
+        {
+            check_tier1_print_refusal(stream, (const uint8_t*)"f", 1, outcome);
+            outcome.call_kinds = 0;
+            check_tier1_print_refusal(stream, (const uint8_t*)"g", 1, outcome);
+            fclose(stream);
+        }
+        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,narrow-argument,other-result\n") != NULL &&
+                                strstr(line, "tier1-refused\tg\t") != NULL && strstr(strstr(line, "tier1-refused\tg\t"), "call=") == NULL,
+                                "a refused call's line ends in its kinds, and another refusal's has none", line);
+        static CheckTier1Report report;
+        report.calls[CHECK_TIER1_CALL_FLOATING_ARGUMENT] = 3;
+        report.calls[CHECK_TIER1_CALL_ABI_RECORD] = 1;
+        char printed[8192] = { 0 };
+        stream = fmemopen(printed, sizeof(printed) - 1, "w");
+        if (stream != NULL)
+        {
+            check_tier1_print_report(stream, &report);
+            fclose(stream);
+        }
+        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.floating-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
+                                strstr(printed, "selection.call.indirect") == NULL,
+                                "the report counts refused calls by kind", NULL);
+    }
+    arena_release(&arena);
+}
+
 static bool check_tier1_test_cause(CheckTier1Outcome outcome, const CheckTier1FailureCase* test)
 {
     const CheckTier1Fault* fault = &test->fault;
@@ -382,6 +453,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && x86_zen5_initialize();
     check_lanes_test_expect(tally, ready, "initialize Tier 1 outcome regression tables", NULL);
     check_tier1_test_classification(tally);
+    check_tier1_test_call_kinds(tally);
     char source[PATH_MAX];
     char object[PATH_MAX];
     char errors[PATH_MAX];

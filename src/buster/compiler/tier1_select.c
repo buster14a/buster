@@ -569,12 +569,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
         break;
     case TIER1_RULE_COPY:
-        // Only a copy whose narrow source the planner's canonical column certified vanishes in its own register: its
-        // 32-bit storage has zeros past its width (tier1_select_canonical lists the producers, including the entry
-        // MOVZX of a narrow parameter and the result MOVZX of a narrow call). A 32-bit copy of an I32 value keeps its
-        // move: a parameter or call result may arrive with a dirty upper half, and the move is what clears it (the call
-        // tests' hostile callees check this).
-        if (destination != holes->left || (width == 4 && holes->source_width == 0))
+        // A copy in its own register is nothing. A 32-bit value's upper half is unspecified (tier1_select_width), so a
+        // copy of an I32 has nothing to clear. A narrow one's bits past its width are what a narrow source's canonical
+        // column says (tier1_select_canonical), and a 32-bit move wouldn't clear those either.
+        if (destination != holes->left)
         {
             tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
@@ -582,11 +580,15 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_TRUNCATE:
     case TIER1_RULE_ZERO_EXTEND:
     {
-        // Truncations and zero extensions always emit: even in place they must clear the bits past the width.
+        // Zero extensions and narrow truncations always emit: even in place they clear the bits past the width. A
+        // truncation to I32 is a copy, nothing in its own register, since the upper half it would clear is unspecified.
         // Narrow zero extensions never reach this case from the planner; they select COPY above.
         const uint32_t source_width = holes->rule == TIER1_RULE_TRUNCATE ? width : holes->source_width;
         const uint16_t form = source_width == 1 ? X86_FORM_MOVZX_R32_RM8 : source_width == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
-        tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
+        if (holes->rule == TIER1_RULE_ZERO_EXTEND || width != 4 || destination != holes->left)
+        {
+            tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
+        }
         break;
     }
     case TIER1_RULE_SIGN_EXTEND:
@@ -1153,7 +1155,10 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
 
 static uint32_t tier1_select_width(uint32_t type)
 {
-    // Narrow SSA values occupy a zero-extended 32-bit register/spill slot; signedness is explicit in IR_SEXT.
+    // Narrow SSA values occupy a zero-extended 32-bit register/spill slot; signedness is explicit in IR_SEXT. An I32's
+    // upper half is unspecified, as System V leaves a parameter's and a result's (#1116): every rule reads an I32 operand
+    // at 32 bits (an address's index is an I64), and a zero extension to I64 always writes its 32-bit move. So no copy,
+    // truncation to I32, call argument or call result clears it.
     return type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
 }
 
@@ -1195,8 +1200,8 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 //   IR_ICMP              setcc, then MOVZX_R32_RM8
 //   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
 // COPY, BITCAST, ZEXT, SELECT and PHI only move narrow values (MOV, CMOV, edge moves, spill/reload), so they are
-// canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it keeps its clearing
-// move and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
+// canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it is noncanonical too
+// and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
 // probes (tier1_narrow_test.c) check the supported producers natively.
 static void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, uint8_t* canonical)
@@ -1723,10 +1728,10 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     {
         base.rule = TIER1_RULE_COPY;
         base.values[0] = a;
-        // A copy of a narrow value can vanish in its own register only when the planner's canonical column certifies
-        // that value's 32-bit storage (tier1_select_canonical: an entry MOVZX for narrow parameters, the result MOVZX
-        // for narrow calls, and the producers' own full-width writes). An I32 source keeps its clearing move because a
-        // parameter or call result may arrive with a dirty upper half.
+        // A copy in its own register is nothing (tier1_select_expand). A narrow source carries its width where the
+        // planner's canonical column certifies its 32-bit storage (tier1_select_canonical: an entry MOVZX for narrow
+        // parameters, the result MOVZX for narrow calls, and the producers' own full-width writes), so the copy is as
+        // canonical as its source.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         base.source_width = narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0 ? narrow_width : 0;
         base.intrinsic_cost = 1;
@@ -1762,9 +1767,10 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         // A zero extension of a canonical I1, I8 or I16 value is a copy: the source register already holds the
         // destination value with zeros past its width (the planner's canonical column, tier1_select_canonical), and a
         // 32-bit move zeroes the whole 64-bit register. This keeps the second movzx of issue #981's speedtest1 loop out
-        // of the plan on both paths. The copy carries the narrow source width so the emitter can drop it in its own
-        // register; an I32 source keeps its clearing move. For `zext(icmp)` the truth-value candidate below usually wins,
-        // as #140 folds the comparison's own setcc/movzx; this copy covers a comparison the fold leaves alone.
+        // of the plan on both paths. The copy carries the narrow source width, and is nothing in its own register; an
+        // I32 source's zero extension always writes its move, since its upper half is unspecified (tier1_select_width).
+        // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the comparison's own setcc/movzx;
+        // this copy covers a comparison the fold leaves alone.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         const bool narrow_copy = op == IR_ZEXT && narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0;
         base.rule = narrow_copy ? TIER1_RULE_COPY : op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;

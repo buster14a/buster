@@ -523,6 +523,41 @@ the successor's start, or in a stub for a split critical edge. The plan's
 definitions are its uses there, required, since an instruction writes its
 destination's register.
 
+### Values live across calls (#1116)
+
+A call saves each value that lives past it in a caller-saved register: the
+value goes to its register's call-save row, a frame row of that register's for
+the whole function. Where the allocation puts it in a callee-saved register,
+the prologue saves that register once instead (`tier1_emit_cfg_callee`). `rbp`
+is the sixth callee-saved register where the frame keeps no frame pointer in it.
+The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
+`reserved_registers`).
+
+A parameter keeps its incoming register over its definition's interval, so a
+parameter live across a run of calls in its entry block, as in Lua's
+`luac.c:PrintCode` and its runs of `printf`, stays in a caller-saved register.
+Saving it call by call was most of such functions' `call_stores` and
+`call_loads`. Both consumers now save less often within straight-line code: a
+chain, or a block of a CFG (`Tier1EmitSaves`).
+
+- **Loads wait until a read.** A call doesn't load its saved registers back.
+  It owes those loads until a node reads the register, or does anything that
+  would move or replace its value: its transitions at either phase, its
+  definition, or a fixed registers' sequence. The straight-line code's last
+  node, which jumps, also takes them all back (`tier1_emit_owed`). At a return
+  or a trap the owed values are dead, so they are dropped. A value read by none
+  of the calls stays in its row across the run.
+- **A row isn't stored again while it holds the value.** For each general
+  register, the code keeps the owner its row was stored or kept for. A call
+  stores a register only where its owner is now another value. A fixed
+  registers' sequence, which stores those rows, forgets them, and nothing
+  carries into another block.
+
+An owed register's owner never changes while the load is owed: whatever would
+change it takes the value back first. So the emitter's view of where each value
+is stays the allocation's, which `tier1_cfg_verify` checks unchanged. The cost is a scan of each node's uses and transitions while some
+load is owed, scalar work bounded by the node's own uses.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
