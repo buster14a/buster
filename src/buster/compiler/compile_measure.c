@@ -15,7 +15,8 @@
 // default's), the default against the reference, and each stage's median, its range and its share of the median
 // span (the preprocessor's phases, the reader's expressions' walk, `check-input.expressions`, and the lowering's phases,
 // under their stages),
-// ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and exit). Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
+// ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and exit), and the
+// lowering's coverage, the first report's `lowering-nodes` line. Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
 // be whole, or the command fails. The caller pins it (taskset): the processes inherit its CPUs. DIR is a new directory
 // under --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
 // docs/compile-time.md has the 9700X's numbers for sqlite3.c, against tcc.
@@ -167,6 +168,9 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     double* values = BUSTER_ARENA_PUSH_ARRAY(arena, double, m->runs + 1);
     char** argv = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)m->argument_count + 6);
     uint64_t failures = timed == NULL || rows == NULL || values == NULL || argv == NULL;
+    // The lowering's coverage, from the first --time-stages report: its `lowering-nodes` line (#624's fragments' and #1048's
+    // templates' shares of the evaluated nodes), which every run repeats.
+    bool covered = false;
     for (uint32_t run = 0; failures == 0 && run < m->warmups + m->runs; run += 1)
     {
         const bool warmup = run < m->warmups;
@@ -184,6 +188,13 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             if (c == 1)
             {
                 row[BUSTER_MEASURE_OUTSIDE] = (double)one.wall_ns / 1e6 - row[BUSTER_MEASURE_SPAN];
+            }
+            const char* coverage = errors != NULL && !covered ? strstr(errors, "lowering-nodes\t") : NULL;
+            if (coverage != NULL)
+            {
+                const char* end = strchr(coverage, '\n');
+                printf("lowering coverage: %.*s\n", (int)(end != NULL ? end - coverage : (long)strlen(coverage)), coverage);
+                covered = true;
             }
             arena_pop_to(arena, mark);
             if (!exited || !reported)

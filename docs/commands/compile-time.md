@@ -13,6 +13,6 @@ requirements. [Command index](README.md).
   page faults and peak resident set added, and the process's resource use, with the lanes its session asked for and
   ran on (#905: `lanes-asked` and `lanes`); off by default, its laps test a null pointer. `measure-compile [--runs N]
   [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with and without the option and
-  against a reference compiler (tcc), in a rotating order, with each stage's medians; the 9700X job runs it on
+  against a reference compiler (tcc), in a rotating order, with each stage's medians and the lowering's coverage; the 9700X job runs it on
   `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.

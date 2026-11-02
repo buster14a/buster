@@ -1124,6 +1124,9 @@ without the option, with it, and the reference compiler.
   and `wait4`'s rusage gives its user and system time, peak RSS and faults.
 - **Checks.** Every process must exit with status 0, the two objects of every
   run must be the same bytes, and every report must be whole.
+- **Coverage.** It prints the first `--time-stages` report's `lowering-nodes`
+  line, as `lowering coverage:`: the evaluated nodes and the shares #624's
+  fragments and #1048's node templates took, on the host's path.
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
   ranked by elapsed time. The preprocessor's phases and the expressions' walk
