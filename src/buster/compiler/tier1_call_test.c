@@ -920,6 +920,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
     if (selected == TIER1_SELECT_OK)
     {
         const Tier1EmitOptions options = {
+            .certify = true,
             .register_mask = fixture->void_return ? 0 : fixture->narrow_return ? 1u << X86_REGISTER_RAX : tier1_liveness_register_mask(),
             .frame_flags = frame_flags,
             .vector = vector,
@@ -1057,6 +1058,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
         const uint64_t output_mark = test->output.length;
         const uint64_t scratch_mark = test->scratch.length;
         const Tier1EmitOptions options = {
+            .certify = true,
             .register_mask = tier1_liveness_register_mask(),
             .vector = true,
         };
