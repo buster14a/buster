@@ -1567,22 +1567,6 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
     {
         return;
     }
-    if (cpu && !target && !clones)
-    {
-        // CPU dispatch's code generation isn't supported. Without another multiversioning attribute there is no
-        // compatibility error to report, and retaining the declaration would let -c write a call to a plain symbol the
-        // source doesn't define (#839's review).
-        for (uint32_t i = 0; i < attributes->count; i += 1)
-        {
-            CheckInputAttribute* attribute = attributes->records + i;
-            if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH))
-            {
-                check_input_report(reader, attribute->name_token, CHECK_INPUT_UNSUPPORTED);
-                attribute->ignored = true;
-            }
-        }
-        return;
-    }
     const uint64_t mark = reader->scratch->length;
     const uint32_t count = attributes->count;
     bool* incompatible = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, bool, count) : NULL;
@@ -1716,6 +1700,11 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             active_kind = CHECK_MULTIVERSION_TARGET;
         }
     }
+    bool pair = false;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        pair |= incompatible[i];
+    }
     if (active != BUSTER_CHECK_NONE)
     {
         const uint32_t bad = check_input_attribute_multiversion_disallowed(attributes, active_kind, incompatible, active, inline_function);
@@ -1723,6 +1712,21 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         {
             check_input_report_multiversion(reader, name, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, (uint8_t)active_kind,
                                             attributes->records[bad].name_token, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, 0);
+        }
+        else if (cpu && !target && !clones && !pair)
+        {
+            // CPU dispatch's code generation isn't supported. With no target, target_clones or compatibility error to
+            // report, retaining the declaration would let -c write a call to a plain symbol the source doesn't define
+            // (#839's review). A disallowed attribute above is clang's multiversioning error, not this refusal.
+            for (uint32_t i = 0; i < attributes->count; i += 1)
+            {
+                CheckInputAttribute* attribute = attributes->records + i;
+                if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH))
+                {
+                    check_input_report(reader, attribute->name_token, CHECK_INPUT_UNSUPPORTED);
+                    attribute->ignored = true;
+                }
+            }
         }
     }
     arena_pop_to(reader->scratch, mark);
@@ -1751,8 +1755,9 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         CheckInputAttribute* attribute = &attributes->records[i];
         // These spellings are standard C23 attributes, not GNU attributes clang's older C modes know: it warns and
         // ignores them, so they don't conflict with multiversioning (#839's review).
-        if (!attribute->ignored && reader->pp->options.language.standard < 2023)
+        if (!attribute->ignored)
         {
+            // clang's C parser warns and ignores these spellings in every mode (#839's re-review).
             const String8 spelling = check_input_attribute_name(reader, attribute->name);
             attribute->ignored |= check_input_attribute_equal(spelling, "nodiscard") || check_input_attribute_equal(spelling, "maybe_unused") ||
                                   check_input_attribute_equal(spelling, "no_sanitize_undefined");

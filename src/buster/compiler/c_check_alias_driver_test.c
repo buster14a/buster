@@ -538,6 +538,15 @@ static void check_test_driver_multiversion(CheckTest* test, const char* clang, c
           "int g(int x) { return x; }\n__attribute__((cpu_dispatch(generic), target(\"default\"))) int h(int x) { return x + 1; }\n"
           "int caller(int x) { return h(x); }\n",
           "'target' and 'cpu_dispatch' attributes are not compatible", true },
+        { "cpu_specific beside always_inline",
+          "__attribute__((cpu_specific(generic), always_inline)) int h(void);\n",
+          "attribute 'cpu_specific' multiversioning cannot be combined with attribute 'always_inline'", true },
+        { "cpu_dispatch beside noinline",
+          "__attribute__((cpu_dispatch(generic), noinline)) int h(void);\n",
+          "attribute 'cpu_dispatch' multiversioning cannot be combined with attribute 'noinline'", true },
+        { "cpu_specific beside cpu_dispatch",
+          "__attribute__((cpu_specific(generic), cpu_dispatch(generic))) int h(void);\n",
+          "'cpu_dispatch' and 'cpu_specific' attributes are not compatible", true },
         { "aligned beside target default",
           "int h(void) __attribute__((aligned(16), target(\"default\")));\n",
           "attribute 'target' multiversioning cannot be combined with attribute 'aligned'", true },
@@ -564,6 +573,21 @@ static void check_test_driver_multiversion(CheckTest* test, const char* clang, c
           "__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
           "int caller(int x) { return h(x); }\n",
           "attribute 'target' multiversioning cannot be combined with attribute 'always_inline'", true },
+        { "a later target version checks an earlier default declaration",
+          "__attribute__((always_inline, target(\"default\"))) int h(int x);\n"
+          "__attribute__((target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { return h(x); }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'always_inline'", true },
+        { "three target versions check the first declaration",
+          "__attribute__((always_inline, target(\"avx2\"))) int h(void);\n"
+          "__attribute__((target(\"avx512f\"))) int h(void);\n"
+          "__attribute__((target(\"default\"))) int h(void) { return 0; }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'always_inline'", true },
+        { "a late version checks the first declaration, not the middle one",
+          "__attribute__((target(\"avx2\"))) int h(void);\n"
+          "__attribute__((noinline, target(\"avx512f\"))) int h(void);\n"
+          "__attribute__((target(\"default\"))) int h(void) { return 0; }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'noinline'", true },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {

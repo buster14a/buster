@@ -5215,14 +5215,29 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
             const CheckInputAttributes* previous_attributes =
                 reader->output->attributes != 0 && previous_declaration < parser->tokens.count ? reader->output->attributes[previous_declaration] : 0;
-            const bool previous_inline = previous_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
-                                         previous_declaration < parser->tokens.count &&
-                                         (reader->output->function_flags[previous_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+            // clang's multiversioning check uses the canonical (first) declaration's attributes, not the immediate
+            // previous one (#839's re-review).
+            uint32_t first_handle = previous_handle;
+            while (first_handle != 0)
+            {
+                const uint32_t earlier = reader->bindings.previous[first_handle - 1];
+                if (earlier == 0)
+                {
+                    break;
+                }
+                first_handle = earlier;
+            }
+            const uint32_t first_declaration = first_handle != 0 ? reader->bindings.declaration[first_handle - 1] : BUSTER_CHECK_NONE;
+            const CheckInputAttributes* first_attributes =
+                reader->output->attributes != 0 && first_declaration < parser->tokens.count ? reader->output->attributes[first_declaration] : 0;
+            const bool first_inline = first_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
+                                      first_declaration < parser->tokens.count &&
+                                      (reader->output->function_flags[first_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
             const bool attributes_valid = valid;
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
             if (attributes_valid && function && !is_typedef)
             {
-                check_input_attribute_multiversion(reader, attributes, name, previous_attributes, previous_declaration, is_inline, previous_inline);
+                check_input_attribute_multiversion(reader, attributes, name, first_attributes, first_declaration, is_inline, first_inline);
             }
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);

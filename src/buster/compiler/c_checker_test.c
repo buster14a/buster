@@ -5509,6 +5509,13 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu23",
+            "int h(void) __attribute__((nodiscard, maybe_unused, no_sanitize_undefined, target(\"default\")));\n",
+            false,
+            false,
+            .standard = 2023
+        },
     };
     enum
     {
