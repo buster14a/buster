@@ -112,7 +112,9 @@ patterns are:
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
   (the build's `-fno-strict-aliasing`): 40 instructions more per node. The IR has no atomic access of its own: C's atomic operations
-  reach it as calls of the unit's leaves. A volatile load remains a separate
+  reach it as calls of the unit's leaves, but a fence of a constant order (#1059), which is the IR's `fence`
+  (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst` and no records for the others, a barrier no
+  selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using

@@ -164,6 +164,9 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ALLOCA_IMMEDIATE,
     TIER1_RULE_STACK_SAVE,
     TIER1_RULE_STACK_RESTORE,
+    // A memory fence (IR_FENCE, #1059) of the order and scope `immediate`: mfence for a thread fence of seq_cst, the one
+    // x86-64 needs an instruction for, and no records for the others. No value; no pass moved an access across it.
+    TIER1_RULE_FENCE,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -874,6 +877,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     case TIER1_RULE_UNREACHABLE:
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
+        break;
+    case TIER1_RULE_FENCE:
+        if (holes->immediate == BUSTER_IR_FENCE_SEQ_CST)
+        {
+            tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_MFENCE });
+        }
         break;
     case TIER1_RULE_PHI:
         break;
@@ -3026,6 +3035,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     {
         base.rule = TIER1_RULE_LIFETIME;
         base.immediate = a;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_FENCE)
+    {
+        base.rule = TIER1_RULE_FENCE;
+        base.immediate = a;
+        base.intrinsic_cost = a == BUSTER_IR_FENCE_SEQ_CST ? 1 : 0;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;

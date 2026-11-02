@@ -10,7 +10,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-_Static_assert(IR_OP_COUNT == 61, "audit the independent dataflow operand oracle for a new IR operation");
+// IR_FENCE (#1059), the last added, uses no value: the default case's.
+_Static_assert(IR_OP_COUNT == 62, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests
