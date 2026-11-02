@@ -696,23 +696,27 @@ tokens' vector at every start, the masks and the entries' lists by both paths,
 with the directory ending at a `PROT_NONE` page. The tests that build a
 `CheckInput` by hand build its sparse columns from their values.
 
-On the 9700X, CPU 2 under the host's lock, main `3ce71ec3` against the change
-(`93f2085f`), with every object the same bytes, by both paths, on 8 lanes and
-with `-g`: 8 interleaved rounds of `perf stat -r 3`, and `measure-compile --runs
-11` of each with the other as its reference:
+On the 9700X, CPU 2 under the host's lock, main `dac5b770` against the change
+merged with it (`67f7bf51`), with every object the same bytes, by both paths, on
+8 lanes and with `-g`: 8 interleaved rounds of `perf stat -r 3`, and
+`measure-compile --runs 11` of each with the other as its reference:
 
 | measure | main | sparse columns |
 | --- | ---: | ---: |
-| task clock | 117.43 ms | 115.43 ms |
-| user cycles | 557.7 M | 551.6 M |
+| task clock | 117.07 ms | 116.07 ms |
+| user cycles | 555.8 M | 555.5 M |
 | user instructions | 1,274.2 M | 1,272.1 M |
-| kernel cycles | 93.4 M | 88.7 M |
-| peak RSS (`wait4`) | 323,508 KiB | 298,808 KiB |
-| `check-input` | 49.05 ms | 47.70 ms |
-| `check-input`'s peak added | 171,320 KiB | 144,632 KiB |
+| kernel cycles | 93.6 M | 88.0 M |
+| peak RSS (`wait4`) | 323,720 KiB | 296,856 KiB |
+| `check-input` | 49.07 ms | 47.35 ms |
+| `check-input`'s peak added | 171,256 KiB | 144,504 KiB |
 
-Every round of the 8 has the change 1.7 to 2.7 ms faster. The peak is still
-the reader's end, 24.7 MB lower.
+- **The time.** Every round of the 8 has the change 0.8 to 1.5 ms faster, nearly
+  all of it the kernel's: the fills' and the pages' clearing it no longer does.
+  An earlier round on main `3ce71ec3` (with `93f2085f`, the same code) had it
+  2.0 ms faster, with 1.1% fewer user cycles, which this round doesn't repeat:
+  a placement's difference, as `sqlite3.c`'s `-c` is known to show.
+- **The peak** is still the reader's end, 26,864 KiB (8.3%) lower.
 
 ## The checker's graph and program passes (#530)
 
