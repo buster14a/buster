@@ -2518,7 +2518,9 @@ came last.
 On the 9700X (`benchmark-preprocessor --only vectorized`, `taskset -c 2`,
 seven rounds of interleaved processes in one lock hold each, the medians of
 each run's 21 passes and of the runs; `main.c` frozen at `3ce71ec3`, the
-pinned `sqlite3.c`), this change against `3ce71ec3`:
+pinned `sqlite3.c`; [the record](https://github.com/buster14a/buster-performance/tree/d7a77b5b0cc6a3b9d32848efeabe0c67c387bcb5/docs/measurements/printer-classes-649-2026-11-02)
+has the logs, the variants' patches and the scripts), this change against
+`3ce71ec3`:
 
 | | `main.c` printing | `main.c` whole run | `sqlite3.c` printing | `sqlite3.c` whole run |
 | --- | --- | --- | --- | --- |
