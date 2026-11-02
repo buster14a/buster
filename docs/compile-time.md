@@ -712,7 +712,7 @@ On the 9700X, CPU 2 under the host's lock, main `dac5b770` against the change
 merged with it (`67f7bf51`), with every object the same bytes, by both paths, on
 8 lanes and with `-g`: 8 interleaved rounds of `perf stat -r 3`, and
 `measure-compile --runs 11` of each with the other as its reference ([the
-record](https://github.com/buster14a/buster-performance/tree/9b1d6a069f1c8d366f8d273e4da71acb25f9c19e/docs/measurements/sparse-columns-628-2026-11-02)
+record](https://github.com/buster14a/buster-performance/tree/a012932ca4ca85bca5783d65245ac9837942d02c/docs/measurements/sparse-columns-628-2026-11-02)
 has the raw outputs, the receipts and the scripts):
 
 | measure | main | sparse columns |
@@ -731,6 +731,11 @@ has the raw outputs, the receipts and the scripts):
   2.0 ms faster, with 1.1% fewer user cycles, which this round doesn't repeat:
   a placement's difference, as `sqlite3.c`'s `-c` is known to show.
 - **The peak** is still the reader's end, 26,864 KiB (8.3%) lower.
+- **The shared pool's claims** (`3950f15b`, after the review), measured the same
+  way against `dac5b770`: task clock 117.07 → 115.90 ms, kernel cycles 93.8 →
+  89.3 M, peak 323,608 → 296,856 KiB, objects the same bytes. User
+  instructions are 0.75 M more than `67f7bf51`'s: the directories' acquire loads
+  and the exhaustion test.
 
 ## The checker's graph and program passes (#530)
 
