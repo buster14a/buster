@@ -1421,9 +1421,9 @@ query:
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
 default, clang's include search, and clang's predefined macros for the same
-options plus `__BUSTER__` defined to 1. One capability macro differs: the
-default omits `__GCC_ASM_FLAG_OUTPUTS__` until inline assembly flag-output
-constraints are implemented (#798). `pp_predefines` writes the rest in three parts:
+options plus `__BUSTER__` defined to 1, `__GCC_ASM_FLAG_OUTPUTS__` among
+them, since the C driver lowers inline assembly's flag outputs (#147).
+`pp_predefines` writes them in three parts:
 
 - the fixed part, `pp_predefines_base`: clang 23.1.3's for
   `x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
@@ -1442,9 +1442,7 @@ constraints are implemented (#798). `pp_predefines` writes the rest in three par
 file runs use it, so that they start from clang's macros alone and compare only
 preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
 `__clang_version__` differ from the generator's.
-The file may define `__GCC_ASM_FLAG_OUTPUTS__`; `-D` and `-U` also retain their
-usual order after the chosen predefines. `--clang-features` selects feature
-query answers and does not enable the omitted macro.
+`-D` and `-U` keep their usual order after the chosen predefines.
 
 `__FLT_EVAL_METHOD__` is a builtin, as in clang: 0, or 1 and 2 with
 `-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).

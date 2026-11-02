@@ -1077,12 +1077,9 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
                     check_action_source_complete(types, value.type, &action);
         }
         valid &= !memory || (original.flags & BUSTER_CHECK_BIT_FIELD) == 0;
-        if (valid && (source->flags & CHECK_ASM_FLAG) != 0)
-        {
-            uint32_t width = 0;
-            bool sign = false;
-            valid = check_action_integer_type(types, original.type, &width, &sign);
-        }
+        // clang refuses a _BitInt operand of any constraint ("invalid type in asm input", #147), and takes a flag
+        // output of any other type, whose size its code generation (and the lowering, by name) limits.
+        valid &= check_action_kind(types, type_strip_aligned(types, original.type)) != BUSTER_TYPE_KIND_BIT_INT;
         if (valid && (source->flags & CHECK_ASM_MATCH) != 0)
         {
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;

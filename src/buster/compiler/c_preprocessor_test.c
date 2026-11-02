@@ -3387,13 +3387,12 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
     result = result && clang_arguments != 0;
     if (result)
     {
-        clang_arguments[0] = "-U__GCC_ASM_FLAG_OUTPUTS__";
         for (int i = 0; i < argument_count; i += 1)
         {
-            clang_arguments[i + 1] = arguments[i];
+            clang_arguments[i] = arguments[i];
         }
     }
-    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count + 1, path, true) : (PPClangOutput){ 0 };
+    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count, path, true) : (PPClangOutput){ 0 };
     free(clang_arguments);
     char* theirs = clang.status == PP_CLANG_ACCEPTED ? clang.text : 0;
     result = theirs != 0 && ours != 0;
@@ -3815,8 +3814,7 @@ static bool pp_test_predefines(const char* directory)
         size_t ours_length = passed ? made : 0;
         size_t clang_length = 0;
         char* clang_arguments[3] = { (char*)modes[m][0], (char*)modes[m][1], 0 };
-        clang_arguments[count] = "-U__GCC_ASM_FLAG_OUTPUTS__";
-        free(pp_test_clang(clang_arguments, count + 1, empty_path, clang_path, &clang_length));
+        free(pp_test_clang(clang_arguments, count, empty_path, clang_path, &clang_length));
         FILE* file = fopen(clang_path, "r");
         char* theirs = malloc(1 << 20);
         clang_length = file != 0 && theirs != 0 ? fread(theirs, 1, (1 << 20) - 1, file) : 0;
@@ -7042,8 +7040,8 @@ static bool pp_test_number(const char* text, uint64_t* value)
     return result;
 }
 
-// The default capability inventory requires source checking and both required consumers; action folding alone
-// remains private to its action API. Clang's oracle mode retains its independent frozen tables and raw operands.
+// __GCC_ASM_FLAG_OUTPUTS__: clang's 1 by default and in clang's feature mode, since the C driver lowers flag outputs
+// (#147); -D and -U after it, and a --predefines file's own, as for any predefined macro.
 static bool pp_test_asm_flag_predefine(const char* directory)
 {
     static const char source[] = "#ifdef __GCC_ASM_FLAG_OUTPUTS__\nvalue __GCC_ASM_FLAG_OUTPUTS__\n#else\nabsent\n#endif\n";
@@ -7053,9 +7051,10 @@ static bool pp_test_asm_flag_predefine(const char* directory)
         bool explicit_predefines;
         const char* expected;
     } cases[] = {
-        { NULL, false, "absent" },
-        { "--clang-features", false, "absent" },
+        { NULL, false, "value 1" },
+        { "--clang-features", false, "value 1" },
         { "-D__GCC_ASM_FLAG_OUTPUTS__=7", false, "value 7" },
+        { "-U__GCC_ASM_FLAG_OUTPUTS__", false, "absent" },
         { "-U__GCC_ASM_FLAG_OUTPUTS__", true, "absent" },
         { NULL, true, "value 3" },
         { "-D__GCC_ASM_FLAG_OUTPUTS__=7", true, "value 7" },

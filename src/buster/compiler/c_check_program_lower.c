@@ -10228,8 +10228,25 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         const CheckProgramHelper* helper = writer->output->helpers.items + plan->helper;
         const uint32_t object = plan->block != 0 ? check_lower_object(writer, plan->block, 3) : BUSTER_CHECK_NONE;
         const TypeId argument = BUSTER_TYPE_ULONG;
-        const uint32_t call = writer->output->status == CHECK_PROGRAM_OK ? check_lower_native_call(writer, helper->symbol, BUSTER_TYPE_VOID, &argument, plan->block != 0 ? 1 : 0) : 0;
-        check_lower_instruction(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
+        // An asm goto's helper returns its exit (0 for the fall-through, a label's index plus one), which a temporary keeps
+        // for a branch to each label after the call: the tasks are pushed last first.
+        const bool jumps = helper->result_type == BUSTER_TYPE_INT && statement->is_goto;
+        const uint32_t exit = jumps && writer->output->status == CHECK_PROGRAM_OK ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32) : BUSTER_CHECK_NONE;
+        for (uint32_t l = statement->label_count; jumps && l-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const uint32_t at = program->asm_offsets[control.target] + l;
+            check_lower_instruction(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, program->asm_targets[at]);
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, (uint64_t)l + 1);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, exit);
+        }
+        if (jumps)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, exit);
+        }
+        const TypeId result = jumps ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID;
+        const uint32_t call = writer->output->status == CHECK_PROGRAM_OK ? check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0) : 0;
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);
         if (plan->block != 0)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
@@ -10972,12 +10989,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // expression's, and its call, with its block and a temporary an operand among the locals.
     const uint64_t asm_statements = program->status == CHECK_PROGRAM_OK && input != 0 ? input->asm_count : 0;
     const uint64_t asm_operands = asm_statements != 0 && program->asms != 0 ? program->asms->count : 0;
+    // An asm goto's dispatch after its call (#147): its exit's temporary and store, and a compare and a branch per label.
+    const uint64_t asm_labels = asm_statements != 0 && program->asm_offsets != 0 ? program->asm_offsets[asm_statements] : 0;
     // A unit with a _BitInt past 128 bits (#137) has room for its limbs, its computations' temporaries and libgcc's calls
     // (check_lower_limb_room).
     const CheckLowerLimbRoom limb_room = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 ? check_lower_limb_room(program) :
                                                                                                                                 (CheckLowerLimbRoom){ 0 };
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
-                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
+                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 6 + asm_labels * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
                                 limb_room.entries + lane_calls * 13 + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
@@ -10986,7 +11005,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // bounds the writer's reusable local room regardless of the number of bodies.
     const uint64_t recipe_pools = integer_builtin_count != 0 ? 1 : 0;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
-                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements + (input != NULL ? input->kr_parameter_count : 0) +
+                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements * 2 + (input != NULL ? input->kr_parameter_count : 0) +
                                       limb_room.locals + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;

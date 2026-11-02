@@ -10,7 +10,7 @@
 #include <cpuid.h>
 
 // The planner without room (#929's review): a statement of x87 operands and a template of no instructions, one of an
-// x87 operand and an instruction, and one refused at its first operand (a flag output's) before its x87 operand, whose
+// x87 operand and an instruction, and one refused at its first operand (an MMX register's) before its x87 operand, whose
 // later places the planner never writes. check_program_asm_plan of them, by both paths, with the output arena's room cut
 // to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
@@ -20,7 +20,7 @@ static void check_test_program_asm_room(CheckTest* test)
     static const char source[] =
         "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
         "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
-        "int flagged(int a, float x){int z;__asm__(\"cmpl $0, %2\" : \"=@ccz\"(z), \"+t\"(x) : \"r\"(a));return z+(int)x;}";
+        "int flagged(int a, float x){long long z;__asm__(\"cmpl $0, %2\" : \"=y\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}";
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -75,8 +75,8 @@ static void check_test_program_asm_room(CheckTest* test)
         check_test_expect(test, ready && done && kept && failures != 0, description);
         const bool plans_right = done && planned.plans != NULL && planned.plans[0].reason == NULL && planned.plans[0].helper != BUSTER_CHECK_NONE &&
                                  planned.plans[1].reason == NULL && planned.plans[1].helper != BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
-                                 strcmp(planned.plans[2].reason, "inline assembly flag outputs") == 0 && helpers.count == 2;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements have helpers, and the flag output is refused by name", path == 0 ? "scalar" : "vector");
+                                 strcmp(planned.plans[2].reason, "inline assembly operands in MMX registers") == 0 && helpers.count == 2;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements have helpers, and the MMX operand is refused by name", path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
         check_test_types_close(&types);
@@ -86,6 +86,75 @@ static void check_test_program_asm_room(CheckTest* test)
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+// Flag outputs (#147): every condition clang takes, after compares of values around each one's edges, into objects of
+// every size an integer store covers (bool, char, short, int, long, __int128, a float's bits and a struct of 4 bytes),
+// a `+` one, several beside register outputs and an x87 one, and one after a template of no instructions that keeps
+// the flags its own code left (a compare the statement's operands come after).
+static void check_test_program_asm_flags(CheckTest* test, const char* clang)
+{
+    static const char* const conditions[] = { "a", "ae", "b", "be", "c", "e", "z", "g", "ge", "l", "le", "na", "nae", "nb",
+                                              "nbe", "nc", "ne", "nz", "ng", "nge", "nl", "nle", "no", "np", "ns", "o", "p", "s" };
+    char source[16384];
+    uint64_t length = (uint64_t)snprintf(source, sizeof(source), "static int values[]={0,1,-1,2,-2,0x7fffffff,-0x7fffffff-1,1000,-1000};\n");
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conditions); c += 1)
+    {
+        length += (uint64_t)snprintf(source + length, sizeof(source) - length,
+                                     "static int cc_%s(int a,int b){int r=7;__asm__(\"cmpl %%2, %%1\" : \"=@cc%s\"(r) : \"r\"(a), \"r\"(b));return r;}\n",
+                                     conditions[c], conditions[c]);
+    }
+    length += (uint64_t)snprintf(source + length, sizeof(source) - length, "int tested(int n){unsigned s=0;for(int i=0;i<9;i++)for(int j=0;j<9;j++){int a=values[i]+n,b=values[j];\n");
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conditions); c += 1)
+    {
+        length += (uint64_t)snprintf(source + length, sizeof(source) - length, "s=s*3+(unsigned)cc_%s(a,b);\n", conditions[c]);
+    }
+    snprintf(source + length, sizeof(source) - length, "}return (int)s;}\n");
+    check_test_program_source(test, source, "asm-flag-conditions", clang);
+    check_test_program_source(test,
+        "struct four{unsigned char b[4];};"
+        "int tested(int n){_Bool zb=1;char zc=9;short zs=-1;long zl=-1;unsigned long long zu=~0ull;__int128 zi=-1;float zf=2.5f;struct four zt={{9,9,9,9}};"
+        "__asm__(\"testl %1, %1\" : \"=@ccz\"(zb) : \"r\"(n));__asm__(\"testl %1, %1\" : \"=@ccnz\"(zc) : \"r\"(n));"
+        "__asm__(\"cmpl $5, %1\" : \"=@ccl\"(zs) : \"r\"(n));__asm__(\"cmpl $5, %1\" : \"=@ccge\"(zl) : \"r\"(n));"
+        "__asm__(\"cmpl $3, %1\" : \"=@ccb\"(zu) : \"r\"(n));__asm__(\"cmpl $3, %1\" : \"=@ccae\"(zi) : \"r\"(n));"
+        "__asm__(\"testl %1, %1\" : \"=@ccs\"(zf) : \"r\"(n));__asm__(\"testl %1, %1\" : \"=@ccns\"(zt) : \"r\"(n));"
+        "unsigned fb;__builtin_memcpy(&fb,&zf,4);unsigned tb;__builtin_memcpy(&tb,&zt,4);"
+        "return zb+zc*2+zs*4+(int)zl*8+(int)zu*16+(int)(zi>>64)*32+(int)zi*64+(int)fb*128+(int)tb*256;}",
+        "asm-flag-objects", clang);
+    check_test_program_source(test,
+        "int tested(int n){int z=5;long q=9;int r;__asm__(\"movl %3, %1\\n\\taddl $1, %1\\n\\tcmpl $4, %3\" : \"+@ccg\"(z), \"=&r\"(r), \"=@ccle\"(q) : \"r\"(n));"
+        "long double x=n<0?-n:n;int e;__asm__(\"fsqrt\\n\\tcmpl $2, %2\" : \"+t\"(x), \"=@cce\"(e) : \"r\"(n));"
+        "int k;__asm__(\"xorl %1, %1\\n\\tsubl $1, %1\" : \"=@ccc\"(k), \"+r\"(r) : : \"cc\");"
+        "return z+r*3+(int)q*5+(int)(x*16)+e*7+k*11+r*13;}",
+        "asm-flag-mixed", clang);
+}
+
+// asm goto (#147): a label by name and by number (after the operands and a `+` operand's input), a jcc's and a jmp's,
+// several labels and one named twice, a label before the statement (a loop), outputs whose values reach every label,
+// a flag output beside them, statements in a loop of live values and in a function with a variable-length array, and a
+// template that falls through.
+static void check_test_program_asm_goto(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        "static int sign(int x){__asm__ goto(\"testl %0, %0\\n\\tjz %l[zero]\\n\\tjs %l2\" : : \"r\"(x) : \"cc\" : zero, negative);return 1;zero:return 0;negative:return -1;}"
+        "static int pick(int x){__asm__ goto(\"cmpl $1, %0\\n\\tje %l1\\n\\tcmpl $2, %0\\n\\tje %l[two]\\n\\tcmpl $3, %0\\n\\tje %l[one]\\n\\tjmp %l[other]\" : : \"r\"(x) : \"cc\" : one, two, other);"
+        "return 100;one:return 1;two:return 2;other:return 3;}"
+        "static int count_down(int x){int steps=0;again:steps+=1;x-=1;__asm__ goto(\"testl %0, %0\\n\\tjg %l[again]\" : : \"r\"(x) : \"cc\" : again);return steps;}"
+        "static int fall(int x){__asm__ goto(\"nop\" : : \"r\"(x) : : never);return x+5;never:return -5;}"
+        "int tested(int n){unsigned s=0;for(int i=-3;i<6;i++)s=s*7+(unsigned)(sign(i+n)+3)+(unsigned)pick(i+n)*11+(unsigned)fall(i);return (int)s+count_down(n+4)*13;}",
+        "asm-goto-labels", clang);
+    check_test_program_source(test,
+        "static int out(int x){int r;__asm__ goto(\"movl %1, %0\\n\\taddl $10, %0\\n\\tcmpl $3, %1\\n\\tjl %l[small]\" : \"=&r\"(r) : \"r\"(x) : \"cc\" : small);"
+        "return r;small:return r+1000;}"
+        "static int both(int x){int y=x;long z=0;__asm__ goto(\"addl $1, %0\\n\\tmovq $7, %1\\n\\tcmpl $5, %0\\n\\tjge %l3\" : \"+r\"(y), \"=r\"(z) : : \"cc\" : big);"
+        "return y+(int)z;big:return y*2+(int)z;}"
+        "static int flags(int x){int f;__asm__ goto(\"cmpl $0, %1\\n\\tjs %l[neg]\" : \"=@ccz\"(f) : \"r\"(x) : : neg);return f;neg:return 10+f;}"
+        "static int live(int x){int a=x*3,b=x*5,c=x*7,t=0;for(int i=0;i<x+4;i++){__asm__ goto(\"testl $1, %0\\n\\tjnz %l[odd]\" : : \"r\"(i) : \"cc\" : odd);"
+        "t+=a;continue;odd:t+=b+c;}return t+a+b+c;}"
+        "static int vla(int x){int k=x<1?1:x;int v[k];for(int i=0;i<k;i++)v[i]=i*x;int s=0;for(int i=0;i<k;i++){__asm__ goto(\"cmpl $4, %0\\n\\tjg %l[skip]\" : : \"r\"(v[i]) : \"cc\" : skip);"
+        "s+=v[i];skip:;}return s;}"
+        "int tested(int n){unsigned s=0;for(int i=-2;i<9;i++)s=s*5+(unsigned)out(i+n)+(unsigned)both(i)*3+(unsigned)flags(i-n)*7+(unsigned)live(i&3)+(unsigned)vla(i&7);return (int)s;}",
+        "asm-goto-outputs", clang);
 }
 
 static void check_test_program_asm(CheckTest* test, const char* clang)
@@ -429,7 +498,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){unsigned s=0;for(int i=-3;i<9;i++)s=s*7+(unsigned)dense(i+n)+(unsigned)relay(i);return (int)s+total;}";
     check_test_program_source(test, asm_tables, "asm-names-switch-tables", clang);
     check_test_program_tables(test, asm_tables, "asm-names-switch-tables", 1, 6);
-    // Clang takes its flag-output path; buster selects the equivalent setcc fallback until it supports flag outputs.
+    // Both compilers take the flag-output path, which __GCC_ASM_FLAG_OUTPUTS__ advertises.
     check_test_program_source(test,
         "int tested(int n){int z;\n"
         "#ifdef __GCC_ASM_FLAG_OUTPUTS__\n"
@@ -438,6 +507,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"testl %1,%1; sete %b0; movzbl %b0,%0\" : \"=r\"(z) : \"r\"(n) : \"cc\");\n"
         "#endif\n"
         "return z;}", "asm-flag-output-fallback", clang);
+    check_test_program_asm_flags(test, clang);
+    check_test_program_asm_goto(test, clang);
     // The forms of musl's x86_64 atomics (arch/x86_64/atomic_arch.h), in functions of this test's own: lock prefixes as
     // statements of their own before cmpxchg, xadd, and, or, xor, inc and dec on memory outputs (an "=m" one beside
     // an "m" input of its object, and "+m"), xchg, a store fenced by a locked or of the stack, pause, the bit scans
@@ -609,8 +680,18 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
     check_test_program_boundary_reason(test, "int tested(int n){int r;__asm__(\"movl %1, %0\" : \"=r\"(r) : \"N\"((unsigned char)255));return r+n;}",
                                        "asm-n-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
-    check_test_program_boundary_reason(test, "int tested(int n){_Bool z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
-                                       "asm-flag-output", true, false, 0, 0, "inline assembly flag outputs");
+    // Flag outputs (#147): named in the template, of an object no integer store covers, and with another alternative.
+    check_test_program_boundary_reason(test, "int tested(int n){int z;__asm__(\"testl %1, %1 # %0\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
+                                       "asm-flag-output-named", true, false, 0, 0, "inline assembly flag outputs named in their templates");
+    check_test_program_boundary_reason(test, "struct three{char c[3];};int tested(int n){struct three z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z.c[0];}",
+                                       "asm-flag-output-size", true, false, 0, 0, "inline assembly flag outputs of this size");
+    check_test_program_boundary_reason(test, "int tested(int n){int z;__asm__(\"testl %1, %1\" : \"=r@ccz\"(z) : \"r\"(n));return z;}",
+                                       "asm-flag-output-alternatives", true, false, 0, 0, "inline assembly flag outputs with other alternatives");
+    // asm goto (#147): a label as anything but a jmp's or a jcc's target.
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__ goto(\"leaq %l[out](%%rip), %%rax\" : : : \"rax\" : out);return n;out:return n+1;}",
+                                       "asm-goto-label-data", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__ goto(\"call %l0\" : : : : out);return n;out:return n+1;}",
+                                       "asm-goto-label-call", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
     // The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; shapes off the
     // stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
     // top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,
