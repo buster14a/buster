@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-oracle-cache: the oracle cache's checks (oracle_cache.c), in a directory of their own under $TMPDIR (or /tmp)
 // and two more of one template beside it, with sh, clang and a program of the test's own (oracle_test_helper) as the
@@ -9,8 +10,9 @@
 //   - roots: a directory's, an option's and a file's (its random characters before its suffix), names that aren't
 //     roots, two in order, more than BUSTER_ORACLE_ROOTS, a root followed by a name's character (not it), two roots
 //     replaced by each other in one pass, keys that are alike only where the random characters differ, a root after a
-//     trailing slash's second slash or any number of them, and `$TMPDIR=/`'s roots (and paths that aren't), whose run
-//     in another directory of a trailing-slash `$TMPDIR` is taken;
+//     trailing slash's second slash or any number of them, `$TMPDIR=/`'s roots (and paths that aren't), the normalized
+//     temporary directory's spelling, whose run in another directory of a trailing-slash `$TMPDIR` is taken, and a
+//     traced compile under a trailing-slash `$TMPDIR` taken in another directory;
 //   - runs: a run's status, output, errors and written file, taken by the same run again and by one in the other
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
@@ -78,6 +80,7 @@
 //     turned off (oracle_cache_disable).
 // It prints its checks and failures and exits with status 1 if any fail.
 
+#include "buster/compiler/test_paths.h"
 #ifndef BUSTER_ORACLE_CACHE_TEST_INCLUDED
 #define BUSTER_ORACLE_CACHE_TEST_INCLUDED
 
@@ -207,6 +210,7 @@ static void oracle_test_roots(OracleTest* test)
     const char* saved = getenv("TMPDIR");
     char* kept = saved != 0 ? strdup(saved) : 0;
     setenv("TMPDIR", "/b/", 1);
+    oracle_test_expect(test, strcmp(oracle_temporary_directory(), "/b") == 0, "roots: the temporary directory helper removes the trailing slash");
     OracleRoots roots;
     oracle_roots_begin(&roots);
     oracle_test_expect(test, roots.base_length == 2 && strcmp(roots.base, "/b") == 0, "roots: the temporary directory without its trailing slash");
@@ -223,18 +227,39 @@ static void oracle_test_roots(OracleTest* test)
     oracle_roots_find(&roots, "/b///x-Ab3d9Z/c.c");
     oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 13 && roots.roots[0].random == 7 && memcmp(roots.roots[0].name, "/b///x-Ab3d9Z", 13) == 0,
                        "roots: a directory after any number of slashes");
-    // `$TMPDIR=/` is a root's own first slash, at a name's boundary; it doesn't make every absolute path a root.
+    // `$TMPDIR=/` is a root's own first slash: any slash may start a root, as a path under / or an option's `-I/path`
+    // spells one.
     setenv("TMPDIR", "/", 1);
+    oracle_test_expect(test, strcmp(oracle_temporary_directory(), "/") == 0, "roots: the temporary directory helper keeps /");
     oracle_roots_begin(&roots);
     oracle_test_expect(test, roots.base_length == 1 && strcmp(roots.base, "/") == 0, "roots: the temporary directory that is /");
     oracle_roots_find(&roots, "/buster-root-Ab3d9Z/c.c");
     oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 19 && roots.roots[0].random == 13 && memcmp(roots.roots[0].name, "/buster-root-Ab3d9Z", 19) == 0,
                        "roots: a directory under /");
-    oracle_test_expect(test, oracle_test_root_count("/usr/bin/clang") == 0 && oracle_test_root_count("/b/x-Ab3d9Z") == 0,
+    oracle_roots_find(&roots, "-I/buster-option-Ab3d9Z/include");
+    oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 21 && memcmp(roots.roots[0].name, "/buster-option-Ab3d9Z", 21) == 0,
+                       "roots: a directory under / after an option's letter");
+    oracle_test_expect(test, oracle_test_root_count("/usr/bin/clang") == 0 && oracle_test_root_count("/b/plain") == 0 &&
+                           oracle_test_root_count("/b/x-Ab3d9Z") == 0,
                        "roots: absolute paths under / that aren't roots");
+    // A test's `$TMPDIR/NAME` spells `//NAME` for the base '/': it is the same root as the tool's resolved `/NAME`.
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, "//buster-root-Ab3d9Z/c.c");
+    oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 19 && roots.roots[0].random == 13 && memcmp(roots.roots[0].name, "/buster-root-Ab3d9Z", 19) == 0,
+                       "roots: a directory spelled // under / is the single-slash root");
     setenv("TMPDIR", "//", 1);
+    oracle_test_expect(test, strcmp(oracle_temporary_directory(), "/") == 0, "roots: the temporary directory helper makes // /");
     oracle_roots_begin(&roots);
     oracle_test_expect(test, roots.base_length == 1 && strcmp(roots.base, "/") == 0, "roots: // is /");
+    setenv("TMPDIR", "/b//sub/", 1);
+    oracle_test_expect(test, strcmp(oracle_temporary_directory(), "/b/sub") == 0, "roots: the temporary directory helper collapses its slashes");
+    // A temporary directory too long for the roots' base leaves roots off rather than truncating a path (#1104).
+    char long_base[BUSTER_ORACLE_PATH_BYTES + 8];
+    memset(long_base, 'a', BUSTER_ARRAY_LENGTH(long_base) - 1);
+    long_base[BUSTER_ARRAY_LENGTH(long_base) - 1] = 0;
+    setenv("TMPDIR", long_base, 1);
+    oracle_roots_begin(&roots);
+    oracle_test_expect(test, roots.base_length == 0, "roots: an over-long temporary directory turns roots off");
     setenv("TMPDIR", "/b/", 1);
     oracle_roots_begin(&roots);
     oracle_roots_find(&roots, "-I/b/x-Ab3d9Z/include");
@@ -648,8 +673,9 @@ static void oracle_test_trailing_root(OracleTest* test)
     char directories[2][BUSTER_ORACLE_PATH_BYTES + 16];
     snprintf(directories[0], sizeof(directories[0]), "%s/buster-trailing-XXXXXX", trailing);
     snprintf(directories[1], sizeof(directories[1]), "%s/buster-trailing-XXXXXX", trailing);
-    bool made = mkdtemp(directories[0]) != 0;
-    made = made && mkdtemp(directories[1]) != 0;
+    const bool made_first = mkdtemp(directories[0]) != 0;
+    const bool made_second = made_first && mkdtemp(directories[1]) != 0;
+    const bool made = made_second;
     OracleCache cache;
     oracle_test_open(test, &cache, "use", "trailing");
     bool right = made;
@@ -674,12 +700,71 @@ static void oracle_test_trailing_root(OracleTest* test)
     }
     free(kept);
     oracle_cache_close(&cache);
-    if (made)
+    if (made_second)
     {
         oracle_test_remove(directories[1], "");
+    }
+    if (made_first)
+    {
         oracle_test_remove(directories[0], "");
     }
     oracle_test_remove(test->base, "trailing");
+}
+
+// A traced compile under a trailing-slash $TMPDIR, whose tree is built from the normalized directory (#1104): the run's
+// working directory and clang's resolved paths then agree, so the compile in the other directory is taken, and a header
+// that changes makes a new variant there.
+static void oracle_test_trailing_dependencies(OracleTest* test)
+{
+    const char* saved = getenv("TMPDIR");
+    char* kept = saved != 0 ? strdup(saved) : 0;
+    char trailing[BUSTER_ORACLE_PATH_BYTES + 4];
+    snprintf(trailing, sizeof(trailing), "%s//", test->base);
+    setenv("TMPDIR", trailing, 1);
+    const char* normalized = oracle_temporary_directory();
+    char directories[2][BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(directories[0], sizeof(directories[0]), "%s/buster-trailing-dep-XXXXXX", normalized);
+    snprintf(directories[1], sizeof(directories[1]), "%s/buster-trailing-dep-XXXXXX", normalized);
+    const bool made_first = mkdtemp(directories[0]) != 0;
+    const bool made_second = made_first && mkdtemp(directories[1]) != 0;
+    bool ready = made_second;
+    for (uint32_t d = 0; ready && d < 2; d += 1)
+    {
+        ready = oracle_test_write_text(directories[d], "main.c", "#include \"h.h\"\nint x = X;\n") &&
+                oracle_test_write_text(directories[d], "h.h", "#define X 1\n");
+    }
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "trailing-dependencies");
+    char errors[16384];
+    char* main_source[] = { "main.c", 0 };
+    bool taken = false;
+    int status = 0;
+    const bool first = ready && oracle_test_clang(&cache, directories[0], main_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    const bool other = ready && oracle_test_clang(&cache, directories[1], main_source, &taken, &status, errors, sizeof(errors)) && taken && status == 0;
+    oracle_test_write_text(directories[1], "h.h", "#define X 2\n");
+    const bool changed = ready && oracle_test_clang(&cache, directories[1], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    const bool again = ready && oracle_test_clang(&cache, directories[1], main_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_expect(test, first && other && changed && again,
+                       "roots: a traced compile under a trailing-slash $TMPDIR is taken in another directory, and run again after its header changes");
+    if (kept != 0)
+    {
+        setenv("TMPDIR", kept, 1);
+    }
+    else
+    {
+        unsetenv("TMPDIR");
+    }
+    free(kept);
+    oracle_cache_close(&cache);
+    if (made_second)
+    {
+        oracle_test_remove(directories[1], "");
+    }
+    if (made_first)
+    {
+        oracle_test_remove(directories[0], "");
+    }
+    oracle_test_remove(test->base, "trailing-dependencies");
 }
 
 static void oracle_test_dependencies(OracleTest* test)
@@ -830,7 +915,7 @@ static void oracle_test_identities(OracleTest* test)
     oracle_test_expect(test, timed, "identities: clang's __TIMESTAMP__ is SOURCE_DATE_EPOCH's, its files' times not part of the run");
     // __DATE__, and __TIME__ pasted from two halves in a header in no root and in a source on standard input: without
     // SOURCE_DATE_EPOCH none is kept, and with it each is, and gives the epoch's time.
-    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     char fixed[BUSTER_ORACLE_PATH_BYTES];
     char option[BUSTER_ORACLE_PATH_BYTES + 8];
     char input[BUSTER_ORACLE_PATH_BYTES + 16];
@@ -2582,23 +2667,9 @@ static int run_oracle_cache_tests(int argc, char** argv)
 {
     (void)argv;
     OracleTest test = { 0 };
-    const char* temporary = getenv("TMPDIR");
-    temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
-    // The test's own paths are built from a normalized temporary directory (#1104): a trailing slash would otherwise
+    // The test's own paths are built from the normalized temporary directory (#1104): a trailing slash would otherwise
     // give the runs `/tmp//name`, which their dependency paths, which clang resolves, don't spell alike.
-    char normalized[BUSTER_ORACLE_PATH_BYTES];
-    const size_t temporary_length = strlen(temporary);
-    size_t normalized_length = temporary_length;
-    while (normalized_length > 1 && temporary[normalized_length - 1] == '/')
-    {
-        normalized_length -= 1;
-    }
-    if (normalized_length < sizeof(normalized))
-    {
-        memcpy(normalized, temporary, normalized_length);
-        normalized[normalized_length] = 0;
-        temporary = normalized;
-    }
+    const char* temporary = oracle_temporary_directory();
     snprintf(test.base, sizeof(test.base), "%s/buster-oracle-test-XXXXXX", temporary);
     snprintf(test.runs[0], sizeof(test.runs[0]), "%s/buster-oracle-run-XXXXXX", temporary);
     snprintf(test.runs[1], sizeof(test.runs[1]), "%s/buster-oracle-run-XXXXXX", temporary);
@@ -2617,6 +2688,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_sha(&test);
         oracle_test_roots(&test);
         oracle_test_trailing_root(&test);
+        oracle_test_trailing_dependencies(&test);
         oracle_test_runs(&test);
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);

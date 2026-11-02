@@ -106,6 +106,9 @@
 
 #include "buster/compiler/string8.h"
 
+// The tests' normalized temporary directory, for the test files and benchmarks that build their trees from it.
+#include "buster/compiler/test_paths.h"
+
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
 

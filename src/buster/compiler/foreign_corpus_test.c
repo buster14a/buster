@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-foreign-corpus: the foreign linker's differential corpus test (#86's "done when", and #394's output kinds). Each
 // program of the corpus is compiled by each C compiler given (gcc and clang by default) at -O2, as their drivers compile
@@ -36,6 +37,7 @@
 // as an archive), and with --self DIR this repository's compiler at DIR, compiled by clang alone, each with runs of its
 // own. --compilers and --linkers choose others; --keep keeps the directory under --directory (TMPDIR or /tmp).
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_FOREIGN_CORPUS_MAX_SOURCES 64
 #define BUSTER_FOREIGN_CORPUS_MAX_ARGUMENTS 160
 #define BUSTER_FOREIGN_CORPUS_MAX_ROWS 65536
@@ -1704,7 +1706,7 @@ static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage
 static int run_foreign_corpus_tests(int argc, char** argv)
 {
     ForeignCorpus* corpus = calloc(1, sizeof(ForeignCorpus));
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     const char* sqlite = 0;
     const char* lua = 0;
     bool keep = false;

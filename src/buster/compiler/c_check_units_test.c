@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-check-units [--executable PATH] [--clang PATH] [--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
 // [--generate DIR [--units N] [--functions N]]:
@@ -64,6 +65,7 @@
 // - With --generate DIR, nothing is tested: a program of synth's shape (--units, 512 by default, of --functions, 200) is
 //   written in DIR, for measurements.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_CHECK_UNITS_TEST_SECONDS 120
 #define BUSTER_CHECK_UNITS_TEST_MAX_UNITS 16
 // The generated programs' units, from 2 to this many; and the synth-shaped program's units and functions.
@@ -1894,8 +1896,8 @@ static int run_check_units_tests(int argc, char** argv)
         return tally.failures == 0 ? 0 : 1;
     }
     char directory[PATH_MAX];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-units-XXXXXX", temporary != NULL && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-units-XXXXXX", temporary);
     const bool made = parsed && mkdtemp(directory) != NULL;
     check_units_test_expect(&tally, made, "make the test's directory", directory);
     if (made && corpus != NULL)
