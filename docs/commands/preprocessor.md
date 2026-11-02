@@ -290,11 +290,6 @@ Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
 and the repository's translation units with `--clang`, and `--tables src`.
 
-`sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
-translation units are token-identical; `docs/c-preprocessor.md` has the
-configurations. The 9700X job runs the cases and the repository's translation
-units with `--clang`.
-
 The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
 the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,
 `--jobs N` worker processes (1 by default; the cases don't depend on it), and
