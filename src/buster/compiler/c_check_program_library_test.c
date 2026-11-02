@@ -359,6 +359,25 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "h=hq(h,__builtin_fmaf128(q,q,q));int e;h=hq(h,__builtin_frexpf128(q,&e));h=hq(h,__builtin_ldexpf128(q,n));h=hq(h,__builtin_logbf128(q+5));"
         "return out(h)+e*3+__builtin_ilogbf128(q+5);}",
         "library-math-float128", clang);
+    // The __fp16 forms (#148): their arguments convert to __fp16 and their values are __fp16's; clang's code calls
+    // sinf16 and its kin by name, which the unit defines here (of _Float16, whose values pass as __fp16's do), and
+    // computes the others in float (ceilf16's ceilf), fma's in double, fabsf16's and copysignf16's bits.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_LIBRARY_FOLD
+        "_Float16 sinf16(_Float16 x){return (_Float16)__builtin_sinf((float)x);}_Float16 sqrtf16(_Float16 x){return (_Float16)__builtin_sqrtf((float)x);}"
+        "_Float16 powf16(_Float16 x,_Float16 y){return (_Float16)__builtin_powf((float)x,(float)y);}"
+        "_Float16 ldexpf16(_Float16 x,int e){return (_Float16)__builtin_ldexpf((float)x,e);}"
+        "void sincosf16(_Float16 x,_Float16*s,_Float16*c){*s=(_Float16)__builtin_sinf((float)x);*c=(_Float16)__builtin_cosf((float)x);}"
+        "static unsigned long hh(unsigned long h,const __fp16*p){return hash(h,p,2);}\n"
+        "#define H(e) ({__fp16 t_=(e);h=hh(h,&t_);})\n"
+        "int tested(int n){_Float16 x=(_Float16)(n*0.4375f-1.25f);float y=n*0.37f+0.11f;double z=-0.5-n*1.75;unsigned long h=14695981039346656037UL;int e=0;__fp16 s,c;"
+        "H(__builtin_sinf16(x));H(__builtin_sqrtf16(y));H(__builtin_powf16(y,x));H(__builtin_ldexpf16(x,n));__builtin_sincosf16(x,&s,&c);H(s);H(c);"
+        "H(__builtin_ceilf16(z));H(__builtin_floorf16(y));H(__builtin_truncf16(z));H(__builtin_rintf16(y*3));H(__builtin_roundevenf16(x));H(__builtin_roundf16(z));"
+        "H(__builtin_fabsf16(z));H(__builtin_copysignf16(y,z));H(__builtin_fmaxf16(x,y));H(__builtin_fminf16(x,z));H(__builtin_fmaximum_numf16(z,y));"
+        "H(__builtin_fminimum_numf16(z,y));H(__builtin_fmaf16(x,y,z));H(__builtin_frexpf16(y,&e));H(__builtin_canonicalizef16(x));"
+        "float sum=__builtin_fmaxf16(x,y)+__builtin_fabsf16(z);h=hash(h,&sum,4);"
+        "static const float folded=__builtin_fmaxf16(1.5f,2.5f)+__builtin_fminimum_numf16(-0.0f,0.0f);h=hash(h,&folded,4);return out(h)+e*3+(int)sizeof(__builtin_fabsf16(x));}",
+        "library-math-half", clang);
     check_test_program_source(test,
         BUSTER_CHECK_TEST_LIBRARY_FOLD
         "int tested(int n){_Complex double c;__real__ c=n*0.37+0.11;__imag__ c=1.5-n*0.25;_Complex float g;__real__ g=n*0.5f;__imag__ g=0.75f;"

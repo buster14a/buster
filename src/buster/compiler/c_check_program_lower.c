@@ -7168,6 +7168,14 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         {
             check_lower_floating_compare(writer, node, id, effect->floating_type);
         }
+        else if (id == CBUILTIN_CANONICALIZEF16)
+        {
+            // __fp16's (#148): clang's code converts it to float, canonicalizes that and converts it back, which the
+            // conversions alone do (the first quiets a signaling NaN, and every other value comes back as it was).
+            check_lower_convert(writer, BUSTER_TYPE_FLOAT, BUSTER_TYPE_HALF);
+            check_lower_convert(writer, BUSTER_TYPE_HALF, BUSTER_TYPE_FLOAT);
+            check_lower_operand(writer, node, 3, false, BUSTER_TYPE_HALF);
+        }
         else if (selectors && effect->selected_selector < 5)
         {
             // A known category retains the selector prefix and its side effects in the tested Clang 23.1.4's order.
@@ -7878,6 +7886,77 @@ static void check_lower_amx_helper(CheckLowerWriter* writer, uint32_t node, cons
     }
 }
 
+// A library builtin of __fp16 whose -O0 code clang computes rather than calling its own name (#148, c_builtin_library.c):
+// fabsf16's and copysignf16's bits (the value's 16 bits on the integer stack: its sign cleared, or taken from the second),
+// and the others a call of a float function (ceilf, floorf, truncf, rintf, roundevenf, roundf, fmaxf, fminf,
+// fmaximum_numf, fminimum_numf, frexpf) of the arguments converted to float, or fma of them converted to double, the
+// result converted back to __fp16, as clang's code at the baseline computes them (its roundss and maxss at znver5 give
+// the same values). Pushed in reverse, as tasks run. False for any other builtin, which it leaves alone.
+static bool check_lower_library_promoted(CheckLowerWriter* writer, uint32_t node, CBuiltinLibraryId library)
+{
+    const CheckStream* stream = writer->program->stream;
+    const uint32_t first = writer->program->input->graph.argument_offsets[node];
+    const uint32_t count = writer->program->input->graph.argument_counts[node];
+    const bool bits = library == CBUILTIN_LIBRARY_FABSF16 || library == CBUILTIN_LIBRARY_COPYSIGNF16;
+    CheckLowerRuntime runtime = CHECK_LOWER_RUNTIMES;
+    switch (library)
+    {
+        case CBUILTIN_LIBRARY_CEILF16: runtime = CHECK_LOWER_RUNTIME_LIBM_CEILF; break;
+        case CBUILTIN_LIBRARY_FLOORF16: runtime = CHECK_LOWER_RUNTIME_LIBM_FLOORF; break;
+        case CBUILTIN_LIBRARY_TRUNCF16: runtime = CHECK_LOWER_RUNTIME_LIBM_TRUNCF; break;
+        case CBUILTIN_LIBRARY_RINTF16: runtime = CHECK_LOWER_RUNTIME_LIBM_RINTF; break;
+        case CBUILTIN_LIBRARY_ROUNDEVENF16: runtime = CHECK_LOWER_RUNTIME_LIBM_ROUNDEVENF; break;
+        case CBUILTIN_LIBRARY_ROUNDF16: runtime = CHECK_LOWER_RUNTIME_LIBM_ROUNDF; break;
+        case CBUILTIN_LIBRARY_FMAXF16: runtime = CHECK_LOWER_RUNTIME_FMAXF; break;
+        case CBUILTIN_LIBRARY_FMINF16: runtime = CHECK_LOWER_RUNTIME_FMINF; break;
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUMF16: runtime = check_lower_library_runtime(CBUILTIN_LIBRARY_FMAXIMUM_NUMF); break;
+        case CBUILTIN_LIBRARY_FMINIMUM_NUMF16: runtime = check_lower_library_runtime(CBUILTIN_LIBRARY_FMINIMUM_NUMF); break;
+        case CBUILTIN_LIBRARY_FREXPF16: runtime = check_lower_library_runtime(CBUILTIN_LIBRARY_FREXPF); break;
+        case CBUILTIN_LIBRARY_FMAF16: runtime = check_lower_library_runtime(CBUILTIN_LIBRARY_FMA); break;
+        default: break;
+    }
+    if (bits)
+    {
+        const bool copy = library == CBUILTIN_LIBRARY_COPYSIGNF16;
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U16, 0);
+        if (copy)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 0x8000);
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+            check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U32, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 0x7fff);
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+        check_lower_operand(writer, node, 3, false, stream->argument_conversions[first].type);
+    }
+    else if (runtime != CHECK_LOWER_RUNTIMES)
+    {
+        const TypeId promoted = library == CBUILTIN_LIBRARY_FMAF16 ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_FLOAT;
+        TypeId arguments[3] = { 0 };
+        for (uint32_t a = 0; a < count && a < 3; a += 1)
+        {
+            const TypeId type = stream->argument_conversions[first + a].type;
+            arguments[a] = type_unqualified(type) == BUSTER_TYPE_HALF ? promoted : type;
+        }
+        const uint32_t call = check_lower_runtime_call(writer, runtime, promoted, arguments, count < 3 ? count : 3, BUSTER_CHECK_NONE);
+        check_lower_convert(writer, promoted, BUSTER_TYPE_HALF);
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, promoted), call);
+        for (uint32_t a = count < 3 ? count : 3; a-- > 0;)
+        {
+            const TypeId type = stream->argument_conversions[first + a].type;
+            if (type_unqualified(type) == BUSTER_TYPE_HALF)
+            {
+                check_lower_convert(writer, BUSTER_TYPE_HALF, promoted);
+            }
+            check_lower_operand(writer, node, a + 3, false, type);
+        }
+    }
+    return bits || runtime != CHECK_LOWER_RUNTIMES;
+}
+
 // An x86 builtin's call: a leaf's (c_builtin_x86_helpers.c) where the helpers planned one for it, the generic
 // __builtin_unpredictable's operand (its hint is the branch's, which Tier 0 doesn't take) and __builtin_assume's nothing
 // (its operand isn't evaluated), or its row (check_lower_x86_row_builtin).
@@ -7896,6 +7975,10 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     if (fortify != CBUILTIN_FORTIFY_COUNT)
     {
         check_lower_fortify(writer, node, fortify);
+    }
+    else if (library != CBUILTIN_LIBRARY_COUNT && cbuiltin_library_half(library) && check_lower_library_promoted(writer, node, library))
+    {
+        // Computed as clang's code computes it (check_lower_library_promoted).
     }
     else if (library != CBUILTIN_LIBRARY_COUNT)
     {

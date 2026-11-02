@@ -7256,6 +7256,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_CANONICALIZE, "__builtin_canonicalize", false, true, false },
         { CBUILTIN_CANONICALIZEF, "__builtin_canonicalizef", false, true, false },
         { CBUILTIN_CANONICALIZEL, "__builtin_canonicalizel", false, true, false },
+        { CBUILTIN_CANONICALIZEF16, "__builtin_canonicalizef16", false, true, false },
         { CBUILTIN_SQRT, "__builtin_sqrt", false, true, false },
         { CBUILTIN_SQRTF, "__builtin_sqrtf", false, true, false },
         { CBUILTIN_COPYSIGN, "__builtin_copysign", false, true, false },

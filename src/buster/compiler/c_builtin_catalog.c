@@ -57,7 +57,7 @@
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
 // take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
 // stdc ones and the carry chains) 0x3a0 to 0x3c7, its floating builtins past the first ones (c_check_builtin_float.c:
-// isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9, and the alignment builtins and
+// isnormal to isfpclass, signbitf and signbitl, canonicalize and its __fp16 form) 0x3d0 to 0x3da, and the alignment builtins and
 // __builtin_expect_with_probability 0x3e0 to 0x3e3, the signaling NaNs and the _Float16 and __float128 constants 0x3e4 to
 // 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa, launder, the alloca variants, allow_runtime_check,
 // allow_sanitize_check, annotation, addressof and function_start (c_check_builtin_misc.c's) 0x3f0 to 0x3fb. Those
@@ -410,6 +410,7 @@
     X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
     X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
     X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEF16, 0x3dau, "__builtin_canonicalizef16", BUSTER_CBUILTIN_SOURCE) \
     X(ALIGN_UP, 0x3e0u, "__builtin_align_up", BUSTER_CBUILTIN_CONSTANT) \
     X(ALIGN_DOWN, 0x3e1u, "__builtin_align_down", BUSTER_CBUILTIN_CONSTANT) \
     X(IS_ALIGNED, 0x3e2u, "__builtin_is_aligned", BUSTER_CBUILTIN_CONSTANT) \
@@ -625,10 +626,11 @@ static __attribute__((unused)) bool cbuiltin_float_signbit(uint32_t id)
     return result;
 }
 
-// Whether an identity is one of clang's canonicalize builtins, x * 1.0 of their prototypes' types (0x3d7 to 0x3d9).
+// Whether an identity is one of clang's canonicalize builtins, x * 1.0 of their prototypes' types (0x3d7 to 0x3da: the
+// last, canonicalizef16, of __fp16, which clang's code computes in float, its argument converted and its result back).
 static __attribute__((unused)) bool cbuiltin_float_canonicalize(uint32_t id)
 {
-    const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEL;
+    const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEF16;
     return result;
 }
 

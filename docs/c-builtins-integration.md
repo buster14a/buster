@@ -1629,9 +1629,9 @@ for a C library function X, and its rows with attribute `f`, X itself where
 clang makes the name a builtin of the unit. `c_builtin_library.c` holds both
 lists, `c_check_builtin_library.c` their folds.
 
-**Calls.** `c_builtin_library_calls.inc` lists the 352 `F` rows that compile as
+**Calls.** `c_builtin_library_calls.inc` lists the 387 `F` rows that compile as
 calls of their functions: the math library's (`sin` to `tgammaf128`, the complex
-functions, `powi`'s aside), the string and memory functions, the formatted
+functions, `powi`'s aside, and the `__fp16` forms below), the string and memory functions, the formatted
 input and output that takes no `FILE` (`printf`, `snprintf`, `vsscanf`), the
 allocation functions, `abort`, the wide-character functions and
 `__get_unsafe_stack_*`. The checker gives each call its row's ordinary
@@ -1649,6 +1649,31 @@ unit has one symbol of each name. `__builtin_powi`, `powif` and `powil` are
 `llvm.powi`'s, whose code calls libgcc's `__powidf2`, `__powisf2` and
 `__powixf2` (x raised to an `int` by repeated squaring, not `pow`'s value), and
 so do theirs.
+
+**The `__fp16` forms** (`__builtin_sinf16` and 34 others, #148). Their rows'
+prototypes take and return `__fp16`, which no function type may (clang's Sema
+refuses such a declaration, and so does `type_function`), so
+`c_builtin_intrinsic_types.c` decodes them with `_Float16` in its place
+(`BuiltinIntrinsicTypeInput.half_prototypes`, for the rows
+`cbuiltin_library_half` names): binary16's values pass alike, and pointers keep
+their `__fp16` (`sincosf16`'s `__fp16 *`). `check_x86_action` then gives the
+call's arguments `__fp16` conversions (the rounding is the same) and its value
+`__fp16`'s type, which C promotes to `float` where it computes:
+`__builtin_fmaxf16(x, y) + 1` is a `float`. clang -O0 calls 21 of them by their
+own names, as this does: `sinf16`, `acosf16`, `sqrtf16`, `powf16`, `ldexpf16`,
+`sincosf16` and their kin, which glibc doesn't define, so that a program links
+them from elsewhere. It computes the other 14 in `float`, which the lowering
+does too (`check_lower_library_promoted`): `ceilf16`, `floorf16`, `truncf16`,
+`rintf16`, `roundevenf16`, `roundf16`, `fmaxf16`, `fminf16`,
+`fmaximum_numf16`, `fminimum_numf16` and `frexpf16` call the `float` function
+of their arguments converted to `float` (clang's baseline code calls the same;
+its `roundss` and `maxss` at znver5 give the same values), `fmaf16` calls `fma`
+of them converted to `double`, its result rounded once to `__fp16` as clang's
+`__truncdfhf2` rounds it, and `fabsf16` and `copysignf16` are their 16 bits'
+sign cleared or copied. `fmaxf16`, `fminf16` and their `_num` kin fold, as
+clang's `E` rows do. `__builtin_canonicalizef16`, no `F` row, is the floating
+builtins' (0x3da): its `__fp16` argument converted to `float` and back, which
+quiets a signaling NaN as clang's code does.
 
 **Where clang's code is no call.** clang -O0 compiles many of these rows to
 LLVM intrinsics rather than calls: `llvm.maxnum` and `llvm.minnum` for `fmax`
@@ -1720,15 +1745,14 @@ not calls. The alloca variants are the catalogue's miscellaneous builtins
 table's other `F` rows stay refused, and `__has_builtin` answers 0 for them.
 The signaling NaNs and the `_Float128` and
 `_Float16` NaNs, which clang folds, are the floating builtins' constants
-("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
-function takes or returns `__fp16`), the matrix builtins, and the `FILE`
+("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the matrix builtins, and the `FILE`
 builtins (`fprintf` and its kin).
 
 `test-checker` (`c_check_program_library_test.c`, alone with
 `--program-library`) checks the lists against clang's table and accounts for
 every `F` and `f` row of C's modes; checks the folds' constant contexts by both
 paths against clang's acceptance; and runs programs of each family (`double`,
-`float`, `long double` and `_Float128` math, `powi`, complex, strings, wide
+`float`, `long double`, `_Float128` and `__fp16` math, `powi`, complex, strings, wide
 characters, formatted output and input, allocation, the folds in code, special
 values and `errno`) by both paths against clang -O0's builds.
 `test-checker-driver` (`c_check_library_driver_test.c`) compares the implicit

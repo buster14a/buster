@@ -258,6 +258,8 @@ static CheckInputIntrinsicDeclaration check_input_intrinsic_decode(CheckInputRea
         .attributes_length = info->attributes_length,
         .custom_typechecking = info->custom_typechecking,
         .strict_prototypes = reader->parser->language.standard >= 2023,
+        .half_prototypes = cbuiltin_library_candidate(info->name, info->name_length) &&
+                           cbuiltin_library_half(cbuiltin_library_id(info->name, info->name_length)),
     };
     const bool va_list = memchr(info->encoding, 'a', info->encoding_length) != 0 || memchr(info->encoding, 'A', info->encoding_length) != 0;
     if (va_list && !info->custom_typechecking)

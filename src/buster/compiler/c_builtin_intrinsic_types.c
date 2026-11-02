@@ -66,6 +66,10 @@ struct BuiltinIntrinsicTypeInput
     TypeId va_list_type;
     bool custom_typechecking;
     bool strict_prototypes;
+    // A library builtin of __fp16 (#148, c_builtin_library.c's cbuiltin_library_half): its function type takes and returns
+    // _Float16 where the prototype has __fp16, which no function type may, and the caller gives the call's arguments and
+    // result __fp16 (result_type and parameters keep it).
+    bool half_prototypes;
 };
 
 typedef struct BuiltinIntrinsicTypeResult BuiltinIntrinsicTypeResult;
@@ -491,11 +495,13 @@ static __attribute__((unused)) void builtin_intrinsic_types_decode(TypeTable* ta
                 {
                     result->prototype = input->strict_prototypes || result->parameter_count != 0 || !result->variadic;
                     bool model = type_unqualified(result->result_type) == BUSTER_TYPE_HALF;
+                    TypeId twins[BUSTER_INTRINSIC_TYPE_MAX_PARAMETERS];
                     for (uint32_t i = 0; i < result->parameter_count; i += 1)
                     {
                         model = model || result->parameters[i] == BUSTER_TYPE_HALF;
+                        twins[i] = result->parameters[i] == BUSTER_TYPE_HALF ? BUSTER_TYPE_FLOAT16 : result->parameters[i];
                     }
-                    if (model)
+                    if (model && !input->half_prototypes)
                     {
                         builtin_intrinsic_type_fail(&reader, BUILTIN_INTRINSIC_TYPES_UNSUPPORTED, BUSTER_INTRINSIC_TYPE_UNSUPPORTED_MODEL, 0);
                     }
@@ -503,7 +509,8 @@ static __attribute__((unused)) void builtin_intrinsic_types_decode(TypeTable* ta
                     {
                         const uint8_t flags = (result->prototype ? BUSTER_TYPE_FLAG_PROTOTYPE : 0) |
                                               (result->prototype && result->variadic ? BUSTER_TYPE_FLAG_VARIADIC : 0);
-                        result->function_type = builtin_intrinsic_type_factory(&reader, type_function(table, result->result_type, result->parameters, result->parameter_count, flags), 0);
+                        const TypeId returned = type_unqualified(result->result_type) == BUSTER_TYPE_HALF ? BUSTER_TYPE_FLOAT16 : result->result_type;
+                        result->function_type = builtin_intrinsic_type_factory(&reader, type_function(table, returned, twins, result->parameter_count, flags), 0);
                     }
                 }
             }

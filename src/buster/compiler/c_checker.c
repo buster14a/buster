@@ -1626,6 +1626,21 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
     }
+    if (cbuiltin_library_half(library) && result->diagnostic == CHECK_DIAG_NONE)
+    {
+        // A builtin of __fp16 (#148, c_builtin_library.c): its function type's _Float16 stands for the prototype's __fp16,
+        // which the arguments convert to (binary16's rounding is the same) and the call's value has, a folded one too.
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, action->type, &count);
+        for (uint32_t i = 0; i < count && i < action->argument_count; i += 1)
+        {
+            if (parameters[i] == BUSTER_TYPE_FLOAT16 && action->argument_conversions[i].type == BUSTER_TYPE_FLOAT16)
+            {
+                action->argument_conversions[i].type = BUSTER_TYPE_HALF;
+            }
+        }
+        result->value.type = type_unqualified(result->value.type) == BUSTER_TYPE_FLOAT16 ? BUSTER_TYPE_HALF : result->value.type;
+    }
     if (ordinary_call)
     {
         // These exact generic signatures have no x86 immediate constraints. Keep the ordinary call's conversions,

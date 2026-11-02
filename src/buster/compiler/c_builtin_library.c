@@ -12,12 +12,17 @@
 // whose code calls libgcc's __powidf2, __powisf2 and __powixf2 (cbuiltin_library_libgcc).
 //
 // The table's F rows of custom checking that classify a value (__builtin_isnormal and its kin) and __builtin_signbitf and
-// signbitl, which clang tests inline, are the floating builtins' (c_check_builtin_float.c), not calls. Its other F rows
-// stay refused, and __has_builtin answers 0 for them: the __fp16 ones (their prototypes take and return __fp16, which no
-// C function can), the matrix builtins and C++'s __builtin_trivially_relocate, the signaling NaNs'
-// and the _Float128 and _Float16 NaNs' (which clang folds and libc has no function for), and the FILE builtins (fprintf
-// and its kin, whose prototypes need the unit's FILE), whose prototypes don't decode (c_builtin_intrinsic_types.c). The
-// alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c), which take them first.
+// signbitl, which clang tests inline, are the floating builtins' (c_check_builtin_float.c), not calls. The __fp16 ones
+// (__builtin_sinf16 and its kin, #148) take and return __fp16, which no C function can: their function types take and
+// return _Float16, whose values pass alike, and the checker gives their calls' arguments and results __fp16
+// (cbuiltin_library_half, c_checker.c's check_x86_action). clang's -O0 code calls their own names (sinf16), but for those
+// it computes in float, which the lowering does too (check_lower_library_promoted): a call of ceilf, floorf, truncf,
+// rintf, roundevenf, roundf, fmaxf, fminf, fmaximum_numf, fminimum_numf or frexpf of the arguments converted to float, or
+// of fma of them converted to double, the result converted back to __fp16, and fabsf16's and copysignf16's bits. Its other
+// F rows stay refused, and __has_builtin answers 0 for them: the matrix builtins and C++'s __builtin_trivially_relocate,
+// and the FILE builtins (fprintf and its kin, whose prototypes need the unit's FILE), whose prototypes don't decode
+// (c_builtin_intrinsic_types.c). The alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c),
+// which take them first.
 //
 // The rows with attribute f are the C library's functions by their own names (sin, strlen, printf), which clang makes
 // builtins of the unit unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise, and ALL_GNU_LANGUAGES'
@@ -105,6 +110,13 @@ static __attribute__((unused)) CBuiltinLibraryId cbuiltin_library_id(const char*
     return result;
 }
 
+// Whether a library builtin's prototype takes or returns __fp16 (its name's f16 forms, __builtin_sinf16's and the others).
+static __attribute__((unused)) bool cbuiltin_library_half(CBuiltinLibraryId id)
+{
+    const uint32_t length = id < CBUILTIN_LIBRARY_COUNT ? cbuiltin_library_lengths[id] : 0;
+    return length > 3 && memcmp(cbuiltin_library_names[id] + length - 3, "f16", 3) == 0;
+}
+
 // The constant folds of the library builtins that clang folds and this compiler does too (c_check_builtin_library.c,
 // which reads each: its header lists them), which __has_constexpr_builtin advertises.
 typedef enum CBuiltinLibraryFold
@@ -143,13 +155,17 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
         case CBUILTIN_LIBRARY_FMAXL:
         case CBUILTIN_LIBRARY_FMAXIMUM_NUM:
         case CBUILTIN_LIBRARY_FMAXIMUM_NUMF:
-        case CBUILTIN_LIBRARY_FMAXIMUM_NUML: result = CBUILTIN_LIBRARY_FOLD_MAXIMUM; break;
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUML:
+        case CBUILTIN_LIBRARY_FMAXF16:
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUMF16: result = CBUILTIN_LIBRARY_FOLD_MAXIMUM; break;
         case CBUILTIN_LIBRARY_FMIN:
         case CBUILTIN_LIBRARY_FMINF:
         case CBUILTIN_LIBRARY_FMINL:
         case CBUILTIN_LIBRARY_FMINIMUM_NUM:
         case CBUILTIN_LIBRARY_FMINIMUM_NUMF:
-        case CBUILTIN_LIBRARY_FMINIMUM_NUML: result = CBUILTIN_LIBRARY_FOLD_MINIMUM; break;
+        case CBUILTIN_LIBRARY_FMINIMUM_NUML:
+        case CBUILTIN_LIBRARY_FMINF16:
+        case CBUILTIN_LIBRARY_FMINIMUM_NUMF16: result = CBUILTIN_LIBRARY_FOLD_MINIMUM; break;
         case CBUILTIN_LIBRARY_COPYSIGNL: result = CBUILTIN_LIBRARY_FOLD_COPY_SIGN; break;
         default: break;
     }

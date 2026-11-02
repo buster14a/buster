@@ -529,7 +529,11 @@ static bool check_builtin_float_prototype(TypeTable* table, const CheckBuiltinFl
         uint32_t width = 0;
         bool is_signed = false;
         const bool wide_integer = check_action_is_integer(table, values[0].type) && !check_action_integer_type(table, values[0].type, &width, &is_signed);
-        if (kind == BUSTER_TYPE_KIND_COMPLEX || (kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, values[0].type)) || wide_integer)
+        // canonicalizef16's __fp16 takes either binary16 type as it is (#148).
+        const TypeId format = type_unqualified(type_strip_aligned(table, values[0].type));
+        const bool binary16 = parameter == BUSTER_TYPE_HALF && (format == BUSTER_TYPE_HALF || format == BUSTER_TYPE_FLOAT16);
+        if (kind == BUSTER_TYPE_KIND_COMPLEX || (kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, values[0].type) && !binary16) ||
+            wide_integer)
         {
             output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION;
             values[0].constant_kind = CHECK_CONSTANT_NONE;
@@ -616,6 +620,11 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                  input->id == CBUILTIN_SIGNBITL || input->id == CBUILTIN_CANONICALIZEL)
         {
             result_type = BUSTER_TYPE_LONG_DOUBLE;
+        }
+        else if (input->id == CBUILTIN_CANONICALIZEF16)
+        {
+            // Its prototype takes and returns __fp16 (#148).
+            result_type = BUSTER_TYPE_HALF;
         }
         if (special || nan)
         {
