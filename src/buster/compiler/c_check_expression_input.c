@@ -633,9 +633,10 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
 // The coded walk's action at `token` of visits byte `classes`, by its class where `coded` (the unit has none of the
 // features every class leaves to the walk), else and where the class's action doesn't take it, the walk's visit. A
 // class's action that leaves the token has written only its first value, NONE, and its children's chains (value_next),
-// both of which the walk's visit writes again as they were.
+// both of which the walk's visit writes again as they were. In a coded unit, the visit's ticks are added to `*visited`
+// (BUSTER_CHECK_EXPRESSION_PART_VISITS); in another, the caller times its whole chunk as visits.
 static void check_input_expression_coded(CheckInputReader* reader, uint32_t token, uint8_t classes, bool coded, const CheckInputIdentifiers* identifiers,
-                                         uint32_t* identifier)
+                                         uint32_t* identifier, uint64_t* visited)
 {
     const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     bool acted = coded && code != CHECK_INPUT_CODE_SCALAR;
@@ -717,7 +718,9 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
     if (!acted)
     {
         reader->output->expression_left[code] += coded;
+        const uint64_t start = coded ? __rdtsc() : 0;
         check_input_expression_visit(reader, token, classes);
+        *visited += coded ? __rdtsc() - start : 0;
     }
 }
 
@@ -737,11 +740,13 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
-    // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk. And the tokens of each class the
-    // actions reached, in four histograms that a chunk's run of one class doesn't make a chain of: those the classes'
-    // actions acted at are the rest of the ones their actions left (CheckInput.expression_acted).
+    // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
+    // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms
+    // that a chunk's run of one class doesn't make a chain of: those the classes' actions acted at are the rest of the
+    // ones their actions left (CheckInput.expression_acted).
     uint64_t prepared = 0;
     uint64_t acted = 0;
+    uint64_t visited = 0;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
@@ -757,7 +762,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         uint32_t i = 0;
         for (; i < acting && !reader->output->resource; i += 1)
         {
-            check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier);
+            check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &visited);
         }
         for (uint32_t k = 0; coded && k < i; k += 1)
         {
@@ -767,8 +772,11 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         prepared += ready - start;
         acted += done - ready;
     }
+    // A coded unit's visits lie within its chunks' actions; another's actions are all visits.
+    visited = coded ? (visited < acted ? visited : acted) : acted;
     reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE] = prepared;
-    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = acted;
+    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = acted - visited;
+    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS] = visited;
     for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
     {
         const uint32_t tokens_reached = reached[0][code] + reached[1][code] + reached[2][code] + reached[3][code];

@@ -3012,6 +3012,104 @@ static bool check_test_driver_clock_text(char* text, size_t capacity, bool syste
     return fits;
 }
 
+// The report's walk lines as check_clock_report prints them from a clock (#1172's review): read back by name
+// (check_clock_read_walk), each part's ticks come back under its own name and the usage's columns in their order, or as
+// the unavailable pair where a unit's read failed; and measure-compile's rows of them (check_clock_print_walk) give each
+// median under its own name.
+static void check_test_driver_clock_printer(CheckTest* test)
+{
+    bool printed = true;
+    for (uint32_t failed = 0; failed < 2; failed += 1)
+    {
+        CheckClock stage_clock;
+        check_clock_start(&stage_clock);
+        // A billion ticks across a second and the report's own few microseconds: a millisecond is a million ticks to about
+        // one part in ten thousand, which the parts' ratios below allow.
+        stage_clock.monotonic.tv_sec -= 1;
+        stage_clock.last = stage_clock.start + 1000000000ull;
+        stage_clock.expression_ticks = 110000000ull;
+        for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            stage_clock.expression_part_ticks[p] = 10000000ull * (p + 1);
+        }
+        stage_clock.expression_system_us = 1234;
+        stage_clock.expression_faults = 5678;
+        stage_clock.expression_usage_failed = failed != 0;
+        FILE* stream = tmpfile();
+        char text[32768] = { 0 };
+        if (stream != NULL)
+        {
+            check_clock_report(&stage_clock, NULL, 0, stream);
+            rewind(stream);
+            const size_t length = fread(text, 1, sizeof(text) - 1, stream);
+            text[length] = 0;
+            fclose(stream);
+        }
+        double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+        bool valid = stream != NULL && check_clock_read_walk(text, parts) && parts[0] > 0;
+        for (uint32_t p = 1; valid && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            const double ratio = parts[p] / parts[0];
+            valid = ratio > (double)(p + 1) - 0.001 && ratio < (double)(p + 1) + 0.001;
+        }
+        printed = printed && valid && (failed != 0 ? parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == -1 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == -1
+                                                   : parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == 1.234 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == 5678);
+    }
+    check_test_expect(test, printed, "--time-stages prints each of the walk's parts under its own name, and its usage in order or as unavailable");
+    // measure-compile's rows: medians and ranges distinct per part, then the usage's.
+    double median[BUSTER_CHECK_CLOCK_WALK_PARTS + 2];
+    double low[BUSTER_CHECK_CLOCK_WALK_PARTS + 2];
+    double high[BUSTER_CHECK_CLOCK_WALK_PARTS + 2];
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS + 2; p += 1)
+    {
+        median[p] = 1.5 * (p + 1);
+        low[p] = median[p] - 0.25;
+        high[p] = median[p] + 0.25;
+    }
+    FILE* stream = tmpfile();
+    char text[4096] = { 0 };
+    if (stream != NULL)
+    {
+        check_clock_print_walk(stream, median, low, high, 100.0);
+        rewind(stream);
+        const size_t length = fread(text, 1, sizeof(text) - 1, stream);
+        text[length] = 0;
+        fclose(stream);
+    }
+    uint32_t seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] = { 0 };
+    bool rows = stream != NULL;
+    for (const char* line = text; rows && *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        char name[64] = { 0 };
+        double value = 0;
+        double from = 0;
+        double to = 0;
+        double faults = 0;
+        const int fields = sscanf(line, "%63s %lf (%lf to %lf)", name, &value, &from, &to);
+        bool known = false;
+        for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            char wanted[64];
+            snprintf(wanted, sizeof(wanted), "expressions.%s", check_clock_walk_parts[p]);
+            const bool match = strcmp(name, wanted) == 0;
+            known = known || match;
+            seen[p] += match;
+            rows = rows && (!match || (fields == 4 && value == median[p] && from == low[p] && to == high[p]));
+        }
+        const bool usage = strcmp(name, "expressions.usage") == 0 && sscanf(line, "%*s %lf %lf", &value, &faults) == 2;
+        seen[BUSTER_CHECK_CLOCK_WALK_PARTS] += usage;
+        rows = rows && (known || usage) &&
+               (!usage || (value == median[BUSTER_CHECK_CLOCK_WALK_PARTS] && faults == 9.0));
+        line = end != NULL ? end + 1 : line + strlen(line);
+    }
+    for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(seen); p += 1)
+    {
+        rows = rows && seen[p] == 1;
+    }
+    check_test_expect(test, rows, "measure-compile prints each of the walk's parts' median and range under its own name, and its usage in order");
+}
+
 // check_clock_read's availability contract: numeric legacy reports still read, an unavailable status needs every
 // system and fault column at -1, an available status or none refuses any -1, and one substituted numeric column in an
 // unavailable report is refused rather than hiding a distorted later delta.
@@ -3037,25 +3135,50 @@ static void check_test_driver_clock_reader(CheckTest* test)
                                         check_clock_read(text, stages, phases, &total, &walk, usage);
     check_test_expect(test, numeric && unavailable && false_available && mixed && numeric_without_status,
                       "--time-stages' reader accepts numeric and wholly unavailable system-time reports and refuses mixed or falsely available ones");
-    // The walk's parts (check_clock_read_walk): each once, nonnegative, within the walk's row, and its usage line.
+    // The walk's parts (check_clock_read_walk): each once, nonnegative, within the walk's row, and its usage line, whose
+    // unavailable form is -1 in both columns and nowhere else.
+#define BUSTER_TEST_WALK_HEAD "time-check\texpressions\t1.000\t1.0\n"
+#define BUSTER_TEST_WALK_CLASSES "time-check\texpressions.classes\t0.100\t0.1\n"
+#define BUSTER_TEST_WALK_PREPARE "time-check\texpressions.prepare\t0.200\t0.2\n"
+#define BUSTER_TEST_WALK_ACTIONS "time-check\texpressions.actions\t0.400\t0.4\n"
+#define BUSTER_TEST_WALK_VISITS "time-check\texpressions.visits\t0.250\t0.2\n"
+#define BUSTER_TEST_WALK_PARTS BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PREPARE BUSTER_TEST_WALK_ACTIONS BUSTER_TEST_WALK_VISITS
     const char* const walks[] = {
-        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
-        "time-check\texpressions.actions\t0.600\t0.6\ntime-check\texpressions.usage\t0.300\t12\n",
-        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t-1.000\t-1\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PREPARE BUSTER_TEST_WALK_VISITS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS BUSTER_TEST_WALK_ACTIONS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PREPARE "time-check\texpressions.actions\t0.600\t0.6\n" BUSTER_TEST_WALK_VISITS
         "time-check\texpressions.usage\t0.300\t12\n",
-        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
-        "time-check\texpressions.actions\t0.900\t0.9\ntime-check\texpressions.usage\t0.300\t12\n",
-        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.classes\t0.100\t0.1\n"
-        "time-check\texpressions.prepare\t0.200\t0.2\ntime-check\texpressions.actions\t0.600\t0.6\ntime-check\texpressions.usage\t0.300\t12\n",
-        "time-check\texpressions\t1.000\t1.0\ntime-check\texpressions.classes\t0.100\t0.1\ntime-check\texpressions.prepare\t0.200\t0.2\n"
-        "time-check\texpressions.actions\t0.600\t0.6\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS,
+        BUSTER_TEST_WALK_HEAD "time-check\texpressions.classes\t-0.100\t-0.1\n" BUSTER_TEST_WALK_PREPARE BUSTER_TEST_WALK_ACTIONS BUSTER_TEST_WALK_VISITS
+        "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t-0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t0.300\t-1\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t-1.000\t12\n",
     };
+#undef BUSTER_TEST_WALK_PARTS
+#undef BUSTER_TEST_WALK_VISITS
+#undef BUSTER_TEST_WALK_ACTIONS
+#undef BUSTER_TEST_WALK_PREPARE
+#undef BUSTER_TEST_WALK_CLASSES
+#undef BUSTER_TEST_WALK_HEAD
     double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
-    const bool whole = check_clock_read_walk(walks[0], parts) && parts[0] == 0.1 && parts[1] == 0.2 && parts[2] == 0.6 && parts[3] == 0.3 && parts[4] == 12;
-    const bool refused = !check_clock_read_walk(walks[1], parts) && !check_clock_read_walk(walks[2], parts) && !check_clock_read_walk(walks[3], parts) &&
-                         !check_clock_read_walk(walks[4], parts);
-    check_test_expect(test, whole && refused,
-                      "--time-stages' walk reader takes each part once within the walk and refuses a missing, repeated or excess part or usage");
+    const bool whole = check_clock_read_walk(walks[0], parts) && parts[0] == 0.1 && parts[1] == 0.2 && parts[2] == 0.4 && parts[3] == 0.25 && parts[4] == 0.3 &&
+                       parts[5] == 12;
+    const bool unavailable_usage = check_clock_read_walk(walks[1], parts) && parts[3] == 0.25 && parts[4] == -1 && parts[5] == -1;
+    // A missing part, a repeated one, parts past the walk's row (actions' 0.6 makes their sum 1.15), a repeated part, a
+    // missing usage line, a negative part, and a negative or half-unavailable usage.
+    bool refused = true;
+    for (uint32_t w = 2; w < BUSTER_ARRAY_LENGTH(walks); w += 1)
+    {
+        refused = refused && !check_clock_read_walk(walks[w], parts);
+    }
+    check_test_expect(test, whole && unavailable_usage && refused,
+                      "--time-stages' walk reader takes each part once within the walk, and a numeric or wholly unavailable usage, and refuses a missing, "
+                      "repeated, excess or negative part, a missing or negative usage and a half-unavailable one");
+    check_test_driver_clock_printer(test);
 }
 
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
@@ -3207,15 +3330,21 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable") != NULL;
-    // The reader's expressions' walk (#1038), under its stage.
-    const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
+    // The reader's expressions' walk (#1038), under its stage, and its parts' and usage's rows under it.
+    bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL && strstr(text, "\n      expressions.usage ") != NULL;
+    for (uint32_t p = 0; walked && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+    {
+        char row[64];
+        snprintf(row, sizeof(row), "\n      expressions.%s ", check_clock_walk_parts[p]);
+        walked = strstr(text, row) != NULL;
+    }
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
-    check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk under its stage");
+    check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk, its parts and its usage under its stage");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {

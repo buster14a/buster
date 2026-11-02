@@ -1102,21 +1102,42 @@ report, on standard error after the command, a row per stage.
   up. It overlaps the stage, so it is no row of the stages' sum. The report's
   reader (`check_clock_read`) requires it once, within its stage. Its parts
   follow, each a `time-check expressions.PART MILLISECONDS PERCENT` line
-  (`CheckInput.expression_part_ticks`, three TSC reads a chunk of the coded
-  walk):
+  (`CheckInput.expression_part_ticks`, disjoint and within the walk):
   - `classes`, the classes' pass;
   - `prepare`, the coded walk's chunks' compaction and identifiers' leaves;
-  - `actions`, every token's action, the walk's own visits among them (on the
-    scalar path, every visit).
+  - `actions`, the classes' own actions in the coded walk;
+  - `visits`, the walk's own visits (`check_input_expression_visit`): in a
+    coded unit those of the tokens the classes' actions leave, and in a unit the
+    coded walk leaves to the visit throughout, or on the scalar path, all of the
+    walk past its classes.
 
-  Then comes `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the
-  process's getrusage counters across the walk, in which the graph's columns
-  are first touched. They are low-confidence as the stages' are, and the
-  reader's own while the other lanes are parked. `check_clock_read_walk` reads
-  these lines, each once, the parts adding up to no more than the walk.
-  `measure-compile` prints their medians under `check-input.expressions`.
+  `prepare` and `actions` are the coded walk's: on the scalar path (`--scalar`)
+  they are `0.000`, which is no measurement. Then comes
+  `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the process's
+  `getrusage(RUSAGE_SELF)` counters across the walk, low-confidence as the
+  stages' are. They count every thread's, which in a one-lane compile (as the
+  9700X step's) are the reader's own; in a command with several units on
+  lanes, other threads' too. The faults are mostly the first touches of the
+  graph's node columns, which `check_graph_initialize` leaves unwritten and the
+  walk writes a node at a time; the reader's per-token columns and the output
+  columns `check_input_output_none` clears are written before the walk, so its
+  faults don't count them. Where a unit's read failed, the line is
+  `-1.000 -1`, latched across the units as the stages' columns are, so a
+  substituted zero cannot read as a measurement. `check_clock_read_walk` reads
+  these lines, each once, the parts nonnegative and adding up to no more than
+  the walk, and the usage numeric or wholly unavailable. `measure-compile`
+  prints their medians under `check-input.expressions`
+  (`check_clock_print_walk`), `-1` where a run's usage was unavailable.
+- **The walk's clock is always on.** The walk's row and parts are read with or
+  without the option: two TSC reads a unit for the walk, two for the classes'
+  pass, three a chunk of 1,024 positions, two a visit in a coded unit, and two
+  `getrusage` calls a unit. On sqlite3.c (2.7 million tokens, about 2,700
+  chunks and 7,800 visits) that is some 24,000 TSC reads and two system calls,
+  well under a millisecond against a walk of tens of milliseconds; reading them
+  only under the option would take a flag through the reader for less than the
+  run-to-run noise.
 - **Off by default.** Without the option the driver reads no clock, and each lap
-  is a test of a null pointer. With it, the report and the objects are checked
+  is a test of a null pointer; the reader's walk keeps its own counts, above. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
 
 **The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]

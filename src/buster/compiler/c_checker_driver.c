@@ -2740,6 +2740,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 }
                 stage_clock->expression_faults += input.expression_faults;
                 stage_clock->expression_system_us += input.expression_system_us;
+                stage_clock->expression_usage_failed = stage_clock->expression_usage_failed || input.expression_usage_failed;
             }
             if (input.resource)
             {

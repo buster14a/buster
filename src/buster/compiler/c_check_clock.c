@@ -137,7 +137,7 @@ static const char* const check_clock_write_names[] = { "count", "layout", "symbo
 
 #define BUSTER_CHECK_CLOCK_WRITE_PHASES (sizeof(check_clock_write_names) / sizeof(check_clock_write_names[0]))
 // The expressions' walk's parts the report gives (check_clock_walk_parts): BUSTER_CHECK_EXPRESSION_PARTS.
-#define BUSTER_CHECK_CLOCK_WALK_PARTS 3u
+#define BUSTER_CHECK_CLOCK_WALK_PARTS 4u
 
 typedef struct CheckClock CheckClock;
 struct CheckClock
@@ -172,15 +172,18 @@ struct CheckClock
     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
     // #1038), which the report gives on a `time-check` line; its parts' (CheckInput.expression_part_ticks, in
     // check_clock_walk_parts' order), each on a `time-check expressions.PART` line; and the minor faults and system
-    // microseconds across it, on the `time-check expressions.usage` line.
+    // microseconds across it, on the `time-check expressions.usage` line. A unit whose getrusage read failed
+    // (CheckInput.expression_usage_failed) latches expression_usage_failed, and the line gives the two as unavailable
+    // (-1), as the stages' columns are, rather than a total that a unit's substituted zero would distort.
     uint64_t expression_ticks;
     uint64_t expression_part_ticks[BUSTER_CHECK_CLOCK_WALK_PARTS];
     uint64_t expression_faults;
     uint64_t expression_system_us;
+    bool expression_usage_failed;
 };
 
 // The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
-static const char* const check_clock_walk_parts[BUSTER_CHECK_CLOCK_WALK_PARTS] __attribute__((unused)) = { "classes", "prepare", "actions" };
+static const char* const check_clock_walk_parts[BUSTER_CHECK_CLOCK_WALK_PARTS] __attribute__((unused)) = { "classes", "prepare", "actions", "visits" };
 
 // Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock. The driver calls it, but
 // not every unit that includes this file (tests/peak-rss.c).
@@ -316,8 +319,15 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         const double part = (double)stage_clock->expression_part_ticks[p] / ticks_per_millisecond;
         fprintf(stream, "time-check\texpressions.%s\t%.3f\t%.1f\n", check_clock_walk_parts[p], part, total > 0 ? part * 100.0 / total : 0.0);
     }
-    fprintf(stream, "time-check\texpressions.usage\t%.3f\t%llu\n", (double)stage_clock->expression_system_us / 1e3,
-            (unsigned long long)stage_clock->expression_faults);
+    if (stage_clock->expression_usage_failed)
+    {
+        fputs("time-check\texpressions.usage\t-1.000\t-1\n", stream);
+    }
+    else
+    {
+        fprintf(stream, "time-check\texpressions.usage\t%.3f\t%llu\n", (double)stage_clock->expression_system_us / 1e3,
+                (unsigned long long)stage_clock->expression_faults);
+    }
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
@@ -364,9 +374,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
 
 // Reads the expressions' walk's parts from a report check_clock_report wrote, in `text` among other lines: each part's
 // milliseconds (check_clock_walk_parts' order) into parts[0] to parts[BUSTER_CHECK_CLOCK_WALK_PARTS - 1], then the
-// walk's system milliseconds and minor faults (its `expressions.usage` line). Every row must occur once, nonnegative,
-// and the parts may add up to no more than the walk's own row (each rounded to a microsecond). check_clock_read reads
-// the rest; a report's reader that wants the parts reads them apart (measure-compile).
+// walk's system milliseconds and minor faults (its `expressions.usage` line). Every row must occur once, nonnegative
+// but for the usage's unavailable pair, -1 and -1 together, and the parts may add up to no more than the walk's own row
+// (each rounded to a microsecond). check_clock_read reads the rest; a report's reader that wants the parts reads them
+// apart (measure-compile).
 static __attribute__((unused)) bool check_clock_read_walk(const char* text, double* parts)
 {
     uint32_t seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
@@ -396,7 +407,7 @@ static __attribute__((unused)) bool check_clock_read_walk(const char* text, doub
         parts[BUSTER_CHECK_CLOCK_WALK_PARTS] = usage ? first : parts[BUSTER_CHECK_CLOCK_WALK_PARTS];
         parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] = usage ? second : parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1];
         seen[BUSTER_CHECK_CLOCK_WALK_PARTS] += usage;
-        valid = valid && (!usage || (first >= 0 && second >= 0));
+        valid = valid && (!usage || (first >= 0 && second >= 0) || (first == -1 && second == -1));
         const bool whole = fields == 3 && strcmp(name, "expressions") == 0;
         walk = whole ? first : walk;
         seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] += whole;
@@ -409,6 +420,22 @@ static __attribute__((unused)) bool check_clock_read_walk(const char* text, doub
         sum += i < BUSTER_CHECK_CLOCK_WALK_PARTS ? parts[i] : 0;
     }
     return valid && sum <= walk + 0.001 * BUSTER_CHECK_CLOCK_WALK_PARTS;
+}
+
+// Prints measure-compile's rows of the expressions' walk's parts under its `check-input.expressions` row: `median`,
+// `low` and `high` hold each part's median and range over the runs (check_clock_walk_parts' order), then the usage's
+// system milliseconds and minor faults, as check_clock_read_walk reads them (-1 where unavailable); `span` is the median
+// span the parts' shares are of.
+static __attribute__((unused)) void check_clock_print_walk(FILE* stream, const double* median, const double* low, const double* high, double span)
+{
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "expressions.%s", check_clock_walk_parts[p]);
+        fprintf(stream, "      %-18s %9.3f  (%.3f to %.3f)  %5.1f%%\n", name, median[p], low[p], high[p], span > 0 ? median[p] * 100.0 / span : 0.0);
+    }
+    fprintf(stream, "      %-18s %9.3f  %7.0f  low-confidence system ms and minor faults across the walk (-1 unavailable)\n", "expressions.usage",
+            median[BUSTER_CHECK_CLOCK_WALK_PARTS], median[BUSTER_CHECK_CLOCK_WALK_PARTS + 1]);
 }
 
 // Reads a report check_clock_report wrote, in `text` among other lines (a compile's diagnostics): each stage's

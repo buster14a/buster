@@ -216,11 +216,15 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_CODES 32u
 // The expressions' walk's parts, whose TSC ticks --time-stages reports within its row (#1038): the classes' pass
 // (check_input_expression_classes), the coded walk's chunks' preparation (the compaction and the identifiers' leaves),
-// and the actions (every token's, the walk's own visits among them; on the scalar path, every visit).
+// its classes' own actions, and the walk's visits (check_input_expression_visit: in a coded unit those of the tokens
+// the classes' actions leave, two TSC reads each; in a unit the coded walk leaves to the visit throughout, and on the
+// scalar path, the whole of its actions). Preparation and the classes' actions are the coded walk's, 0 on the scalar
+// path.
 #define BUSTER_CHECK_EXPRESSION_PART_CLASSES 0u
 #define BUSTER_CHECK_EXPRESSION_PART_PREPARE 1u
 #define BUSTER_CHECK_EXPRESSION_PART_ACTIONS 2u
-#define BUSTER_CHECK_EXPRESSION_PARTS 3u
+#define BUSTER_CHECK_EXPRESSION_PART_VISITS 3u
+#define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
@@ -486,12 +490,16 @@ struct CheckInput
     uint32_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
     // The TSC's ticks the expressions' walk took (check_input_expressions), which --time-stages reports apart within the
     // reader's stage (#1038), and its parts' (BUSTER_CHECK_EXPRESSION_PART_*); and the process's minor faults and system
-    // microseconds across it (getrusage, as the stages' clock reads them; the reader's own while the other lanes are
-    // parked, as in a unit's check), both 0 where a read failed: the graph's columns are first touched in the walk.
+    // microseconds across it, from getrusage(RUSAGE_SELF) as the stages' clock reads them: every thread's, which in a
+    // one-lane compile are the reader's own. The faults are mostly the first touches of the graph's node columns, which
+    // check_graph_initialize leaves unwritten and the walk writes a node at a time; the reader's per-token columns and
+    // the output columns check_input_output_none clears are written before it. Where a read failed,
+    // expression_usage_failed is set and the two are 0, which the report gives as unavailable (-1), not as a reading.
     uint64_t expression_ticks;
     uint64_t expression_part_ticks[BUSTER_CHECK_EXPRESSION_PARTS];
     uint64_t expression_faults;
     uint64_t expression_system_us;
+    bool expression_usage_failed;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -7667,7 +7675,7 @@ static void check_input_expressions(CheckInputReader* reader)
             const uint32_t token = reader->postorder[order];
             check_input_expression_visit(reader, token, reader->visits[token]);
         }
-        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = __rdtsc() - classed;
+        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS] = __rdtsc() - classed;
     }
     else
     {
@@ -8858,12 +8866,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_expressions(&reader);
                     input->expression_ticks = __rdtsc() - expressions_start;
                     struct rusage after;
-                    if (used && getrusage(RUSAGE_SELF, &after) == 0)
+                    const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
+                    if (read)
                     {
                         input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
                         input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
                                                                  (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
                     }
+                    input->expression_usage_failed = !read;
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {

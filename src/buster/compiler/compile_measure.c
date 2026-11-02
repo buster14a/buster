@@ -281,17 +281,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             {
                 printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", "check-input.expressions", median[BUSTER_MEASURE_WALK], low[BUSTER_MEASURE_WALK],
                        high[BUSTER_MEASURE_WALK], span > 0 ? median[BUSTER_MEASURE_WALK] * 100.0 / span : 0.0);
-                for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
-                {
-                    const uint32_t index = BUSTER_MEASURE_PARTS + p;
-                    char name[64];
-                    snprintf(name, sizeof(name), "expressions.%s", check_clock_walk_parts[p]);
-                    printf("      %-18s %9.3f  (%.3f to %.3f)  %5.1f%%\n", name, median[index], low[index], high[index],
-                           span > 0 ? median[index] * 100.0 / span : 0.0);
-                }
-                const uint32_t usage = BUSTER_MEASURE_PARTS + BUSTER_CHECK_CLOCK_WALK_PARTS;
-                printf("      %-18s %9.3f  %7.0f  low-confidence system ms and minor faults across the walk\n", "expressions.usage", median[usage],
-                       median[usage + 1]);
+                check_clock_print_walk(stdout, median + BUSTER_MEASURE_PARTS, low + BUSTER_MEASURE_PARTS, high + BUSTER_MEASURE_PARTS, span);
             }
         }
         printf("  %-22s %9.3f  (%.3f to %.3f)  the stages' medians add up to %.3f\n", "span", span, low[BUSTER_MEASURE_SPAN], high[BUSTER_MEASURE_SPAN], sum);
