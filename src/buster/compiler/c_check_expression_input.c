@@ -503,18 +503,51 @@ static bool check_input_expression_return(CheckInputReader* reader, uint32_t tok
 }
 
 // A statement's terminator, or a for's closing parenthesis: each of its values discarded, a CAST to void, or a CONDITION
-// in a condition's context, which may hold one value at most. A unit with statement expressions, whose last statements'
-// values are their results and whose discards the regions chain, is the walk's.
+// in a condition's context, which may hold one value at most. In a unit with statement expressions, the last statement of
+// a statement expression's region (CheckInputRegion.final_statement, found through its parent, or a label's) gives the
+// region its one value as its result, and the discards are chained from the token for the region's walk
+// (CheckInputReader.region_roots): what the walk's action does, in the same order. A region's last statement without
+// exactly one value is the walk's, which refuses it.
 static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
+    CheckInput* input = reader->output;
     const bool condition = reader->conditions[token] != 0;
-    const bool acted = reader->output->region_count == 0 && (!condition || values.count <= 1);
+    CheckInputRegion* region = NULL;
+    if (input->region_count != 0)
+    {
+        const Parser* parser = reader->parser;
+        const uint32_t parent = parser->tree.parents[token];
+        uint32_t selected = parent < parser->tokens.count ? input->expression_regions[parent] : 0;
+        if (selected == 0 && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
+        {
+            selected = check_input_labeled_region(reader, parent);
+        }
+        region = selected != 0 && input->regions[selected - 1].final_statement == token ? &input->regions[selected - 1] : NULL;
+    }
+    const bool acted = (!condition || values.count <= 1) && (region == NULL || values.count == 1);
+    if (acted && region != NULL)
+    {
+        region->result = values.first;
+    }
+    uint32_t last = BUSTER_CHECK_NONE;
     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
     {
         const uint32_t discard = check_input_add_node(reader, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (discard != BUSTER_CHECK_NONE)
         {
-            reader->output->graph.types[discard] = BUSTER_TYPE_VOID;
+            input->graph.types[discard] = BUSTER_TYPE_VOID;
+            if (reader->region_roots != NULL)
+            {
+                if (last == BUSTER_CHECK_NONE)
+                {
+                    reader->region_roots[token] = discard;
+                }
+                else
+                {
+                    reader->value_next[last] = discard;
+                }
+                last = discard;
+            }
         }
     }
     return acted;
