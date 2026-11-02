@@ -157,10 +157,27 @@ definition. Its flags and edges:
 - **Edges:** each body's evaluated references (calls, addresses and reads of
   static objects, from the checked expression walk: not `sizeof`, `alignof` or a
   `_Generic` association it doesn't select, and not the operands of `&&`, `||`
-  and `?:` that a constant condition never evaluates), and each initializer's
-  (its address constants, strings and compound literals). A body also selects
-  its own block-scope statics, referenced or not, as clang emits every static
-  local of a function it emits.
+  and `?:` that a constant condition never evaluates, nor what a constant
+  `if`'s dead arm holds, below), and each initializer's (its address
+  constants, strings and compound literals). A body also selects its own
+  block-scope statics, referenced or not, as clang emits every static local of
+  a function it emits, but those that a dead arm declares.
+- **Constant `if`s (#1108):** `check_program` writes only the arm that an `if`
+  whose condition is an integer constant without side effects runs, without the
+  condition, as clang -O0's code has it (`CodeGenFunction::EmitIfStmt`): unless
+  a label, or a `case` of a `switch` outside it, can enter the other arm, or the
+  condition holds a label itself (`ContainsLabel`, which sees one in `sizeof`'s
+  operand too). A condition whose `&&` or `||` leaves an operand unevaluated is
+  a constant, a call in that operand among them: `main.c`'s
+  `BUSTER_IN_UNIT(X) && argc >= 2 && strcmp(...) == 0` branches. The dead arm
+  takes its references with it, its block-scope statics' too, and its
+  statement expressions, whose regions it writes empty
+  (`CheckProgram.dropped_arms`, the arms' token ranges). So a function that
+  only a dead arm calls is neither selected nor lowered, nor checked by code
+  generation's target features (#775): `if (BUSTER_VECTOR_PATH(vector))` in a
+  baseline build no longer emits the AVX-512 kernel it calls. A constant
+  `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
+  `FindCaseStatementsForValue`) are still written and selected.
 
 The selected bodies, data and the symbols they need become the emission's view,
 in source order whatever order the traversal found them in. `--lower-all`
@@ -279,14 +296,18 @@ none of its subset's programs makes a name twice in clang's objects.
   `tested.x.2` in both) and differ from it once a name in its string table is
   replaced: `tag.2` for the label, `tested.x` for the made `tested.x.2` (the
   suffix lost) and `tested.x.3` for the label `tested.x.1`. Constant `if`s'
-  fixtures select their dead arms' callees, as Tier 0 lowers them, and their
-  objects are compared under clang's model (`folded_ifs`, below) instead, and
+  fixtures leave their dead arms out (#1108), in `-c`'s selection and in
+  clang's model alike, and their objects are compared with clang's too, and
   run: a chain of `sizeof` conditions, dead arms with a label, with an outer
   `case` and with their own `switch`, a true condition with an `else`,
-  floating, pointer and side-effecting conditions, and an `else if` chain. And
+  floating, pointer and side-effecting conditions, an `else if` chain, dead
+  arms' block-scope statics, a condition whose `&&` leaves a call unevaluated,
+  dead arms' statement expressions with a `break` and a `continue` (in the body
+  and inside a live statement expression) and a dead arm's `asm goto`. And
   the reasons below on one fixture of each (`c_check_corpus_symbols_test.c`),
   through `check_corpus_measure` as `--symbols` runs it, must all be
-  explained, and a function clang alone sees renamed must not be.
+  explained, what only constant `if`s' dead arms reach must make no difference
+  at all, and a function clang alone sees renamed must not be.
 - **c-testsuite** (`test-c-testsuite --cross-check`): each program's `-c`
   object against `clang -O0 -c`'s, functions and objects. All 220 programs
   agree; the backend compiles every one since it lowers `long double`.
@@ -311,9 +332,11 @@ none of its subset's programs makes a name twice in clang's objects.
   checking comparison, whose 6,323,682-token unit exceeds their hosted
   runner's memory (docs/ci.md).
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
-  dropped and 164 inlined.
+  dropped and 164 inlined. The dropped ones were the other units' commands,
+  each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which
+  `-c` now leaves out as clang does (#1108).
 
-On corpora, clang -O0 decides four things in its code otherwise than the
+On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
 checked program, never from a name, and fails on any other:
 
@@ -321,12 +344,18 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
-| dropped | ours only: a definition that the selection of clang's model doesn't reach, the program with unselected operands counted and a constant `if`'s dead arm left out (`CheckProgramOptions.folded_ifs`) | Doesn't emit the arm that an integer constant condition without side effects never runs, unless a label or a `case` of a `switch` outside it enters it (`CodeGenFunction::EmitIfStmt` and `ContainsLabel`), and so not what only that arm calls. musl's `FORCE_EVAL` calls `fp_force_evalf` and `fp_force_evall` in the arms a `double` never runs. Tier 0 lowers both arms, and the selection counts them. |
 | inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 doesn't inline: it calls the function, so the object defines it. |
 
-The model doesn't name string literals, which have no symbols, and a constant
-`if`'s dead arm drops the ones only it refers to too (c-testsuite's 00212, 00214
-and 00215): the corpora compare no strings.
+Until #1108 there was a fourth, dropped: a definition only ours had, which
+clang's model left out because only a constant `if`'s dead arm reached it
+(musl's `FORCE_EVAL` calls `fp_force_evalf` and `fp_force_evall` in the arms a
+`double` never runs). `-c` leaves such an arm out now as clang does (the source
+path's "Constant `if`s"), so the selection's model is the program with the
+unselected operands counted alone, and what a dead arm reaches makes no
+difference. The counts below that name dropped differences are from before it.
+
+The model doesn't name string literals, which have no symbols: the corpora
+compare no strings.
 
 The harness finds the definitions that may explain a difference by binary
 searches (`check_corpus_symbol_index`): once per file it sorts the selections'
@@ -343,7 +372,7 @@ c-testsuite too.
 Results on the Zen 4 laptop, with clang 23.1.3 (`--target`'s configuration of
 each corpus as `test-checker-corpus` runs it):
 
-| Corpus | Accepted | Compared | Explained differences (folded, unselected, dropped) | Unexplained | Refused by the backend |
+| Corpus | Accepted | Compared | Explained differences (folded, unselected, dropped before #1108) | Unexplained | Refused by the backend |
 | --- | --- | --- | --- | --- | --- |
 | c-testsuite (220) | 220 | 220 | 0 | 0 | 0 |
 | musl 1.2.5 `src` (Zig 0.14.1's copy), 1,524 files, `-std=c99 -ffreestanding` | 1,484 | 546 | 383 (210, 59, 114) | 0 | 937, and 1 the backend fails on |

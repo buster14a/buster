@@ -5736,7 +5736,12 @@ lock and pin timings to CPU 2.
 
 On the source path, `check_program_select` (`c_check_program_select.c`) gives
 the planner the checked program's definitions, roots and evaluated references,
-and `-c` and the direct path lower what it selects. `c_lowering_symbols.c`
+and `-c` and the direct path lower what it selects. A constant `if`'s dead arm
+is never written, as clang -O0 doesn't emit it (#1108, the lowering guide's
+"Constant `if`s"): what only it reaches, a block-scope static it declares
+among them, is neither selected nor checked for target features, so
+`main.c`'s units emit no other unit's commands and a baseline build no
+`BUSTER_VECTOR_PATH` kernel. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
 on fixtures of each kind of definition (functions, objects and string literals),
 `test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
@@ -5861,12 +5866,13 @@ checks each file as the driver does and compares it with
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
-names the checked source makes; a difference must have one of four documented
+names the checked source makes; a difference must have one of three documented
 reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
--O0's objects": folded constants, unselected operands, a constant `if`'s
-dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
+-O0's objects": folded constants, unselected operands, and a local
 `always_inline` function, which clang inlines everywhere), and a file the
-backend refuses is counted with its feature.
+backend refuses is counted with its feature. A constant `if`'s dead arm is no
+reason: `-c` leaves it out as clang does, with what only it reaches
+(`CheckProgram.dropped_arms`, #1108).
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
 directories so, with the count they compare. `--id-order N` checks each file

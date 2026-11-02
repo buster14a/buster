@@ -169,7 +169,7 @@ done
 rm "$flags_file" "$sources_file"
 == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
 # #129: each source the checker accepts is written as -c writes it, and must define what clang -O0 -c's object
-# does, but for the four documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
+# does, but for the three documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
 # feature it names. Its acceptance against clang -fsyntax-only is compared too, as for any corpus. These eight
 # directories' 542 files that the backend lowers, with every explained difference of musl's (math's), must all
 # be compared: a backend that came to refuse them would otherwise pass by comparing none.

@@ -4,9 +4,8 @@
 // Original end-to-end demand fixtures. Default/lazy checking and scalar/vector schedules must emit byte-identical
 // ELF objects after semantic selection. The fixture counts are stated independently of the reachability solver.
 // Every object emitted is also compared with clang -O0 -c's of the same source (#129): the same functions, objects
-// and string literals (c_lowering_symbols.c), which no fixture defeats with a constant condition's dead arm. The
-// constant ifs' fixtures (check_test_program_folded_ifs) select their dead arms' callees, as Tier 0 lowers them, and
-// their objects are compared under the model of clang's code instead (CheckProgramOptions.folded_ifs).
+// and string literals (c_lowering_symbols.c). The constant ifs' fixtures (check_test_program_folded_ifs) leave their
+// dead arms out, as clang -O0 does (CheckProgram.dropped_arms, #1108), and select nothing that only those arms reach.
 
 // Whether clang -O0 -c's object of `source` defines what `bytes` does (lowering_symbols_compare and _strings, with the
 // source's `names`); if not, the differences are printed under `name`. Then each pair of `patches` (a list of strings
@@ -76,11 +75,11 @@ static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, cons
     return valid && differences == 0 && string_differences == 0 && caught;
 }
 
-// A fixture's selection, emitted, with `functions` and `objects` selected, by every path; with `folded`, of clang's model
-// (CheckProgramOptions.unselected_operands and folded_ifs).
+// A fixture's selection, emitted, with `functions` and `objects` selected, by every path; with `model`, of clang's model
+// (CheckProgramOptions.unselected_operands).
 static void check_test_program_selection_run(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
                                              CheckProgramStatus emission_status, const char* clang, const char* symbols_clang, const char* const* patches,
-                                             bool folded)
+                                             bool model)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -125,7 +124,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                     check_data_prepare(&data, &input, &stream, &initializers, &types.table, path == 0, &retained, &scratch);
             const CheckProgramOptions options = { .initializers = &initializers, .asms = &asms, .identifiers = &identifiers,
                                                  .initializer_references = data.references, .initializer_reference_count = data.reference_count, .scalar = path == 0,
-                                                 .unselected_operands = folded, .folded_ifs = folded };
+                                                 .unselected_operands = model };
             ready = ready && check_program(&full, &parser, &input, &stream, &types.table, options, &retained, &scratch) &&
                     check_program_select(&selection, &full, &data, path == 0, &retained, &scratch);
             snprintf(description, sizeof(description), "%s: checked semantic dependency/root selection succeeds", name);
@@ -269,10 +268,13 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
     check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang, 0, false);
 }
 
-// #418's CI: a constant if's dead arm. Each fixture's selection selects the dead arms' callees, as Tier 0 lowers them,
-// and clang's model selects what clang -O0 -c's object defines, which its emitted object must define too (and run as
-// clang's build runs). An arm that a label or an outer case enters is kept, an arm whose cases are its own switch's
-// is not, and conditions of a floating or pointer type or with a side effect keep both arms, as clang keeps them.
+// #418's CI and #1108: a constant if's dead arm. -c's selection, and clang's model's, select what clang -O0 -c's object
+// defines, which the emitted object must define too (and run as clang's build runs): nothing that only a dead arm
+// reaches. An arm that a label or an outer case enters is kept, an arm whose cases are its own switch's is not, and
+// conditions of a floating or pointer type or with a side effect keep both arms, as clang keeps them. A dead arm's
+// block-scope statics go with it, and so do its statement expressions, a break in a loop in one among them, inside the
+// body and inside a live statement expression; a condition whose && leaves a call unevaluated is a constant (main.c's
+// BUSTER_IN_UNIT branches), and an asm goto in a dead arm jumps nowhere.
 static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
 {
     typedef struct CheckFoldedIf CheckFoldedIf;
@@ -281,38 +283,50 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
         const char* name;
         const char* source;
         uint32_t functions;
-        uint32_t kept;
         uint32_t objects;
     };
     static const CheckFoldedIf fixtures[] = {
         { "folded-if-sizeof-chain",
           "static inline int narrow(int n){return n+1;}static inline int wide(int n){return n+2;}static inline int widest(int n){return n+3;}"
           "int tested(int n){long x=n;int r;if(sizeof(x)==sizeof(int))r=narrow(n);else if(sizeof(x)==sizeof(long))r=wide(n);else r=widest(n);"
-          "return r+(int)x-n;}", 4, 2, 0 },
+          "return r+(int)x-n;}", 2, 0 },
         { "folded-if-dead-arm-with-a-label",
-          "static int entered(int n){return n+1;}int tested(int n){if(0){again:n=entered(n);}if(n<3)goto again;return n;}", 2, 2, 0 },
+          "static int entered(int n){return n+1;}int tested(int n){if(0){again:n=entered(n);}if(n<3)goto again;return n;}", 2, 0 },
         { "folded-if-dead-arm-with-an-outer-case",
-          "static int entered(int n){return n+1;}int tested(int n){switch(n){case 0:if(0){case 1:n=entered(n);}break;}return n;}", 2, 2, 0 },
+          "static int entered(int n){return n+1;}int tested(int n){switch(n){case 0:if(0){case 1:n=entered(n);}break;}return n;}", 2, 0 },
         { "folded-if-dead-arm-with-its-own-switch",
-          "static int inner(int n){return n+1;}int tested(int n){if(0){switch(n){case 1:n=inner(n);}}return n;}", 2, 1, 0 },
+          "static int inner(int n){return n+1;}int tested(int n){if(0){switch(n){case 1:n=inner(n);}}return n;}", 1, 0 },
         { "folded-if-true-with-an-else",
           "static int then_arm(int n){return n+1;}static int else_arm(int n){return n+2;}int tested(int n){if(1)n=then_arm(n);else n=else_arm(n);return n;}",
-          3, 2, 0 },
+          2, 0 },
         { "folded-if-floating-and-pointer-conditions",
           "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}static int x;"
-          "int tested(int n){if(0.0)n=a(n);else n=b(n);if(&x)n=c(n);else n=d(n);return n+x;}", 5, 5, 1 },
+          "int tested(int n){if(0.0)n=a(n);else n=b(n);if(&x)n=c(n);else n=d(n);return n+x;}", 5, 1 },
         { "folded-if-condition-with-a-side-effect",
-          "static int a(int n){return n+1;}int tested(int n){if((n++,0))n=a(n);return n;}", 2, 2, 0 },
+          "static int a(int n){return n+1;}int tested(int n){if((n++,0))n=a(n);return n;}", 2, 0 },
         { "folded-if-false-else-if-chain",
-          "static int a(int n){return n+1;}static int b(int n){return n+2;}int tested(int n){if(0){n=a(n);}else if(0){n=b(n);}return n;}", 3, 1, 0 },
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}int tested(int n){if(0){n=a(n);}else if(0){n=b(n);}return n;}", 1, 0 },
+        { "folded-if-dead-arm-block-scope-statics",
+          "static int helper(int n){return n+1;}static int other(int n){return n+2;}"
+          "int tested(int n){static int live=3;if(0){static int(*pointer)(int)=helper;static int counter=4;n=pointer(n)+counter;}"
+          "else{static int kept=5;n+=kept;}if(1){}else{static int(*unused)(int)=other;n=unused(n);}return n+live;}", 1, 2 },
+        { "folded-if-unevaluated-call-in-the-condition",
+          "static char big[1<<20];static int heavy(int x){big[x]=1;return big[x+1];}int strcmp(const char*,const char*);"
+          "int tested(int n){int r=0;if(0&&n>=2&&strcmp(\"a\",\"b\")==0){r=heavy(n);}return r+n;}", 1, 0 },
+        { "folded-if-dead-arm-statement-expressions",
+          "static int helper(int n){return n+1;}static int inner(int n){return n+2;}"
+          "int tested(int n){if(0){while(n){n=({if(n>3)break;helper(n);});}}"
+          "return ({int r=n;if(0){for(;r;){r=({if(r>3)continue;inner(r);});}}r+1;});}", 1, 0 },
+        { "folded-if-dead-arm-asm-goto",
+          "static int helper(int n){return n+1;}int tested(int n){if(0){asm goto(\"jmp %l0\"::::out);n=helper(n);}return n;out:return n+1;}", 1, 0 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         const CheckFoldedIf* fixture = fixtures + i;
         char name[160];
-        check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, 0, 0, false);
+        check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, false);
         snprintf(name, sizeof(name), "%s-in-clangs-model", fixture->name);
-        check_test_program_selection_run(test, fixture->source, name, fixture->kept, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, true);
+        check_test_program_selection_run(test, fixture->source, name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, true);
     }
 }
 

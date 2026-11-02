@@ -310,6 +310,27 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
     return body;
 }
 
+// Whether `token` is in one of the arms the program's writer left out (CheckProgram.dropped_arms, in token order and
+// apart): the last to start at or before it, if it ends at or after it.
+static bool check_program_token_dropped(const CheckProgram* program, uint32_t token)
+{
+    uint32_t low = 0;
+    uint32_t high = program->dropped_arm_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if ((uint32_t)(program->dropped_arms[middle] >> 32) <= token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low != 0 && token <= (uint32_t)program->dropped_arms[low - 1];
+}
+
 // Whether the program's bodies are in token order and apart, as check_program_token_body needs them.
 static bool check_program_bodies_ordered(const CheckProgram* program)
 {
@@ -534,11 +555,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     kinds[edges++] = target != 0 ? C_LOWERING_REFERENCE_EVALUATED : C_LOWERING_REFERENCE_EXTERNAL;
                 }
             }
-            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body.
+            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body, unless an
+            // arm the writer left out declares it: clang emits it where it emits its declaration's statement (#1108).
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
             const uint32_t body = declaration < input->token_count && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE &&
-                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] ? check_program_token_body(full, declaration) : 0;
+                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] && !check_program_token_dropped(full, declaration) ?
+                                  check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {
                 const uint32_t source = object_definitions[full->bodies[body - 1].object];

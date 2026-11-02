@@ -350,7 +350,11 @@ before the call (the callee's) or up to the definition (the caller's), as clang
 inherits them; `CheckProgram.attribute_keys` keeps them, in a unit with a target
 attribute alone. The calls are those clang emits: the walk of the x86 builtins'
 range errors (#487) reaches what a constant condition leaves running, and a
-direct callee is the function's name alone, not `(*f)` or `(&f)`. A `cleanup`
+direct callee is the function's name alone, not `(*f)` or `(&f)`. The functions
+are the selection's, which leaves out a function that only a constant `if`'s
+dead arm reaches (#1108: the program writes no such arm, as clang emits none),
+so the check never walks one: `if (BUSTER_VECTOR_PATH(vector))` in a baseline
+build calls an AVX-512 kernel that clang, and `-c`, never emit. A `cleanup`
 attribute's call (#147, `CallCleanupFunction::Emit`) is one too, of the function
 its argument names, by that function's declarations before the argument. Clang
 emits it where the variable's scope ends, as it pops the cleanup: once, however
