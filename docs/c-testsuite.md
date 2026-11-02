@@ -71,8 +71,9 @@ the harness can't run. `--compiler PATH` tests another compiler executable with
 the same options, and `--keep` keeps the work directory (under `$TMPDIR` or
 `/tmp`), which a failure keeps anyway.
 
-`--self-test` (about 6 s) runs the harness on three tests of its own with a
-stand-in compiler, a shell script, in six scenarios: from a DIR and a `$TMPDIR`
+`--self-test` (about 2 s) runs the harness on three tests of its own with a
+stand-in compiler, a shell script, in six scenarios at once, each in a process
+of its own with its own results' mapping: from a DIR and a `$TMPDIR`
 relative to the current directory (the processes run elsewhere, so the harness
 makes every path absolute); waiting by polling as it does where `pidfd_open`
 fails; with `--cross-check` where `-c` refuses a test the direct path compiles,
@@ -116,7 +117,7 @@ links libm by name, the direct path taking `-l` libraries as GCC's driver does
 
 The 9700X job fetches the commit in a step of its own and runs the self-test
 and the subset among its tests at once, as two commands (#522): the self-test
-on one CPU, since most of its 7 s waits out its timeouts, and the subset with
+on one CPU, since most of its 2 s waits out its timeouts, and the subset with
 `--cross-check` on four, `--jobs "$BUSTER_PARALLEL_CPUS"` (a worker per CPU of
 its heading's).
 

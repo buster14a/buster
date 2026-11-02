@@ -221,16 +221,28 @@ static void lifecycle_dump_log(const char* log)
     }
 }
 
-static bool lifecycle_case(const LifecycleCase* test, const char* root, const char* compiler, const char* clang, const char* fixture, const char* failing_fixture, const char* failing_clang, const char* no_op_path)
+// A case's run: its workspace (its child's TMPDIR), its captured output, and its child, which runs while the other
+// cases' do.
+typedef struct LifecycleRun LifecycleRun;
+struct LifecycleRun
 {
     char temporary[PATH_MAX];
     char log[PATH_MAX];
+    bool valid;
+    pid_t child;
+};
+
+// Starts a case's child: the compiler's harness in a workspace of the case's own, its output into the case's log.
+static void lifecycle_start(const LifecycleCase* test, LifecycleRun* run, const char* root, const char* compiler, const char* clang, const char* fixture, const char* failing_fixture, const char* failing_clang, const char* no_op_path)
+{
     char log_name[128];
     const int length = snprintf(log_name, sizeof(log_name), "%s.log", test->name);
-    bool valid = length >= 0 && (size_t)length < sizeof(log_name) && lifecycle_path(temporary, sizeof(temporary), root, test->name) && mkdir(temporary, 0700) == 0 && lifecycle_path(log, sizeof(log), root, log_name);
-    int status = -1;
-    if (valid)
+    run->valid = length >= 0 && (size_t)length < sizeof(log_name) && lifecycle_path(run->temporary, sizeof(run->temporary), root, test->name) && mkdir(run->temporary, 0700) == 0 && lifecycle_path(run->log, sizeof(run->log), root, log_name);
+    run->child = -1;
+    if (run->valid)
     {
+        const char* temporary = run->temporary;
+        const char* log = run->log;
         const pid_t child = fork();
         if (child == 0)
         {
@@ -270,15 +282,26 @@ static bool lifecycle_case(const LifecycleCase* test, const char* root, const ch
             execv(compiler, (char* const*)arguments);
             _exit(126);
         }
-        status = lifecycle_wait(child);
+        run->child = child;
+    }
+}
+
+// Waits for a case's child, then checks its status, its workspace and its report.
+static bool lifecycle_finish(const LifecycleCase* test, LifecycleRun* run)
+{
+    bool valid = run->valid;
+    int status = -1;
+    if (valid)
+    {
+        status = lifecycle_wait(run->child);
         char artifact[PATH_MAX] = {0};
-        const bool workspace = lifecycle_workspace(temporary, test->retained, artifact, sizeof(artifact));
-        const bool report = lifecycle_report(log, artifact, test);
+        const bool workspace = lifecycle_workspace(run->temporary, test->retained, artifact, sizeof(artifact));
+        const bool report = lifecycle_report(run->log, artifact, test);
         valid = status == test->status && workspace && report;
         if (!valid)
         {
             fprintf(stderr, "differential lifecycle: %s workspace=%s report=%s\n", test->name, workspace ? "valid" : "invalid", report ? "valid" : "invalid");
-            lifecycle_dump_log(log);
+            lifecycle_dump_log(run->log);
         }
     }
     printf("differential lifecycle: %s %s (status=%d, expected=%d)\n", test->name, valid ? "PASS" : "FAIL", status, test->status);
@@ -313,10 +336,21 @@ static int lifecycle_tests(int argc, char** argv)
     unsigned failures = 0;
     if (valid)
     {
-        for (unsigned i = 0; i < sizeof(lifecycle_cases) / sizeof(lifecycle_cases[0]); ++i)
+        // The cases run at once, each in its own workspace: most of each one's time is the harness waiting out its
+        // fixtures' one-second watchdogs (differential_test.c), so in turn they took about 20 s and at once about 4.
+        // Their results are checked and printed in the cases' order.
+        enum { LIFECYCLE_CASES = sizeof(lifecycle_cases) / sizeof(lifecycle_cases[0]) };
+        static LifecycleRun runs[LIFECYCLE_CASES];
+        fflush(stdout);
+        fflush(stderr);
+        for (unsigned i = 0; i < LIFECYCLE_CASES; ++i)
+        {
+            lifecycle_start(&lifecycle_cases[i], &runs[i], root, compiler, clang, fixture, failing_fixture, self, no_op_path);
+        }
+        for (unsigned i = 0; i < LIFECYCLE_CASES; ++i)
         {
             ++count;
-            const bool passed = lifecycle_case(&lifecycle_cases[i], root, compiler, clang, fixture, failing_fixture, self, no_op_path);
+            const bool passed = lifecycle_finish(&lifecycle_cases[i], &runs[i]);
             failures += !passed;
         }
     }

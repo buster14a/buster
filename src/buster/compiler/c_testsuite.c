@@ -1000,12 +1000,10 @@ static int c_testsuite_self_test(CTestsuite* suite)
     };
     const uint32_t scenario_count = sizeof(scenarios) / sizeof(scenarios[0]);
     char base[PATH_MAX];
-    char original[PATH_MAX];
     char path[PATH_MAX];
     const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
     snprintf(base, sizeof(base), "%s/buster-c-testsuite-self-XXXXXX", temporary);
-    char* saved = getenv("TMPDIR") != 0 ? strdup(getenv("TMPDIR")) : 0;
-    bool valid = getcwd(original, sizeof(original)) != 0 && mkdtemp(base) != 0 && realpath(base, path) != 0;
+    bool valid = mkdtemp(base) != 0 && realpath(base, path) != 0;
     if (valid)
     {
         snprintf(base, sizeof(base), "%s", path);
@@ -1025,36 +1023,63 @@ static int c_testsuite_self_test(CTestsuite* suite)
     suite->timeout = 1;
     suite->compile_timeout = 1;
     uint32_t failures = valid ? 0 : 1;
-    for (uint32_t scenario = 0; valid && scenario < scenario_count; scenario += 1)
+    // The scenarios run at once, each in a child process of its own, since each changes the process's directory,
+    // environment and pidfd switch: most of each one's time is its programs' and compiles' one-second timeouts, so in
+    // turn they took about 7 s and at once about 1.3. A child's exit status is whether its scenario came out as expected;
+    // the parent waits for them in the scenarios' order.
+    pid_t children[sizeof(scenarios) / sizeof(scenarios[0])];
+    fflush(stdout);
+    fflush(stderr);
+    for (uint32_t scenario = 0; scenario < scenario_count; scenario += 1)
     {
-        const bool relative = scenario == 0;
-        c_testsuite_without_pidfd = scenario == 1;
-        suite->cross_check = scenario == 2 || scenario == 4 || scenario == 5;
-        snprintf(path, sizeof(path), "%s/checkout", base);
-        valid = !relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0);
-        valid = valid && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
-        valid = valid && (scenario != 3 || setenv("C_TESTSUITE_ABNORMAL", "1", 1) == 0);
-        valid = valid && (scenario != 4 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "kill", 1) == 0);
-        valid = valid && (scenario != 5 || setenv("C_TESTSUITE_EXTRA_SYMBOL", "1", 1) == 0);
-        const uint64_t start = c_testsuite_now();
-        const bool ran = valid && c_testsuite_execute(suite, relative ? "checkout" : path, 0, 3);
-        const uint64_t elapsed = c_testsuite_now() - start;
-        unsetenv("C_TESTSUITE_REFUSE_OBJECTS");
-        unsetenv("C_TESTSUITE_ABNORMAL");
-        unsetenv("C_TESTSUITE_EXTRA_SYMBOL");
-        valid = (saved != 0 ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0) && chdir(original) == 0;
-        const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], expectations[scenario]) && elapsed < UINT64_C(20) * 1000000000;
-        if (ran)
+        children[scenario] = valid ? fork() : -1;
+        if (children[scenario] == 0)
         {
-            c_testsuite_remove(suite);
+            // The suite's results are shared with the workers that write them (a MAP_SHARED mapping), and so with the
+            // other scenarios' processes: each scenario's go in a mapping of its own.
+            CTestsuiteResult* results = mmap(0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+            suite->results = results != MAP_FAILED ? results : 0;
+            const bool relative = scenario == 0;
+            c_testsuite_without_pidfd = scenario == 1;
+            suite->cross_check = scenario == 2 || scenario == 4 || scenario == 5;
+            snprintf(path, sizeof(path), "%s/checkout", base);
+            bool ready = suite->results != 0 && (!relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0));
+            ready = ready && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
+            ready = ready && (scenario != 3 || setenv("C_TESTSUITE_ABNORMAL", "1", 1) == 0);
+            ready = ready && (scenario != 4 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "kill", 1) == 0);
+            ready = ready && (scenario != 5 || setenv("C_TESTSUITE_EXTRA_SYMBOL", "1", 1) == 0);
+            const uint64_t start = c_testsuite_now();
+            const bool ran = ready && c_testsuite_execute(suite, relative ? "checkout" : path, 0, 3);
+            const uint64_t elapsed = c_testsuite_now() - start;
+            const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], expectations[scenario]) && elapsed < UINT64_C(20) * 1000000000;
+            if (ran)
+            {
+                c_testsuite_remove(suite);
+            }
+            if (!expected)
+            {
+                fprintf(stderr, "test-c-testsuite: self-test, %s: failed (%" PRIu64 " ms)\n", scenarios[scenario], elapsed / 1000000);
+            }
+            fflush(stdout);
+            fflush(stderr);
+            _exit(expected ? 0 : 1);
         }
-        if (!expected)
-        {
-            fprintf(stderr, "test-c-testsuite: self-test, %s: failed (%" PRIu64 " ms)\n", scenarios[scenario], elapsed / 1000000);
-        }
-        failures += !expected;
     }
-    c_testsuite_without_pidfd = false;
+    for (uint32_t scenario = 0; scenario < scenario_count; scenario += 1)
+    {
+        int status = 0;
+        pid_t waited = -1;
+        do
+        {
+            waited = children[scenario] > 0 ? waitpid(children[scenario], &status, 0) : -1;
+        } while (waited < 0 && errno == EINTR);
+        const bool expected = waited == children[scenario] && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (valid && !expected && !(waited == children[scenario] && WIFEXITED(status)))
+        {
+            fprintf(stderr, "test-c-testsuite: self-test, %s: its process didn't run to the end\n", scenarios[scenario]);
+        }
+        failures += valid && !expected;
+    }
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
         snprintf(path, sizeof(path), "%s/%s", base, files[i][0]);
@@ -1067,7 +1092,6 @@ static int c_testsuite_self_test(CTestsuite* suite)
         rmdir(path);
     }
     rmdir(base);
-    free(saved);
     printf("test-c-testsuite: self-test: %u scenarios, %u failed\n", scenario_count, failures + (valid ? 0 : 1));
     return valid && failures == 0 ? 0 : 1;
 }
