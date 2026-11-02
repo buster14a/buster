@@ -123,6 +123,16 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
         code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
                kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL : CHECK_INPUT_CODE_SCALAR;
     }
+    // The columns the reader wrote before the walk refine a class (#1038): a separator of a comma operator is a BINARY,
+    // and an initializer's assignment, a builtin's token where the class's action would leave it to the walk, and an
+    // intrinsic's call are the walk's.
+    code = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[i] != 0 ? CHECK_INPUT_CODE_BINARY : code;
+    code = code == CHECK_INPUT_CODE_BINARY && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
+    const bool builtin_declines = code == CHECK_INPUT_CODE_PREFIX || code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_CAST ||
+                                  code == CHECK_INPUT_CODE_TERNARY || code == CHECK_INPUT_CODE_SUBSCRIPT || code == CHECK_INPUT_CODE_MEMBER ||
+                                  code == CHECK_INPUT_CODE_POSTFIX || code == CHECK_INPUT_CODE_CONDITION || code == CHECK_INPUT_CODE_CALL;
+    code = builtin_declines && reader->builtins[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
+    code = code == CHECK_INPUT_CODE_CALL && reader->output->intrinsic_ids != NULL && reader->output->intrinsic_ids[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
     if (reader->ignored[i] != 0)
     {
         code = listed ? CHECK_INPUT_CODE_LIST : CHECK_INPUT_CODE_DROP;
@@ -271,6 +281,10 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         PADDED_VISITS,
         COMPACT_TOKENS,
         COMPACT_CLASSES,
+        BUILTINS,
+        COMMAS,
+        INITIALIZERS,
+        INTRINSICS,
         COLUMNS,
     };
     uint8_t* mappings[COLUMNS];
@@ -501,6 +515,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         reader.vla_ends = check_test_scan_column(mappings[BOUNDS] + page, count, 4);
         reader.first_value = check_test_scan_column(mappings[FIRST_VALUE] + page, count, 4);
         reader.specifier_finishes = check_test_scan_column(mappings[FINISHES] + page, count, sizeof(CheckInputSpecifierJob*));
+        reader.builtins = check_test_scan_column(mappings[BUILTINS] + page, count, 2);
+        reader.expression_commas = check_test_scan_column(mappings[COMMAS] + page, count, 1);
+        reader.initializers = check_test_scan_column(mappings[INITIALIZERS] + page, count, 1);
+        // A unit without intrinsics has no column of their ids.
+        input.intrinsic_ids = (count & 1) != 0 ? check_test_scan_column(mappings[INTRINSICS] + page, count, 4) : NULL;
         uint32_t* sparse_columns[] = { input.expression_regions, input.asm_ids, reader.constant_present, reader.vararg_calls, reader.designator_tokens, reader.vla_ends };
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -516,6 +535,16 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             }
             // A type query that finishes at one token in eight.
             reader.specifier_finishes[i] = (check_test_random(test) & 7) == 0 ? (CheckInputSpecifierJob*)&reader : NULL;
+            // A builtin, an initializer's assignment and an intrinsic's id at one token in eight each, and a comma
+            // operator's separator at one in two.
+            const uint32_t folds = check_test_random(test);
+            reader.builtins[i] = (folds & 7) == 0 ? (uint16_t)(1 + (folds >> 16) % 900) : 0;
+            reader.initializers[i] = ((folds >> 3) & 7) == 0 ? (uint8_t)(1 + ((folds >> 24) & 1)) : 0;
+            reader.expression_commas[i] = (uint8_t)((folds >> 6) & 1);
+            if (input.intrinsic_ids != NULL)
+            {
+                input.intrinsic_ids[i] = ((folds >> 7) & 7) == 0 ? 1 + (folds >> 20) : 0;
+            }
         }
         // The sparse marks the columns' writers keep (CheckInputReader.sparse_marks, #628), by the test's own reading, which
         // the vector path's classes read in place of the columns.

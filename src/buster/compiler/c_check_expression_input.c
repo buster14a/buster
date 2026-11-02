@@ -380,7 +380,7 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
         case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
         default: break;
     }
-    const bool acted = op != CHECK_OP_COUNT && values.count == 1 && reader->builtins[token] == 0;
+    const bool acted = op != CHECK_OP_COUNT && values.count == 1;
     if (acted)
     {
         check_input_expression_value(reader, token, check_input_expression_operator(reader, op, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE));
@@ -388,11 +388,11 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
     return acted;
 }
 
-// A binary operator, or a comma operator: two values, but an initializer's assignment.
+// A binary operator, or a comma operator: two values. An initializer's assignment is the walk's class.
 static bool check_input_expression_binary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const CheckOp op = check_input_binary(reader->parser->tokens.kinds[token]);
-    const bool acted = op != CHECK_OP_COUNT && values.count == 2 && reader->initializers[token] == 0 && reader->builtins[token] == 0;
+    const bool acted = op != CHECK_OP_COUNT && values.count == 2;
     if (acted)
     {
         const uint32_t second = reader->value_next[values.first];
@@ -404,7 +404,7 @@ static bool check_input_expression_binary(CheckInputReader* reader, uint32_t tok
 // A conditional operator of three values, or of two with the middle one omitted (x ?: y), whose first is both.
 static bool check_input_expression_ternary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
-    const bool acted = (values.count == 3 || values.count == 2) && reader->builtins[token] == 0;
+    const bool acted = values.count == 3 || values.count == 2;
     if (acted)
     {
         const bool omitted = values.count == 2;
@@ -420,7 +420,7 @@ static bool check_input_expression_ternary(CheckInputReader* reader, uint32_t to
 static bool check_input_expression_member(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const Parser* parser = reader->parser;
-    const bool acted = values.count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER && reader->builtins[token] == 0;
+    const bool acted = values.count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
     if (acted)
     {
         const bool arrow = parser->tokens.kinds[token] == PARSE_KIND_ARROW;
@@ -441,7 +441,7 @@ static bool check_input_expression_member(CheckInputReader* reader, uint32_t tok
 // An operator of `values.count` values (one, or two for a subscript), where the class asks for `wanted`.
 static bool check_input_expression_fixed(CheckInputReader* reader, uint32_t token, CheckInputValues values, CheckOp op, uint32_t wanted)
 {
-    const bool acted = values.count == wanted && reader->builtins[token] == 0;
+    const bool acted = values.count == wanted;
     if (acted)
     {
         const uint32_t second = wanted == 2 ? reader->value_next[values.first] : BUSTER_CHECK_NONE;
@@ -473,7 +473,7 @@ static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t
 static bool check_input_expression_condition(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     const Parser* parser = reader->parser;
-    const bool acted = values.count == 1 && reader->builtins[token] == 0;
+    const bool acted = values.count == 1;
     if (acted)
     {
         const uint32_t keyword = reader->first_child[token];
@@ -491,13 +491,12 @@ static bool check_input_expression_condition(CheckInputReader* reader, uint32_t 
 // A call of a function: the callee's value its operand, and the arguments' values its own slice of argument_nodes, each
 // with its first token; a call of a plain library builtin's declaration that clang folds marked in its members
 // (check_input_library_call, #148); and in a unit with overload tables, a call whose callee's token names an overload set
-// recorded with the set's head (CheckGraph.overload_calls), in node order as the walk records them. A builtin's, an
-// intrinsic's and a K&R unit's calls are the walk's.
+// recorded with the set's head (CheckGraph.overload_calls), in node order as the walk records them. A K&R unit's calls are
+// the walk's, and so are a builtin's and an intrinsic's, by their class (check_input_expression_fold).
 static bool check_input_expression_call(CheckInputReader* reader, uint32_t token, CheckInputValues values)
 {
     CheckInput* input = reader->output;
-    const bool acted = values.count != 0 && reader->builtins[token] == 0 && (input->intrinsic_ids == 0 || input->intrinsic_ids[token] == 0) &&
-                       input->kr_parameter_count == 0;
+    const bool acted = values.count != 0 && input->kr_parameter_count == 0;
     if (acted)
     {
         CheckGraph* graph = &input->graph;
@@ -580,14 +579,7 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
                 acted = check_input_expression_binary(reader, token, values);
                 break;
             case CHECK_INPUT_CODE_SEPARATOR:
-                if (reader->expression_commas[token])
-                {
-                    acted = check_input_expression_binary(reader, token, values);
-                }
-                else
-                {
-                    check_input_expression_list(reader, token, values);
-                }
+                check_input_expression_list(reader, token, values);
                 break;
             case CHECK_INPUT_CODE_GROUP:
                 acted = values.count == 1;
