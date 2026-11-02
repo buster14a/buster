@@ -42,9 +42,9 @@ instructions. The last target option wins. The earlier `--isa=x86-64`,
 `--isa=avx2` and `--isa=avx512f` spellings remain aliases for baseline, v3 and
 v4 respectively, within the same documented syntax subset.
 
-`x86_match_initialize(index, target)` intersects understood syntax with the
-target's allowed forms once, keeping unsupported instructions out of both
-matching paths. An index belongs to that target and can be reused for its
+`x86_match_initialize(index, target)` intersects the admitted forms (below,
+"The admitted forms") with the target's allowed forms once, keeping unsupported
+instructions out of both matching paths. An index belongs to that target and can be reused for its
 inputs. Final resolved records also pass the shared target/operand validator
 before encoding. The encoder's hot loop has no new checks.
 
@@ -87,96 +87,101 @@ immediate address, as does GCC's `OFFSET FLAT:symbol`; a bare symbol in an ordin
 a branch its destination, unless a width asks for memory: `call qword ptr
 callback` calls through the pointer at `callback`. AT&T uses `%register`,
 `$immediate`, displacement/base/index/scale, and `*` for indirect calls/jumps.
-Integer width suffixes are checked; LEA's sizes only its destination, and a
-complete alias (`jnb`, `jnl`, `sal`) is never read as a suffix. `pushw` covers
-the 16-bit register and memory forms as well as immediates. AT&T extension
-spellings (`movzbl`, `movzwl`, `movsbl`, `movsbq`, `movslq`, and their other
-source/destination widths) check both widths. `cbtw/cwtl/cltq/cwtd/cltd/cqto`
-name the corresponding sign-extension instructions.
+A complete alias (`jnb`, `jnl`, `sal`, `setz`, `cmovnae`) is never read as a
+suffix. `pushw` covers the 16-bit register and memory forms as well as
+immediates. AT&T extension spellings (`movzbl`, `movzwl`, `movsbl`, `movsbq`,
+`movslq`, and their other source/destination widths) check both widths, and so
+does LEA's suffix, which sizes only its destination. `cbtw/cwtl/cltq/cwtd/cltd/cqto`
+name the corresponding sign-extension instructions, and GNU as's other AT&T
+names are taken too: `stosl`, `insl` and the other dword string instructions,
+`iret` and `sysret` (and their `l` spellings), the far returns `lret`, `lretw`,
+`lretl` and `lretq`, and the x87's 16-bit environment and state forms
+`fnsaves`, `fnstenvs`, `frstors` and the others. Intel's `movsx` of a
+doubleword source is `movsxd`, as GNU as reads it (`movsx r8, r8d`), and a shift
+or rotate of one operand shifts by 1 (`shrl %ecx`, `shr ecx`), the D1 form.
 
-The admitted families are:
+### The admitted forms (#1134)
 
-- `mov`, `movabs`, `lea`, `movzx`, `movsx`, `movsxd`; integer
-  `add/adc/sub/sbb/and/or/xor/cmp/test`, `inc/dec/neg/not`, `mul/imul/div/idiv`,
-  `shl/sal/shr/sar/rol/ror/shld/shrd`;
-- `push/pushw/pop`, near `call/jmp`, all canonical Jcc/CMOVcc/SETcc conditions,
-  common Jcc aliases, `loop/loope/loopne/jrcxz`, `ret/leave/nop/int3/ud2/syscall`,
-  `clc/stc/cmc/cld/std`, `cbw/cwde/cdqe/cwd/cdq/cqo`;
-- SSE2 `movaps/movups/movapd/movupd/movdqa/movdqu`, packed float
-  `add/sub/mul/div` on `ps/pd`, `xorps/xorpd/pxor`, and SSE2's packed integer
-  arithmetic, compares, packs, unpacks and shifts (`paddb/w/d/q`,
-  `psubb/w/d/q`, `pcmpeqb/w/d`, `pcmpgtb/w/d`, `pmaddwd`, `pmulhw/lw/udq`,
-  `packsswb/dw`, `packuswb`, `punpckl/hbw/wd/dq/qdq`, `psll/psrl/psra` on
-  words, doublewords and quadwords, `pand/pandn/por`, and `pavgb/w`,
-  `pmaxsw`, `pminsw`, `pminub`, `pmaxub`, `pmulhuw`);
-- the corresponding VEX forms and `vzeroupper`; 512-bit AVX-512F packed float
-  arithmetic/moves, `vpaddd/vpsubd/vpxord/vmovdqa32/vmovdqu32`, with destination
-  masks/zeroing and supported `{1to8}`/`{1to16}` memory broadcasts;
-- VEX `kmovb/kmovw/kmovd/kmovq` between mask registers, memory and general
-  registers, including `k0`, subject to each form's target features. Byte and
-  word moves use 32-bit general registers; qword moves use 64-bit ones;
-- the processor-state instructions C's inline assembly uses (#147): `cpuid`,
-  `xgetbv`, `xchg`, `bswap`, the x87's `fnstcw/fldcw/fnstsw/fnclex`,
-  `stmxcsr/ldmxcsr`, and SSE2's `pcmpeqd` in its legacy forms. An `xchg` takes
-  its memory operand first in Intel order, as the catalogue has it. `fnstsw`
-  takes memory or `%ax` (the operand grammar's accumulator alone), and an
-  `xchg` of the accumulator with another register takes the two-byte form,
-  where GNU as takes the one-byte one;
-- what musl's inline assembly uses (#147), with its families: the `lock`
-  prefix on the locked forms of `cmpxchg`, `xadd`, `add/or/adc/sbb/and/sub/xor`
-  and `inc/dec/not/neg` (memory destinations; `lock xchg` and the locked bit
-  tests aren't admitted), and those instructions' unlocked `cmpxchg` and
-  `xadd`; `bsf`, `bsr`, `lzcnt`, `tzcnt` and `hlt`; SSE's `sqrtss/sqrtsd`,
-  `cvtss2si/cvtsd2si`, `cvttss2si/cvttsd2si`, `andps/andpd`, `andnps/andnpd`,
-  `orps/orpd` and SSE2's `psrld/psrlq/pslld/psllq`, in their legacy forms on
-  XMM registers; FMA3's scalar `vfmadd`, `vfmsub`, `vfnmadd` and `vfnmsub`
-  (`132`, `213` and `231`, `ss` and `sd`); and the x87's operations on the
-  stack's top (`fsqrt`, `fabs`, `fchs`, `frndint`, `fprem`, `fprem1`,
-  `fscale`, `fxtract`, `f2xm1`, `fyl2x`, `fyl2xp1`, `fpatan`, `fptan`,
-  `fsin`, `fcos`, `fsincos`, `fxam`, `ftst` and the constants `fld1` to
-  `fldln2`) and its integer loads and stores `fild/fist/fistp/fisttp`, whose
-  AT&T suffixes are the integer's: `s` 16 bits, `l` 32, `ll` and `q` 64
-  (`fistpll`). The x87's stack registers (`%st(1)`) aren't the parser's;
-- operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc`, and `rdtscp`
-  (#798). The assembler requires a target with RDTSCP for `rdtscp`; inline
-  templates admit it independently of the target, so their author is responsible
-  for selecting instructions supported by the CPU and declaring register outputs;
-- the spin-wait spellings `rep nop` and `rep; nop`, each encoded as `pause`,
-  and `rep bsr` and `rep bsf`, which are `lzcnt`'s and `tzcnt`'s bytes (F3 0F
-  BD and BC: dr_flac spells `lzcnt` so), encoded as their forms, so a target
-  without LZCNT or BMI refuses them;
-- AMD's return-stack-buffer hints `rep ret`/`repz ret` (F3 C3) and
-  `repne ret`/`repnz ret` (F2 C3), with or without AT&T's `q` and as a prefix
-  written before or as a statement of its own; `retl` stays refused, as GNU as
-  refuses it;
-- a prefix written as a statement of its own, `lock` or `rep` and its aliases,
-  past a semicolon or lines (`lock ; cmpxchg %ecx,(%rdx)`, as musl's atomics
-  write it): GNU as applies it to the next instruction, and so does this
-  assembler, which takes the two as one instruction, the prefix on its line.
-  Only an instruction takes it, with no label between. Before a 16-bit
-  instruction its bytes are then the line's (`66 f0 0f b1`), where GNU as
-  writes the prefix it emitted alone first (`f0 66 0f b1`), as clang's
-  integrated assembler does too: the same instruction;
-- compiler control-flow markers: `endbr64`, and `notrack`/`bnd` before a near
-  `call` or `jmp` (each as one mnemonic with its branch, like `rep movs`);
-- what naked functions' templates use (#147): `pushfq/popfq`, SSE2's `movq`
-  between an XMM register and a general one or memory, the x87's `fld` and
-  `fstp` of 4, 8 and 10 bytes (AT&T's `flds/fldl/fldt` and
-  `fstps/fstpl/fstpt`), the string instructions `movs/stos/lods` alone and with
-  `rep` and `cmps/scas` alone and with `repe/repne` (`rep` and its prefix's
-  aliases one mnemonic with the instruction, AT&T's `l` the dword form), and
-  AVX-512F's `vmovdqa64/vmovdqu64`. In AT&T syntax `movq` is SSE2's when an
-  operand is an XMM register and `mov`'s 64-bit form otherwise. Between memory
-  and an XMM register it takes SSE2's own forms (`F3 0F 7E`, `66 0F D6`), as GNU
-  as does, rather than the general register's `REX.W` ones of the same length.
+The syntax admits the form table's forms of 64-bit mode itself, not a list of
+families (`x86_match_supported`): a form is admitted when
 
-Only forms covered by the frontend's operand-role grammar are admitted.
-Missing families, rounding/SAE, explicit instruction-prefix syntax, far
-branches, 16/32-bit execution modes, other segment registers, VSIB, section
-groups, GOT/TLS relocation modifiers other than `@PLT`, `@GOTPCREL` and
-`@GOTPCRELX`, debug directives other than the compiler's `.file`, `.loc`,
-`.uleb128` and `.sleb128` data, and macro-assembler directives are diagnosed.
-An unsupported form never reaches the trusted encoder.
+- its operand roles are ones the matcher has (`x86_match_roles`): none, rm, reg,
+  vvvv (first, as BMI's `blsr` and the vector shifts by an immediate have it, or
+  third, as BMI2's `shlx`), an immediate, a branch target, the accumulator, CL,
+  the count 1, an `/is4` register (VEX's four-operand blends) and XMM0 written
+  out (SSE4.1's blends, `sha256rnds2`), at most four of them;
+- every operand descriptor is one the parser reads: general registers of 8 to 64
+  bits, XMM, YMM and ZMM registers, opmasks, and memory addressed by general
+  registers; not the x87's stack registers (`%st(1)`), MMX, bound, control,
+  debug, segment or tile registers, vector-indexed (VSIB) memory, register pairs
+  or a default flags value;
+- its mnemonic is one the parser spells, with the catalogue's prefixes composed
+  from their tokens: `lock` before any instruction, `notrack` and `bnd` before a
+  near call or jmp, `rep`, `repe` and `repne` before the string instructions and
+  `ret`. The other prefixed spellings (`data16`, `rex.w`, the branch hints `cs`
+  and `ds`, `xacquire`, `xrelease`) aren't;
+- and it has no EVEX feature the parser has no syntax for: suppressed exceptions
+  (`{sae}`), APX's new data destination and no flags, and source conditions.
+  Embedded rounding (`{rn-sae}`) has no syntax either, so its forms never match.
+  The far call and jmp through memory aren't near branches' syntax.
+
+About 6,100 forms pass, of about 1,900 mnemonics (the index has 4,096
+buckets). The target intersection then keeps out every form the target's
+features don't allow, and every form the [target table](x86-target.md) doesn't
+classify, which no target allows: the table fails closed. #1134 classified the
+user-level forms the table hadn't (SSE4.1's, SHA's, ADX's, MOVBE's, RDRAND's,
+RDSEED's, the cache and prefetch instructions', the XSAVE family's, FSGSBASE's,
+the shadow stack's, the baseline's system instructions, AVX's and AVX2's VEX
+forms, and AVX-512 F, BW, DQ, CD and VBMI forms), and an index for every feature
+(the C lowering's) holds about 4,200 forms. The extensions the table has no
+feature for (AVX512-FP16, AVX10.2, AMX, XOP, FMA4, TBM, LWP, Key Locker, APX's
+EVEX promotions and the others) stay out on every target. Other unsupported
+syntax is diagnosed: rounding/SAE, explicit pseudo-prefixes (`{vex}`, `{load}`),
+far branches, 16/32-bit execution modes and 32-bit addresses, other segment
+registers, VSIB, section groups, GOT/TLS relocation modifiers other than
+`@PLT`, `@GOTPCREL` and `@GOTPCRELX`, debug directives other than the
+compiler's `.file`, `.loc`, `.uleb128` and `.sleb128` data, and macro-assembler
+directives. An unsupported form never reaches the trusted encoder.
+
+An AT&T size suffix is the matcher's to check, by each form's suffix width
+(`x86_match_suffix_width`), when the full mnemonic isn't a name of the index:
+
+- `b`, `w`, `l` and `q` give the width of the form's general-register or memory
+  operand, but of a general-register destination where the source is a vector
+  or mask register: `cvtsi2sdl (%r8), %xmm1` sizes its source, `crc32b %al, %ecx`
+  its source byte, and `cvtss2siq (%rax), %rax` its destination. A suffix the
+  registers disagree with is diagnosed as such once the operands match without
+  it (`addl %rax, %rbx`);
+- the x87's memory widths: `s` a float's or a short's, `l` a double's or a
+  long's, `t` an extended value's and `ll` or `q` a long long's, where the x87's
+  integer instructions are those whose names start with `fi` (`fadds`, `fiaddl`,
+  `fistpll`, `fldt`);
+- a vector memory operand's width: `x`, `y` and `z` for 16, 32 and 64 bytes,
+  where the memory's width would be ambiguous (`vcvtpd2dqx (%rax), %xmm0`).
+
+Intel memory widths are `byte` to `zmmword ptr`, `tbyte ptr` (10 bytes) and
+`fword ptr` (a far pointer's 6). Broadcasts take `{1to2}` to `{1to32}`, as the
+vector's elements are many.
+
+Of the forms that match an instruction, the matcher takes a legacy or VEX one
+before an EVEX one, as GNU as does, though EVEX's compressed displacement
+(disp8\*N) can make the EVEX form shorter: AVX-512 isn't what an AVX instruction
+needs, and the C lowering's index has every feature. A VEX form whose features a
+processor with its EVEX sibling's may lack (AVX-VNNI's `vpdpbusd` and the
+others, which Zen 4 lacks beside AVX512-VNNI) comes after the EVEX one, as GNU as
+picks it without `{vex}`. Then it takes the shortest. An exchange of two general
+registers with the accumulator first swaps its operands, so that `xchg rax, rcx`
+takes the accumulator's one-byte form (`48 91`), as GNU as encodes it; `xchg
+eax, eax` takes 87's form, since 90 is NOP, which keeps RAX's upper half.
+
+A diagnostic for an instruction that doesn't match names it as the source writes
+it and says why: `instruction not supported` (a name the syntax doesn't admit,
+or whose forms no target allows), `instruction requires ISA features the target
+lacks (see -march)`, `no form of the instruction takes these operands` (`on this
+target`, where the target refuses some of its forms), or `mnemonic suffix and
+register width disagree`. The `assemble` command prints the name after the
+message (`error: instruction not supported: vpfoo`); C's inline assembly reports
+the message alone, at its statement.
 
 Statements end at newline or semicolon. `#` and `//` start line comments;
 `/* ... */` comments preserve statement newlines. Strings preserve embedded
@@ -435,6 +440,27 @@ and check included-source diagnostics and preservation of existing output
 when assembly fails. Without external tools, the test also preprocesses pastes
 and 20,000 pp-numbers that `$` splits into five tokens each through both
 kernels, and reads assembly from a pipe.
+
+The round trip (`assembler_round_trip_test.c`, #1134) is the syntax's coverage
+test, which grows with the form table: every form an index of every feature
+holds but branches (whose destinations are labels) and embedded rounding, as
+four random records each of the encoder tests' generator, printed in Intel
+syntax by their GNU as printer without its pseudo-prefixes and in AT&T syntax by
+the test's own printer (reversed operands, `%`, `$`, `*` for an indirect
+branch, the destination's `{%kN}{z}` last, a suffix where the operands leave
+the width open, and GNU as's AT&T names). Each line must assemble by both paths
+into one record, both syntaxes into the same bytes, and that record must be the
+original instruction: its mnemonic, its operands in Intel order (the
+immediate's value at the operation's width), its decorations and broadcast, and
+the matcher's choice among its encodings (no higher rank, and of the original's
+rank no longer). With `--cross-check`, GNU as assembles two records of every
+form in both syntaxes, each in a 16-byte slot filled with `int3`, and its bytes
+must be the matcher's, but where GNU as would choose another encoding of the
+same instruction (`x86_assembler_prefers_another_form`), which is counted. On
+binutils 2.42 that was 16,314 of 16,316 lines the same and 2 counted. The
+issue's 47 inline-assembly instructions and #1115's are fixtures of their own,
+compared with GNU as too, beside each diagnostic's message and name and the
+encoding choices above.
 
 The matcher tests also compare independent scalar and indexed-vector selection
 on every admitted catalogue row with 64 operand variations: range limits,
