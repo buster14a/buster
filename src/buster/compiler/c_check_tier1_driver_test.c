@@ -715,9 +715,12 @@ static const char check_test_tier1_records_other_source[] =
 
 // The dynamic stack's fixture (#141): variable-length arrays in a loop's body (a save and a restore per iteration), beside
 // calls with stack arguments (each with its outgoing area at its own rsp), in a frame realigned by an object aligned to 64
-// (its base r15), with values live across calls in callee-saved registers, in a variadic definition, and alloca's. Each
-// callee's backtrace() walks through the dynamic frames' unwind tables to the C runtime's: the frames' total it prints
-// is clang's build's only where none of them stops the walk.
+// (its base r15), with values live across calls in callee-saved registers, in a variadic definition, and alloca's; and a
+// loop's variable-length array beside by-value aggregates (#1117's review): a 24-byte one passed on the stack, 16-byte
+// ones returned in a general and an xmm register, and a call of ten integers and two doubles, so that the outgoing
+// area from rsp, the aggregates' staging below it and the result's object meet in one dynamic frame. Each callee's
+// backtrace() walks through the dynamic frames' unwind tables to the C runtime's: the frames' total it prints is
+// clang's build's only where none of them stops the walk.
 static const char check_test_tier1_dynamic_source[] =
     "#include <alloca.h>\n#include <execinfo.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n"
     "static long unwound;\n"
@@ -738,10 +741,20 @@ static const char check_test_tier1_dynamic_source[] =
     "    return r + kept + other; }\n"
     "long tier1_vla_variadic(int n, ...) { va_list list; va_start(list, n); long a[n]; for (int i = 0; i < n; i += 1) a[i] = va_arg(list, long); va_end(list);\n"
     "    return touch(a, n) + sum8(n, a[0], a[n - 1], 4, 5, 6, 7, 8); }\n"
+    "typedef struct { long a, b, c; } Agg24;\n"
+    "typedef struct { double x; long y; } Agg16;\n"
+    "__attribute__((noinline)) static long take24(Agg24 s, long k) { probe(); return s.a * 3 + s.b * 5 + s.c * 7 + k; }\n"
+    "__attribute__((noinline)) static Agg16 make16(long i, double d) { Agg16 r = { d * 2 + (double)i, i * 9 }; return r; }\n"
+    "__attribute__((noinline)) static long many10(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, double x, double y)\n"
+    "    { return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10 + (long)(x * 4) + (long)(y * 8); }\n"
+    "long tier1_vla_records(long n) { long total = 0; for (long k = 1; k <= n; k += 1) { long a[k + 2]; for (long i = 0; i < k + 2; i += 1) a[i] = i * k + 3;\n"
+    "    Agg24 s = { a[0], a[k], a[k + 1] }; total += take24(s, k); Agg16 r = make16(k, (double)a[1] / 4); total += r.y + (long)(r.x * 2);\n"
+    "    total += many10(a[0], a[1], k, n, 5, 6, 7, 8, 9, a[k + 1], r.x, (double)k / 2) + touch(a, k + 2); } return total; }\n"
     "int main(void) {\n"
     "    printf(\"%ld %ld %ld %ld %ld %ld\\n\", tier1_vla_loop(9), tier1_vla_calls(10), tier1_vla_aligned(70), tier1_alloca(12), tier1_vla_live(5, 3),\n"
     "           tier1_vla_variadic(9, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));\n"
     "    printf(\"%ld %ld %ld %ld %ld %ld\\n\", tier1_vla_loop(1), tier1_vla_calls(1), tier1_vla_aligned(1), tier1_alloca(1), tier1_vla_live(1, 0), tier1_vla_variadic(1, 11L));\n"
+    "    printf(\"%ld %ld\\n\", tier1_vla_records(9), tier1_vla_records(1));\n"
     "    printf(\"%ld\\n\", unwound);\n"
     "    return 0;\n"
     "}\n";

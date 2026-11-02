@@ -1443,6 +1443,9 @@ struct Tier1SelectPlan
     uint32_t* effective_use_offsets;
     uint32_t* effective_use_values;
     uint32_t effective_use_count;
+    // Each node the code computes (covered 0): its pattern's subtree cost, the pattern's intrinsic cost and its distinct
+    // tree children's costs (tier1_select_pattern_cost), on either path. A covered node's is the scalar path's candidate's
+    // there, and 0 on the vector path, which makes no pattern for it.
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
@@ -1980,25 +1983,32 @@ static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, 
     pattern->fold_count += tier1_select_tree_child(forest, parent, value) ? 1 : 0;
 }
 
-static inline __attribute__((always_inline)) void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+// A pattern's cost at `node`: its intrinsic cost and the costs of its distinct values that are tree children, a subtree's
+// cost from its children's as forest->costs has them.
+static inline __attribute__((always_inline)) uint32_t tier1_select_pattern_cost(const Tier1SelectForest* forest, uint32_t node, const Tier1SelectPattern* pattern)
 {
-    assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
-    uint32_t cost = pattern.intrinsic_cost;
+    uint32_t cost = pattern->intrinsic_cost;
     for (uint32_t operand = 0; operand < 3; operand += 1)
     {
-        const uint32_t value = pattern.values[operand];
+        const uint32_t value = pattern->values[operand];
         bool repeated = false;
         for (uint32_t previous = 0; previous < operand; previous += 1)
         {
-            repeated |= pattern.values[previous] == value;
+            repeated |= pattern->values[previous] == value;
         }
         if (!repeated && tier1_select_tree_child(forest, node, value))
         {
             cost += forest->costs[value];
         }
     }
+    return cost;
+}
+
+static inline __attribute__((always_inline)) void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+{
+    assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
     candidates->patterns[candidates->count] = pattern;
-    candidates->costs[candidates->count] = cost;
+    candidates->costs[candidates->count] = tier1_select_pattern_cost(forest, node, &pattern);
     candidates->count += 1;
 }
 
@@ -3478,6 +3488,14 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 failed_node = node;
             }
             pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
+        }
+        // On the bottom-up path the walk back made each pattern before its tree children's, so its cost counted none of
+        // theirs: each computed node's cost again, children first in the levels' order, so that the column is a subtree's
+        // cost on both paths (Tier1SelectPlan.costs).
+        for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
+        {
+            const uint32_t node = level_nodes[position];
+            plan.costs[node] = needed[node] != 0 ? tier1_select_pattern_cost(&forest, node, &plan.patterns[node]) : 0;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {

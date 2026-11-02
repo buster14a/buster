@@ -170,7 +170,8 @@ patterns are:
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,
   and each one past its class's registers in the stack's next slot. A variadic
-  call's `al` is the count of its floating arguments in registers.
+  call's `al` is the number of vector registers its arguments take, an
+  aggregate's xmm parts among them (`AbiCall.vector_registers`).
 - Variadic definitions (#789): the anchors that `va_start`'s lowering reaches,
   the register save area and the overflow area. The save area is a frame object
   (`TIER1_RULE_STACK_ADDRESS`, folded into its users' memory operands like any
@@ -357,12 +358,14 @@ representer); and each operator's table gives the state of each pair of
 representers. The grammar isn't finite-state as it stands (a chain of additions
 grows a register's cost against a fold's zero without bound), so normalized
 costs saturate at 8, past which a difference no longer picks another rule in
-these patterns. The tables have 582 states, 172 rules and a pool of 18,705
-16-bit entries for the operators' maps and tables, and are in the baked section
-(`baked.c`), so a compile starts with them built; `--tier1` and
-`test-baked-tables` build them where the executable isn't baked. The bound and
-table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gave 346 states, 12 gave
-942 and 16 gave 1,430.
+these patterns. The tables have 582 states, 172 rules, at most 57
+representers in an operator's position and a pool of 18,705 16-bit entries for
+the operators' maps and tables (as `test-tier1-select` prints them), and are in
+the baked section (`baked.c`), so a compile starts with them built; `--tier1`
+and `test-baked-tables` build them where the executable isn't baked. The bound
+and table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gives 346 states, 23
+representers and 11,418 entries, and 16 gives 1,430 states, past the tables'
+1,024, so that its build's bake fails.
 
 A plan then takes four passes over the function's nodes, each 16 nodes a
 vector with an exact scalar twin (`tier1_burs_*_scalar`):
@@ -725,7 +728,12 @@ children must be the scalar one's, both kernels' states and rules alike, and
 every node of a class the grammar covers must have a candidate. The same check
 runs on every function `test-tier1-pipeline` plans and every function
 `benchmark-tier1-select-source` selects, outside its time, where a difference
-fails the benchmark.
+fails the benchmark. The plan's `costs` column is each computed node's subtree
+cost on both paths (the bottom-up path, which makes a pattern before its tree
+children's, works them out again children first): `test-tier1-select` checks
+it on both paths' plans and `test-tier1-pipeline` on each plan it makes,
+against the definition worked out from the function alone
+(`tier1_select_test_plan_costs`).
 
 `test-tier1-select --manifest` writes CSV with separate origins for actual
 `plan` emission, direct `expansion` fixtures and test `wrapper` records. Every

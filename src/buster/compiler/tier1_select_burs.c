@@ -284,8 +284,10 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
 // into a register costs more for each node of it, so that a state of each chain length would be a state of its own
 // (burg's generator fails on such a grammar; Proebsting, 1995). Within one node's choice, the alternatives that read a
 // saturated cost read it at the same child, so they differ by what they fold of their other children, which the bound
-// keeps. 8 makes 582 states, at most 57 representers in an operator's position, and a pool of 21,777 entries; 16 makes
-// 1,430 states and 47,735 entries, and 4, 346 and 14,490. The tests compare every cover's cost with munch's.
+// keeps. 8 makes 582 states, at most 57 representers in an operator's position and a pool of 18,705 entries, as
+// test-tier1-select prints them; 4 makes 346 states, 23 representers and 11,418 entries; and 16 makes 1,430 states, past
+// BUSTER_TIER1_BURS_MAX_STATES, so that tier1_select_initialize fails and build.sh's bake with it (the 9700X, #1117's
+// review). The tests compare every cover's cost with munch's.
 #define BUSTER_TIER1_BURS_BOUND 8u
 // The tables' bounds: the generator fails past them, which tier1_select_initialize reports.
 #define BUSTER_TIER1_BURS_MAX_STATES 1024u

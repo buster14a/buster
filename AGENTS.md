@@ -230,7 +230,9 @@ designs and the compilers already built this way.
   self-loops. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
+  edge's stub. Long double, selects of floating values, switches and the
+  convention's rarer aggregate shapes still refuse explicitly ([the Tier 1
+  guide](docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
   stores, constants and bitcasts to and from integers of every width) and
   allocated in the opmask class by the CFG consumer, which moves and spills them

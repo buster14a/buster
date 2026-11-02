@@ -1244,6 +1244,8 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_again(&function, &dominance, &plan, true, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
                                                          "the verified function's plan is the verifying plan's");
+                        ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_costs(&plan, &test->arenas[TIER1_PIPELINE_SCRATCH]) == 0,
+                                                         "each computed node's cost is its pattern's subtree cost");
                         const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
                         tier1_burs_check_function(&test->burs, &function, &test->arenas[TIER1_PIPELINE_SCRATCH]);
                         ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,

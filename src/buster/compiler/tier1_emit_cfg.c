@@ -1094,7 +1094,8 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
     const uint32_t spills = emitted->cfg.allocation.spill_count;
     const uint32_t index = location - BUSTER_TIER1_CFG_SPILL;
     const bool temporary = index >= spills && index < spills + BUSTER_TIER1_ALLOCATE_CLASSES;
-    const uint32_t row = index < spills ? index : tier1_emit_cfg_temporary_row(emitted, index - spills);
+    // A temporary slot's row only for a temporary: another location's index past the spills names no class.
+    const uint32_t row = index < spills ? index : temporary ? tier1_emit_cfg_temporary_row(emitted, index - spills) : UINT32_MAX;
     const bool found = location >= BUSTER_TIER1_CFG_SPILL && (index < spills || temporary) && row < emitted->frame.count;
     *offset = found ? emitted->frame.offset[row] : 0;
     return found;
@@ -1103,8 +1104,9 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
 // A call's argument past its class's registers (#141), node `value`'s, into its 8-byte slot `slot` bytes into the
 // outgoing area from rsp: from where the allocation has it at the call's use phase `position`, which needn't be a
 // register (its use isn't required): from its register (a floating value's xmm one by movss or movsd), from its slot
-// through the scratch register, or recomputed into the scratch register. The slot's 8 bytes are stored whole: an I32's
-// bits past its 32, and an F32's, are the callee's to ignore, as the ABI says.
+// through the scratch register, or recomputed into the scratch register. A general register's mov stores the slot's 8
+// bytes, an I32's bits past its 32 the callee's to ignore, and a floating value's movss or movsd its 4 or 8, the rest
+// of the slot unwritten and the callee's to ignore too, as the ABI says.
 static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint32_t slot, Tier1EmitBuffer* buffer)
 {
     const uint8_t base = (uint8_t)emitted->frame.base_register;

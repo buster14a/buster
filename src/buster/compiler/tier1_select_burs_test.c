@@ -190,6 +190,24 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     arena_pop_to(scratch, mark);
 }
 
+// The most representers of any operator's child position: the largest a map's value is, plus one.
+static uint32_t tier1_burs_test_representers(void)
+{
+    uint32_t most = 0;
+    for (uint32_t op = 0; op < TIER1_BURS_OPERATORS; op += 1)
+    {
+        for (uint32_t position = 0; position < tier1_burs_arity[op] && position < 2; position += 1)
+        {
+            for (uint32_t s = 0; s < tier1_burs_state_count; s += 1)
+            {
+                const uint32_t representer = tier1_burs_pool[tier1_burs_map_base[position][op] + s];
+                most = representer + 1 > most ? representer + 1 : most;
+            }
+        }
+    }
+    return most;
+}
+
 // The tables' invariants, and the labeling and rule kernels against their twins on random columns.
 static void tier1_select_test_burs_tables(Tier1SelectTest* test)
 {
@@ -335,9 +353,9 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
     }
     tier1_select_test_expect(test, files != 0 && check.mismatches == 0 && check.uncovered == 0, "the IR fixtures' classes, states and rules are the twins' alike, every covered class with a candidate");
     // As the selection's own summary: on standard error where standard output carries the manifest (--manifest).
-    fprintf(test->manifest ? stderr : stdout, "tier1 bottom-up rewrite: %u states, %u rules, a pool of %u entries; the IR fixtures: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64
+    fprintf(test->manifest ? stderr : stdout, "tier1 bottom-up rewrite: %u states, %u rules, at most %u representers in a position, a pool of %u entries; the IR fixtures: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64
            " mismatches, %" PRIu64 " uncovered\n",
-           tier1_burs_state_count, tier1_burs_rule_count, tier1_burs_pool_length, check.functions, check.nodes, check.matched, check.fallbacks, check.mismatches, check.uncovered);
+           tier1_burs_state_count, tier1_burs_rule_count, tier1_burs_test_representers(), tier1_burs_pool_length, check.functions, check.nodes, check.matched, check.fallbacks, check.mismatches, check.uncovered);
     arena_release(&scratch);
     arena_release(&input);
     arena_release(&source);

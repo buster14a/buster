@@ -670,6 +670,51 @@ static bool tier1_select_test_plan_again(const IrFunction* function, const IrDom
     return equal;
 }
 
+// The plan's costs column (Tier1SelectPlan.costs) against its definition, worked out here from the function alone: each
+// node the code computes costs its pattern's intrinsic cost and the costs of its distinct values that are tree children
+// (a single use, in its block, before it). Returns how many computed nodes' costs differ, or UINT64_MAX without memory.
+static uint64_t tier1_select_test_plan_costs(const Tier1SelectPlan* plan, Arena* scratch)
+{
+    const IrFunction* function = plan->function;
+    const uint64_t mark = scratch->length;
+    const uint32_t count = function->instruction_count;
+    uint32_t* blocks = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* uses = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint64_t differ = blocks != 0 && uses != 0 ? 0 : UINT64_MAX;
+    for (uint32_t block = 0; differ == 0 && block < function->block_count; block += 1)
+    {
+        for (uint32_t node = function->block_offsets[block]; node < function->block_offsets[block + 1]; node += 1)
+        {
+            blocks[node] = block;
+            uses[node] = 0;
+        }
+    }
+    for (uint32_t node = 0; differ == 0 && node < count; node += 1)
+    {
+        const uint32_t operand_count = (uint32_t)ir_operand_count(function, node);
+        for (uint32_t p = 0; p < operand_count; p += 1)
+        {
+            const uint32_t value = ir_operand(function, node, p, blocks[node]).value;
+            uses[value < count ? value : count] += value < count ? 1 : 0;
+        }
+    }
+    for (uint32_t node = 0; differ != UINT64_MAX && node < count; node += 1)
+    {
+        const Tier1SelectPattern* pattern = &plan->patterns[node];
+        uint64_t expected = pattern->intrinsic_cost;
+        for (uint32_t operand = 0; operand < 3; operand += 1)
+        {
+            const uint32_t value = pattern->values[operand];
+            const bool repeated = (operand > 0 && pattern->values[0] == value) || (operand > 1 && pattern->values[1] == value);
+            const bool child = value < node && uses[value] == 1 && blocks[value] == blocks[node];
+            expected += !repeated && child ? plan->costs[value] : 0;
+        }
+        differ += plan->covered[node] == 0 && plan->costs[node] != expected ? 1 : 0;
+    }
+    arena_pop_to(scratch, mark);
+    return differ;
+}
+
 static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFunction* function, const uint8_t* registers, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -684,6 +729,8 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
         tier1_select_test_expect(test, tier1_select_test_plan_again(function, 0, &vector, false, output, scratch) && tier1_select_test_plan_again(function, 0, &scalar, false, output, scratch),
                                  "a verified function's plan without verification is the same, by both paths");
         tier1_select_test_expect(test, vector.estimated_cost <= scalar.estimated_cost, "bottom-up cover never costs more than maximal munch");
+        tier1_select_test_expect(test, tier1_select_test_plan_costs(&vector, scratch) == 0 && tier1_select_test_plan_costs(&scalar, scratch) == 0,
+                                 "each computed node's cost is its pattern's subtree cost, by both paths");
         const Tier1SelectPlan* plans[] = {&vector, &scalar};
         uint64_t random = UINT64_C(0x7a87b0c525ee96fb);
         for (uint32_t path = 0; path < 2; path += 1)
