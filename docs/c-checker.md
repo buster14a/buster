@@ -126,8 +126,12 @@ the encoder's time on `sqlite3.c`, against 1.33 times without it
 value of an option that takes the next argument stays that option's, as
 `pp_option_takes_value` lists them: `-o -lresult` writes `-lresult`), found as
 GNU ld finds it: `libNAME.so`, or else `libNAME.a`, in the first of the `-LDIR`
-directories, then glibc's library directories, that has one; a linker script
-(glibc's `libm.so`) stands for the libraries it names. Binding takes a name
+directories, then the GCC installation the runtime selected and the native
+prefix's `lib64`, then glibc's library directories, that has one; a static
+executable considers only `libNAME.a`. A linker script (glibc's `libm.so`)
+stands for the libraries it names,
+by absolute path, relative path or `-l` name, and the direct path reuses the
+selected `libgcc.a` and refuses other archives. Binding takes a name
 from them before `libc.so.6`, where GCC's driver puts them on the line, and the
 executable needs one only for a strong reference that binds to it, the
 program's or a needed library's own that its `DT_NEEDED` doesn't cover and no
@@ -2264,8 +2268,32 @@ What the lowering covers past scalars (#145's programs):
   header's functions have, is read as that one was. A unit without one, the
   usual one, makes no column. A function of several versions
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
-  name, and so are vector values in a function whose attribute turns AVX-512F or
-  AVX-512VL off; the convention stays the unit's, as clang's does.
+  name when its body is selected; a declaration-only version with no body is
+  still outside that refusal, and so are vector values in a function whose
+  attribute turns AVX-512F or AVX-512VL off; the convention stays the unit's, as
+  clang's does.
+- **Multiversioning's attribute conflicts (#839).** The checker reports clang's
+  Sema errors for GNU's function multiversioning at `-fsyntax-only`: a function
+  with `target("default")`, `target_clones`, `cpu_specific` or `cpu_dispatch`
+  refuses every declaration attribute clang keeps except `used` (for `target`
+  alone), `nonnull` and `nothrow`, at the function's name. `target` beside
+  `target_clones`, `cpu_specific` or `cpu_dispatch` is the later attribute's
+  "not compatible" error with clang's note at the earlier one. A target
+  declaration that makes a function multiversioned with an earlier declaration
+  checks the earlier declaration's attributes first, at its name, with clang's
+  "function multiversioning caused by this declaration" note at the new one.
+  A target declaration that makes a function multiversioned with an earlier one
+  checks the canonical first declaration, as clang does, and a later version
+  repeats its error with the caused-here note; a repeated `target_clones`,
+  `cpu_specific` or `cpu_dispatch` reports clang's cannot-appear-more-than-once
+  error with its conflicting-attribute note. `cpu_specific` and `cpu_dispatch`
+  declarations without a `target` or `target_clones` attribute are refused as
+  unsupported at `-fsyntax-only` (deliberately unlike clang, which accepts
+  them), so their declaration-only uses cannot reach `-c` as a plain symbol;
+  their code generation is otherwise refused by name with the other
+  multiversioning forms. `test-checker` compares the errors' places with
+  clang's, and `test-checker-driver` compares the errors and notes line for
+  line.
 - **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
   GNU's complex integer types (`_Complex char` to `_Complex unsigned
   __int128`) and the complex `_BitInt`s of up to 128 bits that the usual

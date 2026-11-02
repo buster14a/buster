@@ -130,8 +130,19 @@ typedef enum IrOp
     // until the next start. A slot with no marker lives throughout its function; one with markers is live where some
     // path from a start reaches without an end, which Tier 1's frame planner colors (tier1_emit_cfg_lifetimes).
     IR_LIFETIME,
+    // A memory fence (#1059): `a` its order, C's memory_order (BUSTER_IR_FENCE_ORDER: relaxed to seq_cst), and its scope
+    // (BUSTER_IR_FENCE_SIGNAL: a signal fence, against a signal handler on the same thread alone; without it, a thread
+    // fence). It reads and writes no value, but no pass moves a load, a store or a call across it, eliminates one past it
+    // or drops it: an effect as an unknown call's on memory, without a call's registers. The typed stream's FENCE.
+    IR_FENCE,
     IR_OP_COUNT,
 } IrOp;
+
+// An IR_FENCE's operand (#1059), as the typed stream's FENCE value: its order and its scope, and seq_cst, the order a
+// thread fence needs an instruction for on x86-64 (mfence).
+#define BUSTER_IR_FENCE_ORDER 0x07u
+#define BUSTER_IR_FENCE_SIGNAL 0x08u
+#define BUSTER_IR_FENCE_SEQ_CST 5u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -464,6 +475,17 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "vcmp",
     "vselect",
     "lifetime",
+    "fence",
+};
+
+// A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
+static const char* const ir_fence_orders[BUSTER_IR_FENCE_SEQ_CST + 1] = {
+    "relaxed",
+    "consume",
+    "acquire",
+    "release",
+    "acq_rel",
+    "seq_cst",
 };
 
 static bool ir_integer(uint32_t type)
@@ -597,6 +619,7 @@ typedef enum IrRule
     IR_RULE_VECTOR_CONSTANT,
     IR_RULE_VECTOR_COMPARE,
     IR_RULE_VECTOR_SELECT,
+    IR_RULE_FENCE,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -666,7 +689,8 @@ typedef enum IrRule
     X(IR_VCONST,        0, 1, BUSTER_IR_VECTORS, IR_RULE_VECTOR_CONSTANT, 0) \
     X(IR_VCMP,          3, 7, BUSTER_IR_MASKS, IR_RULE_VECTOR_COMPARE, 0) \
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
-    X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0)
+    X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
+    X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -1035,6 +1059,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_VECTOR_COMPARE: valid = ir_vector_type(ta) && ta == tb && c < IR_PREDICATE_COUNT && type == (ta == IR_V16I32 ? IR_M16 : IR_M8); break;
             case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
+            case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -1976,6 +2001,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                     case IR_PARAM: fprintf(output, " %" PRIu32, a); break;
                     case IR_STACK_ADDR: fprintf(output, " $%" PRIu32, a); break;
                     case IR_LIFETIME: fprintf(output, " $%" PRIu32 " %s", a, b != 0 ? "end" : "start"); break;
+                    case IR_FENCE: fprintf(output, " %s%s", ir_fence_orders[a & BUSTER_IR_FENCE_ORDER], (a & BUSTER_IR_FENCE_SIGNAL) != 0 ? " signal" : ""); break;
                     case IR_SYMBOL_ADDR: fprintf(output, " @%" PRIu32, a); break;
                     case IR_ADDRESS:
                     {

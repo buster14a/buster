@@ -1708,7 +1708,8 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     {
         pop = class != BUSTER_TYPED_CLASS_VOID;
     }
-    else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_JUMP_VALUE)
+    // A FENCE (#1059) neither pops nor pushes, as a jump's own stack doesn't change.
+    else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_JUMP_VALUE && kind != BUSTER_TYPED_FENCE)
     {
         pop = 2;
         push = true;
@@ -9098,7 +9099,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         const uint32_t helper = check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node);
         const CBuiltinId id = check_builtin_atomic_base((CBuiltinId)graph->members[node]);
-        if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
+        // A fence the plan took as direct (#1059) has no helper: the typed stream's FENCE of its order and scope, its
+        // constant argument evaluated for nothing.
+        const uint32_t atomic = helper == BUSTER_CHECK_NONE ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node) : BUSTER_CHECK_NONE;
+        const uint32_t fence = atomic != BUSTER_CHECK_NONE ? check_program_direct_fence(program, node, stream->atomics + atomic) : UINT32_MAX;
+        if (fence != UINT32_MAX)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, fence);
+        }
+        else if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {
             check_lower_atomic_query(writer, node);
         }

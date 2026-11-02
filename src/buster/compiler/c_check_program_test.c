@@ -2491,6 +2491,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
 #include "c_check_program_folds_test.c"
+#include "c_check_program_fence_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -3197,6 +3198,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
         check_test_program_folds(test, clang);
+        check_test_program_fences(test, clang);
         check_test_program_batch(test);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);

@@ -20592,7 +20592,9 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         }
         // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
         const char* argument = predefines_alias(arguments[i]);
-        if (strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
+        const bool malformed_linker = strcmp(argument, "-Wl") == 0 || strncmp(argument, "-Wl=", 4) == 0;
+        if ((strncmp(argument, "-W", 2) == 0 && strncmp(argument, "-Wl,", 4) != 0 && !malformed_linker) || strcmp(argument, "-w") == 0 ||
+            strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
         {
             warnings[options->semantic_warning_option_count++] = argument;
         }
@@ -20645,6 +20647,24 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             result = predefined != PREDEFINES_PARSE_ERROR;
             i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
+        }
+        else if (strcmp(argument, "-Xlinker") == 0)
+        {
+            result = next != NULL;
+            i += result;
+            if (!result)
+            {
+                fprintf(stderr, "error: missing argument to linker option '-Xlinker'\n");
+            }
+        }
+        else if (strncmp(argument, "-Wl,", 4) == 0)
+        {
+            // No linker runs for -E. Do not interpret its payload as a warning option.
+        }
+        else if (malformed_linker)
+        {
+            fprintf(stderr, "error: malformed linker option '%s' (use '-Wl,OPTION')\n", argument);
+            result = false;
         }
         else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-c") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0 || strcmp(argument, "-pipe") == 0)
         {
@@ -21148,7 +21168,7 @@ static bool pp_clang_fallback_links(const char* ours, char* links)
 // Is `argument` an option whose value is the next argument (pp_parse_options)?
 static bool pp_option_takes_value(const char* argument)
 {
-    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target", "-MF", "-MT", "-MQ" };
+    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target", "-MF", "-MT", "-MQ", "-Xlinker" };
     bool result = pp_own_option_with_value(argument);
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
     {
