@@ -1088,10 +1088,12 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
+        arena_static_base_pages();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
+        arena_static_base_pages();
         result = run_parse_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
@@ -1566,6 +1568,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
+        arena_static_base_pages();
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
         if (!main_information(argc - 1, argv + 1, &result))
         {

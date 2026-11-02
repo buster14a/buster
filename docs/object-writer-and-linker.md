@@ -539,8 +539,9 @@ columns (1.8 µs each, 47 µs in all, more than hello world's whole link is to
 take) and a huge page each once past its first 64 KB. Names' bytes go to an
 arena of their own, which grows as names are interned.
 
-An arena's first 64 KB stay in 4 KB pages (`MADV_NOHUGEPAGE`), and huge pages
-start right after them, on a 2 MB boundary. A huge page is cleared whole when
+An arena's first 64 KB stay in 4 KB pages, and huge pages start right after
+them, on a 2 MB boundary (since #652 by the layout rather than by advice:
+`docs/arena-memory.md`, "Page sizes"). A huge page is cleared whole when
 it is first touched: 15.1 µs on the 9700X, against 0.75 µs for a 4 KB page
 and 4.7 µs for all sixteen of the first 64 KB (`benchmark-lanes`). With
 transparent huge pages set to "always", as on the 9700X, even an arena used
