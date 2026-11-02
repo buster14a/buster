@@ -22,34 +22,43 @@ jobs:
         run: |
           gzip -dc .github/issue-1120.patch.gz > "$RUNNER_TEMP/issue1120.patch"
           cp .github/issue-1120-fixup.patch "$RUNNER_TEMP/issue1120-fixup.patch"
+          cp .github/issue-1120-boundary.patch "$RUNNER_TEMP/issue1120-boundary.patch"
           echo "47ce429ea5d0b92d49686cdc3499c3d9ac396c33b825603b3f31c01278225206  $RUNNER_TEMP/issue1120.patch" | sha256sum --check
           git switch --detach df007cd52c074223cfa6deddb14b058714c0ed53
           git apply --check "$RUNNER_TEMP/issue1120.patch"
           git apply "$RUNNER_TEMP/issue1120.patch"
           git apply "$RUNNER_TEMP/issue1120-fixup.patch"
+          git apply "$RUNNER_TEMP/issue1120-boundary.patch"
           git diff --check
       - name: Install repository-pinned Clang and test dependencies
         run: bash tools/ci/setup-hosted.sh
       - name: Build scalar-host correctness compiler
+        id: build
         run: ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue1120-build.log"
       - name: Run heterogeneous input regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./build/compiler test-source-driver 2>&1 | tee "$RUNNER_TEMP/issue1120-tests.log"
       - name: Run existing semantic driver regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./build/compiler test-checker-driver --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue1120-checker.log"
       - name: Run existing multi-unit regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./build/compiler test-check-units 2>&1 | tee "$RUNNER_TEMP/issue1120-units.log"
-      - name: Run existing assembler and linker cross-checks
-        run: |
-          ./build/compiler test-assembler --cross-check 2>&1 | tee "$RUNNER_TEMP/issue1120-assembler.log"
-          ./build/compiler test-foreign --cross-check 2>&1 | tee "$RUNNER_TEMP/issue1120-foreign.log"
+      - name: Run existing assembler cross-checks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./build/compiler test-assembler --cross-check 2>&1 | tee "$RUNNER_TEMP/issue1120-assembler.log"
+      - name: Run existing linker cross-checks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./build/compiler test-foreign --cross-check 2>&1 | tee "$RUNNER_TEMP/issue1120-foreign.log"
       - name: Check no-recursion call graph
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./build.sh check-call-graph 2>&1 | tee "$RUNNER_TEMP/issue1120-callgraph.log"
       - name: Publish only the tested source changes
         run: |
           git switch -c agent/1120-mixed-inputs
           git config user.name 'OpenAI'
           git config user.email 'noreply@openai.com'
-          git add docs/c-checker.md src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_units.c src/buster/compiler/foreign_driver.c src/buster/compiler/main.c src/buster/compiler/source_driver.c src/buster/compiler/source_driver_test.c tools/ci/correctness.tests
+          git add docs/c-checker.md src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_driver_test.c src/buster/compiler/c_checker_units.c src/buster/compiler/foreign_driver.c src/buster/compiler/main.c src/buster/compiler/source_driver.c src/buster/compiler/source_driver_test.c tools/ci/correctness.tests
           git commit -m 'driver: route mixed C, assembly and ELF inputs before linking' -m 'Fixes #1120. Preserve parallel C compilation and pass generated objects to the foreign linker in memory.' -m 'Agent session: ChatGPT session; private permalink unavailable in the tool environment.' -m 'Model: OpenAI / GPT-6 Astra Pro'
           git push origin HEAD:refs/heads/agent/1120-mixed-inputs
           git rev-parse HEAD | tee "$RUNNER_TEMP/issue1120-commit.txt"
