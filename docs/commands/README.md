@@ -37,8 +37,9 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-diagnostics, benchmark-diagnostics` | `diagnostic.c` | [determinism](determinism.md) |
 | `test-differential, test-differential-harness` | `differential.c` | [differential](differential.md) |
 | `test-dominators, benchmark-dominators` | `dominators.c` | [dominators](dominators.md) |
+| `test-emission-metadata` | `emission_metadata.c` | [emission-metadata](emission-metadata.md) |
 | `-E, parse, -fsyntax-only, -c` | `main.c` | [driver](driver.md) |
-| `test-emission-metadata, test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
+| `test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
 | `test-executable, test-dynamic, test-static` | `executable.c` | [executable](executable.md) |
 | `test-files, benchmark-files` | `c_files.c` | [files](files.md) |
 | `benchmark-floors` | `link_benchmark.c` | [floors](floors.md) |

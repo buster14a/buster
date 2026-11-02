@@ -2,24 +2,11 @@
 
 Run commands and resolve source paths from the repository root. Follow the
 [shared agent rules](../../AGENTS.md), including the 9700X lock and `cores`
-requirements. [Command index](README.md).
+requirements. [Command index](README.md). The event protocol it resolves is
+[emission-metadata](emission-metadata.md)'s.
 
 ## Module overview
 
-- `src/buster/compiler/emission_metadata.c` is #1056's tier-neutral source/frame
-  event protocol: bounded, producer-owned events with two-sided record-boundary
-  anchors, explicit generated origins, a frame-rule vocabulary, and transactional
-  count/place/fill resolution against final record starts and ends. Layout
-  validation has an exact scalar path and an AVX-512 twin; source/frame checks and
-  sparse resolution are scalar, with no locked-9700X measurement yet.
-  `src/buster/compiler/emission_metadata_test.c` supplies
-  `test-emission-metadata [--seed N]`, built by `build.sh` and run by the
-  correctness inventory; the standalone wrapper `tests/emission-metadata/test.c`
-  gives the isolated baseline, AVX-512F and sanitizer commands. The driver's
-  `-g` source-row path (`c_check_debug.c`) validates the emitted code's source
-  events through it and fails closed on disagreement. [The
-  guide](../../docs/emission-metadata.md) records the record-boundary, ownership,
-  emitted-function and verifier contracts and what remains.
 - `src/buster/compiler/emitted_code.c` is #1056's tier-neutral emitted function,
   `EmittedCode`, which `check_program_emit` consumes (its code, rows and unwind
   path no longer consume a `Tier0Code`; `--verify`'s comparison with
