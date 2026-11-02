@@ -56,6 +56,9 @@ static void check_input_region_prepare(CheckInputReader* reader, uint32_t openin
         reader->output->expression_regions[opening] = index + 1;
         reader->output->expression_regions[closing] = index + 1;
         reader->output->expression_regions[block] = index + 1;
+        check_input_sparse_mark(reader, opening, true);
+        check_input_sparse_mark(reader, closing, true);
+        check_input_sparse_mark(reader, block, true);
     }
     else
     {

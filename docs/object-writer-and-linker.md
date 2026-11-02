@@ -1783,16 +1783,35 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
   library until step 5. A weak thread-local symbol defined nowhere gets an
   offset of 0 from the thread pointer, in its `TPOFF32` fields and its GOT
   slot alike, as GNU ld gives it.
-- **Limits:** the image must end below 2 GB and the TLS block be at most
-  2 GB, so that every image offset, PC-relative value and offset from the
+- **Limits:** the image must end below 128 TB (x86-64's 47-bit user address
+  space) and the TLS block be at most 2 GB, so that every offset from the
   thread pointer fits in 32 bits (`.tbss` takes no address space, so the
-  image's limit doesn't bound it). Atoms are at most 2 GB each, checked
-  before their padding is added, so that no sum of sizes wraps.
+  image's ordinary limit doesn't bound it). Every atom but a `.bss` one is at
+  most 2 GB, checked before its padding is added, so that no sum of sizes
+  wraps; a `.bss` atom may need up to the image's bound, since it needs
+  address space but no bytes. A link whose image reaches 2 GB, where a signed
+  32-bit image offset ends, places those oversized `.bss` atoms after the
+  ordinary `.bss` buckets. A symbol's full address there is checked, not just
+  its atom's start, and the checked patch computes each fixup's value: an
+  `ABS64`, `PC64`, `ABS32` (which reaches 4 GB), `SIZE32`, `SIZE64` or
+  GOT-mediated fixup carries its full address or size, a call or `PC32` whose
+  distance fits still links even to a target past 2 GB, and one whose value
+  doesn't fit its field is refused. A GOT-mediated fixup to a far symbol must
+  have its slot; if the counts didn't reserve one, the writer refuses it
+  rather than reading slot 0. The writer's 32-bit reference column still holds
+  only a symbol's image offset, so the patch, GOT slots and dynamic
+  relocations read a far symbol's full address from a side column. The
+  image's tail alone may be farther.
 - **Errors** don't depend on the lane count: the entry point is checked
   first, each phase reports the first item in id order that fails, and a
   failing fixup is the smallest that does. Each phase's errors go in a row of
   their own, so a lane that has gone on to the next phase can't change what
-  the others still read of the last one.
+  the others still read of the last one. Each error carries the cause the
+  driver prints with the atom, symbol or fixup it names: an atom's size,
+  alignment, array shape or class; the image's end, the TLS block or the
+  section-name table; an unwind atom's size, malformed records or an FDE out
+  of the table's range; an entry point's missing definition or non-code atom;
+  a relocation's reason; or the phase whose scratch memory ran out.
 
 Its phases, each lane taking a range of the atoms, fixups, symbols or GOT
 words (`lane_range`, since each loop is a few nanoseconds per item), or parts

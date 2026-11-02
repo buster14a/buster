@@ -119,6 +119,7 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
         reader->builtins[closing] = builtin;
         check_input_rare_claim(reader, &reader->vararg_calls[closing]);
         reader->vararg_calls[closing] = index + 1;
+        check_input_sparse_mark(reader, closing, true);
         reader->ignored[keyword] = true;
         if (builtin == CBUILTIN_VA_ARG && second < closing)
         {

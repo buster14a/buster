@@ -69,7 +69,7 @@ static void check_test_overload_declarations(CheckTest* test, TypeTable* table)
         { .type = fi, .declaration = 10, .canonical = 10, .object = 100, .previous = UINT32_MAX, .scope = 1, .position = 11, .flags = BUSTER_CHECK_OVERLOADABLE },
         { .type = fd, .declaration = 20, .canonical = 20, .object = 200, .previous = 0, .scope = 1, .position = 21, .flags = BUSTER_CHECK_OVERLOADABLE },
     };
-    const CheckOverloadContext context = { .source_position = 100 };
+    const CheckOverloadContext context = { .semantic.source_position = 100 };
     CheckOverloadCandidate next = { .type = fi, .declaration = 30, .canonical = 30, .object = 300, .previous = 1, .scope = 1, .position = 31, .flags = BUSTER_CHECK_OVERLOADABLE };
     CheckOverloadResult result = check_overload_declare(table, candidates, 2, 1, &next, &context);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.canonical == 10 && result.object == 100 && result.candidate == 0,
@@ -210,8 +210,8 @@ static void check_test_overload_selection(CheckTest* test, TypeTable* table, con
                 .arguments = fixture->arguments,
                 .argument_count = fixture->argument_count,
                 .argument_conversions = conversions,
-                .extensions = BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT,
-                .source_position = 100,
+                .context.extensions = BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT,
+                .context.source_position = 100,
             };
             CheckActionResult checked;
             const CheckOverloadResult result = check_overload_call(table, &action, candidates, fixture->count, fixture->count - 1, &scratch, path != 0, &checked, 0, 0);
@@ -265,7 +265,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
         .head = 0,
         .arguments = &argument,
         .argument_count = 1,
-        .context = { .source_position = 15 },
+        .context = { .semantic.source_position = 15 },
     };
     Arena scratch = arena_reserve(1u << 20);
     CheckOverloadResult result = check_overload_select(table, &request, &scratch);
@@ -274,7 +274,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
     request.head = 1;
     result = check_overload_select(table, &request, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_INVALID, "future declaration cannot be smuggled into an earlier source snapshot");
-    request.context.source_position = 25;
+    request.context.semantic.source_position = 25;
     result = check_overload_select(table, &request, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.candidate == 1, "later call uses its own expanded overload set");
     candidates[2] = candidates[1];
@@ -283,7 +283,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
     candidates[2].position = 31;
     candidates[2].flags |= BUSTER_CHECK_OVERLOAD_UNAVAILABLE;
     request.count = 3;
-    request.context.source_position = 35;
+    request.context.semantic.source_position = 35;
     result = check_overload_select(table, &request, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.candidate == 1, "later unavailable redeclaration does not mutate an earlier captured head");
     request.head = 2;
@@ -319,7 +319,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
         .head = 256,
         .arguments = arguments,
         .argument_count = 2,
-        .context = { .source_position = 2000 },
+        .context = { .semantic.source_position = 2000 },
     };
     for (uint32_t path = 0; path < 2; path += 1)
     {
@@ -409,7 +409,7 @@ static void check_test_overload_arguments(CheckTest* test, TypeTable* table)
         .arguments = &argument,
         .argument_count = 1,
         .argument_conversions = &conversion,
-        .source_position = 100,
+        .context.source_position = 100,
     };
     Arena scratch = arena_reserve(65536);
     for (uint32_t path = 0; path < 2; path += 1)

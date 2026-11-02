@@ -215,6 +215,12 @@ static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
 // were mapped, or discarded by the pool. A push through a copy of the arena doesn't move its peak, so only a caller that
 // knows no copy pushed past its length may take the answer for its next pushes' bytes (#628: the C driver's arena).
 static __attribute__((unused)) bool arena_untouched(const Arena* arena);
+// Gives the kernel back the pages that pushes touched past the arena's length, from the first huge page boundary past it,
+// which the kernel maps again, zero, wherever a later push touches them: for an arena whose next users touch far fewer
+// of its pages than its last ones (#628: the C driver's scratch, which the reader and check_program take to 77 MB of
+// sqlite3.c's and the backend after them to 24 MB). Borrowed storage, and an arena whose writable extent is unknown, keep
+// their pages. The peak stays where it was: past the length, the pages up to the boundary still hold what was written.
+static __attribute__((unused)) void arena_discard(Arena* arena);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages.
@@ -579,6 +585,21 @@ static void arena_pop_to(Arena* arena, uint64_t length)
 static bool arena_untouched(const Arena* arena)
 {
     return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
+}
+
+static void arena_discard(Arena* arena)
+{
+    if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
+    {
+        const uintptr_t base = (uintptr_t)arena->base;
+        const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
+        const uintptr_t end = (base + (arena->peak < written ? arena->peak : written) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+        if (end > begin)
+        {
+            madvise((void*)begin, end - begin, MADV_DONTNEED);
+        }
+    }
 }
 
 static void arena_poison(Arena* arena, uint8_t value)

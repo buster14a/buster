@@ -8,6 +8,9 @@
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers, only
 // when the selected program has a body: its helpers also come only from those bodies. Data-only links need no tables.
+// A template that takes directives is an assembled unit (c_check_program_asm.c): its atoms, symbols and fixups are
+// merged into the link (check_program_emit_asm_unit), its code becoming its helper's or naked function's atom, and its
+// sections joining -c's object as file-scope assembly's do.
 // With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it, or as Tier 1's code did
 // (check_tier1_frame, #177: its early returns' teardowns as tails, open where its code doesn't end in an epilogue)
 // (unwind_tier0_frame, and its tail calls' teardowns with unwind_tier0_frame_tails, #147), at
@@ -16,6 +19,7 @@
 // each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
 
 #include "worker_budget.c"
+#include "c_check_tier1_outcome.c"
 
 // What an executable's link binds against (the direct path, #157): the C runtime, which bind_begin joins between the
 // program's symbols and its atoms, its arrays from `arena` and its atoms' bytes copied into the emission's byte arena.
@@ -52,8 +56,22 @@ struct CheckProgramCode
     // (check_program_sections); none in a unit without one.
     SymbolId* retained_symbols;
     uint32_t retained_count;
+    // The atoms of templates that take directives (CheckProgramAsm.unit), which the body loop publishes: each one's
+    // section, with the file-scope assembly's, for -c's object.
+    AtomId* unit_atoms;
+    ObjectAtomSection* unit_sections;
+    uint32_t unit_atom_count;
+    // The units' labels that -c's object leaves out, as the assembler's own temporary symbols: their `.L` names, their
+    // numeric labels and what asm_object_options marked (ObjectOptions.temporary_symbols).
+    SymbolId* unit_temporary;
+    uint32_t unit_temporary_count;
+    // The unit program symbols whose `.size` a template set, indexed by SymbolId: the values, and which ones. The
+    // definitions' atoms exist only after the static data is published, so check_program_sections applies them.
+    uint64_t* asm_sizes;
+    uint8_t* asm_size_set;
     CheckProgramStatus status;
     Tier0Error backend_error;
+    CheckTier1Outcome tier1_failure;
     uint32_t token;
     uint32_t backend_node;
     // CheckProgramLowered.reason, or the attribute or construct the emission refused.
@@ -247,7 +265,8 @@ struct CheckEmitBoard
 #define BUSTER_CHECK_EMIT_ROUND_BODIES 1u
 
 // The C driver's --tier1 (c_check_tier1.c, #138's piece for #140): each body Tier 1's pipeline takes compiled by it,
-// every other by Tier 0. A lane's arenas for the pipeline: each step's output and the steps' scratch, reserved at the
+// explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
+// output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
 #define BUSTER_CHECK_TIER1_STEPS 7
 typedef struct CheckTier1Lane CheckTier1Lane;
@@ -263,23 +282,6 @@ struct CheckTier1Lane
     bool gvn_reserved;
     bool targeted;
 };
-
-// What became of a body under --tier1: Tier 1's code, or the step that refused it, whose body Tier 0 compiled. A
-// selection's refusal also names the IR operation it refused, or the function (IR_OP_COUNT) where it refused no
-// operation, or its error past that (CheckTier1Report.operations); an emission's, its error (.emission).
-typedef enum CheckTier1Stage
-{
-    CHECK_TIER1_COMPILED,
-    CHECK_TIER1_NAKED,
-    CHECK_TIER1_LOWERING,
-    CHECK_TIER1_PROMOTION,
-    CHECK_TIER1_OPTIMIZATION,
-    CHECK_TIER1_ANALYSIS,
-    CHECK_TIER1_SELECTION,
-    CHECK_TIER1_EMISSION,
-    CHECK_TIER1_RESOURCE,
-    CHECK_TIER1_STAGE_COUNT,
-} CheckTier1Stage;
 
 // What Tier 1's code of a body holds: its records, and the allocation's traffic, its spills' stores and reloads, the
 // saves and restores around its calls and fixed registers' sequences, its recomputed values (constants and addresses,
@@ -311,6 +313,10 @@ typedef struct CheckTier1Report CheckTier1Report;
 struct CheckTier1Report
 {
     uint32_t functions;
+    uint32_t requested;
+    uint32_t admitted;
+    uint32_t categories[CHECK_TIER1_CATEGORY_COUNT];
+    uint32_t fallbacks;
     uint32_t stages[CHECK_TIER1_STAGE_COUNT];
     uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
     uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
@@ -398,6 +404,8 @@ struct CheckProgramLanes
     // --tier1-no-lifetimes, the checked program gives its objects no lifetimes, and Tier 1's frame shares no object's slot
     // (#177's comparison, c_check_program_lifetime.c).
     bool tier1;
+    bool tier1_strict;
+    const CheckTier1Fault* tier1_fault;
     // --tier1-gvn runs #866's congruence solver on the lowered IR, before promotion: a measurement option, off by
     // default, because the class representatives it merges lengthen live ranges that Tier 1's allocation pays for.
     bool tier1_gvn;
@@ -413,18 +421,19 @@ static bool check_tier1_ready = false;
 
 // Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
-// branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns the body's stage:
-// CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
-// `output` as it was.
-static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
+// branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns
+// an explicit success, unsupported, resource or internal outcome. A failed attempt leaves output unchanged and
+// clears code/counts, retaining its cause and location by value.
+static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
+                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
+static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
 // Prints a line on `stream` for a function Tier 1 refused: its name, `length` bytes at `name`, and its outcome's step and
 // IR operation or error.
-static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome);
+static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, CheckTier1Outcome outcome);
 
 // CLOCK_MONOTONIC, for CheckProgramLanes.timing.
 static uint64_t check_program_lanes_now(void)
@@ -468,7 +477,7 @@ struct CheckEmitBody
     const char* reason;
 };
 
-// A part's steps (CheckLowerPart, the lowering's), and its first body whose Tier 0 code failed and its first whose code
+// A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
 // failed after Tier 0, its end for none.
 typedef struct CheckEmitPart CheckEmitPart;
 struct CheckEmitPart
@@ -526,9 +535,8 @@ struct CheckEmitRun
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
-    // With --tier1, what became of each body: its CheckTier1Stage, and a refused selection's IR operation in bits 8 up;
-    // and Tier 1's code's counts, for the bodies it compiled.
-    uint32_t* tier1_outcomes;
+    // With --tier1, each body's complete outcome and its published code's counts (zero on refusal).
+    CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
     uint64_t* costs;
     uint64_t* boundaries;
@@ -689,20 +697,22 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
 }
 
 // Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
-// the code in its lane's scratch as Tier 0's is: true if the pipeline took it, and its outcome either way. A naked
+// the code in its lane's scratch as Tier 0's is, with an explicit outcome and disposition. A naked
 // function's code is its templates'. Out of line, so that the plain emission carries none of it.
-static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, bool naked)
+static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, bool naked)
 {
     const CheckProgram* program = run->program;
     const Tier0Function* function = &run->lowered->functions[b];
     const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
     const X86Target* target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? &program->target : &program->targets[body_target - 1];
-    uint32_t operation = 0;
-    const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
-                                          check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                              !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
-    run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
-    return stage == CHECK_TIER1_COMPILED;
+    const CheckTier1Fault* fault = run->lanes->tier1_fault;
+    fault = fault != NULL && fault->body == b + 1 ? fault : NULL;
+    CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
+                                        check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
+                                                            !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
+    outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
+    run->tier1_outcomes[b] = outcome;
+    return outcome;
 }
 
 // What a symbol's declarations make of it for GNU's common attribute (#147, check_program_emit's commons): the attribute,
@@ -764,22 +774,59 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         function->symbol_count = run->access_count;
         // The entries' first records only for source rows.
         function->entry_records = run->sources;
-        // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's.
+        // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's; one that takes
+        // directives is an assembled unit, which the merge publishes (check_program_emit_asm_unit).
         const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
-        // With --tier1, Tier 1's code where its pipeline takes the body (check_program_emit_tier1).
-        const bool tier1 = lane->tier1 != NULL && check_program_emit_tier1(run, lane, b, naked != 0);
-        if (!tier1)
+        // With --tier1, Tier 1's code where its pipeline takes the body (check_program_emit_tier1). A naked function
+        // whose templates take directives is an assembled unit, which remains an explicit admission refusal here.
+        const bool unit_naked = naked != 0 && naked->unit_assembled;
+        CheckTier1Outcome outcome = (CheckTier1Outcome){ 0 };
+        if (unit_naked)
         {
-            run->codes[b] = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+            if (lane->tier1 != NULL)
+            {
+                outcome = check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0);
+                outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
+                run->tier1_outcomes[b] = outcome;
+            }
         }
-        check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
-        if (run->codes[b].error != TIER0_OK)
+        else
         {
-            part->tier0_failed = b;
+            outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
         }
-        else if (part->code_failed == end && !check_program_emit_code(run, lane, b))
+        const bool tier1 = outcome.category == CHECK_TIER1_SUCCESS;
+        const bool forbidden = outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
+        if (unit_naked)
         {
-            part->code_failed = b;
+            if (!forbidden)
+            {
+                // Its code is its unit's entry atom, which the merge publishes; its length and start are known here for
+                // -g's rows, before the merge.
+                run->codes[b] = naked->code;
+                CheckEmitBody* body = run->bodies + b;
+                *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+                body->length = naked->unit.entry_atom != 0 ? naked->unit.link.atoms.size[naked->unit.entry_atom] : 0;
+            }
+            else
+            {
+                part->tier0_failed = b;
+            }
+        }
+        else
+        {
+            if (!tier1 && !forbidden)
+            {
+                run->codes[b] = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+            }
+            check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
+            if (forbidden || run->codes[b].error != TIER0_OK)
+            {
+                part->tier0_failed = b;
+            }
+            else if (part->code_failed == end && !check_program_emit_code(run, lane, b))
+            {
+                part->code_failed = b;
+            }
         }
     }
 }
@@ -1162,13 +1209,30 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
     }
     for (uint32_t n = 0; valid && n < count; n += 1)
     {
-        if (asms->names[n].label || symbols[n] == 0)
+        const CheckAsmName* name = &asms->names[n];
+        const uint8_t binding = name->flags & BUSTER_LINK_SYMBOL_BINDING;
+        // An absolute symbol has no link symbol: its value is the assembler's, and another template's reference to it was
+        // refused by name (check_program_asm_names).
+        if (name->absolute)
+        {
+            symbols[n] = 0;
+            continue;
+        }
+        // An undefined global that no fixup refers to is a declaration, as `.globl sym2` alone: the direct path's binding
+        // must not take it for a strong reference, and no object needs it without a relocation. One naming the program's
+        // symbol still takes that symbol.
+        const bool declaration = symbols[n] == 0 && !name->label && !name->referenced && binding != BUSTER_LINK_SYMBOL_WEAK;
+        if (declaration)
+        {
+            symbols[n] = 0;
+        }
+        else if (name->label || symbols[n] == 0)
         {
             symbols[n] = first + *own;
             *own += 1;
-            if (!asms->names[n].label && externals != 0)
+            if (!name->label && externals != 0)
             {
-                externals[*external_count] = asms->names[n].spelling;
+                externals[*external_count] = name->spelling;
                 *external_count += 1;
             }
         }
@@ -1187,6 +1251,232 @@ static uint64_t check_program_emit_marked(const Tier0Code* code)
         marked += i == 0 || code->references[i].instruction != code->references[i - 1].instruction;
     }
     return marked;
+}
+
+// `spelling`'s index in the asm names (`asms->names`), or BUSTER_CHECK_NONE: the unit's symbols' names are the names
+// check_program_asm_names gathered, and a unit has few.
+static uint32_t check_program_emit_asm_name(const CheckProgramAsms* asms, String8 spelling)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t n = 0; result == BUSTER_CHECK_NONE && n < asms->name_count; n += 1)
+    {
+        const String8 other = asms->names[n].spelling;
+        result = other.length == spelling.length && memcmp(other.pointer, spelling.pointer, spelling.length) == 0 ? n : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// Publishes a template's assembled unit (check_program_asm_unit): copies its atoms' bytes into `bytes`, adds its atoms,
+// symbols and fixups to the emission's link, and maps its symbols to the names' symbols (`asm_symbols`), defining its
+// labels and the function's or helper's `symbol` at the unit's entry atom. Its entry atom, bytes and length are
+// `*entry_atom`, `*entry_bytes` and `*entry_length`; `atoms` and `sections` (`atoms` of room, if not null) get each added
+// atom and its section descriptor. False for an arena without room or an inconsistent unit.
+static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckProgramAsms* asms, const AsmResult* unit, const SymbolId* asm_symbols,
+                                        SymbolId symbol, AtomId* atoms, ObjectAtomSection* sections, uint32_t* section_count, Arena* bytes, Arena* scratch,
+                                        AtomId* entry_atom, uint8_t** entry_bytes, uint64_t* entry_length)
+{
+    const Link* source = &unit->link;
+    const uint64_t mark = scratch->length;
+    AtomId* mapped = source->atoms.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, AtomId, source->atoms.count) : 0;
+    SymbolId* symbols = source->symbols.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, source->symbols.count) : 0;
+    bool valid = mapped != 0 && symbols != 0;
+    *entry_atom = 0;
+    *entry_bytes = 0;
+    *entry_length = 0;
+    if (valid)
+    {
+        memset(mapped, 0, source->atoms.count * sizeof(AtomId));
+        memset(symbols, 0, source->symbols.count * sizeof(SymbolId));
+    }
+    for (uint32_t a = 1; valid && a < source->atoms.count; a += 1)
+    {
+        const uint8_t class = source->atoms.class[a];
+        const uint64_t size = source->atoms.size[a];
+        const bool zero = link_class_is_zero_fill(class);
+        uint8_t* copy = size != 0 && !zero ? arena_push(bytes, size, 16) : 0;
+        valid = size == 0 || zero || copy != 0;
+        if (valid && copy != 0)
+        {
+            memcpy(copy, source->atoms.bytes[a], size);
+        }
+        mapped[a] = valid ? link_add_atom(&result->link, class, source->atoms.alignment_log2[a], size, copy, 0) : 0;
+        valid = mapped[a] != 0;
+        if (valid && atoms != 0 && sections != 0)
+        {
+            atoms[*section_count] = mapped[a];
+            sections[*section_count] = unit->object_options.atom_sections != 0 ? unit->object_options.atom_sections[a] : (ObjectAtomSection){ 0 };
+            *section_count += 1;
+        }
+    }
+    for (uint32_t s = 1; valid && s < source->symbols.count; s += 1)
+    {
+        const uint32_t atom = source->symbols.atom[s];
+        const bool defined = atom != 0;
+        const String8 spelling = check_asm_unit_name(unit, s);
+        if (spelling.length == 0)
+        {
+            // A numeric label or `.`: an unnamed local symbol, defined at its atom.
+            symbols[s] = defined && atom < source->atoms.count ?
+                         link_add_symbol(&result->link, 0, mapped[atom], source->symbols.value[s], source->symbols.size[s],
+                                         BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_PROGRAM) :
+                         0;
+            valid = symbols[s] != 0;
+        }
+        else
+        {
+            const uint32_t n = check_program_emit_asm_name(asms, spelling);
+            valid = n != BUSTER_CHECK_NONE;
+            symbols[s] = valid ? asm_symbols[n] : 0;
+            // An undefined global that no fixup refers to is a declaration, which check_program_emit_asm_symbols leaves
+            // without a symbol: it has none to map here either.
+            if (valid && symbols[s] == 0 && !defined)
+            {
+                continue;
+            }
+            valid = valid && symbols[s] != 0;
+            if (valid && defined)
+            {
+                valid = atom < source->atoms.count && link_define_symbol(&result->link, symbols[s], mapped[atom], source->symbols.value[s], source->symbols.size[s]);
+                if (valid)
+                {
+                    result->link.symbols.source[symbols[s]] = BUSTER_LINK_SOURCE_PROGRAM;
+                }
+            }
+        }
+        if (valid && symbols[s] != 0 &&
+            (spelling.length == 0 || (unit->object_options.temporary_symbols != 0 && unit->object_options.temporary_symbols[s])))
+        {
+            result->unit_temporary[result->unit_temporary_count++] = symbols[s];
+        }
+    }
+    for (uint32_t a = 1; valid && a < source->atoms.count; a += 1)
+    {
+        const uint32_t begin = source->atoms.fixup_begin[a];
+        for (uint32_t f = 0; valid && f < source->atoms.fixup_count[a]; f += 1)
+        {
+            const FixupId fixup = begin + f;
+            const SymbolId target = source->fixups.target[fixup] < source->symbols.count ? symbols[source->fixups.target[fixup]] : 0;
+            valid = target != 0 && link_add_fixup(&result->link, mapped[a], source->fixups.offset[fixup], source->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND,
+                                                   target, link_fixup_addend(source, fixup)) != 0;
+        }
+    }
+    if (valid && unit->entry_atom != 0 && unit->entry_atom < source->atoms.count)
+    {
+        *entry_atom = mapped[unit->entry_atom];
+        *entry_bytes = result->link.atoms.bytes[*entry_atom];
+        *entry_length = result->link.atoms.size[*entry_atom];
+    }
+    valid = valid && *entry_atom != 0;
+    if (valid && symbol != 0)
+    {
+        valid = link_define_symbol(&result->link, symbol, *entry_atom, 0, *entry_length);
+        if (valid)
+        {
+            result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
+// A unit helper's unwind entry, from the frame it published (CheckProgramAsm.saved and .frame) and its length: the pushes'
+// and the reservation's transitions at the prologue, and the reservation's release and the pops' at the epilogue, with
+// the body between them unknown. `length` is the unit's entry atom's size.
+static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t length, UnwindFunction* output)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(saved);
+    const uint32_t prologue_count = pushes + 1;
+    const uint32_t epilogue_count = pushes + 2;
+    const uint32_t count = prologue_count + 1 + epilogue_count;
+    X86Instruction records[2 * BUSTER_TIER0_CALLEE_SAVED + 4];
+    X86Instruction prologue[1 + BUSTER_TIER0_CALLEE_SAVED];
+    X86Instruction epilogue[1 + BUSTER_TIER0_CALLEE_SAVED + 1];
+    uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
+    uint32_t offsets[2 * BUSTER_TIER0_CALLEE_SAVED + 5];
+    uint32_t at = 0;
+    for (uint32_t r = 0; r < BUSTER_TIER0_CALLEE_SAVED; r += 1)
+    {
+        if ((saved >> r & 1) != 0)
+        {
+            const X86Instruction push = { .form = X86_FORM_PUSH_R64, .rm = tier0_callee_saved[r] };
+            prologue[at] = push;
+            records[at] = push;
+            at += 1;
+        }
+    }
+    prologue[at] = (X86Instruction){ .form = X86_FORM_SUB_RM64_IMM8, .rm = X86_REGISTER_RSP, .immediate = (int32_t)frame };
+    records[at] = prologue[at];
+    at += 1;
+    records[at++] = (X86Instruction){ .form = X86_FORM_RET };
+    epilogue[0] = (X86Instruction){ .form = X86_FORM_ADD_RM64_IMM8, .rm = X86_REGISTER_RSP, .immediate = (int32_t)frame };
+    uint32_t epilogue_length = 1;
+    for (uint32_t r = BUSTER_TIER0_CALLEE_SAVED; r-- > 0;)
+    {
+        if ((saved >> r & 1) != 0)
+        {
+            epilogue[epilogue_length++] = (X86Instruction){ .form = X86_FORM_POP_R64, .rm = tier0_callee_saved[r] };
+        }
+    }
+    epilogue[epilogue_length++] = (X86Instruction){ .form = X86_FORM_RET };
+    memcpy(records + at, epilogue, (uint64_t)epilogue_length * sizeof(X86Instruction));
+    // The prologue's and the epilogue's own lengths, record by record, as the encoder writes them.
+    uint32_t sizes[2 * BUSTER_TIER0_CALLEE_SAVED + 3];
+    bool valid = epilogue_length == epilogue_count && at + epilogue_length == count;
+    uint32_t sizes_count = 0;
+    for (uint32_t r = 0; valid && r < prologue_count; r += 1)
+    {
+        const int64_t encoded = x86_encode_scalar(prologue + r, 1, bytes, sizeof(bytes), 0, 0);
+        valid = encoded > 0;
+        sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
+    }
+    for (uint32_t r = 0; valid && r < epilogue_length; r += 1)
+    {
+        const int64_t encoded = x86_encode_scalar(epilogue + r, 1, bytes, sizeof(bytes), 0, 0);
+        valid = encoded > 0;
+        sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
+    }
+    uint32_t prologue_bytes = 0;
+    for (uint32_t r = 0; valid && r < prologue_count; r += 1)
+    {
+        prologue_bytes += sizes[r];
+    }
+    uint32_t epilogue_bytes = 0;
+    for (uint32_t r = prologue_count; valid && r < sizes_count; r += 1)
+    {
+        epilogue_bytes += sizes[r];
+    }
+    valid = valid && (uint64_t)prologue_bytes + epilogue_bytes <= length;
+    if (valid)
+    {
+        uint32_t index = 0;
+        offsets[index++] = 0;
+        for (uint32_t r = 0; r < prologue_count; r += 1)
+        {
+            offsets[index] = offsets[index - 1] + sizes[r];
+            index += 1;
+        }
+        offsets[index++] = length - epilogue_bytes;
+        for (uint32_t r = prologue_count; r < sizes_count; r += 1)
+        {
+            offsets[index] = offsets[index - 1] + sizes[r];
+            index += 1;
+        }
+        const Tier0Code code = {
+            .records = records,
+            .count = count,
+            .frame_saved = saved,
+            .frame_size = frame,
+            .error = TIER0_OK,
+        };
+        UnwindFunction built;
+        const UnwindError error = index == count + 1 ? unwind_tier0_frame(&code, offsets, length, &built) : UNWIND_ERROR_INVALID;
+        if (error == UNWIND_OK)
+        {
+            *output = built;
+        }
+        return error;
+    }
+    return UNWIND_ERROR_INVALID;
 }
 
 // The objects the unit defines, a byte per object in `defined` (1 where it does), and how Tier 0 reaches each of the
@@ -1509,12 +1799,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     run.costs = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
     // --tier1's outcomes, and its tables, once: the cost model's (x86_zen5.c), which its selection reads.
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
-    run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
+    run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
     if (run.tier1_outcomes != 0)
     {
-        // A body a failure before it left unreached has none (an outcome past the stages).
-        memset(run.tier1_outcomes, 0xff, (uint64_t)count * sizeof(uint32_t));
+        // A body a failure before it left unreached has no outcome, never success.
+        memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
     }
     if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
     {
@@ -1605,12 +1895,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
                 const CheckEmitPart* part = run.parts + p;
-                const bool tier0 = part->tier0_failed != part->lower.end && run.codes[part->tier0_failed].error == TIER0_ERROR_MEMORY;
+                const uint32_t failed_body = part->tier0_failed;
+                const bool blocked = failed_body != part->lower.end && run.tier1_outcomes != NULL && run.tier1_outcomes[failed_body].fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
+                const bool tier0 = failed_body != part->lower.end && !blocked && run.codes[failed_body].error == TIER0_ERROR_MEMORY;
                 const bool code = part->code_failed != part->lower.end && run.bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE;
                 again = part->lower.status == CHECK_PROGRAM_RESOURCE ? CHECK_PROGRAM_AGAIN_LOWERING :
                         tier0 ? CHECK_PROGRAM_AGAIN_TIER0 :
                         code ? CHECK_PROGRAM_AGAIN_CODE :
                                CHECK_PROGRAM_AGAIN_NONE;
+            }
+            for (uint32_t b = 0; again != CHECK_PROGRAM_AGAIN_NONE && run.tier1_outcomes != NULL && b < count; b += 1)
+            {
+                if (run.tier1_outcomes[b].fallback == CHECK_TIER1_FALLBACK_FORBIDDEN)
+                {
+                    again = CHECK_PROGRAM_AGAIN_NONE;
+                }
             }
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
         }
@@ -1625,6 +1924,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             arena_pop_to(scratch, scratch_before);
             arena_pop_to(columns, columns_before);
             memset(run.lane_states, 0, sizeof(CheckEmitLane));
+            if (run.tier1_outcomes != NULL)
+            {
+                memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
+            }
             run.stage_clock = stage_clock;
             check_program_emit_alone(&run);
         }
@@ -1644,30 +1947,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->again = again;
         lanes->prepare_ns = lanes_begin - started;
         lanes->lanes_ns = lanes_end - lanes_begin;
-    }
-    for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && b < count; b += 1)
-    {
-        const uint32_t outcome = run.tier1_outcomes[b];
-        const uint32_t stage = outcome & 0xff;
-        lanes->tier1_report.functions += stage < CHECK_TIER1_STAGE_COUNT;
-        lanes->tier1_report.stages[stage < CHECK_TIER1_STAGE_COUNT ? stage : 0] += stage < CHECK_TIER1_STAGE_COUNT;
-        lanes->tier1_report.operations[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_SELECTION;
-        lanes->tier1_report.emission[(outcome >> 8) % BUSTER_CHECK_TIER1_OPERATIONS] += stage == CHECK_TIER1_EMISSION;
-        const CheckTier1Counts* counts = &run.tier1_counts[b];
-        const bool compiled = stage == CHECK_TIER1_COMPILED;
-        lanes->tier1_report.records += compiled ? counts->records : 0;
-        lanes->tier1_report.spill_stores += compiled ? counts->spill_stores : 0;
-        lanes->tier1_report.spill_loads += compiled ? counts->spill_loads : 0;
-        lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
-        lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
-        lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
-        lanes->tier1_report.dropped_definitions += compiled ? counts->dropped_definitions : 0;
-        lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
-        lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
-        lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
-        lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
-        lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
-        lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.
@@ -1933,13 +2212,23 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     if (valid && failed != count)
     {
-        const Tier0Code* code = run.codes + failed;
-        result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
-                         code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
-        result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
-                         code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
-        result->backend_error = code->error;
-        result->backend_node = code->node;
+        const CheckTier1Outcome outcome = run.tier1_outcomes != NULL ? run.tier1_outcomes[failed] : (CheckTier1Outcome){ 0 };
+        if (outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN)
+        {
+            result->tier1_failure = outcome;
+            result->status = outcome.category == CHECK_TIER1_RESOURCE_FAILURE ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
+            result->backend_node = outcome.instruction;
+        }
+        else
+        {
+            const Tier0Code* code = run.codes + failed;
+            result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
+                             code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+            result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
+                             code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
+            result->backend_error = code->error;
+            result->backend_node = code->node;
+        }
         result->token = program->bodies[failed].declaration;
         valid = false;
     }
@@ -1969,8 +2258,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             rows->counts[b] = body->row_count;
             rows->sizes[b] = (uint32_t)body->length;
             rows->bodies[b] = body->body_offset;
-            memcpy(rows->offsets + rows->count, body->row_offsets, (uint64_t)body->row_count * sizeof(uint32_t));
-            memcpy(rows->tokens + rows->count, body->row_tokens, (uint64_t)body->row_count * sizeof(uint32_t));
+            if (body->row_count != 0)
+            {
+                memcpy(rows->offsets + rows->count, body->row_offsets, (uint64_t)body->row_count * sizeof(uint32_t));
+                memcpy(rows->tokens + rows->count, body->row_tokens, (uint64_t)body->row_count * sizeof(uint32_t));
+            }
             rows->count += body->row_count;
         }
     }
@@ -2044,12 +2336,45 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const SymbolId symbol = program->object_symbols[program->bodies[b].object];
         structor_count += (structors[2 * symbol] != 0) + (structors[2 * symbol + 1] != 0);
     }
+    // Templates that take directives publish their assembled units' tables too: their atoms (one is the helper's or the
+    // naked function's own), symbols, names and fixups.
+    uint64_t unit_atoms = 0;
+    uint64_t unit_symbols = 0;
+    uint64_t unit_names = 0;
+    uint64_t unit_fixups = 0;
+    uint64_t unit_wide = 0;
+    for (uint32_t s = 0; valid && s < program->input->asm_count; s += 1)
+    {
+        const CheckProgramAsm* plan = asms->plans != 0 ? asms->plans + s : 0;
+        if (plan != 0 && plan->unit_assembled)
+        {
+            unit_atoms += plan->unit.link.atoms.count != 0 ? plan->unit.link.atoms.count - 1 : 0;
+            unit_symbols += plan->unit.link.symbols.count != 0 ? plan->unit.link.symbols.count - 1 : 0;
+            unit_names += plan->unit.link.names.count != 0 ? plan->unit.link.names.count - 1 : 0;
+            unit_fixups += plan->unit.link.fixups.count;
+            unit_wide += plan->unit.link.fixups.wide_count;
+        }
+    }
+    for (uint32_t b = 0; valid && asms->naked != 0 && b < program->body_count; b += 1)
+    {
+        const CheckProgramNaked* naked = asms->naked + b;
+        if (naked->unit_assembled)
+        {
+            unit_atoms += naked->unit.link.atoms.count != 0 ? naked->unit.link.atoms.count - 1 : 0;
+            unit_symbols += naked->unit.link.symbols.count != 0 ? naked->unit.link.symbols.count - 1 : 0;
+            unit_names += naked->unit.link.names.count != 0 ? naked->unit.link.names.count - 1 : 0;
+            unit_fixups += naked->unit.link.fixups.count;
+            unit_wide += naked->unit.link.fixups.wide_count;
+        }
+    }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count;
-    const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
-    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
-    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names;
+                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count + unit_atoms;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups;
+    const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols +
+                                  unit_symbols;
+    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names +
+                                unit_names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities + structor_count < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -2256,12 +2581,51 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const String8 spelling = asms->names[n].spelling;
             const NameId name = link_add_name(&result->link, (const uint8_t*)spelling.pointer, (uint32_t)spelling.length);
-            const uint8_t flags = BUSTER_LINK_SYMBOL_NOTYPE | (asms->names[n].label ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_GLOBAL);
+            const uint8_t asm_binding = asms->names[n].flags & BUSTER_LINK_SYMBOL_BINDING;
+            const uint8_t chosen = asm_binding != BUSTER_LINK_SYMBOL_LOCAL ? asm_binding : asms->names[n].label ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_GLOBAL;
+            const uint8_t flags = (asms->names[n].flags & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_VISIBILITY)) | chosen;
             valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == asm_symbols[n];
             if (valid && binding != NULL && asms->names[n].label)
             {
                 result->link.symbols.source[asm_symbols[n]] = BUSTER_LINK_SOURCE_PROGRAM;
             }
+        }
+    }
+    // A name that maps to one of the unit's program symbols takes the template's binding, visibility and `.size`
+    // directives, as clang's assembled module does: `.weak target`, `.hidden target`, `.globl static_target` and
+    // `.size target, 7` change the C symbol's own flags and size.
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        const SymbolId symbol = asm_symbols[n];
+        const CheckAsmName* name = &asms->names[n];
+        const bool visibility = (name->flags & BUSTER_LINK_SYMBOL_VISIBILITY) != BUSTER_LINK_SYMBOL_DEFAULT;
+        if (symbol == 0 || symbol >= asm_first || (name->directives == 0 && !visibility))
+        {
+            continue;
+        }
+        uint8_t* flags = &result->link.symbols.flags[symbol];
+        if ((name->directives & BUSTER_ASM_DIRECTIVE_BINDING) != 0)
+        {
+            // Clang's integrated assembler refuses `.weak` on a defined C variable of external linkage, though a
+            // function's is a warning, a static or block-scope variable's is accepted, and an extern's is a declaration.
+            // The template's is refused by name too.
+            const uint32_t object = program->symbol_objects[symbol - 1];
+            const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+            const bool external = declaration != BUSTER_CHECK_NONE && declaration < program->input->token_count &&
+                                  program->input->linkage[declaration] == 2;
+            if ((name->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK && (*flags & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION &&
+                object < program->object_count && defined[object] != 0 && external)
+            {
+                result->status = CHECK_PROGRAM_UNSUPPORTED;
+                result->reason = "inline assembly .weak on a defined variable";
+                valid = false;
+                break;
+            }
+            *flags = (uint8_t)((*flags & ~BUSTER_LINK_SYMBOL_BINDING) | (name->flags & BUSTER_LINK_SYMBOL_BINDING));
+        }
+        if (visibility)
+        {
+            *flags = (uint8_t)((*flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | (name->flags & BUSTER_LINK_SYMBOL_VISIBILITY));
         }
     }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
@@ -2361,6 +2725,31 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // are encoded here: the labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols),
     // and with unwind tables each function's frame, as its code is sized.
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
+    result->unit_atoms = valid && unit_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, unit_atoms) : 0;
+    result->unit_sections = valid && unit_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, unit_atoms) : 0;
+    result->unit_atom_count = 0;
+    result->unit_temporary = valid && unit_symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, unit_symbols) : 0;
+    result->unit_temporary_count = 0;
+    valid = valid && (unit_atoms == 0 || (result->unit_atoms != 0 && result->unit_sections != 0)) &&
+            (unit_symbols == 0 || result->unit_temporary != 0);
+    // The templates of alignment and section directives alone: their data atoms and labels, without a helper to call.
+    for (uint32_t s = 0; valid && asms->plans != 0 && s < program->input->asm_count; s += 1)
+    {
+        const CheckProgramAsm* plan = asms->plans + s;
+        if (plan->unit_assembled && plan->helper == BUSTER_CHECK_NONE)
+        {
+            AtomId entry_atom = 0;
+            uint8_t* entry_bytes = 0;
+            uint64_t entry_length = 0;
+            valid = check_program_emit_asm_unit(result, asms, &plan->unit, asm_symbols, 0, result->unit_atoms, result->unit_sections, &result->unit_atom_count,
+                                                bytes, scratch, &entry_atom, &entry_bytes, &entry_length);
+            if (!valid)
+            {
+                result->status = CHECK_PROGRAM_BACKEND;
+                result->reason = "an inline assembly unit could not be published";
+            }
+        }
+    }
     uint32_t labels = 0;
     CheckEmitBody helper_body;
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
@@ -2373,6 +2762,66 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         CheckEmitBody* body = source_body ? run.bodies + b : &helper_body;
         // An asm template's code: a naked function's or an asm statement's helper's, whose labels are defined below.
         const bool assembly = source_body ? asms->naked != 0 && asms->naked[b].planned : helpers->items[b - count].assembly != 0;
+        // A template that takes directives is an assembled unit of its own (check_program_emit_asm_unit), not records.
+        const CheckProgramAsm* unit_plan = !source_body && assembly ? asms->plans + (helpers->items[b - count].assembly - 1) : 0;
+        const AsmResult* unit = unit_plan != 0 ? (unit_plan->unit_assembled ? &unit_plan->unit : 0) :
+                                source_body && asms->naked != 0 && asms->naked[b].planned && asms->naked[b].unit_assembled ? &asms->naked[b].unit :
+                                                                                                                                  0;
+        if (unit != 0)
+        {
+            AtomId entry_atom = 0;
+            uint8_t* entry_bytes = 0;
+            uint64_t entry_length = 0;
+            body->status = CHECK_PROGRAM_OK;
+            body->token = BUSTER_CHECK_NONE;
+            const char* reason = NULL;
+            valid = symbol != 0 && check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
+                                                               &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length);
+            reason = valid ? NULL : "an inline assembly unit could not be published";
+            if (valid)
+            {
+                body->bytes = entry_bytes;
+                body->length = entry_length;
+                if (unwind)
+                {
+                    if (source_body)
+                    {
+                        // A naked function's unit says nothing of its frame: its entry has the call's rule alone, as its
+                        // records' path does.
+                        valid = entry_length <= INT32_MAX;
+                        run.frames[b] = (UnwindFunction){ .size = valid ? (uint32_t)entry_length : 0 };
+                    }
+                    else
+                    {
+                        const UnwindError frame = entry_length <= INT32_MAX ? check_asm_unit_frame(unit_plan->saved, unit_plan->frame, (uint32_t)entry_length, &run.frames[b]) :
+                                                                              UNWIND_ERROR_LIMIT;
+                        valid = frame == UNWIND_OK;
+                        reason = valid ? NULL : frame == UNWIND_ERROR_LIMIT ? "an inline assembly helper is too large for its unwind entry" :
+                                                                              "an inline assembly helper's frame is not the one its unwind entry describes";
+                    }
+                }
+            }
+            if (valid)
+            {
+                if (source_body)
+                {
+                    result->function_atoms[b] = entry_atom;
+                }
+                result->code_bytes += entry_length;
+            }
+            else
+            {
+                result->status = CHECK_PROGRAM_BACKEND;
+                result->reason = reason != NULL ? reason : "an inline assembly unit could not be published";
+                result->token = source_body ? program->bodies[b].declaration : BUSTER_CHECK_NONE;
+                valid = false;
+            }
+            if (!source_body)
+            {
+                arena_pop_to(scratch, work_mark);
+            }
+            continue;
+        }
         uint32_t* offsets = 0;
         if (!source_body)
         {
@@ -2567,17 +3016,85 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     (priority == 65535 || link_add_priority(&result->link, atom, priority));
         }
     }
+    // A template's `.size` on one of the unit's program symbols, which check_program_sections applies once the static
+    // data's atoms exist: a variable's atom is published after this emission.
+    bool sized = false;
+    for (uint32_t n = 0; sized == false && n < asms->name_count; n += 1)
+    {
+        const SymbolId symbol = asm_symbols[n];
+        sized = symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0;
+    }
+    result->asm_sizes = sized ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, result->link.symbols.count) : 0;
+    result->asm_size_set = sized ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, result->link.symbols.count) : 0;
+    valid = valid && (!sized || (result->asm_sizes != 0 && result->asm_size_set != 0));
+    if (valid && sized)
+    {
+        memset(result->asm_size_set, 0, result->link.symbols.count);
+        for (uint32_t n = 0; n < asms->name_count; n += 1)
+        {
+            const SymbolId symbol = asm_symbols[n];
+            if (symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0)
+            {
+                result->asm_sizes[symbol] = asms->names[n].size;
+                result->asm_size_set[symbol] = 1;
+            }
+        }
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
+    // Report only source order's prefix through the winning Tier 1 failure, not the speculative work later parts
+    // happened to finish. A failure of an earlier compiler phase publishes no Tier 1 success counters. This is
+    // independent of lane completion order, and a rejected body's counts are always zero.
+    const uint32_t report_end = valid ? count : result->tier1_failure.category != CHECK_TIER1_UNATTEMPTED ? failed + 1 : 0;
+    if (lanes != NULL && lanes->tier1)
+    {
+        lanes->tier1_report.requested += count;
+    }
+    for (uint32_t b = 0; run.tier1_outcomes != 0 && b < report_end; b += 1)
+    {
+        const CheckTier1Outcome outcome = run.tier1_outcomes[b];
+        const uint32_t stage = outcome.stage;
+        const bool attempted = outcome.category != CHECK_TIER1_UNATTEMPTED;
+        lanes->tier1_report.functions += attempted;
+        lanes->tier1_report.admitted += attempted && stage != CHECK_TIER1_NAKED;
+        lanes->tier1_report.categories[outcome.category] += attempted;
+        lanes->tier1_report.fallbacks += outcome.fallback == CHECK_TIER1_FALLBACK_TIER0;
+        lanes->tier1_report.stages[stage] += attempted;
+        const uint32_t operation = check_tier1_operation(outcome);
+        if (stage == CHECK_TIER1_SELECTION && operation < BUSTER_CHECK_TIER1_OPERATIONS)
+        {
+            lanes->tier1_report.operations[operation] += 1;
+        }
+        if (stage == CHECK_TIER1_EMISSION && outcome.emission_error != 0 && outcome.emission_error < BUSTER_CHECK_TIER1_OPERATIONS)
+        {
+            lanes->tier1_report.emission[outcome.emission_error] += 1;
+        }
+        const CheckTier1Counts* counts = &run.tier1_counts[b];
+        const bool compiled = outcome.category == CHECK_TIER1_SUCCESS;
+        lanes->tier1_report.records += compiled ? counts->records : 0;
+        lanes->tier1_report.spill_stores += compiled ? counts->spill_stores : 0;
+        lanes->tier1_report.spill_loads += compiled ? counts->spill_loads : 0;
+        lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
+        lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
+        lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
+        lanes->tier1_report.dropped_definitions += compiled ? counts->dropped_definitions : 0;
+        lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
+        lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
+        lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
+        lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
+        lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
+        lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
+    }
     if (!valid)
     {
         const CheckProgramStatus status = result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
         const uint32_t token = result->token;
         const Tier0Error backend = result->backend_error;
+        const CheckTier1Outcome tier1_failure = result->tier1_failure;
         const uint32_t backend_node = result->backend_node;
         const char* reason = result->reason;
         arena_pop_to(output, mark);
         arena_pop_to(bytes, byte_mark);
-        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason };
+        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason, .tier1_failure = tier1_failure };
         if (rows != NULL)
         {
             *rows = (CheckProgramRows){ 0 };
@@ -2594,7 +3111,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         const SymbolId symbol = program->object_symbols[program->bodies[b].object];
         const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
-        if ((run.tier1_outcomes[b] & 0xff) != CHECK_TIER1_COMPILED && (run.tier1_outcomes[b] & 0xff) < CHECK_TIER1_STAGE_COUNT && name != 0)
+        if (run.tier1_outcomes[b].fallback == CHECK_TIER1_FALLBACK_TIER0 && name != 0)
         {
             check_tier1_print_refusal(lanes->tier1_refusals, result->link.names.bytes[name], result->link.names.length[name], run.tier1_outcomes[b]);
         }
@@ -2696,7 +3213,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     Link* link = &code->link;
     *table = 0;
     bool valid = true;
-    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0)
+    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -2723,6 +3240,10 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                                                          .flags = object_class_sections[class].flags };
             }
             code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+            for (uint32_t a = 0; a < code->unit_atom_count; a += 1)
+            {
+                descriptors[code->unit_atoms[a]] = code->unit_sections[a];
+            }
             *table = descriptors;
         }
         for (uint32_t p = 0; valid && p < placements; p += 1)
@@ -2829,6 +3350,33 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             code->reason = reason;
             code->token = refused;
             valid = false;
+        }
+    }
+    // A template's `.size` on one of the unit's program symbols, now that a variable's atom is published: a function's
+    // size may override its body's, as clang's assembler writes it; an extern's is the no-op both compilers make it. A
+    // size past the definition's atom would break the link's symbol rule, which clang's writer lets through; the
+    // template's is refused by name instead.
+    for (SymbolId symbol = 1; valid && code->asm_size_set != 0 && symbol < code->link.symbols.count; symbol += 1)
+    {
+        if (code->asm_size_set[symbol] == 0)
+        {
+            continue;
+        }
+        const AtomId atom = code->link.symbols.atom[symbol];
+        const uint64_t value = code->link.symbols.value[symbol];
+        if (atom == 0)
+        {
+            continue;
+        }
+        if (atom >= code->link.atoms.count || code->asm_sizes[symbol] > code->link.atoms.size[atom] - value)
+        {
+            code->status = CHECK_PROGRAM_UNSUPPORTED;
+            code->reason = "inline assembly .size on the unit's symbol exceeds its definition";
+            valid = false;
+        }
+        else
+        {
+            code->link.symbols.size[symbol] = code->asm_sizes[symbol];
         }
     }
     valid = valid && check_program_define_aliases(code, program);

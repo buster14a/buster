@@ -473,10 +473,23 @@ designs and the compilers already built this way.
   references and labels. The statement's code calls the result, a per-unit
   helper; a template of no instructions, a barrier's, is no code at all, but
   one with x87 operands, whose helper passes them through the x87's stack as
-  clang's code does. A
+  clang's code does. A template that takes a directive besides the syntax
+  switches is instead one source assembled whole by `asm_assemble` (the
+  helper's frame and operand loads around it, or a naked function's templates),
+  whose atoms, symbols and fixups the emission merges; a template of alignment
+  or NOP fill alone publishes its atoms and calls nothing. `.set` absolute
+  symbols are the template's; `.globl` or a visibility directive upgrades a label
+  another template defines, `.type`/`.size` apply to its own template's label,
+  a binding or visibility directive applies to the unit's C symbol of that name
+  (`.weak` a function's, an extern's or a static variable's; an external
+  definition's is refused, and a zero-filled static is accepted where clang
+  refuses it), a `.size` once its definition's atom exists, and a reference
+  from another
+  template is refused by name. A
   naked function's templates are its whole code. Templates' labels are local
-  symbols, and the other names they refer to are the unit's symbols of those
-  link names or undefined globals (`check_program_emit_asm_symbols`). A
+  unless a binding or visibility directive names them, and the other names they
+  refer to are the unit's symbols of those link names or undefined globals
+  (`check_program_emit_asm_symbols`). A
   file-scope `asm`'s templates are assembled by the emission into atoms of
   their sections before the functions' (`check_program_emit_file_asm`, #619),
   each in its section in `-c`'s object.
@@ -490,7 +503,8 @@ designs and the compilers already built this way.
   `test-checker --program-asm` runs the inline-assembly source fixtures alone;
   the full `test-checker` command continues to include them.
   `test-checker-driver` links and runs naked functions' labels and a template's
-  call of `puts` by the direct path. `test-assembler` checks
+  call of `puts` by the direct path, and compares a template's `-c` symbols
+  with clang's. `test-assembler` checks
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
   admits for templates with GNU as. [The inline assembly
   guide](docs/c-inline-assembly.md) has the placement, the substitution, the
@@ -525,11 +539,14 @@ designs and the compilers already built this way.
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
-  unwind tables alike, #177's `check_tier1_frame`; without `-g`; `--tier1-report` and
-  `--tier1-refusals` say which step refused the others, and
-  `--tier1-no-rematerialize` compiles them without rematerialization and
+  unwind tables alike, #177's `check_tier1_frame`; without `-g`;
+  `--tier1-strict` fails qualification on an unsupported body rather than
+  falling back, while resource and internal failures fail either mode;
+  `--tier1-report` and `--tier1-refusals` say which step refused the others,
+  and `--tier1-no-rematerialize` compiles them without rematerialization and
   `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
-  guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
+  guide](docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure
+  outcomes](docs/tier1-outcomes.md)), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
@@ -3797,8 +3814,11 @@ like the others, its measurements are informational.
   that fails while writing beside the output leaves the output, its other
   link, and nothing beside them;
 - limits: a weak thread-local symbol defined nowhere (offset 0 in its field
-  and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
-  and one whose padding wraps (refused); a bad entry point, the first of two
+  and its GOT slot); TLS blocks of 2 GB (linked) and past it, a `.tbss` atom
+  past 2 GB and a `.bss` atom whose padding wraps (refused), and `.bss` atoms
+  of exactly 2 GB and past it (linked and run by every lane count, with their
+  `.bss` and writable segment sizes and an `ABS64` to a symbol at the atom's
+  last byte checked); a bad entry point, the first of two
   symbols defined nowhere in different lanes' ranges, the smallest failing
   fixup, an atom aligned past a page, a bad init array atom and an atom of
   each of the C runtime's classes (`.init` and `.fini`), which step 4's
@@ -3989,7 +4009,10 @@ created destination when a first publication fails.
 runtime against this system's static runtime (`runtime_import_static`), then
 its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
 directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
-which it removes unless `--keep`. Each program is bound by `bind.c` and
+which it removes unless `--keep`. One libc program has a 3 GiB `.bss` atom and
+an `ABS64` pointer to its last byte, in both the static executable and the
+static PIE, written by every lane count and exact twin. Each program is bound
+by `bind.c` and
 written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
 relaxation and the GOT relaxation rewrite them), with zeroed fields over the
