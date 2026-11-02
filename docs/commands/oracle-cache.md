@@ -177,14 +177,14 @@ The roots: a test makes its files in directories of `mkdtemp`'s under
 those paths through `oracle_temporary_directory`, which returns `$TMPDIR` with
 runs of slashes collapsed and trailing slashes removed, so the path a test
 spells and the path a tool resolves from its working directory name the same
-bytes; a value too long for its buffer is returned raw, and roots then off, as
-before, rather than truncated. A root is such a name in a run's strings,
+bytes; a value too long for its buffer is returned raw, and the roots are then
+off, as before, rather than truncated. A root is such a name in a run's strings,
 `$TMPDIR/NAME`, NAME's last 6 characters (or the 6 before its last `.`) letters
 and digits, as `mkdtemp`'s random ones are. A root may also follow the base
-with any number of slashes, so a raw `/tmp//name` matches; `$TMPDIR=/` is the
-base `/` itself, so a path's first slash or an option's (`-I/name`) may start a
-root, while a nested path's slash doesn't. A test's `//name` and a tool's
-resolved `/name` are the same root. A key has a placeholder for each root's 6
+with any number of slashes, so a raw `/tmp//name` is still found; `$TMPDIR=/`
+is the base `/` itself, so a path's first slash or an option's (`-I/name`) may
+start a root, while a nested path's slash doesn't. A test's `//name` and a
+tool's resolved `/name` are the same root. A key has a placeholder for each root's 6
 characters, by the root's place among the run's; an entry holds the roots it
 was made with, which a run that takes it replaces with its own, as long, in the
 result (an object's bytes as much as a text's) and in the names of what it
@@ -287,8 +287,9 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   and in random pieces;
 - roots: a directory's, an option's and a file's, names that aren't roots, two
   in order, more than 8, a root followed by a name's character (not it), two
-  replaced by each other in one pass, and keys alike only where the random
-  characters differ;
+  replaced by each other in one pass, keys alike only where the random
+  characters differ, the normalized temporary directory and an over-long one,
+  and a run under a trailing-slash `$TMPDIR` taken in another directory;
 - runs: a run's status, output, errors and written file (NUL bytes among its
   own), taken by the same run and by one in the other directory, naming that
   one's directory; each part of a key making a new one (the input's bytes, an
@@ -298,7 +299,9 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   didn't write, removed when its entry is taken;
 - dependencies (traced `clang -fsyntax-only`): a compile taken in its
   directory and in the other, run again after a header changes, and taken
-  after a file it doesn't look for is added beside it; run again after
+  after a file it doesn't look for is added beside it; a compile under a
+  trailing-slash `$TMPDIR` taken in another directory, then run again after
+  its header changes; run again after
   `#embed`'s resource or what `__has_include` found changes; `__has_include`'s
   header created where it looked, in a directory other files go into; a nested
   header created in its includer's directory, before the one `-I` found;

@@ -11,8 +11,8 @@
 //     roots, two in order, more than BUSTER_ORACLE_ROOTS, a root followed by a name's character (not it), two roots
 //     replaced by each other in one pass, keys that are alike only where the random characters differ, a root after a
 //     trailing slash's second slash or any number of them, `$TMPDIR=/`'s roots (and paths that aren't), the normalized
-//     temporary directory's spelling, whose run in another directory of a trailing-slash `$TMPDIR` is taken, and a
-//     traced compile under a trailing-slash `$TMPDIR` taken in another directory;
+//     temporary directory's spelling (including an over-long one), a run in another directory of a trailing-slash
+//     `$TMPDIR`, and a traced compile under one taken in another directory;
 //   - runs: a run's status, output, errors and written file, taken by the same run again and by one in the other
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
@@ -258,6 +258,8 @@ static void oracle_test_roots(OracleTest* test)
     memset(long_base, 'a', BUSTER_ARRAY_LENGTH(long_base) - 1);
     long_base[BUSTER_ARRAY_LENGTH(long_base) - 1] = 0;
     setenv("TMPDIR", long_base, 1);
+    oracle_test_expect(test, strcmp(oracle_temporary_directory(), long_base) == 0,
+                       "roots: an over-long temporary directory is returned raw, not truncated");
     oracle_roots_begin(&roots);
     oracle_test_expect(test, roots.base_length == 0, "roots: an over-long temporary directory turns roots off");
     setenv("TMPDIR", "/b/", 1);
