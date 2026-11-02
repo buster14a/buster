@@ -230,11 +230,11 @@ static __attribute__((unused)) void arena_discard(Arena* arena);
 static __attribute__((unused)) void arena_static_base_pages(void);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
-// pages.
+// pages, or else an inaccessible page on each side of them.
 static uint64_t arena_mapping_bytes(uint64_t capacity)
 {
     const uint64_t pages = (capacity + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
-    return capacity > BUSTER_ARENA_SMALL_BYTES ? pages + BUSTER_ARENA_HUGE_PAGE_BYTES : pages;
+    return capacity > BUSTER_ARENA_SMALL_BYTES ? pages + BUSTER_ARENA_HUGE_PAGE_BYTES : pages + 2 * BUSTER_ARENA_PAGE_BYTES;
 }
 
 // A failed large mapping switches this thread to bounded reservations (also used by tools with a restricted virtual
@@ -290,8 +290,8 @@ static __attribute__((unused)) void arena_report_failure(FILE* stream, const cha
 // So the layout decides most of the page sizes, and the advice is only where it doesn't (#652): the kernel takes a huge
 // page only where one writable mapping covers its whole 2 MB from a huge-page boundary. Below base + small, the writable
 // bytes start at base, past inaccessible ones, and end at that boundary, where the huge pages' differently advised
-// mapping starts: fewer than 2 MB of them hold no huge page. Nor does an arena of base pages alone, from its mapping's
-// start, in fewer than 2 MB, short of the kernel merging its mapping with a writable neighbour's. From 2 MB,
+// mapping starts: fewer than 2 MB of them hold no huge page, nor can they join a writable neighbour's mapping. An arena
+// of BUSTER_ARENA_SMALL_BYTES or less, base pages alone, has inaccessible pages on both sides for that. From 2 MB,
 // MADV_NOHUGEPAGE keeps them base pages. Past base + small, the first commit that reaches there advises MADV_HUGEPAGE
 // (arena_commit), which a host whose transparent huge pages are `madvise` needs. An arena that stays in its base pages,
 // as most of a small unit's 70 do, takes one mmap and one mprotect, without the two madvise calls, which also split its
@@ -341,8 +341,9 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
         }
         if (mapping != MAP_FAILED)
         {
-            // An arena of base pages alone starts at its mapping's start (c_check_deferred.c's lanes' slices rely on it).
-            uint64_t offset = 0;
+            // An arena of base pages alone starts at its mapping's start (c_check_deferred.c's lanes' slices rely on it), or
+            // within BUSTER_ARENA_SMALL_BYTES a page past it, with a page past its end too.
+            uint64_t offset = capacity <= BUSTER_ARENA_SMALL_BYTES ? BUSTER_ARENA_PAGE_BYTES : 0;
             if (capacity > small)
             {
                 const uintptr_t huge_begin = ((uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);

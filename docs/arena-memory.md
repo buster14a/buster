@@ -23,9 +23,12 @@ the rest huge pages. `base + small` falls on a 2 MB boundary, and `base` a page
 or more past the mapping's start. Since the kernel takes a transparent huge page
 only where one writable mapping covers its whole 2 MB from such a boundary, the
 layout itself keeps the base pages base pages (#652): below `base + small` the
-writable bytes start past inaccessible ones and end at the boundary, so fewer
-than 2 MB of them hold no huge page, with any setting of transparent huge pages.
-So the advice is only where the layout doesn't decide:
+writable bytes start past inaccessible ones and end at the boundary, where the
+huge pages' differently advised mapping starts, so fewer than 2 MB of them hold
+no huge page, nor join a writable neighbour's mapping, with any setting of
+transparent huge pages. An arena of 64 KB or less, base pages alone, has an
+inaccessible page on each side for the same reason. So the advice is only where
+the layout doesn't decide:
 
 - `MADV_NOHUGEPAGE` at the reservation for base pages of 2 MB or more (a units
   lane's 16 MB floor, the tables reserved in base pages throughout, the
