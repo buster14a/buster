@@ -31,9 +31,11 @@
 // worker budget gives (lane_narrow), so that nothing in the command creates or joins a thread after its start. Each
 // part declares its interface first, then defines it. In this order:
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
-//     arena_pop_to. An arena reserves inaccessible address space up front, committing its prefix as pushes need it. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
-//     arena_poison overwrites what pushes took, for tests of code that reuses an arena, and a thread's ArenaPool
-//     (arena_pool) keeps the arenas it releases for its next reservations.
+//     arena_pop_to. An arena reserves inaccessible address space up front, committing its prefix as pushes need it. A
+//     push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated. arena_poison
+//     overwrites what pushes took, for tests of code that reuses an arena, and a thread's ArenaPool (arena_pool) keeps
+//     the arenas it releases for its next reservations, which take them zero-filled, their committed prefixes still
+//     writable unless commit charge is bounded, and their mappings perhaps larger than the capacity asked for.
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, LaneSession, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index,
@@ -137,13 +139,16 @@ struct Arena
     bool unaccounted;
     // The requested ceiling can exceed capacity after a constrained-address-space reservation.
     uint64_t requested_capacity;
-    // The capacity its mapping was laid out for, at least capacity: its pages past `small` are huge only if this is past
-    // it, and a reservation from the pool takes the arena for any capacity up to it (arena_reserve_policy).
+    // For an owned mapping, the capacity it was laid out for, at least capacity (0 for borrowed storage, including
+    // arena_measure): its pages past `small` are huge only if this is past it, and a reservation from the pool takes
+    // the arena for any capacity up to it (arena_reserve_policy).
     uint64_t reserved;
 };
 
-// Reserves up to `capacity` bytes (less under address-space constraints), initially inaccessible. Pushes make their
-// prefix writable; the kernel allocates physical pages on first touch: the first
+// Reserves up to `capacity` bytes (less under address-space constraints), zero-filled. A fresh mapping is initially
+// inaccessible; an arena from the thread's pool (arena_pool) may keep the prefix its last pushes made writable (unless
+// commit charge is bounded: arena_commit_unbounded), and its mapping may be larger than its capacity (Arena.reserved).
+// Pushes make their prefix writable; the kernel allocates physical pages on first touch: the first
 // BUSTER_ARENA_SMALL_BYTES in base pages, and the rest in huge pages. Returns an arena without capacity, in which every
 // push fails, if the address space can't be reserved.
 static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
@@ -211,7 +216,8 @@ static __attribute__((unused)) Arena arena_measure(void);
 static __attribute__((unused)) void arena_release(Arena* arena);
 // `size` bytes at the first address from base + length that is a multiple of `alignment`, a power of two. Returns 0 and
 // leaves the arena as it was if they don't fit or the alignment isn't a power of two. The bytes aren't cleared: they
-// are zero only the first time their pages are touched.
+// are zero only where no push since the arena's reservation took them (past its peak): a fresh mapping's pages are
+// zero, and so are a pooled arena's, whose pages the pool discards.
 static __attribute__((unused)) void* arena_push(Arena* arena, uint64_t size, uint64_t alignment);
 // `count` elements of `element_bytes` each; 0, as from arena_push, if count * element_bytes overflows.
 static __attribute__((unused)) void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment);

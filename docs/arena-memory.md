@@ -83,7 +83,8 @@ poison unused logical capacity explicitly commit that test memory first; a raw
 
 `tests/arena/resources.c` checks inaccessible tails, growth and stable pointers,
 zero-filled pool reuse (its prefix writable, and inaccessible again in a child
-under a finite `RLIMIT_DATA`), the pool's choice of mapping by layout and room,
+under a finite `RLIMIT_DATA`), the pool's choice of mapping by base pages,
+layout and room, the smallest first and the latest released of equal ones,
 borrowed/measuring arenas, overflow rollback, a real
 `mprotect` refusal injected with a child-only seccomp filter, and 32 simultaneous
 large logical requests under a 2 GiB address-space limit. Another isolated child

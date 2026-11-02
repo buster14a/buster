@@ -162,6 +162,64 @@ static bool memory_pool(bool keeps)
     return valid && pool.count == 0 && !pool.limits;
 }
 
+// The pool's choice among several arenas (#1128): the smallest mapping with room, though released earlier than a
+// larger one; of equal mappings, the latest released; and only one with the reservation's base pages.
+static bool memory_pool_fit(void)
+{
+    ArenaPool pool = { 0 };
+    arena_pool = &pool;
+    Arena one = arena_reserve(1 << 20);
+    Arena four = arena_reserve(4 << 20);
+    Arena twin = arena_reserve(1 << 20);
+    const uint8_t* addresses[3] = { one.base, four.base, twin.base };
+    bool valid = one.base != 0 && four.base != 0 && twin.base != 0;
+    arena_release(&one);
+    arena_release(&four);
+    // 2 MB, which the 1 MB mapping hasn't room for, takes the 4 MB one, and then 512 KB the 1 MB one.
+    Arena two = arena_reserve(2 << 20);
+    Arena half = arena_reserve(512 << 10);
+    valid = valid && two.base == addresses[1] && two.capacity == (2 << 20);
+    valid = valid && half.base == addresses[0] && half.capacity == (512 << 10) && pool.count == 0;
+    arena_release(&half);
+    arena_release(&twin);
+    Arena later = arena_reserve(1 << 20);
+    Arena earlier = arena_reserve(1 << 20);
+    valid = valid && later.base == addresses[2] && earlier.base == addresses[0] && pool.count == 0;
+    // A units lane's small unit starts its arenas with 16 MB of base pages (arena_small_floor): such a mapping isn't
+    // one for a reservation that starts with 64 KB, though it has room and huge pages past its head, but is for another
+    // with 16 MB.
+    Arena floored = arena_reserve_small(32 << 20, 16 << 20);
+    const uint8_t* head = floored.base;
+    arena_release(&floored);
+    Arena plain = arena_reserve(1 << 20);
+    valid = valid && head != 0 && plain.base != 0 && plain.base != head && pool.count == 1;
+    Arena again = arena_reserve_small(20 << 20, 16 << 20);
+    valid = valid && again.base == head && again.capacity == (20 << 20) && pool.count == 0;
+    Arena* held[] = { &two, &later, &earlier, &plain, &again };
+    for (uint32_t i = 0; i < sizeof(held) / sizeof(held[0]); i += 1)
+    {
+        arena_release(held[i]);
+    }
+    arena_pool = 0;
+    arena_pool_release(&pool);
+    return valid;
+}
+
+// Whether pooled arenas keep their commits, read apart from arena_commit_unbounded, which the pool's test expects
+// against: RLIMIT_DATA infinite, and an overcommit policy other than strict (2).
+static bool memory_commit_unbounded(void)
+{
+    struct rlimit data;
+    int mode = 2;
+    FILE* stream = fopen("/proc/sys/vm/overcommit_memory", "r");
+    const bool parsed = stream != 0 && fscanf(stream, "%d", &mode) == 1;
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    return parsed && mode != 2 && getrlimit(RLIMIT_DATA, &data) == 0 && data.rlim_cur == RLIM_INFINITY;
+}
+
 // The pool where RLIMIT_DATA bounds commit charge, in a child: a pooled arena's prefix is inaccessible again.
 static bool memory_pool_bounded(void)
 {
@@ -444,13 +502,15 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
 
 int main(int argc, char** argv)
 {
+    const bool valgrind = argc > 3 && strcmp(argv[3], "--valgrind") == 0;
+    const bool strict = argc > 3 && strcmp(argv[3], "--strict") == 0;
+    // --strict runs under vm.overcommit_memory 2, where pooled arenas mustn't keep their commits.
+    const bool keeps = memory_commit_unbounded();
     const bool arenas = memory_arenas();
-    const bool pool = memory_pool(arena_commit_unbounded()) && memory_pool_bounded();
+    const bool pool = !(strict && keeps) && memory_pool(keeps) && memory_pool_fit() && memory_pool_bounded();
     const bool partial = memory_partial_commit();
     const bool limited = memory_many_arenas();
     const bool layout = memory_layout_refusal();
-    const bool valgrind = argc > 3 && strcmp(argv[3], "--valgrind") == 0;
-    const bool strict = argc > 3 && strcmp(argv[3], "--strict") == 0;
     const bool commands = argc == 1 || (argc >= 3 && memory_commands(argv[1], argv[2], valgrind, strict));
     printf("memory resources: arenas=%s pool=%s partial=%s limited=%s layout=%s commands=%s\n", arenas ? "pass" : "FAIL", pool ? "pass" : "FAIL", partial ? "pass" : "FAIL", limited ? "pass" : "FAIL", layout ? "pass" : "FAIL", argc == 1 ? "not-run" : commands ? "pass" : "FAIL");
     return arenas && pool && partial && limited && layout && commands ? 0 : 1;
