@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Tier 0's tests (test-tier0): generated programs (tier0_generate.c) compiled by both paths, which must agree on every
 // per-entry column and every record; their records valid for x86_validate and their branch columns for
@@ -14,6 +15,7 @@
 // (tier0_program_functions); the interpreter (tier0_test_interpret); compiling, sizing and encoding a program
 // (tier0_test_build); the native run in a child process (tier0_test_run); the checks; the cross-check; the command.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1658,9 +1660,9 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                              bool keep)
 {
     const bool mixed = options.records != 0;
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char directory[512];
-    snprintf(directory, sizeof(directory), "%s/tier0-cross-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    snprintf(directory, sizeof(directory), "%s/tier0-cross-XXXXXX", temporary);
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
     uint8_t* code_bytes = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, BUSTER_TIER0_TEST_CODE_BYTES);

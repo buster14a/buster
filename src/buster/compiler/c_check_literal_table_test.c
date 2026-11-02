@@ -207,8 +207,8 @@ static void check_test_literal_table_contract(CheckTest* test)
     if (ready)
     {
         const uint32_t declaration = input.literal_tables->declaration;
-        const uint32_t begin = input.initializer_begins[declaration];
-        const uint32_t end = input.initializer_ends[declaration];
+        const uint32_t begin = check_sparse_get(input.initializer_begins, declaration);
+        const uint32_t end = check_sparse_get(input.initializer_ends, declaration);
         uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
         uint32_t found = 0;
         for (uint32_t token = begin + 1; token < end && found < BUSTER_CHECK_LITERAL_TABLE_BATCH; token += 1)

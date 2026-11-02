@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-streaming [--seed N] [--units N] [--cross-check] [--keep]: streaming.c's checks. Programs of generated units,
 // in both orders, with the default chunks and with 4 KB ones (many chunks, and forward fields across their boundaries),
@@ -14,6 +15,7 @@
 // functions, reach _start and give the functions' lines.
 // main.c includes this file after tier0_test.c (its interpreter), unwind_native_test.c and streaming.c.
 
+#include "buster/compiler/test_paths.h"
 typedef struct StreamTestTally StreamTestTally;
 struct StreamTestTally
 {
@@ -497,8 +499,8 @@ static int run_streaming_tests(int argc, char** argv)
     stream_benchmark_test_cpus(&tally);
     stream_test_profile_contract(&tally);
     char directory[PATH_MAX];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-streaming-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-streaming-XXXXXX", temporary);
     valid = valid && x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && mkdtemp(directory) != 0;
     Tier0Tables tables;
     memset(&tables, 0, sizeof(tables));

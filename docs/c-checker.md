@@ -27,6 +27,11 @@ reading source files or creating/replacing output. This applies to both tiers
 and to `--scalar`. The final resolved option state decides: disabling all
 requested sanitizers or OpenMP with later negative options permits ordinary,
 uninstrumented compilation; disabling only part of a sanitizer group does not.
+Coverage follows the same rule: a later `-fno-sanitize-coverage=` (or `-fsanitize-coverage=0`) that leaves no
+instrumenting feature permits compilation, and the refusal names the last `-fsanitize-coverage=` spelling still active.
+The bare `-fsanitize-coverage`, which clang doesn't take, is refused by name in the semantic driver's actions (`-c`, a
+link, `check` and the dumps), but not by the stand-alone preprocessor (`-E`)
+([checker guide](commands/checker.md#unsupported-hardening-requests)).
 Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeling.
 `-fsyntax-only` suppresses `-c` in either order. A sanitizer or `_OPENMP` macro
 observed in a non-emitting action is not a promise that Buster can generate the
@@ -1220,7 +1225,7 @@ contract. Diagnostic-only scans borrow complete checked roots, restore both
 arenas and never publish an initializer or a supposedly clean stream.
 
 String initializer lookup uses `CheckInput.string_ids`, the reader's token-to-literal
-index retained in the output arena. Every adjacent literal part names the same
+index retained in the output arena, a sparse column (`c_check_sparse.c`, #628). Every adjacent literal part names the same
 record. An array-valued expression also resolves its ordinary literal through
 its object identity (`token + 1`), preserving parenthesized string copies;
 predefined function-name arrays remain excluded from literal initialization.

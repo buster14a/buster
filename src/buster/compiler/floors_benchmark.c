@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception Copyright (c) 2026 David Gonzalez Martin. See LICENSE and
+
 // LICENSING.md. The floors' benchmark (docs/object-writer-and-linker.md, "The floors"): what the machine and the kernel
 // charge a linker however it works: creating its output, writing one file from several threads, the small calls it
 // makes per input file, faulting and copying memory, and a process's teardown. It takes over the floor programs of the
@@ -29,6 +30,7 @@
 // Each file's bytes are checked against the source after its last timed write, outside the time. The exit status is
 // 1 if the arguments are invalid, a call fails, or a file differs.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -880,7 +882,7 @@ int run_floors_benchmark(int argc, char** argv);
 
 int run_floors_benchmark(int argc, char** argv)
 {
-    const char* directory = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* directory = oracle_temporary_directory();
     uint32_t sections = (1u << FLOORS_BENCHMARK_SECTIONS) - 1;
     unsigned long long cpu = 2;
     uint64_t selected_size = 0;

@@ -673,6 +673,52 @@ static bool tier1_select_test_plan_again(const IrFunction* function, const IrDom
     return equal;
 }
 
+// The scalar path's costs column (Tier1SelectPlan.costs) against its definition, worked out here from the function alone:
+// each node the code computes costs its pattern's intrinsic cost and the costs of its distinct values that are tree
+// children (a single use, in its block, before it). Returns how many computed nodes' costs differ, or UINT64_MAX without
+// memory.
+static uint64_t tier1_select_test_plan_costs(const Tier1SelectPlan* plan, Arena* scratch)
+{
+    const IrFunction* function = plan->function;
+    const uint64_t mark = scratch->length;
+    const uint32_t count = function->instruction_count;
+    uint32_t* blocks = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* uses = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint64_t differ = blocks != 0 && uses != 0 ? 0 : UINT64_MAX;
+    for (uint32_t block = 0; differ == 0 && block < function->block_count; block += 1)
+    {
+        for (uint32_t node = function->block_offsets[block]; node < function->block_offsets[block + 1]; node += 1)
+        {
+            blocks[node] = block;
+            uses[node] = 0;
+        }
+    }
+    for (uint32_t node = 0; differ == 0 && node < count; node += 1)
+    {
+        const uint32_t operand_count = (uint32_t)ir_operand_count(function, node);
+        for (uint32_t p = 0; p < operand_count; p += 1)
+        {
+            const uint32_t value = ir_operand(function, node, p, blocks[node]).value;
+            uses[value < count ? value : count] += value < count ? 1 : 0;
+        }
+    }
+    for (uint32_t node = 0; differ != UINT64_MAX && node < count; node += 1)
+    {
+        const Tier1SelectPattern* pattern = &plan->patterns[node];
+        uint64_t expected = pattern->intrinsic_cost;
+        for (uint32_t operand = 0; operand < 3; operand += 1)
+        {
+            const uint32_t value = pattern->values[operand];
+            const bool repeated = (operand > 0 && pattern->values[0] == value) || (operand > 1 && pattern->values[1] == value);
+            const bool child = value < node && uses[value] == 1 && blocks[value] == blocks[node];
+            expected += !repeated && child ? plan->costs[value] : 0;
+        }
+        differ += plan->covered[node] == 0 && plan->costs[node] != expected ? 1 : 0;
+    }
+    arena_pop_to(scratch, mark);
+    return differ;
+}
+
 static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFunction* function, const uint8_t* registers, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -687,6 +733,7 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
         tier1_select_test_expect(test, tier1_select_test_plan_again(function, 0, &vector, false, output, scratch) && tier1_select_test_plan_again(function, 0, &scalar, false, output, scratch),
                                  "a verified function's plan without verification is the same, by both paths");
         tier1_select_test_expect(test, vector.estimated_cost <= scalar.estimated_cost, "bottom-up cover never costs more than maximal munch");
+        tier1_select_test_expect(test, tier1_select_test_plan_costs(&scalar, scratch) == 0, "each computed node's cost is its pattern's subtree cost, by the scalar path");
         const Tier1SelectPlan* plans[] = {&vector, &scalar};
         uint64_t random = UINT64_C(0x7a87b0c525ee96fb);
         for (uint32_t path = 0; path < 2; path += 1)
@@ -1300,9 +1347,9 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                 {
                     .instruction_count = count,
                     .block_count = 1,
-                    .extra_count = 7,
+                    .extra_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1,
                     .call_count = 1,
-                    .call_type_count = 7,
+                    .call_type_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1,
                     .parameter_count = 6,
                 };
                 IrFunction function;
@@ -1318,10 +1365,11 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                     {
                         tier1_select_test_node(&function, p, IR_PARAM, parameter_types[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
                     }
-                    for (uint32_t p = 0; p < 7; p += 1)
+                    // Room for one argument more than a call passes, the arguments past the seventh repeating them.
+                    for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1; p += 1)
                     {
-                        function.extra[p] = ordered[p];
-                        function.call_types[p] = parameter_types[ordered[p]];
+                        function.extra[p] = ordered[p % 7];
+                        function.call_types[p] = parameter_types[ordered[p % 7]];
                     }
                     function.calls[0] = (IrCall)
                     {
@@ -1380,7 +1428,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                     }
                     if (calls == 1 && arguments == 6 && result_types[type] == IR_I64)
                     {
-                        for (uint32_t refusal = 0; refusal < 7; refusal += 1)
+                        for (uint32_t refusal = 0; refusal < 9; refusal += 1)
                         {
                             const IrCall saved = function.calls[0];
                             if (refusal == 0)
@@ -1388,6 +1436,11 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 function.calls[0].variadic = true;
                             }
                             else if (refusal == 1)
+                            {
+                                function.calls[0].argument_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
+                                function.calls[0].parameter_count = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
+                            }
+                            else if (refusal == 7)
                             {
                                 function.calls[0].argument_count = 7;
                                 function.calls[0].parameter_count = 7;
@@ -1403,11 +1456,13 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 function.type[5] = IR_I1;
                                 function.call_types[0] = IR_I1;
                             }
-                            else if (refusal == 4)
+                            else if (refusal == 4 || refusal == 8)
                             {
-                                function.result_type = IR_F64;
-                                function.type[6] = IR_F64;
-                                function.calls[0].result_type = IR_F64;
+                                // A double's result is taken (#141), a long double's x87 one isn't.
+                                const uint8_t floating = refusal == 4 ? IR_F64 : IR_F80;
+                                function.result_type = floating;
+                                function.type[6] = floating;
+                                function.calls[0].result_type = floating;
                             }
                             else if (refusal == 5)
                             {
@@ -1425,11 +1480,13 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 const uint64_t mark = output.length;
                                 uint32_t failed = 0;
                                 const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &rejected, &failed);
-                                // A variadic call of integer arguments (its AL zero) and a call through a pointer are taken
-                                // (tier1_call_test.c runs both).
-                                const bool taken = refusal == 0 || refusal == 2;
-                                const Tier1SelectError expected = taken ? TIER1_SELECT_OK : refusal < 5 ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
-                                tier1_select_test_expect(test, error == expected && (taken || refusal >= 5 || failed == 6), "unsupported call ABI and invalid IR remain distinct");
+                                // A variadic call of integer arguments (its AL zero), a call through a pointer
+                                // (tier1_call_test.c runs both), a call of seven, its last on the stack, and a double's
+                                // result (#141, tier1_stack_test.c and tier1_float_test.c) are taken.
+                                const bool taken = refusal == 0 || refusal == 2 || refusal == 4 || refusal == 7;
+                                const bool unsupported = refusal < 5 || refusal == 8;
+                                const Tier1SelectError expected = taken ? TIER1_SELECT_OK : unsupported ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
+                                tier1_select_test_expect(test, error == expected && (taken || !unsupported || failed == 6), "unsupported call ABI and invalid IR remain distinct");
                                 tier1_select_test_expect(test, error == TIER1_SELECT_OK || (output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0), "call refusal preserves result and arena lengths");
                                 arena_pop_to(&output, mark);
                             }
@@ -3324,7 +3381,8 @@ static uint64_t tier1_select_test_variadic_oracle(uint32_t shape, const uint64_t
 // The variadic definition's plan (#789), by both paths: the overflow area's address a value of its own, its lea
 // (TIER1_RULE_STACK_ADDRESS), never folded into a memory operand, whose base is the frame's; the same plan without the
 // verification; and the uniform-register consumer, which has no frame to save the argument registers in, refusing it.
-// A function with its own ABI records is still refused whole.
+// With its own ABI records (#789), its parameter's in rdi, it selects; with a record of a shape selection doesn't take, it
+// is refused whole.
 static void tier1_select_test_variadic(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -3358,13 +3416,29 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
         IrFunction recorded;
         if (shape == 0 && tier1_select_test_variadic_function(&input, shape, true, &recorded))
         {
-            // Its own ABI records, which selection doesn't take yet, whatever else it has.
+            // Its own ABI records (#789): its parameter's, in rdi as the convention puts it, which selection takes; then a
+            // record of each shape it doesn't take, each refusing the function whole: a part in a stack slot (SPLIT), a high
+            // eightbyte alone, a register no argument takes, and a result LLVM returns through a hidden pointer that clang
+            // doesn't count (DEMOTED).
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const uint64_t mark = output.length;
-            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED &&
-                                               output.length == mark,
-                                     "a function with its own ABI records is refused whole");
+            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_OK,
+                                     "a function with its own ABI records of shapes selection takes selects");
+            arena_pop_to(&output, 0);
+            const IrPassed taken = recorded.passed[0];
+            for (uint32_t refused = 0; refused < 4; refused += 1)
+            {
+                recorded.passed[0] = taken;
+                recorded.result_abi = (AbiReturn){ 0 };
+                recorded.passed[0].location.kind = refused == 0 ? BUSTER_ABI_LOCATION_SPLIT : taken.location.kind;
+                recorded.passed[0].location.flags = refused == 1 ? BUSTER_ABI_FLAG_HIGH : taken.location.flags;
+                recorded.passed[0].location.registers[0] = refused == 2 ? BUSTER_ABI_R10 : taken.location.registers[0];
+                recorded.result_abi.flags = refused == 3 ? BUSTER_ABI_FLAG_DEMOTED : 0;
+                const uint64_t mark = output.length;
+                tier1_select_test_expect(test, tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED && output.length == mark,
+                                         "a function with an ABI record of a shape selection doesn't take is refused whole");
+            }
+            recorded.passed[0] = taken;
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&input, 0);
@@ -3759,6 +3833,8 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+#include "buster/compiler/tier1_select_burs_test.c"
+
 static int run_tier1_select_tests(int argc, char** argv)
 {
     int result = 1;
@@ -3814,6 +3890,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_indirect(&test);
             tier1_select_test_indirect_review(&test);
             tier1_select_test_variadic(&test);
+            tier1_select_test_burs(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);
