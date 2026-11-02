@@ -19,6 +19,19 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
+Sanitizer instrumentation and OpenMP code generation are not implemented
+([#1112](https://github.com/buster14a/buster/issues/1112)). Object emission
+(including `check -c`) and direct linking reject an enabled `-fsanitize=...`,
+instrumenting `-fsanitize-coverage=...`, or `-fopenmp[=runtime]` by name before
+reading source files or creating/replacing output. This applies to both tiers
+and to `--scalar`. The final resolved option state decides: disabling all
+requested sanitizers or OpenMP with later negative options permits ordinary,
+uninstrumented compilation; disabling only part of a sanitizer group does not.
+Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeling.
+`-fsyntax-only` suppresses `-c` in either order. A sanitizer or `_OPENMP` macro
+observed in a non-emitting action is not a promise that Buster can generate the
+corresponding instrumentation or parallel runtime calls.
+
 The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
 `-Werror` does not guarantee the warnings or build failures Clang gives for the
 same source: some warnings are not produced, and some produced warnings are not
@@ -308,12 +321,14 @@ does, each rule checked against clang's answers on probes of it:
   the place's only when it is (#480's fourth review): such a count leaves the
   loop's pragmas unsupported, including when a state or count of its category
   shares its pragma. At file scope, where clang reads no count, the pragma is
-  an error. Placement, duplicate and incompatible hints wait for the whole
-  annotated statement (#503): its exclusive end is the reader's barrier and
-  the ordering position of its report, so the diagnostic graph includes the
-  statement's type errors too. The printed source is separate: conflicts at
-  the later pragma's `loop` or hint name, placement at the statement's first
-  token, with clang's directive names and messages. Nested statements finishing
+  an error, reported at the directive with the source spelling (`invalid
+  '#pragma GCC unroll' directive`). Placement, duplicate and incompatible
+  hints wait for the whole annotated statement (#503): its exclusive end is
+  the reader's barrier and the ordering position of its report, so the
+  diagnostic graph includes the statement's type errors too. The printed
+  source is separate: conflicts at the later pragma's `loop` or hint name,
+  placement at the statement's first token, with clang's directive names and
+  messages (where `GCC unroll` is `unroll`). Nested statements finishing
   together report the inner hints first. The existing postorder subtree ends
   supply the boundary; the pragma reader follows parent links to the statement
   root without scanning its body. Only a rejected unit retains one cold
@@ -334,6 +349,20 @@ does, each rule checked against clang's answers on probes of it:
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
+- **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
+  `#pragma fenv_access(on|off)` at file scope or a compound's start updates
+  the same runtime `FENV_ACCESS` column as the STDC form, with the same
+  nested-scope restoration; `#pragma clang fp contract(on|off|fast)` retains
+  its state (`fast` distinct) without contracting anything; and
+  `#pragma float_control(precise, on)` records the precise policy already used.
+  The handler names are not macro-expanded, but their argument words are, so a
+  spelling that was a macro anywhere in the unit is refused conservatively
+  rather than read unexpanded. Other arguments, stack operations, additional
+  clauses, malformed forms and invalid placements are hard semantic-pragma
+  errors. Clang enables `fenv_access` only with `-fms-extensions` (or a strict
+  floating model) and silently ignores a mid-block spelling; buster refuses
+  that option, recognizes these spellings unconditionally as #1135 asks, and
+  refuses the placements it cannot apply.
 - **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
   `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
   number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
@@ -2801,7 +2830,15 @@ warning and error totals with Clang's singular/plural spelling; clean units prin
 no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
 does in Clang. Both output paths share the publication gate, including deferred
 preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
-graph's construction.
+graph's construction. `-Wfatal-errors` publishes the first command-line or default error, including a warning promoted
+to one by `-Werror`, as Clang's fatal error and stops publication there; warnings that remain warnings are unaffected.
+A source pragma's `error` mapping stays an ordinary error, while its `fatal` mapping is fatal, as in Clang.
+`-Wno-fatal-errors` restores the ordinary budget, and the last of the two options on the command line decides. The
+standalone `-E` command and the source driver's preprocessing, parsing and semantic groups all read the option; the
+standalone `parse` command reads it too, but keeps its generated-prefix behavior after a preprocessing fatal rather
+than parsing the prefix the source driver checks. The preprocessing warnings' own `-Werror` promotion (`#warning`,
+macro redefinition and `#pragma message`) and the stream warnings' option suffix are separate policies and are
+unchanged here.
 
 The source driver collects preprocessing, parser and checker groups before
 publication (#698). Their order follows expansion-output boundaries and proven
@@ -4374,10 +4411,12 @@ GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
-not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
-active `-fopenmp` request, including alternate runtime selections, is refused
-until execution semantics are implemented; it must not silently produce serial
-code. A subsequent `-fno-openmp` restores the ignore behavior.
+not a definition of `_OPENMP`, determines whether OpenMP was requested. An active
+`-fopenmp` request, including alternate runtime selections, must not silently
+produce serial code: a code-generating action refuses the option itself before
+reading source (the instrumentation boundary in the introduction), while a
+non-emitting action refuses each `#pragma omp` directive through the checker. A
+subsequent `-fno-openmp` restores the ignore behavior for both.
 
 Known unsupported semantic effects remain hard, named errors, including
 `redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing

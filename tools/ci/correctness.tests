@@ -223,6 +223,13 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 # also runs the sections that share the type table. Whole, the command took 141 s on a hosted runner with 2 CPUs,
 # of which it kept 1.03 busy.
 ./build/compiler test-checker --seed 133 --part 1/4
+== Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
+# #1048: each file's selected program lowered by the task loop and with c_check_program_templates.c's templates forced,
+# on any host, every function's entries, locals, calls and arguments the same. sqlite3.c with test-ir-source's options.
+unset CPATH C_INCLUDE_PATH
+corpus=$BUSTER_CORPUS
+./build/compiler test-lowering-templates $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-lowering-templates --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
 # #131: each function -c compiles lowered by both paths, which must agree and verify, then promoted by both of
 # ssa_ir.c's paths, whose results verify with dominance. sqlite3.c with benchmark-backend-source's options, and
