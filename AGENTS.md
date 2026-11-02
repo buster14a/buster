@@ -1022,12 +1022,15 @@ designs and the compilers already built this way.
   `unwind_rows_scalar`), e.g. a probe loop's CFA in r11. `emitted_verify_frames`
   proves the events against the records and their control flow (a dataflow of
   register values as CFA offsets, entry values and save slots, checked at every
-  reached record), with `--verify` and in the tests. `emitted_code_test.c`
+  reached record; a rule that fails past a form `x86_semantics.c` doesn't cover,
+  such as `monitorx`'s leaf's, unproven rather than refuted, which the driver
+  keeps), with `--verify` and in the tests. `emitted_code_test.c`
   supplies `test-emitted-code [--seed N] [--count N] [--cross-check] [--keep]`:
   row programs against the fixed writer for every descriptor, Tier 0's programs
   and the Tier 1 planner's every flag against the previous readers byte for byte,
-  mutants refuted, and with `--cross-check` a probe frame natively under gdb at
-  every instruction.
+  mutants refuted, uncovered forms' verdicts and `--verify -c` of `monitorx`'s
+  and `mwaitx`'s leaves, and with `--cross-check` a probe frame natively under
+  gdb at every instruction.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the

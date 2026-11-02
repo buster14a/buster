@@ -241,11 +241,21 @@ pointer) is trusted not to reach the save area, which the frame's layout keeps
 apart; code nothing reaches isn't checked; and `jmp r11` is a tail call (Tier 0's
 and Tier 1's through a pointer), any other indirect jump a jump within the
 function to its labels. An assembly template's code is the user's and isn't
-verified. It is scalar and runs with `--verify` and in the tests only, off the
-compile's path; its memory (a state per block leader, two words per record) is
-given back. It rejects malformed events (`EMITTED_VERIFY_INVALID`), refutes
-rules the code doesn't establish (`EMITTED_VERIFY_REFUTED`, with the record and
-the last event applied) and refuses states remembered deeper than 16
+verified. A form `x86_semantics.c` doesn't cover gets its conservative record,
+which may write any register, rsp among them, and any byte: a rule that fails on
+a path through such a record is unproven (`EMITTED_VERIFY_UNPROVEN`), neither
+proved nor refuted, and the driver keeps the frame, as Tier 0's fixed-frame
+analyzer leaves such code (`UNWIND_ERROR_UNSUPPORTED`). An x86 builtin's
+per-unit leaf of such a form is one: `monitorx`'s and `mwaitx`'s, which the
+compiler's own `main.c` compiled with `--verify -c -march=znver5` emits. The
+check goes on past an unproven rule, so that a refutation anywhere in the code,
+on a path no such record is on, still wins. It is scalar and runs with
+`--verify` and in the tests only, off the compile's path; its memory (a state
+per block leader, two words per record) is given back. It rejects malformed
+events (`EMITTED_VERIFY_INVALID`), refutes rules the code doesn't establish
+(`EMITTED_VERIFY_REFUTED`, with the record and the last event applied), leaves
+rules past an uncovered form unproven (`EMITTED_VERIFY_UNPROVEN`, the first
+one's record) and refuses states remembered deeper than 16
 (`EMITTED_VERIFY_UNSUPPORTED`).
 
 ### Tier 1's `-g`
@@ -301,6 +311,11 @@ compiles and runs the resulting DWARF.
   Tier 0's protocol by the fixed reader), byte for byte; and with probes past a
   page without a frame pointer, a row program with its CFA in r11 that the fixed
   reader refuses; with the same mutants refuted;
+- uncovered forms: `monitorx`'s leaf's return unproven, not refuted, and proved
+  without it; a push before `monitorx` that its events don't describe refuted; a
+  return that one path through `monitorx` reaches unproven; a push off its paths
+  refuted after an unproven return; and the driver's `--verify -c
+  -march=znver5` of `monitorx`'s and `mwaitx`'s leaves, by both paths;
 - with `--cross-check` (GNU as and ld, gdb): that probe frame natively, its CFI
   the row writer's, gdb stopped at every instruction of it (the loop's each time
   it runs), each backtrace reaching the caller, whose frame must have its
@@ -387,5 +402,6 @@ Remaining beyond this change:
 - The driver requests no probes (`BUSTER_TIER1_FRAME_PROBE_STACK`); the probe
   frame's unwinding is proved and checked natively in isolation only, as the
   issue asked, before any production option.
-- The verifier's trust boundary (stores it doesn't follow, unreached code) and
-  its scalar implementation, which runs with `--verify` and in the tests alone.
+- The verifier's trust boundary (stores it doesn't follow, unreached code, rules
+  past a form `x86_semantics.c` doesn't cover, which it leaves unproven) and its
+  scalar implementation, which runs with `--verify` and in the tests alone.

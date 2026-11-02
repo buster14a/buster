@@ -617,8 +617,9 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
 // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
 // room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
-// their control flow too (emitted_verify_frames: but an assembly template's code, the user's), and where Tier 0's
-// fixed-frame analyzer takes the records (unwind_tier0, which reads them alone), its frame must be the same CFI.
+// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, and a rule a form
+// x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
+// (unwind_tier0, which reads them alone), its frame must be the same CFI.
 // Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason.
 static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
                                                    Arena* scratch, UnwindFunction* frame, const char** reason)
@@ -636,10 +637,13 @@ static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint
     }
     if (status == CHECK_PROGRAM_OK && verify && !code->assembly)
     {
+        // A frame the verifier can't prove past a form x86_semantics.c doesn't cover (an x86 builtin's leaf of one)
+        // stands, as Tier 0's analyzer below leaves it.
         const EmittedVerdict verdict = emitted_verify_frames(code, scratch);
-        status = verdict.error == EMITTED_VERIFY_OK ? status : verdict.error == EMITTED_VERIFY_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
-        *reason = verdict.error == EMITTED_VERIFY_OK ? 0 : verdict.error == EMITTED_VERIFY_MEMORY ? "no room to verify a function's frame events" :
-                                                                                                     "internal compiler error: a function's frame events aren't its code's";
+        const bool stands = verdict.error == EMITTED_VERIFY_OK || verdict.error == EMITTED_VERIFY_UNPROVEN;
+        status = stands ? status : verdict.error == EMITTED_VERIFY_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
+        *reason = stands ? 0 : verdict.error == EMITTED_VERIFY_MEMORY ? "no room to verify a function's frame events" :
+                                                                        "internal compiler error: a function's frame events aren't its code's";
     }
     if (status == CHECK_PROGRAM_OK && verify && !code->assembly)
     {

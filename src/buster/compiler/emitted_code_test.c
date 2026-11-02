@@ -24,6 +24,9 @@
 //   the loop): proved, lowered to a row program, the fixed reader refusing it, and the same mutations refuted, the loop's
 //   exit rule anchored inside the loop and a single allocation's rule after it (what a fixed writer would say) among
 //   them;
+// - uncovered forms (emitted_test_uncovered): code through monitorx, whose conservative record may write rsp, unproven
+//   where a rule fails on a path through it and refuted where one fails off its paths, though after an unproven one;
+//   and the driver's --verify -c -march=znver5 of monitorx's and mwaitx's leaves, by both paths;
 // - with --cross-check (GNU as and ld, gdb): that probe frame natively, its CFI the row writer's, gdb stopped at every
 //   instruction of it, the probe loop's each time it runs, whose backtrace must reach the caller and whose caller's
 //   frame must have its callee-saved registers and its rsp as they were (a third rule: rsp the CFA).
@@ -299,8 +302,9 @@ static void emitted_test_mutants(EmittedTest* test, const EmittedCode* code, uin
             mutant.frames = events;
             const EmittedVerdict verdict = emitted_verify_frames(&mutant, &test->arena);
             test->mutants += 1;
-            test->refuted += verdict.error != EMITTED_VERIFY_OK;
-            emitted_test_expect(test, verdict.error != EMITTED_VERIFY_OK, way == 0 ? "a frame event's value moved is refuted" : "a frame event anchored early is refuted",
+            const bool refuted = verdict.error == EMITTED_VERIFY_REFUTED || verdict.error == EMITTED_VERIFY_INVALID;
+            test->refuted += refuted;
+            emitted_test_expect(test, refuted, way == 0 ? "a frame event's value moved is refuted" : "a frame event anchored early is refuted",
                                 id * 1024 + e);
         }
         tried += mutable;
@@ -464,6 +468,77 @@ static bool emitted_test_frame_code(const Tier1Frame* frame, uint32_t used, bool
         tier1_frame_emit_add(buffer, (X86Instruction){ .form = X86_FORM_RET });
     }
     return valid;
+}
+
+// One case of emitted_test_uncovered: `count` records with a branch from `branch` to `target` (UINT32_MAX for none) and
+// no frame events (the CIE's rules), whose verdict must be `expected` at `record`.
+static void emitted_test_uncovered_case(EmittedTest* test, X86Instruction* records, uint32_t count, uint32_t branch, uint32_t target, EmittedVerifyError expected,
+                                        uint32_t record, const char* check, uint64_t id)
+{
+    uint32_t branches[1] = { branch };
+    uint32_t targets[1] = { target };
+    const EmittedCode code = {
+        .records = records,
+        .count = count,
+        .branches = branches,
+        .targets = targets,
+        .branch_count = branch != UINT32_MAX ? 1 : 0,
+        .frame_status = EMITTED_FRAME_DESCRIBED,
+    };
+    const EmittedVerdict verdict = emitted_verify_frames(&code, &test->arena);
+    emitted_test_expect(test, verdict.error == expected && (expected == EMITTED_VERIFY_OK || verdict.record == record), check, id);
+}
+
+// Code through a form x86_semantics.c doesn't cover, whose conservative record may write rsp (monitorx's, an x86
+// builtin's per-unit leaf, which main.c's --verify compile emits): a rule it leaves unknown is unproven, not refuted, on
+// every path through it, and the driver keeps such a frame; a rule that fails before it, or on a path that doesn't go
+// through it, is refuted, though an unproven one comes first. Then the driver's --verify compile of the leaves (`-c`,
+// by both paths), which no host needs MWAITX for.
+static void emitted_test_uncovered(EmittedTest* test, const char* directory)
+{
+    const X86Instruction monitorx = { .form = X86_FORM_MONITORX };
+    const X86Instruction ret = { .form = X86_FORM_RET };
+    const X86Instruction push = { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_RBX };
+    const X86Instruction pop = { .form = X86_FORM_POP_R64, .rm = X86_REGISTER_RBX };
+    const X86Instruction test_rax = tier1_frame_emit_register(X86_FORM_TEST_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RAX);
+    const X86Instruction jne = { .form = X86_FORM_JNE_REL8 };
+    X86Instruction leaf[] = { tier1_frame_emit_register(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RDI),
+                              tier1_frame_emit_register(X86_FORM_MOV_R32_RM32, X86_REGISTER_RCX, X86_REGISTER_RSI), monitorx, ret };
+    emitted_test_uncovered_case(test, leaf, 4, UINT32_MAX, UINT32_MAX, EMITTED_VERIFY_UNPROVEN, 3, "monitorx's leaf's return is unproven, not refuted", 1);
+    leaf[2] = leaf[1];
+    emitted_test_uncovered_case(test, leaf, 4, UINT32_MAX, UINT32_MAX, EMITTED_VERIFY_OK, 0, "the leaf without monitorx is proved", 2);
+    X86Instruction early[] = { push, monitorx, pop, ret };
+    emitted_test_uncovered_case(test, early, 4, UINT32_MAX, UINT32_MAX, EMITTED_VERIFY_REFUTED, 1, "a push its events don't describe, before monitorx, is refuted", 3);
+    X86Instruction joined[] = { test_rax, jne, monitorx, ret };
+    emitted_test_uncovered_case(test, joined, 4, 1, 3, EMITTED_VERIFY_UNPROVEN, 3, "a return that one path through monitorx reaches is unproven", 4);
+    X86Instruction apart[] = { test_rax, jne, monitorx, ret, push, ret };
+    emitted_test_uncovered_case(test, apart, 6, 1, 4, EMITTED_VERIFY_REFUTED, 5, "a push off monitorx's path is refuted after an unproven return", 5);
+    char source[512], object[512], err[512];
+    snprintf(source, sizeof(source), "%s/leaves.c", directory);
+    snprintf(object, sizeof(object), "%s/leaves.o", directory);
+    snprintf(err, sizeof(err), "%s/leaves.err", directory);
+    static const char text[] = "int x;int wait_for(int n){__builtin_ia32_monitorx(&x,0,0);__builtin_ia32_mwaitx(2,0,(unsigned)n);return x+n;}\n"
+                               "int caller(int n){return wait_for(n)+1;}\n";
+    const bool written = debug_test_write_file(source, (const uint8_t*)text, sizeof(text) - 1);
+    emitted_test_expect(test, written, "write the leaves' source", 6);
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* arguments[12] = { "/proc/self/exe", "--lanes", "1", "--verify", "-c", "-march=znver5", "-o", object, source };
+        uint32_t used = 9;
+        arguments[used] = path != 0 ? "--scalar" : 0;
+        used += path != 0;
+        arguments[used] = 0;
+        const bool compiled = object_test_run(arguments, "/dev/null", err) == 0;
+        emitted_test_expect(test, compiled, path != 0 ? "--scalar --verify -c compiles monitorx's and mwaitx's leaves" : "--verify -c compiles monitorx's and mwaitx's leaves", 7 + path);
+        if (!compiled && test->failures < 20)
+        {
+            const String8 errors = object_test_read_file(&test->arena, err);
+            fprintf(stderr, "  %.*s", (int)errors.length, errors.pointer != 0 ? (const char*)errors.pointer : "");
+        }
+    }
+    unlink(source);
+    unlink(object);
+    unlink(err);
 }
 
 // The previous Tier 1 adapter's reading of a frame (c_check_tier1.c's check_tier1_frame before #1056): its frame as Tier
@@ -806,6 +881,14 @@ static int run_emitted_code_tests(int argc, char** argv)
         emitted_test_rows(&test);
         emitted_test_tier0(&test, seed, rounds);
         emitted_test_tier1(&test);
+        char directory[] = "/tmp/buster-emitted-leaves-XXXXXX";
+        const bool made = mkdtemp(directory) != 0;
+        emitted_test_expect(&test, made, "make a directory for the leaves' compile", 0);
+        if (made)
+        {
+            emitted_test_uncovered(&test, directory);
+            rmdir(directory);
+        }
         if (cross)
         {
             emitted_test_native(&test, keep);

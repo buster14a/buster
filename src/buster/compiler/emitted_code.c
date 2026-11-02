@@ -88,6 +88,11 @@ typedef enum EmittedVerifyError
     EMITTED_VERIFY_REFUTED,
     // States remembered deeper than the verifier follows.
     EMITTED_VERIFY_UNSUPPORTED,
+    // A rule the verifier can't establish where a record of a form x86_semantics.c doesn't cover is on a path that
+    // reaches it: that form's conservative record may write any register, rsp among them, and any byte, so the rule is
+    // neither proved nor refuted (as Tier 0's analyzer leaves such code, UNWIND_ERROR_UNSUPPORTED). An x86 builtin's
+    // leaf of such a form (monitorx's) is one.
+    EMITTED_VERIFY_UNPROVEN,
     EMITTED_VERIFY_MEMORY,
 } EmittedVerifyError;
 
@@ -273,7 +278,8 @@ static bool emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b
 // What the verifier knows at a point of the code, beside the rules: each general register's value as the CFA plus an
 // offset (BUSTER_EMITTED_UNKNOWN where it isn't one), which register's value at entry each holds (BUSTER_EMITTED_NONE
 // for none), and where each register's entry value is saved in the frame, as an offset from the CFA (the return
-// address's, 16, at CFA - 8 from the entry). Registers by the encoder's numbering.
+// address's, 16, at CFA - 8 from the entry). Registers by the encoder's numbering. `unproven`: a record of a form
+// x86_semantics.c doesn't cover is on a path that reaches the point (EMITTED_VERIFY_UNPROVEN).
 typedef struct EmittedState EmittedState;
 struct EmittedState
 {
@@ -281,6 +287,7 @@ struct EmittedState
     uint8_t holds[16];
     int32_t slots[BUSTER_EMITTED_TRACKED];
     bool reached;
+    bool unproven;
 };
 
 // The rules the events give at a point: the CFA's register (DWARF) and offset, and each register's rule.
@@ -367,6 +374,8 @@ static bool emitted_meet(EmittedState* into, const EmittedState* from)
             into->slots[h] = slot ? BUSTER_EMITTED_UNKNOWN : into->slots[h];
             changed |= slot;
         }
+        changed |= from->unproven && !into->unproven;
+        into->unproven |= from->unproven;
     }
     return changed;
 }
@@ -433,7 +442,8 @@ static bool emitted_indirect(const X86Instruction* record)
 // realignments of the stack and frame registers, loads' effective addresses, calls (which preserve the callee-saved
 // registers and rsp, and leave the others unknown), stores into the frame (which overwrite the slots they reach), and
 // any other write of a register (its value unknown), by x86_semantics.c's resolved effects. A store through a register
-// the verifier doesn't follow is trusted not to reach the save area (the frame's own layout keeps it apart).
+// the verifier doesn't follow is trusted not to reach the save area (the frame's own layout keeps it apart). A form
+// x86_semantics.c doesn't cover writes every register and slot, and marks the state unproven.
 static void emitted_transfer(const X86Instruction* record, EmittedState* state)
 {
     const uint32_t form = record->form & ~BUSTER_X86_FORM_FIXUP;
@@ -503,6 +513,8 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
         // With the opmask column, so that a record of opmask registers (AVX-512's masks) writes only what it writes.
         uint16_t opmasks = 0;
         x86_instruction_resolve(record, &reads, &writes, &opmasks);
+        const X86Effects* effects = x86_effects(record->form);
+        state->unproven |= effects->operation == X86_OPERATION_NONE;
         for (uint32_t g = 0; g < 16; g += 1)
         {
             if (((writes >> g) & 1) != 0)
@@ -513,7 +525,6 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
         if ((writes & BUSTER_X86_RESOURCE_MEMORY) != 0)
         {
             const bool frame_store = !direct && (record->mode == BUSTER_X86_MEMORY_BASE) && record->rm < 16;
-            const X86Effects* effects = x86_effects(record->form);
             if (frame_store)
             {
                 const uint32_t bytes = effects->width != 0 ? effects->width : 64;
@@ -649,9 +660,10 @@ static bool emitted_holds(const EmittedRules* rules, const EmittedState* state)
 // branch to its target and on, each indirect jump to every label, a ret, a trap or a tail call's jump ending its path)
 // follows each register's value as the CFA plus an offset, which register's entry value each holds and where in the
 // frame each entry value is saved (EmittedState), to its fixpoint, the paths' meet at each block; then each reached
-// record is checked against the rules (emitted_holds). Code nothing reaches isn't checked. Events at a boundary's two
-// sides both hold from the record after it: a layout's padding between them executes nothing. An assembly template's
-// code isn't the compiler's: its caller doesn't verify it. Scalar: this runs with --verify and in the tests, off the
+// record is checked against the rules (emitted_holds); a rule that fails on a path through a form x86_semantics.c
+// doesn't cover is unproven rather than refuted. Code nothing reaches isn't checked. Events at a boundary's two sides
+// both hold from the record after it: a layout's padding between them executes nothing. An assembly template's code
+// isn't the compiler's: its caller doesn't verify it. Scalar: this runs with --verify and in the tests, off the
 // compile's path. Its memory, the leaders' states and two words per record, from `scratch`, is given back.
 static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scratch)
 {
@@ -793,6 +805,8 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
     uint32_t event = 0;
     EmittedState state = { .reached = false };
     EmissionAnchor previous = { 0 };
+    // The first rule left unproven, which a refutation anywhere in the code overrides.
+    EmittedVerdict unproven = { .error = EMITTED_VERIFY_OK };
     for (uint32_t i = 0; verdict.error == EMITTED_VERIFY_OK && i <= count; i += 1)
     {
         for (; verdict.error == EMITTED_VERIFY_OK && event < code->frame_count && code->frames[event].at.boundary <= i; event += 1)
@@ -812,9 +826,11 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
         state = leaders[i] != UINT32_MAX ? states[leaders[i]] : state;
         if (state.reached && !emitted_holds(&rules, &state))
         {
-            verdict.error = EMITTED_VERIFY_REFUTED;
-            verdict.record = i;
-            verdict.event = event != 0 ? event - 1 : code->frame_count;
+            const EmittedVerdict failed = { .error = state.unproven ? EMITTED_VERIFY_UNPROVEN : EMITTED_VERIFY_REFUTED,
+                                            .record = i,
+                                            .event = event != 0 ? event - 1 : code->frame_count };
+            verdict = state.unproven ? verdict : failed;
+            unproven = state.unproven && unproven.error == EMITTED_VERIFY_OK ? failed : unproven;
         }
         if (state.reached)
         {
@@ -830,6 +846,7 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
     {
         verdict = (EmittedVerdict){ .error = EMITTED_VERIFY_INVALID, .record = count, .event = event };
     }
+    verdict = verdict.error == EMITTED_VERIFY_OK ? unproven : verdict;
     arena_pop_to(scratch, mark);
     return verdict;
 }
