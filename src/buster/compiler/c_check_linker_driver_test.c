@@ -66,8 +66,8 @@ static void check_test_driver_linker(CheckTest* test, const char* clang, const c
     } paths[] = {
         { { "-Wl,-rpath,/first,-rpath,/second" }, "/first:/second", false },
         { { "-Xlinker", "-rpath", "-Xlinker", "/a,b" }, "/a,b", false },
-        { { "-Wl,-rpath", "-Xlinker", "$ORIGIN/../lib", "-Wl,-R/last" }, "$ORIGIN/../lib:/last", false },
-        { { "-Wl,-R,/short" }, "/short", false },
+        { { "-Wl,-rpath", "-Xlinker", "$ORIGIN/../lib", "-Wl,-R/nonexistent-buster-rpath-last" }, "$ORIGIN/../lib:/nonexistent-buster-rpath-last", false },
+        { { "-Wl,-R,/nonexistent-buster-rpath-short" }, "/nonexistent-buster-rpath-short", false },
         { { "-Wl,--rpath=/equals=here" }, "/equals=here", false },
         { { "-Wl,-rpath=/one", "-Wl,--rpath,/two" }, "/one:/two", false },
         { { "-Wl,--disable-new-dtags,-rpath,legacy" }, "legacy", true },
@@ -98,6 +98,28 @@ static void check_test_driver_linker(CheckTest* test, const char* clang, const c
         }
         check_test_expect(test, check_test_driver_same_files(vector, output), "linker paths produce identical scalar/vector ELF bytes");
     }
+    // -R is lld's --rpath alias, but GNU ld's -R FILE reads symbols (--just-symbols). An existing file must be
+    // refused rather than quietly becoming a runtime path; a directory keeps the lld meaning.
+    {
+        char rpath_file[512];
+        char rpath_directory[512];
+        snprintf(rpath_file, sizeof(rpath_file), "-Wl,-R,%s", source);
+        snprintf(rpath_directory, sizeof(rpath_directory), "-Wl,-R,%s", directory);
+        const char* file_option[] = { rpath_file };
+        const char* directory_option[] = { rpath_directory };
+        char* text = NULL;
+        unlink(output);
+        const int file_status = check_test_driver_linker_command(executable, source, output, false, file_option, 1, &text);
+        check_test_expect(test, file_status != 0 && text != NULL && strstr(text, "unsupported linker option '-R") != NULL && access(output, F_OK) != 0,
+                          "-R FILE is refused as GNU ld's --just-symbols form");
+        free(text);
+        text = NULL;
+        unlink(vector);
+        const int directory_status = check_test_driver_linker_command(executable, source, vector, false, directory_option, 1, &text);
+        check_test_expect(test, directory_status == 0 && check_test_driver_linker_path(vector, directory, false),
+                          "-R DIR keeps the lld runtime-path meaning");
+        free(text);
+    }
     static const struct
     {
         const char* options[4];
@@ -120,6 +142,12 @@ static void check_test_driver_linker(CheckTest* test, const char* clang, const c
         { { "-Xlinker", "--version" }, "unsupported linker option '--version'" },
         { { "-Wl," }, "unsupported linker option ''" },
         { { "-Wl,--build-id," }, "unsupported linker option ''" },
+        { { "-Wl" }, "missing argument to linker option '-Wl'" },
+        { { "-Wl=--rpath,/x" }, "unsupported linker option '-Wl=--rpath,/x'" },
+        { { "-l" }, "usage: compiler" },
+        { { "-L" }, "usage: compiler" },
+        { { "-l", "" }, "usage: compiler" },
+        { { "-L", "" }, "usage: compiler" },
         { { "-Xlinker" }, "missing argument to linker option '-Xlinker'" },
         { { "-Wl,-rpath" }, "missing argument to linker option '-rpath'" },
         { { "-Wl,-e" }, "missing argument to linker option '-e'" },

@@ -103,7 +103,9 @@ archive may hold LTO members nothing needs; a `--whole-archive` member is
 loaded and refused.
 
 Runtime search paths use `-rpath PATH`, `--rpath PATH`, either equals form,
-or `-R PATH` / `-RPATH`. Repeated paths are joined with `:` without expansion.
+or `-R PATH` / `-RPATH`. `-R` follows lld's alias for `--rpath`; an existing
+non-directory argument is GNU ld's `--just-symbols` form and is refused rather
+than silently reinterpreted. Repeated paths are joined with `:` without expansion.
 Dynamic PIE and shared-library output record `DT_RUNPATH` by default;
 `--disable-new-dtags` selects `DT_RPATH`, and `--enable-new-dtags` restores
 RUNPATH. The last dtags option wins. Static output refuses runtime paths.

@@ -1463,6 +1463,12 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
         foreign_test_expect(tally, image.valid && found == 1 && needed[0] != 0 && strcmp(needed[0], "libfdriver_choice.so") == 0,
                             "PIE defaults to shared library with different result from same-name archive", name);
     }
+    {
+        char* static_arguments[] = { (char*)"-static", (char*)"-rpath", (char*)"$ORIGIN", files->objects[FOREIGN_DRIVER_TEST_CALL] };
+        foreign_driver_test_invoke(tally, directory, "static_rpath_refused", "-o", static_arguments, BUSTER_ARRAY_LENGTH(static_arguments), false, 0, arena);
+        char* file_arguments[] = { (char*)"-pie", (char*)"-R", files->objects[FOREIGN_DRIVER_TEST_CALL] };
+        foreign_driver_test_invoke(tally, directory, "just_symbols_refused", "-o", file_arguments, BUSTER_ARRAY_LENGTH(file_arguments), false, 0, arena);
+    }
     for (uint32_t mode = 0; mode < 3; mode += 1)
     {
         char name[64];

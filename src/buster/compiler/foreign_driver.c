@@ -169,7 +169,7 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
             valid = driver->linker.error == NULL && !driver->linker.resource;
             if (!valid)
             {
-                linker_options_diagnose(&driver->linker);
+                linker_options_diagnose(&driver->linker, "link-foreign: ");
             }
         }
         else if (foreign_value)
@@ -346,7 +346,7 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         valid = linker_options_finish(&driver->linker, arena);
         if (!valid)
         {
-            linker_options_diagnose(&driver->linker);
+            linker_options_diagnose(&driver->linker, "link-foreign: ");
         }
     }
     if (driver->linker.entry.pointer != NULL)

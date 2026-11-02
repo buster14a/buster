@@ -35,9 +35,11 @@ static bool linker_options_initialize(LinkerOptions* options, uint32_t capacity,
 static bool linker_options_parse(LinkerOptions* options, int count, char** arguments, int* index)
 {
     const char* argument = arguments[*index];
+    // lld's -R is --rpath. GNU ld's -R FILE is --just-symbols, and only a directory argument is --rpath. Detect the
+    // existing-file form below instead of silently changing its meaning.
+    const bool legacy_rpath = argument[0] == '-' && argument[1] == 'R';
     const bool path = strcmp(argument, "-rpath") == 0 || strcmp(argument, "--rpath") == 0 ||
-                      strncmp(argument, "-rpath=", 7) == 0 || strncmp(argument, "--rpath=", 8) == 0 ||
-                      (argument[0] == '-' && argument[1] == 'R');
+                      strncmp(argument, "-rpath=", 7) == 0 || strncmp(argument, "--rpath=", 8) == 0 || legacy_rpath;
     const bool entry = strcmp(argument, "-e") == 0 || strcmp(argument, "--entry") == 0 || strncmp(argument, "--entry=", 8) == 0;
     const bool keyword = strncmp(argument, "-z", 2) == 0;
     bool handled = true;
@@ -59,7 +61,19 @@ static bool linker_options_parse(LinkerOptions* options, int count, char** argum
         }
         else if (path)
         {
-            if (options->path_count < options->path_capacity)
+            bool file_form = false;
+            if (legacy_rpath)
+            {
+                struct stat info;
+                file_form = stat(value, &info) == 0 && !S_ISDIR(info.st_mode);
+            }
+            if (file_form)
+            {
+                // GNU ld would read these symbols. Refuse rather than store the path as a runpath.
+                options->error = argument;
+                options->error_value = joined ? NULL : value;
+            }
+            else if (options->path_count < options->path_capacity)
             {
                 options->paths[options->path_count++] = (String8){
                     .pointer = (char*)value,
@@ -138,19 +152,19 @@ static bool linker_options_finish(LinkerOptions* options, Arena* arena)
     return valid;
 }
 
-static void linker_options_diagnose(const LinkerOptions* options)
+static void linker_options_diagnose(const LinkerOptions* options, const char* prefix)
 {
     if (options->resource)
     {
-        fprintf(stderr, "error: linker arguments exceed available memory or ELF string limits\n");
+        fprintf(stderr, "%serror: linker arguments exceed available memory or ELF string limits\n", prefix);
     }
     else if (options->missing)
     {
-        fprintf(stderr, "error: missing argument to linker option '%s'\n", options->error);
+        fprintf(stderr, "%serror: missing argument to linker option '%s'\n", prefix, options->error);
     }
     else
     {
-        fprintf(stderr, "error: unsupported linker option '%s%s%s'\n", options->error,
+        fprintf(stderr, "%serror: unsupported linker option '%s%s%s'\n", prefix, options->error,
                 options->error_value != NULL ? " " : "", options->error_value != NULL ? options->error_value : "");
     }
 }

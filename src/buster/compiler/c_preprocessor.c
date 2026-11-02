@@ -20502,7 +20502,9 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     {
         // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
         const char* argument = predefines_alias(arguments[i]);
-        if ((strncmp(argument, "-W", 2) == 0 && strncmp(argument, "-Wl,", 4) != 0) || strcmp(argument, "-w") == 0 || strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
+        const bool malformed_linker = strcmp(argument, "-Wl") == 0 || strncmp(argument, "-Wl=", 4) == 0;
+        if ((strncmp(argument, "-W", 2) == 0 && strncmp(argument, "-Wl,", 4) != 0 && !malformed_linker) || strcmp(argument, "-w") == 0 ||
+            strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
         {
             warnings[options->semantic_warning_option_count++] = argument;
         }
@@ -20526,6 +20528,11 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strncmp(argument, "-Wl,", 4) == 0)
         {
             // No linker runs for -E. Do not interpret its payload as a warning option.
+        }
+        else if (malformed_linker)
+        {
+            fprintf(stderr, "error: malformed linker option '%s' (use '-Wl,OPTION')\n", argument);
+            result = false;
         }
         else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-c") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0 || strcmp(argument, "-pipe") == 0)
         {

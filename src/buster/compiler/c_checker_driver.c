@@ -3374,8 +3374,16 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         quiet |= strcmp(arguments[i], "-w") == 0;
         // An option that takes the next argument as its value (pp_option_takes_value: pp_parse_options' and
         // c_predefines.c's) passes on with it, unread: `-o -lresult` writes -lresult, as clang's driver takes it.
-        const bool forwarding = strcmp(arguments[i], "-Xlinker") == 0 || strncmp(arguments[i], "-Wl,", 4) == 0;
-        const bool valued = !forwarding && i + 1 < count && pp_option_takes_value(arguments[i]);
+        // `-Wl` without its comma and `-Wl=...` are not linker transports: rejecting them here keeps them from
+        // becoming warning options, the silent-ignore class this issue fixes.
+        const bool malformed_forwarding = strcmp(arguments[i], "-Wl") == 0 || strncmp(arguments[i], "-Wl=", 4) == 0;
+        if (malformed_forwarding)
+        {
+            libraries.linker.error = arguments[i];
+            libraries.linker.missing = strcmp(arguments[i], "-Wl") == 0;
+        }
+        const bool forwarding = !malformed_forwarding && (strcmp(arguments[i], "-Xlinker") == 0 || strncmp(arguments[i], "-Wl,", 4) == 0);
+        const bool valued = !forwarding && !malformed_forwarding && i + 1 < count && pp_option_takes_value(arguments[i]);
         if (!valued)
         {
             const char* argument = arguments[i];
@@ -3475,15 +3483,25 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             filtered[filtered_count++] = arguments[i + 1];
             i += 1;
         }
+        else if (malformed_forwarding)
+        {
+            // Diagnosed through LinkerOptions; a malformed transport is never a source or warning option.
+        }
         else if (library || directory)
         {
-            linker_arguments[linker_count++] = arguments[i];
-            if (arguments[i][2] == 0)
+            // A native -l or -L with no value is a driver usage error, as it has always been, not a linker-option
+            // error: the first pass records it in missing_value and the second pass never sees it.
+            char* option = arguments[i];
+            const bool separate = option[2] == 0;
+            char* value = separate && i + 1 < count ? arguments[++i] : NULL;
+            const bool absent = separate && (value == NULL || value[0] == 0);
+            missing_value |= absent;
+            if (!absent)
             {
-                missing_value |= i + 1 == count;
-                if (i + 1 < count)
+                linker_arguments[linker_count++] = option;
+                if (separate)
                 {
-                    linker_arguments[linker_count++] = arguments[++i];
+                    linker_arguments[linker_count++] = value;
                 }
             }
         }
@@ -3731,7 +3749,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!linker_valid)
     {
-        linker_options_diagnose(&libraries.linker);
+        linker_options_diagnose(&libraries.linker, "");
     }
     else if (unsupported_codegen != NULL)
     {

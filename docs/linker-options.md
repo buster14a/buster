@@ -2,8 +2,9 @@
 
 The C command treats `-Wl,a,b,...` as comma-separated linker arguments and
 `-Xlinker ARG` as one literal linker argument. They are not warning options.
-Forwarded arguments and native `-l` / `-L` arguments retain their relative
-order. Another driver's option still owns its operand: for example,
+Bare `-Wl` and `-Wl=...` are malformed transports and are diagnosed, never
+treated as warning flags. Forwarded arguments and native `-l` / `-L` arguments
+retain their relative order. Another driver's option still owns its operand: for example,
 `-o -Wl,result` names an output file rather than forwarding an option.
 
 ```sh
@@ -19,13 +20,19 @@ whereas `-rpath` records directories to search when the executable runs.
 
 | Linker arguments | Effect |
 | --- | --- |
-| `-rpath PATH`, `--rpath PATH`, `-rpath=PATH`, `--rpath=PATH`, `-R PATH`, `-RPATH` | Append a runtime search path. Repeated paths are joined with `:` in command-line order; empty components are retained. |
+| `-rpath PATH`, `--rpath PATH`, `-rpath=PATH`, `--rpath=PATH`, `-R PATH`, `-RPATH` | Append a runtime search path. Repeated paths are joined with `:` in command-line order; empty components are retained. `-R` follows lld's alias for `--rpath`; an existing non-directory argument is GNU ld's `--just-symbols` form and is refused. |
 | `--enable-new-dtags`, `--disable-new-dtags` | Select `DT_RUNPATH` (the default) or `DT_RPATH`; the last selection wins. |
 | `-e NAME`, `--entry NAME`, `--entry=NAME` | Select a defined, non-local code symbol as the entry point. The last selection wins. An undefined entry is an error, not a fallback to `_start`. |
 | `--as-needed`, `--no-as-needed` | Select whether subsequent named libraries need a reference to be retained. The default preserves the driver's existing as-needed behavior. A repeated library explicitly retained by any no-as-needed occurrence is kept once. |
 | `-l LIB`, `-lLIB`, `-L DIR`, `-LDIR` | The same library and search-directory requests as native driver options. |
 | `-z now`, `-z relro`, `-z noexecstack`, `-z text` (also joined, for example `-znow`) | Request existing writer policies: eager GOT binding, RELRO, a non-executable stack, and no relocations into read-only memory. |
 | `--build-id`, `--eh-frame-hdr`, `--hash-style=gnu` | Request metadata already emitted by the writer. Other build-ID or hash-style modes are not implied. |
+
+GNU ld gives `-R FILE` the `--just-symbols` meaning and only treats a directory
+as `--rpath`; lld treats `-R` as an alias for `--rpath`. Buster accepts `-R` for
+a path that is absent or a directory, and refuses an existing non-directory so
+that the GNU form is never silently reinterpreted. Use `-rpath` when the
+runtime search path contains a file-like name.
 
 Entry selection does not omit the normal C runtime startup inputs or convert
 a C function into a process-entry ABI. A custom entry must implement that ABI.
