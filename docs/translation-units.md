@@ -305,15 +305,16 @@ So a units lane does four things:
   missed every arena whose capacity follows its unit's size (624 `mmap`
   calls). Now Lua's link on one lane makes 195 `mprotect`, 149 `mmap` and
   129 `munmap` calls, and on the 9700X (CPUs 0 to 7, the medians of 11 runs,
-  main interleaved, in two rounds) it takes 77.3 and 77.8 ms where main took
-  82.0 and 82.4 (1 lane), 47.5 and 47.9 against 52.4 and 52.8 (2), 35.3 and
-  35.2 against 41.4 and 41.3 (4), and 32.8 and 33.2 against 41.9 and 41.8 (8):
-  5.6, 9.3, 14.7 and 21% less. Its system time on 8 lanes went from 110 to
-  78 ms, and synth's link on 8 lanes took 514 ms where main took 627 (1,669
-  and 1,725 on one), with 875 ms of system time rather than 1,433. A command
-  of one file reserves without a pool, as before: `-c` of the frozen
-  `sqlite3.c` on CPU 2 ran 5,201 more instructions of 1,257 million, in the
-  same time. Under strict overcommit or a finite `RLIMIT_DATA` release still
+  main interleaved; [the
+  record](https://github.com/buster14a/buster-performance/tree/77364f9c661a1d14e9cc7d95b66220bccaa6439b/docs/measurements/arena-pool-1128-2026-11-02))
+  it takes 77.2 ms where main took 82.2 (1 lane), 48.1 against 52.2 (2), 35.3
+  against 42.0 (4) and 33.2 against 41.9 (8): 6.1, 7.9, 16.2 and 20.7% less,
+  and two earlier rounds measured the same within 1.6 points. Its system
+  time on 8 lanes went from 100 to 75 ms, and synth's link on 8 lanes took
+  508 ms where main took 616 (1,675 and 1,730 on one), with 814 ms of system
+  time rather than 1,466. A command of one file reserves without a pool, as
+  before: `-c` of the frozen `sqlite3.c` on CPU 2 ran 3,381 more instructions
+  of 1,257 million, in the same time. Under strict overcommit or a finite `RLIMIT_DATA` release still
   makes the prefix inaccessible, returning its commit charge
   ([the arenas' guide](arena-memory.md)). Clearing a pooled arena's pushed
   bytes with `memset` on reuse, rather than discarding its pages, where they
