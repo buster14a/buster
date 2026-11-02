@@ -148,6 +148,9 @@ struct Tier1CertInstruction
     uint8_t op;
 };
 
+// A phi's value along an edge: its destination takes its source's. A source of BUSTER_CERT_NONE is an undefined operand
+// (the IR's undef, #141's blocks' lifetimes): any bits are the phi's value along that edge, so the successor's fact for
+// the destination needs no proof there.
 typedef struct Tier1CertRename Tier1CertRename;
 struct Tier1CertRename
 {
@@ -459,8 +462,8 @@ static bool tier1_cert_valid(const Tier1CertProgram* program)
             for (uint32_t r = 0; valid && r < edge.rename_count; r += 1)
             {
                 const Tier1CertRename rename = edge.renames[r];
-                valid = rename.source < program->value_count && rename.destination < program->value_count;
-                if (valid)
+                valid = (rename.source < program->value_count || rename.source == BUSTER_CERT_NONE) && rename.destination < program->value_count;
+                if (valid && rename.source != BUSTER_CERT_NONE)
                 {
                     const Tier1CertValue s = program->values[rename.source];
                     const Tier1CertValue d = program->values[rename.destination];
@@ -768,14 +771,16 @@ static bool tier1_cert_prove(Tier1CertState* state, const Tier1CertFact* facts, 
         {
             value = state->renames[value].token;
         }
-        if (fact.location != BUSTER_CERT_NONE)
-        {
-            valid = tier1_cert_match(state, value, fact.location);
-        }
-        else
+        if (fact.location == BUSTER_CERT_NONE)
         {
             valid = tier1_cert_recipe(state->program, fact.value);
         }
+        else if (value != BUSTER_CERT_NONE)
+        {
+            valid = tier1_cert_match(state, value, fact.location);
+        }
+        // Else an undefined phi operand (BUSTER_CERT_NONE, a rename's source): its location holds the fact whatever it
+        // holds.
         state->report->facts += 1;
     }
     return valid;

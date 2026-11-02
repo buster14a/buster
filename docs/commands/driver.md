@@ -90,8 +90,9 @@ requirements. [Command index](README.md).
   reaches compiles there; a unit without `main.c` (a benchmark's) gets
   `static`. A command then runs in two units' copies of the code, so a home
   must share no static variable with its callers' units: `main.c`'s units share
-  one lane context (`lane.c`) and the x86 encoder's templates
-  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`), and `./build.sh check-call-graph`
+  one lane context (`lane.c`), the x86 encoder's templates
+  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`) and Tier 1's selection tables
+  (`tier1_select_burs.c`'s `BUSTER_TIER1_SHARED`), and `./build.sh check-call-graph`
   reports any variable a command reaches in two units ([Call graph check](call-graph.md#call-graph-check)). A
   function to home is a module's entry point that several units compile, coarse enough
   that a call from another unit costs nothing, which keeps its state in its

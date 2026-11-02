@@ -835,9 +835,11 @@ static Tier1CertError tier1_certificate_cfg(const Tier1CfgInput* input, const Ti
                 for (uint32_t k = input->phi_offsets[s]; error == TIER1_CERT_OK && k < input->phi_offsets[s + 1]; k += 1)
                 {
                     error = j != BUSTER_CERT_NONE ? error : TIER1_CERT_INVALID;
+                    // An undefined operand (BUSTER_TIER1_CFG_NONE, the IR's undef, #141) is an undefined rename.
+                    const uint32_t operand = j != BUSTER_CERT_NONE ? input->phi_operands[input->phi_operand_offsets[k] + j] : 0;
                     renames[rename_count] = (Tier1CertRename){
                         .destination = input->phi_values[k],
-                        .source = j != BUSTER_CERT_NONE ? input->phi_operands[input->phi_operand_offsets[k] + j] : 0,
+                        .source = operand == BUSTER_TIER1_CFG_NONE ? BUSTER_CERT_NONE : operand,
                     };
                     rename_count += 1;
                 }

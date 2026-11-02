@@ -176,7 +176,7 @@ static void tier1_liveness_test_oracle(Tier1LivenessTest* test, const Tier1Selec
         tier1_liveness_test_expect(test, live->allocation.starts[interval] == first && live->allocation.ends[interval] == end, "interval envelope equals independent path-search liveness");
         if (function->op[value] == IR_PARAM)
         {
-            tier1_liveness_test_expect(test, first == 0 && live->allocation.allowed_registers[interval] == tier1_liveness_parameter_mask(function->a[value]), "incoming parameter is live from entry in its SysV register");
+            tier1_liveness_test_expect(test, first == 0 && live->allocation.allowed_registers[interval] == tier1_liveness_parameter_mask(function, function->a[value]), "incoming parameter is live from entry in its SysV register");
         }
     }
     tier1_liveness_test_expect(test, cross_values == live->cross_block_values, "only actual cross-block selected uses enter the dense matrix");
