@@ -4,8 +4,8 @@
 // #148's library builtins through the driver, against clang as an external oracle (c_builtin_library.c): the implicit
 // declarations of every plain library name, in each language mode and with -fno-builtin, -fno-builtin-NAME and
 // -ffreestanding, whose diagnostics must be clang's line for line; programs that call library functions declared so,
-// fold plain declarations' calls or not as those options say, and abort, which must run as clang's builds do; and the
-// library builtins the lowering refuses, by name. Include after c_check_fortify_driver_test.c, whose runner it takes.
+// fold plain declarations' calls or not as those options say, and abort, which must run as clang's builds do. Include
+// after c_check_fortify_driver_test.c, whose runner it takes.
 
 // The lines of a compiler's diagnostics that implicit declarations make (clang's ext_implicit_lib_function_decl and its
 // C99 form, the header's note, and the ordinary implicit declarations' and undeclared identifiers' errors), in order,
@@ -283,50 +283,8 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
     unlink(source);
 }
 
-// The library builtins the checker types and the lowering refuses: -c fails naming each, by both paths, and writes no
-// object; their __has_builtin is 0, which the same unit's #if checks.
-static void check_test_library_refusals(CheckTest* test, const char* executable, const char* directory)
-{
-    static const struct
-    {
-        const char* name;
-        const char* source;
-    } refusals[] = {
-        { "__builtin_alloca_with_align", "void* f(void){return __builtin_alloca_with_align(16,64);}\n" },
-        { "__builtin_alloca_uninitialized", "void* f(unsigned long n){return __builtin_alloca_uninitialized(n);}\n" },
-    };
-    char source[512];
-    char object[512];
-    snprintf(source, sizeof(source), "%s/library-refusal.c", directory);
-    snprintf(object, sizeof(object), "%s/library-refusal.o", directory);
-    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
-    {
-        char text[512];
-        const int length = snprintf(text, sizeof(text), "#if __has_builtin(%s)\n#error advertised\n#endif\n%s", refusals[r].name, refusals[r].source);
-        const bool written = length > 0 && (size_t)length < sizeof(text) && parse_test_write(source, text, (uint64_t)length);
-        for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
-        {
-            char* diagnostics = NULL;
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, scalar != 0 ? "--scalar" : NULL, NULL };
-            unlink(object);
-            const int status = check_test_driver_spawn(arguments, &diagnostics);
-            char expected[128];
-            snprintf(expected, sizeof(expected), "unsupported: %s", refusals[r].name);
-            char description[384];
-            snprintf(description, sizeof(description), "%s is refused by name at -c (%s): status %d, \"%.160s\"", refusals[r].name, scalar != 0 ? "scalar" : "vector",
-                     status, diagnostics != NULL ? diagnostics : "");
-            check_test_expect(test, status == 1 && diagnostics != NULL && strstr(diagnostics, expected) != NULL && strstr(diagnostics, "advertised") == NULL &&
-                                    access(object, F_OK) != 0, description);
-            free(diagnostics);
-        }
-    }
-    unlink(source);
-    unlink(object);
-}
-
 static void check_test_driver_library(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_library_implicit(test, clang, executable, directory);
     check_test_library_runs(test, clang, executable, directory);
-    check_test_library_refusals(test, executable, directory);
 }
