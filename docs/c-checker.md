@@ -3964,19 +3964,112 @@ the oracle.
   before it. Those flushes averaged about 3 leaves on `sqlite3.c`, and the
   walk's minimum rose from 32.1 to 34.2 ms, so the leaves are written by their
   action. #1144 makes the leaves' contents ahead instead, without placing them
-  (above). Building the graph data-parallel needs node ids before any node is
-  written, which is #1038's remaining work. That means every value's consumer
-  found (its nearest ancestor that isn't a list, by pointer jumping), the
-  consumers' operand counts as a histogram, and a prefix sum. What still makes
-  it hard is the walk's own visits:
-  - each makes as many nodes as it decides, and reads its operands' columns,
-    so the ids after it are known only once it has run;
-  - the classes must then leave them few and far apart. They are 1.10% of
-    `sqlite3.c`'s tokens, one in about 59 acted at by class, and 4.14% of
-    `main.c`'s.
-  - The nodes' recording isn't such a barrier: nothing reads it before
-    `check_graph_record_finish`, which can record every node from its final
-    columns.
+  (above). The graph by passes, which would number the nodes before writing
+  any, is below.
+- **The literals' values (#1038).** `check_input_expression_literals` reads a
+  chunk's literals before its actions, as the identifiers' leaves are: a plain
+  decimal of one to nine digits without a leading zero (but `0`) is an `int`
+  of that value, and so is a preprocessor's int (`__LINE__`'s) up to
+  `INT_MAX`. Every other literal its action still parses
+  (`check_input_literal`). The vector path reads in stages over the chunk's
+  literals, 16 at a time, so that each stage's cache misses wait together:
+  names and sources; the sources' kinds, locations and ends; the ranges (one
+  of the two the last numbers were in, else `pp_find_range`'s search, which
+  all lanes take in step); then the two aligned words that hold each
+  spelling, four tokens a vector, whose digits one shuffle right-aligns and
+  pairs, quads and lanes multiply out. `check_input_literal_plain` is its
+  scalar twin. The scan test checks both paths on random chunks over three
+  guarded ranges of spellings, and every plain value against
+  `check_literal_number`; `test-checker`'s graph comparisons check the walk's
+  literals against the scalar walk's, which parses every literal.
+  - **What it costs.** Most of a literal's cost is the first read since the
+    parser of its preprocessor columns and its source: on the VM the pass
+    takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms warm on the
+    same chunks (the scalar twin 2.7 and 0.8). The literals' actions fall
+    from 4.0 to 1.6 ms and the chunks' preparation rises by about 1.5 ms, so
+    on the VM, whose gathers its microcode slows, the walk is within its
+    noise. The lexer reads the source and the preprocessor writes those
+    columns in order, as they make the tokens: that is where a literal's
+    value would cost little more.
+- **Where the class actions' time goes.** `benchmark-checker-bindings` times
+  the walk by class (above). On the VM, `sqlite3.c`, 5 passes, before the
+  literals' pass: the class actions take 12.9 ms, 28.8 ns a token.
+
+  | class | tokens | ns a token | share |
+  | --- | --- | --- | --- |
+  | literal | 43,898 | 92.9 | 31.5% |
+  | the walk's own (scalar) | 6,565 | 593 | 30.1% |
+  | identifier | 93,450 | 10.6 | 7.7% |
+  | prefix (904 left) | 8,316 | 112 | 7.2% |
+  | member | 31,479 | 22.6 | 5.5% |
+  | call | 13,090 | 47.0 | 4.8% |
+  | binary | 42,166 | 11.7 | 3.8% |
+  | terminator | 53,683 | 7.2 | 3.0% |
+  | condition | 11,177 | 18.3 | 1.6% |
+  | subscript | 6,727 | 19.2 | 1.0% |
+  | separator | 24,733 | 4.3 | 0.8% |
+  | return | 4,184 | 22.6 | 0.7% |
+  | cast | 8,864 | 10.6 | 0.7% |
+  | list | 74,099 | 0.8 | 0.5% |
+  | string | 1,835 | 31.8 | 0.5% |
+  | postfix | 2,019 | 24.8 | 0.4% |
+  | ternary | 623 | 31.6 | 0.2% |
+  | group | 21,601 | 0.7 | 0.1% |
+
+  The operators and the lists take about 23% of the actions. The dispatch that
+  #1038 found the walk's cost in (one long chain of tests a token) is gone
+  with the classes: what is left is the leaves' and the visits' own work.
+- **The graph by passes (stages 2 and 4), probed and not built.** A probe
+  numbered every acting token of `sqlite3.c` in postorder: each value appended
+  to its consumer's list (the nearest ancestor that isn't a LIST, a GROUP or a
+  SEPARATOR), each operator's operands read from its own list, a terminator a
+  discard a value, and the walk's visits' nodes and value chains taken from
+  the real walk. It reproduced all 323,557 nodes, every node's token and first
+  operand as the walk writes them. So the numbering is right; it doesn't pay:
+  - written plainly it took 11.8 ms on the VM, where the operators and lists
+    it would replace take about 3 ms of the 12.9;
+  - the walk's visits are its barriers: each makes as many nodes as it
+    decides, and reads its operands' columns, so the ids after it are known
+    only once it has run. On `sqlite3.c` they are 7,800, one in about 58
+    tokens acted at by class, which cuts the runs a vector numbering would
+    take to about 58 tokens;
+  - the nodes' recording is no barrier: nothing reads it before
+    `check_graph_record_finish`.
+
+  So the operators stay per token. Their actions cost from under 1 to 47 ns a
+  token.
+- **The graph's first node.** The walk's first node, in `sqlite3.c` a string
+  at token 14, touches every graph column for the first time: each starts a
+  huge page the kernel clears. That one node took 3.2 ms of the walk on the VM
+  warm and over 100 ms after a build (the kernel compacting memory for huge
+  pages), most of the walk's system time (`expressions.usage`). It is the
+  graph's columns' first touch (#528's), not the walk's work: clearing them on
+  a parked lane while the reader's earlier passes run would take it off the
+  compile's path.
+- **Open question 2: one classification for the reader's walks.** It can't be
+  shared. The walk in source order (`check_input_resolve_range`) visits
+  259,625 of `sqlite3.c`'s tokens and 2,332,173 of `main.c`'s, of which the
+  token pass marks 236,159 and 2,129,308 ahead; the walk marks the other 9%
+  itself as it goes (`check_input_visit`: a declaration's activation point,
+  past its declarator). The expressions' classes read what that walk writes
+  (the declared types, the declarations, the specifiers' finishes and the
+  sparse columns), so they can be made only after it, and in postorder, not
+  source order. The two classifications are each one vector pass already:
+  the expressions' classes take 1.2 ms of `sqlite3.c` on the VM. What
+  `check_input_resolve_range` costs (5.18% of `-c` on the 9700X) is its own
+  per-token actions, which a shared list wouldn't change.
+- **Open question 3: leaves in the stream's columns.** They compose. A graph
+  leaf is a `CheckValue`, as a stream's value is, and the stream (#628) keeps
+  its values as 14 bytes of columns (type, flags, object, category and
+  constant kind) and a 96-byte payload row only for the 12% of nodes that need
+  more. Of `sqlite3.c`'s leaves, the identifiers (93,450) need the columns
+  alone, but the enumerators, and the literals (43,898) a payload row: about
+  6 MB against the 13 MB those leaves take as `CheckValue`s, about 4 fewer huge
+  pages to clear.
+  The graph run, which now copies each leaf into the stream's columns, could
+  then take them as they are. It isn't done here: 46 places read leaves as
+  whole `CheckValue`s through `check_graph_leaf_of`, most in the graph run and
+  the reader's later passes, outside the walk.
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
