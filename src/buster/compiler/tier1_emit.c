@@ -154,9 +154,15 @@ struct Tier1EmitResult
     uint32_t* label_records;
     uint32_t label_count;
     // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
-    // `exit_count` of them. The C driver's unwind tables take the early returns' teardowns from them (#177).
+    // `exit_count` of them.
     uint32_t* exits;
     uint32_t exit_count;
+    // The frame's events (#1056): tier1_frame_emit's, at the records' boundaries, the prologue's then each epilogue's in
+    // record order, which the C driver's unwind tables resolve after branch sizing; and the first record after the
+    // prologue, where the body starts (-g's row of it).
+    EmissionFrameEvent* frame_events;
+    uint32_t frame_event_count;
+    uint32_t body_record;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -777,9 +783,11 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             result->references = ir_allocate(output, result->prepared.call_count, sizeof(LinkReference), &ok);
             result->reference_capacity = result->prepared.call_count;
         }
-        // A straight-line chain returns once at most, at its end.
+        // A straight-line chain returns once at most, at its end: its prologue's events and one epilogue's.
         result->exits = ir_allocate(output, 1, 4, &ok);
         result->exit_count = 0;
+        result->frame_events = ir_allocate(output, 2 * BUSTER_TIER1_FRAME_EMIT_EVENTS, sizeof(EmissionFrameEvent), &ok);
+        result->frame_event_count = 0;
         if (!ok)
         {
             error = TIER1_EMIT_MEMORY;
@@ -789,6 +797,8 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             buffer.records = code->records;
             buffer.branches = code->branches;
             buffer.targets = code->targets;
+            buffer.events = result->frame_events;
+            buffer.event_capacity = 2 * BUSTER_TIER1_FRAME_EMIT_EVENTS;
             error = tier1_emit_transitions(&result->prepared, &result->allocation, scratch, &transitions);
         }
     }
@@ -796,6 +806,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     {
         error = TIER1_EMIT_FRAME;
     }
+    result->body_record = buffer.count;
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count; node += 1)
     {
         code->node_first[node] = buffer.count;
@@ -935,6 +946,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     {
         code->count = buffer.count;
         code->branch_count = buffer.branch_count;
+        result->frame_event_count = buffer.event_count;
         code->node_first[count] = buffer.count;
         code->error_node = BUSTER_IR_NONE;
         code->arena_bytes = output->length - output_mark;

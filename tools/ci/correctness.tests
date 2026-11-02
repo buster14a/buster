@@ -566,6 +566,11 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 # Bounded source/frame events and their transactional resolution against a final record layout, by the scalar path and
 # the AVX-512 layout twin where the host has it.
 ./build/compiler test-emission-metadata
+== Test the tier-neutral emitted function and its frame verifier
+# #1056: row programs against the fixed CFI writer for every descriptor; Tier 0's generated programs and the Tier 1
+# frame planner's every flag resolved into the previous readers' descriptors byte for byte; the frame verifier on them
+# and their mutants; and a probe frame (its CFA in r11 through the loop) under gdb at every instruction.
+./build/compiler test-emitted-code --cross-check
 == Test scoped name-resolution kernels
 ./build/compiler test-bindings
 == Test the partial Zen 5 model and instruction harness

@@ -50,9 +50,14 @@
 //   row exactly for the frame pointers, and red_leaf's one row, its whole description. By each path (whose frames'
 //   slots may be colored apart, so not the same bytes), by --lanes 1 and 8 into the vector path's bytes, and its object
 //   linked by cc through GNU ld and lld, the unwinder walks through every function to main; without unwind tables it
-//   stops at the first, and the program prints 1 1 1 1 -1 1 1 1 1 -1. And gdb, without -g (which --tier1 refuses), at
-//   every instruction of each of the nine from its first to its ret, the two-return functions' both returns and the
-//   loops' iterations among them: each backtrace's frames are the function and main.
+//   stops at the first, and the program prints 1 1 1 1 -1 1 1 1 1 -1. And gdb, without -g, at every instruction of
+//   each of the nine from its first to its ret, the two-return functions' both returns and the loops' iterations among
+//   them: each backtrace's frames are the function and main.
+// - The Tier 1 fixture with -g (#1056's bounded subset: a Tier 1 function's rows are its own, the declaration's line
+//   from its entry to its last epilogue and the closing brace's there; docs/tier1.md's "Debug information"), by each
+//   path and by --lanes 1 and 8 into the vector path's bytes: it runs as without -g, llvm-dwarfdump --verify passes, and
+//   gdb, stopped at depth (a Tier 1 function) each of the 14 times it runs, places it at its declaration's line and its
+//   caller at the caller's: a Tier 1 caller's declaration line, main's (Tier 0's) the line of its call.
 
 static const char check_unwind_test_text[] =
     "#include <execinfo.h>\n"
@@ -849,12 +854,14 @@ static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* direc
 
 // The Tier 1 fixture by --tier1 --tier1-refusals --verify (and --scalar with `scalar`, --lanes with `lanes`), into an
 // executable or with `object` an object, with unwind tables or without (`tables`); its refusals go to `output`.err.
-static bool check_unwind_test_tier1_compile(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes)
+static bool check_unwind_test_tier1_compile_debug(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes, bool debug)
 {
     char errors[PATH_MAX + 8];
     snprintf(errors, sizeof(errors), "%s.err", output);
     char* arguments[16] = { (char*)"/proc/self/exe", (char*)"--tier1", (char*)"--tier1-refusals", (char*)"--tier1-report", (char*)"--verify" };
     uint32_t count = 5;
+    arguments[count] = debug ? (char*)"-g" : 0;
+    count += debug ? 1 : 0;
     arguments[count] = tables ? 0 : (char*)"-fno-asynchronous-unwind-tables";
     count += tables ? 0 : 1;
     arguments[count] = object ? (char*)"-c" : 0;
@@ -869,6 +876,11 @@ static bool check_unwind_test_tier1_compile(const char* source, const char* outp
     arguments[count + 2] = (char*)source;
     arguments[count + 3] = 0;
     return object_test_run(arguments, "/dev/null", errors) == 0;
+}
+
+static bool check_unwind_test_tier1_compile(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes)
+{
+    return check_unwind_test_tier1_compile_debug(source, output, tables, object, scalar, lanes, false);
 }
 
 // Whether the Tier 1 fixture's program runs as its unwind tables (or their absence) make it: with them, it returns 0
@@ -959,6 +971,96 @@ static bool check_unwind_test_tier1_field(const char* text, const char* name, ui
     const bool found = field != NULL && (end == NULL || field < end);
     *value = found ? strtoull(field + strlen(key), NULL, 10) : 0;
     return found;
+}
+
+// The line of the fixture's declaration of `name` (1-based): where "name(" starts a function's declaration.
+static uint32_t check_unwind_test_tier1_line(const char* name)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), " %s(", name);
+    const char* found = strstr(check_unwind_test_tier1_text, pattern);
+    uint32_t line = found != 0 ? 1 : 0;
+    for (const char* c = check_unwind_test_tier1_text; found != 0 && c < found; c += 1)
+    {
+        line += *c == '\n' ? 1 : 0;
+    }
+    return line;
+}
+
+// The Tier 1 fixture with -g (#1056; see the file's comment).
+static void check_unwind_test_tier1_debug(CheckDebugTestTally* tally, const char* source, const char* directory, Arena* arena)
+{
+    char outputs[2][PATH_MAX + 32];
+    String8 files[2] = { 0 };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_tier1_g%s", directory, path == 0 ? "" : ".scalar");
+        const bool made = check_unwind_test_tier1_compile_debug(source, outputs[path], true, false, path != 0, 0, true);
+        check_debug_test_expect(tally, made, path == 0 ? "the driver links the Tier 1 fixture by --tier1 -g" : "the driver links the Tier 1 fixture by --tier1 -g --scalar",
+                                outputs[path]);
+        files[path] = made ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
+        check_debug_test_expect(tally, files[path].pointer != 0 && check_unwind_test_tier1_run(outputs[path], true, arena),
+                                "the Tier 1 program with -g runs and walks as without it", outputs[path]);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", outputs[path], 0 };
+        check_debug_test_expect(tally, files[path].pointer != 0 && object_test_run(verify, "/dev/null", "/dev/null") == 0,
+                                "llvm-dwarfdump --verify passes the Tier 1 program's DWARF", outputs[path]);
+    }
+    for (uint32_t count = 0; files[0].pointer != 0 && count < 2; count += 1)
+    {
+        char lanes[PATH_MAX + 40];
+        snprintf(lanes, sizeof(lanes), "%s.lanes%s", outputs[0], count == 0 ? "1" : "8");
+        const bool made = check_unwind_test_tier1_compile_debug(source, lanes, true, false, false, count == 0 ? "1" : "8", true);
+        const String8 file = made ? foreign_test_read(arena, lanes) : (String8){ 0 };
+        check_debug_test_expect(tally, file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0,
+                                count == 0 ? "the Tier 1 -g program by --lanes 1 is the same bytes" : "the Tier 1 -g program by --lanes 8 is one lane's, byte for byte", lanes);
+    }
+    // gdb at depth, each of the 14 times it runs: depth at its declaration's line, its caller at a Tier 1 caller's
+    // declaration's line or at main's line of its call.
+    char commands[PATH_MAX + 32];
+    char report[PATH_MAX + 32];
+    snprintf(commands, sizeof(commands), "%s/dbg_tier1_g.gdb", directory);
+    snprintf(report, sizeof(report), "%s/dbg_tier1_g.gdb.out", directory);
+    const char script[] = "set pagination off\nset confirm off\nset debuginfod enabled off\nbreak depth\ncommands\nsilent\nprintf \"TIER1_STOP\\n\"\nbt 2\n"
+                          "continue\nend\nrun\n";
+    const bool scripted = files[0].pointer != 0 && foreign_test_write(commands, script, sizeof(script) - 1);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-x", commands, outputs[0], 0 };
+    const bool ran = scripted && object_test_run(gdb, report, "/dev/null") == 0;
+    const String8 text = ran ? foreign_test_read(arena, report) : (String8){ 0 };
+    static const char* const callers[] = { "kept", "crowded", "early", "spin", "aligned", "aligned_spin", "aligned_early", "main" };
+    char depth_location[32];
+    snprintf(depth_location, sizeof(depth_location), "dbg_tier1.c:%u", check_unwind_test_tier1_line("depth"));
+    uint32_t stops = 0;
+    uint32_t tier1_callers = 0;
+    bool placed = text.pointer != 0;
+    for (const char* cursor = text.pointer; placed && cursor != 0 && (cursor = strstr(cursor, "TIER1_STOP\n")) != 0; cursor += 1)
+    {
+        placed = debug_test_frame(cursor, "#0 ", "depth", depth_location);
+        const char* caller = strstr(cursor, "#1 ");
+        const char* end = caller != 0 ? strchr(caller, '\n') : 0;
+        bool known = false;
+        for (uint32_t k = 0; placed && caller != 0 && end != 0 && k < BUSTER_ARRAY_LENGTH(callers); k += 1)
+        {
+            char name[32];
+            snprintf(name, sizeof(name), " %s (", callers[k]);
+            const char* named = strstr(caller, name);
+            if (named != 0 && named < end)
+            {
+                char location[32];
+                snprintf(location, sizeof(location), "dbg_tier1.c:%u", check_unwind_test_tier1_line(callers[k]));
+                known = k + 1 == BUSTER_ARRAY_LENGTH(callers) ? strstr(caller, "dbg_tier1.c:") != 0 && strstr(caller, "dbg_tier1.c:") < end :
+                                                                 debug_test_frame(caller, "#1 ", callers[k], location);
+                tier1_callers += k + 1 != BUSTER_ARRAY_LENGTH(callers) && known ? 1 : 0;
+            }
+        }
+        placed = placed && known;
+        stops += 1;
+    }
+    check_debug_test_expect(tally, placed && stops == 14 && tier1_callers == 13,
+                            "gdb places depth and each Tier 1 caller at its declaration's line, main at its call's, each of depth's 14 runs", report);
+    if (!(placed && stops == 14) && text.pointer != 0)
+    {
+        printf("%.3000s\n", text.pointer);
+    }
 }
 
 // The Tier 1 fixture (check_unwind_test_tier1_text, #177; see the file's comment).
@@ -1067,6 +1169,10 @@ static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* dire
         check_unwind_test_gdb(tally, outputs[0], files[0], aligned, BUSTER_ARRAY_LENGTH(aligned), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], aligned_spin, BUSTER_ARRAY_LENGTH(aligned_spin), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], aligned_early, BUSTER_ARRAY_LENGTH(aligned_early), 2, arena);
+    }
+    if (written)
+    {
+        check_unwind_test_tier1_debug(tally, source, directory, arena);
     }
 }
 

@@ -66,11 +66,22 @@ struct CheckProgramRows
     uint32_t capacity;
 };
 
-// A function's raw rows from its entries (`entry_count` of them, entry_records one more: the epilogue's first record)
-// and branch sizing's offsets (by record, the record count's the function's length), into row_offsets and row_tokens
-// (room for entry_count + 2, and the slack). Returns how many.
-static uint32_t check_debug_rows_scalar(const uint32_t* entry_records, const uint32_t* entry_tokens, uint32_t entry_count, const uint32_t* offsets,
-                                        uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
+// An event's token: its origin's entry's (the event's own entry without an origin column: Tier 0's, an event per typed
+// entry), or for generated code (BUSTER_EMISSION_NO_ORIGIN) the declaration's, whose line a debugger then shows for it:
+// the rows' line program has no line 0 (EmittedCode's source events, #1056).
+static uint32_t check_debug_origin_token(const uint32_t* origins, const uint32_t* entry_tokens, uint32_t e, uint32_t declaration)
+{
+    const uint32_t origin = origins != 0 ? origins[e] : e;
+    return origin != BUSTER_EMISSION_NO_ORIGIN ? entry_tokens[origin] : declaration;
+}
+
+// A function's raw rows from its source events (EmittedCode's: `entry_count` of them, event e at the start of record
+// entry_records[e], entry_records one more: the epilogue's first record, and each one's origin, `origins`, or the event's
+// own entry without them) and branch sizing's offsets (by record, the record count's the function's length), into
+// row_offsets and row_tokens (room for entry_count + 2, and the slack). Returns how many.
+static uint32_t check_debug_rows_scalar(const uint32_t* entry_records, const uint32_t* origins, const uint32_t* entry_tokens, uint32_t entry_count,
+                                        const uint32_t* offsets, uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets,
+                                        uint32_t* row_tokens)
 {
     row_offsets[0] = 0;
     row_tokens[0] = declaration;
@@ -79,7 +90,7 @@ static uint32_t check_debug_rows_scalar(const uint32_t* entry_records, const uin
     {
         const uint32_t offset = offsets[entry_records[e]];
         row_offsets[count] = offset;
-        row_tokens[count] = entry_tokens[e];
+        row_tokens[count] = check_debug_origin_token(origins, entry_tokens, e, declaration);
         count += offset != offsets[entry_records[e + 1]] ? 1 : 0;
     }
     const uint32_t epilogue = offsets[entry_records[entry_count]];
@@ -89,13 +100,18 @@ static uint32_t check_debug_rows_scalar(const uint32_t* entry_records, const uin
     return count;
 }
 
-// The same, 16 entries at a time: check_debug_rows_scalar's twin.
-static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* entry_tokens, uint32_t entry_count, const uint32_t* offsets,
-                                 uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
+// The same, 16 entries at a time: check_debug_rows_scalar's twin. An origin column (Tier 1's few events) takes the
+// exact path.
+static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* origins, const uint32_t* entry_tokens, uint32_t entry_count,
+                                 const uint32_t* offsets, uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
 {
 #if !BUSTER_HOST_VECTOR
-    return check_debug_rows_scalar(entry_records, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
+    return check_debug_rows_scalar(entry_records, origins, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
 #else
+    if (origins != 0)
+    {
+        return check_debug_rows_scalar(entry_records, origins, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
+    }
     row_offsets[0] = 0;
     row_tokens[0] = declaration;
     uint32_t count = offsets[entry_records[0]] != 0 ? 1 : 0;
@@ -129,9 +145,10 @@ static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* 
 // producer's metadata or resolves a row the raw rows don't have; the emission then fails closed instead of publishing
 // rows the protocol can't justify. This is the producer/consumer bridge's first consumer: the raw rows remain the
 // publication until the common emitted-function result lands.
-static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint32_t* entry_tokens, uint32_t entry_count, const uint32_t* offsets,
-                                      uint32_t record_count, uint32_t length, uint32_t declaration, uint32_t closing, const uint32_t* row_offsets,
-                                      const uint32_t* row_tokens, uint32_t row_count, bool scalar, EmissionSourceEvent* events, EmissionSourceRow* resolved)
+static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint32_t* origins, const uint32_t* entry_tokens, uint32_t entry_count,
+                                      const uint32_t* offsets, uint32_t record_count, uint32_t length, uint32_t declaration, uint32_t closing,
+                                      const uint32_t* row_offsets, const uint32_t* row_tokens, uint32_t row_count, bool scalar, EmissionSourceEvent* events,
+                                      EmissionSourceRow* resolved)
 {
     const uint32_t declaration_origin = declaration;
     const uint32_t declaration_kind = declaration != BUSTER_EMISSION_NO_ORIGIN ? EMISSION_SOURCE_ORIGIN : EMISSION_SOURCE_GENERATED;
@@ -149,7 +166,9 @@ static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint3
         // The last entry at an offset is the one whose code starts there; the raw rows keep it too.
         if (offsets[entry_records[e]] != offsets[entry_records[e + 1]])
         {
-            const uint32_t token = entry_tokens[e];
+            // A generated event stays generated in the protocol; its row's token is the declaration's.
+            const bool generated = origins != 0 && origins[e] == BUSTER_EMISSION_NO_ORIGIN;
+            const uint32_t token = generated ? BUSTER_EMISSION_NO_ORIGIN : check_debug_origin_token(origins, entry_tokens, e, declaration);
             events[event_count] = (EmissionSourceEvent){
                 .at = {
                     .boundary = entry_records[e],
@@ -190,7 +209,8 @@ static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint3
         uint32_t event = offsets[entry_records[0]] != 0 ? 0 : 1;
         for (; valid && event < event_count; event += 1)
         {
-            valid = expected < row_count && resolved[event].offset == row_offsets[expected] && resolved[event].origin == row_tokens[expected];
+            const uint32_t token = resolved[event].kind == EMISSION_SOURCE_GENERATED ? declaration : resolved[event].origin;
+            valid = expected < row_count && resolved[event].offset == row_offsets[expected] && token == row_tokens[expected];
             expected += valid ? 1 : 0;
         }
         const uint32_t epilogue = offsets[entry_records[entry_count]];

@@ -187,8 +187,10 @@ descending page-sized interval **and the final destination**. The recorded
 amount is the subtraction size or target alignment; the probe stride is
 `BUSTER_TIER1_FRAME_PAGE_BYTES`. Dynamic-body allocations require their own
 protected lowering and are not prologue steps. A probe's loop moves rsp a page at
-a time, which the unwind tables' protocol doesn't describe: the C driver, which
-asks for no probes, refuses such a frame rather than describe it wrongly.
+a time, which the fixed-frame descriptor can't describe: its frame events
+(#1056) put the CFA in r11, the loop's bound, from the subtraction that sets it
+to the loop's exit, where rsp equals it ("Unwind tables" below). The C driver
+asks for no probes; `test-emitted-code` proves and runs such frames in isolation.
 
 The plan has bounded step arrays and no instruction positions. Spill
 loads/stores belong to the instruction consumer.
@@ -299,35 +301,39 @@ Full ABI cross-linking and corpus requirements remain open as listed below.
 
 ## Unwind tables
 
-Tier 1's code in the C driver publishes its frame to the emission as Tier 0's
-code does (`check_tier1_frame` in `c_check_tier1.c`, into `Tier0Code`'s
-`frame_saved`, `frame_size`, `frame_pointer`, `frame_alignment_log2` and
-`frame_base`), so that `check_program_emit_code` writes its unwind tables with
-`unwind_tier0_frame_tails` and `unwind_write`, the vector writer and its exact
-twin, as it writes Tier 0's, and `--verify`'s analyzer (`unwind_tier0`) checks
-the frames it takes. `--tier1` therefore compiles with unwind tables by default,
-under the driver's usual options ([the unwind guide](unwind.md)'s "The C
-driver's unwind tables"), and no longer needs `-fno-asynchronous-unwind-tables`.
+Tier 1's code in the C driver is the emission's tier-neutral result
+(`EmittedCode`, #1056, [the emission metadata guide](emission-metadata.md)),
+whose frame events are its frame emitter's own: `tier1_frame_emit` appends,
+with the records it writes, each rule change at the boundary after the
+instruction that makes it (a push's CFA offset while the CFA is rsp's and its
+slot, rbp's pointing, an allocation's CFA offset, a release's, a pop's and the
+register restored, rbp's pop's CFA back to rsp + 8, a probe loop's CFA in r11).
+`check_program_emit_code` resolves them through the final layout after branch
+sizing, and writes the fixed-frame CFI where they spell a fixed frame (the
+vector writer and its exact twin, the same bytes as when Tier 1's frame was
+published as Tier 0's protocol, which `test-emitted-code` checks for every flag
+of the planner) and a row program otherwise. `--verify` proves the events
+against the records and their control flow (`emitted_verify_frames`), and where
+`unwind_tier0`'s analyzer takes the function, its frame must be the same CFI.
+`--tier1` therefore compiles with unwind tables by default, under the driver's
+usual options ([the unwind guide](unwind.md)'s "The C driver's unwind tables"),
+and with `-g` ([the Tier 1 guide](tier1.md)'s "Debug information").
 
 Tier 1 puts an epilogue before every return's `ret` rather than jumping to one.
-Both consumers record each return's `ret` (`Tier1EmitResult.exits`). Every
-return but the code's last record is published as one of the code's tails
-(`Tier0Code.tail_records`), the way a tail call's teardown is (#147): its CFI
-remembers the body's rules before the teardown, follows the release and pops,
-and restores them after the `ret`. Where the code's last record isn't its last
-return's `ret` (a loop whose latch's jump comes last, a call that doesn't
-return, a trap), the frame is open (`Tier0Code.frame_open`,
-`UnwindFunction.open`): its FDE has the prologue's transitions alone, the body's
-rules hold to its end, and each of its returns is a tail. A frameless function
-publishes no tails, since its rules are the CIE's throughout; it is published
-open where its code doesn't end in a `ret` (the reader otherwise wants a closed
-frameless function to end in a `ret` or a `ud2`), and its FDE is the closed one
-either way. A frame with probes isn't the protocol, and the C driver refuses it
-(`TIER1_EMIT_FRAME`), never asking for one. So does a frame whose exits aren't
-all `ret`s, or whose last record is a `ret` though the frame is published open:
-`check_tier1_frame` checks both, so that a disagreement with the emission's
-reader would send the function to Tier 0 rather than fail the compile.
-`--tier1-report` counts the shapes: `open_frames` (open frames with
+Both consumers record each return's `ret` (`Tier1EmitResult.exits`). Each
+epilogue's events are bracketed: the body's rules remembered at its first record
+and restored after its `ret`, as a tail call's teardown is (#147). Where the
+code's last record is its last return's `ret`, the frame is closed, and the
+emission drops that epilogue's bracket (`unwind_rows_canonical`); where it isn't
+(a loop whose latch's jump comes last, a call that doesn't return, a trap), the
+frame is open: its FDE has the prologue's transitions, the body's rules hold to
+its end, and each of its returns is a bracketed teardown. A frameless function
+has no events: its rules are the CIE's throughout. `check_tier1_compile` checks
+the brackets against the recorded exits (each a `ret`, each restoring right
+after one, in order); a disagreement sends the function to Tier 0
+(`TIER1_EMIT_FRAME`) rather than fail the compile. A frame with probes is
+described too (its CFA in r11 through the loop), though the C driver never asks
+for one. `--tier1-report` counts the shapes: `open_frames` (open frames with
 transitions), `return_tails` (returns published as tails) and `red_zones`
 (frames whose objects are in the red zone).
 
@@ -452,9 +458,10 @@ allocator register reservations → actual spills/callee-save usage → frame
 plan → native prologue/epilogue records**. `tier1_frame_requirements` therefore
 precedes allocation, although final `tier1_frame_plan` follows it. A late
 change needing more reserved registers requires an explicit allocation retry.
-The native companion emits records and branch columns; the C driver's emission
-derives the final-PC unwind tables from them ("Unwind tables" above), while `-g`'s
-source rows for Tier 1's code are still missing.
+The native companion emits records, branch columns and its frame events; the C
+driver's emission resolves the events into the final-PC unwind tables ("Unwind
+tables" above), and `-g`'s rows for Tier 1's code are at the function's
+granularity ([the Tier 1 guide](tier1.md)'s "Debug information").
 
 The planner borrows u32 start/end/size/alignment columns and an optional compact
 index list with separate selected count and column count. Retaining value-wide

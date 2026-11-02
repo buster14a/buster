@@ -404,6 +404,10 @@ int run_builtin_benchmark(int argc, char** argv);
 #include "buster/compiler/calling_convention_test.c"
 int run_calling_convention_benchmark(int argc, char** argv);
 
+// The tier-neutral source and frame events and their resolution against a final layout (#1056), which the frame
+// emitters below publish and the emission consumes.
+#include "buster/compiler/emission_metadata.c"
+
 // Frame storage, explicit prologue/epilogue planning and its native instruction consumer.
 #include "buster/compiler/tier1_frame.c"
 #include "buster/compiler/tier1_frame_test.c"
@@ -417,6 +421,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/tier0.c"
 #include "buster/compiler/unwind.c"
 #include "buster/compiler/unwind_tier0.c"
+// The tier-neutral emitted function (#1056): Tier 0's adapter, the frame events' resolution and their verifier.
+#include "buster/compiler/emitted_code.c"
 #include "buster/compiler/tier0_generate.c"
 #include "buster/compiler/tier0_test.c"
 #include "buster/compiler/c_builtin_lower.c"
@@ -602,6 +608,8 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_tier1.c"
 #pragma clang section text = ""
+// #1056: the tier-neutral emitted function's tests (row programs, Tier 0's and Tier 1's frame events, the verifier).
+#include "buster/compiler/emitted_code_test.c"
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
@@ -1439,6 +1447,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-builtin-lowering") == 0)
     {
         result = run_builtin_lower_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-emitted-code") == 0)
+    {
+        result = run_emitted_code_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-unwind") == 0)
     {

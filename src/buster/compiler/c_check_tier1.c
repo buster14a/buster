@@ -7,9 +7,10 @@
 // (ir_optimize_verified.c, #1055), and emitted (tier1_emit.c, whose CFG consumer allocates a general CFG's values
 // over it, tier1_cfg.c), each step with --scalar by its scalar twin. The emission's check_program_emit_tier1 calls
 // it for each body and gives Tier 0 the bodies a step refuses, so that a program of both tiers' functions is one
-// System V program. Tier 1's code publishes its frame as Tier 0's does (check_tier1_frame, #177), so that the emission
-// writes its unwind tables as it writes Tier 0's. What Tier 1's code leaves out (-g's rows) the driver refuses with
-// the option. Include after tier1_emit.c and c_check_program_emit.c.
+// System V program. Tier 1's code is the emission's tier-neutral result (EmittedCode, #1056) with its frame emitter's
+// own frame events (check_tier1_frame), which the emission resolves into its unwind table as it does Tier 0's; and with
+// -g, its source events at the function's granularity (the body's start and the epilogue: docs/tier1.md's "Debug
+// information"). Include after tier1_emit.c and c_check_program_emit.c.
 
 #include "ir_optimize_verified.c"
 
@@ -70,56 +71,55 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
     return valid;
 }
 
-// Tier 1's frame as Tier 0 publishes its own (Tier0Code.frame_*, which unwind_tier0_frame_tails reads, #177): the
-// callee-saved registers it pushes, by their bits in Tier 0's order (unwind_tier0_saved_registers), its subtraction,
-// its frame pointer, its realignment and its base. Its early returns' rets are the code's tails, each right after its
-// epilogue; and where the code's last record isn't its last return's ret (a loop's latch, a call that doesn't return,
-// a trap), the frame is open and every return is a tail. A frameless function publishes no tails, its rules the CIE's
-// throughout; it is open where its code doesn't end in a ret, which spares the reader's rule that a closed frameless
-// function ends in a ret or a ud2, and its FDE is the closed one either way. A probe's loop
-// (BUSTER_TIER1_FRAME_PROBE_STACK, which the driver doesn't ask for) moves rsp a page at a time, which the protocol
-// doesn't describe; and every exit must be a ret, the last record exactly when the frame is closed. Returns false for
-// a frame it can't publish so, whose function Tier 0 then compiles, rather than fail the emission's reader.
-static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* tails, Tier0Code* code)
+// Tier 1's code's frame as the emission takes it (#1056): its frame emitter's own events (tier1_frame_emit, at the
+// records it wrote: the prologue's, then each return's epilogue's, bracketed by the body's rules remembered and restored
+// after its ret), checked against the exits it records: each a ret in the code, each bracket's restoring right after
+// one, in order. A frame whose last record is its last return's ret is closed: the emission drops that epilogue's
+// bracket (unwind_rows_canonical), so that its CFI is the fixed frame's where the frame is one. Also -g's source events
+// (EmittedCode's): the body's start, generated code at the declaration's line, and the closing brace's row from the
+// last epilogue's first record where the frame is closed. Tier 1's IR keeps no source positions yet: its rows are the
+// function's alone. Returns false for a frame whose events aren't its exits'.
+static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* epilogue)
 {
-    const Tier1Frame* frame = &emitted->frame;
     const X86Instruction* records = emitted->code.records;
-    bool describable = true;
-    for (uint32_t i = 0; i < frame->prologue_count; i += 1)
+    bool valid = emitted->frame_event_count == 0 || emitted->frame_events != 0;
+    for (uint32_t k = 0; valid && k < emitted->exit_count; k += 1)
     {
-        describable &= frame->prologue[i].kind != TIER1_FRAME_PROBE_ALLOCATE && frame->prologue[i].kind != TIER1_FRAME_PROBE_ALIGN;
+        valid = emitted->exits[k] < count && records[emitted->exits[k]].form == X86_FORM_RET && (k == 0 || emitted->exits[k] > emitted->exits[k - 1]);
     }
-    uint32_t saved = 0;
-    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); r += 1)
+    // Each bracket closes right after an exit's ret, in the exits' order: the epilogue its remembering opens.
+    uint32_t exit = 0;
+    uint32_t opened = UINT32_MAX;
+    *epilogue = emitted->exit_count != 0 ? emitted->exits[emitted->exit_count - 1] : count;
+    for (uint32_t i = 0; valid && i < emitted->frame_event_count; i += 1)
     {
-        saved |= ((frame->saved_registers >> unwind_tier0_saved_registers[r]) & 1u) << r;
+        const EmissionFrameEvent event = emitted->frame_events[i];
+        if (event.kind == EMISSION_FRAME_REMEMBER_STATE)
+        {
+            valid = opened == UINT32_MAX;
+            opened = event.at.boundary;
+        }
+        else if (event.kind == EMISSION_FRAME_RESTORE_STATE)
+        {
+            while (exit < emitted->exit_count && emitted->exits[exit] + 1 < event.at.boundary)
+            {
+                exit += 1;
+            }
+            valid = opened != UINT32_MAX && exit < emitted->exit_count && emitted->exits[exit] + 1 == event.at.boundary;
+            *epilogue = valid && exit + 1 == emitted->exit_count ? opened : *epilogue;
+            opened = UINT32_MAX;
+        }
     }
-    describable &= (frame->saved_registers & ~BUSTER_ABI_CALLEE_SAVED) == 0;
-    const bool frameless = saved == 0 && !frame->frame_pointer && frame->stack_adjust_bytes == 0;
+    valid = valid && opened == UINT32_MAX;
+    // Open: the code doesn't end in its last return's ret, so no epilogue row.
     const bool closed = count != 0 && emitted->exit_count != 0 && emitted->exits[emitted->exit_count - 1] == count - 1;
-    for (uint32_t k = 0; k < emitted->exit_count; k += 1)
-    {
-        describable &= emitted->exits[k] < count && records[emitted->exits[k]].form == X86_FORM_RET;
-    }
-    describable &= closed || count == 0 || records[count - 1].form != X86_FORM_RET;
-    const uint32_t tail_count = frameless ? 0 : closed ? emitted->exit_count - 1 : emitted->exit_count;
-    for (uint32_t k = 0; k < tail_count; k += 1)
-    {
-        tails[k] = emitted->exits[k];
-    }
-    code->frame_saved = saved;
-    code->frame_size = frame->stack_adjust_bytes;
-    code->frame_pointer = frame->frame_pointer;
-    code->frame_alignment_log2 = frame->realigned ? (uint8_t)__builtin_ctz(frame->alignment) : 0;
-    code->frame_base = frame->realigned && frame->base_register == BUSTER_TIER1_FRAME_REALIGN_BASE;
-    code->frame_open = !closed;
-    code->tail_records = tail_count != 0 ? tails : 0;
-    code->tail_count = tail_count;
-    return describable;
+    *epilogue = closed ? *epilogue : count;
+    return valid;
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
+                                           bool rematerialize, bool gvn, bool sources, Arena* output, EmittedCode* code, uint32_t* operation,
+                                           CheckTier1Counts* counts)
 {
     *operation = 0;
     *counts = (CheckTier1Counts){ 0 };
@@ -217,8 +217,12 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
     // Each label's first record, where the emission defines its symbol (#789).
     uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
-    uint32_t* tails = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.exit_count + 1) : 0;
-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || tails == 0))
+    // Its frame's events (#1056), and with -g its source events: the body's start and the epilogue's (EmittedCode's).
+    EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
+    uint32_t* source_records = stage == CHECK_TIER1_COMPILED && sources ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2) : 0;
+    uint32_t* source_origins = stage == CHECK_TIER1_COMPILED && sources ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 1) : 0;
+    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0 ||
+                                          (sources && (source_records == 0 || source_origins == 0))))
     {
         arena_pop_to(output, mark);
         stage = CHECK_TIER1_RESOURCE;
@@ -256,7 +260,19 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .frame_bytes = emitted.frame.maximum_stack_bytes,
             .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
         };
-        *code = (Tier0Code){
+        if (emitted.frame_event_count != 0)
+        {
+            memcpy(frames, emitted.frame_events, (uint64_t)emitted.frame_event_count * sizeof(EmissionFrameEvent));
+        }
+        uint32_t epilogue = selected->count;
+        const bool published = check_tier1_frame(&emitted, selected->count, &epilogue);
+        if (sources)
+        {
+            source_records[0] = emitted.body_record;
+            source_records[1] = epilogue;
+            source_origins[0] = BUSTER_EMISSION_NO_ORIGIN;
+        }
+        *code = (EmittedCode){
             .records = records,
             .count = selected->count,
             .branches = branches,
@@ -266,15 +282,23 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
             .reference_count = emitted.reference_count,
             .label_records = labels,
             .label_count = emitted.label_count,
-            .error = TIER0_OK,
+            .source_records = source_records,
+            .source_origins = source_origins,
+            .source_count = sources ? 1 : 0,
+            .frames = emitted.frame_event_count != 0 ? frames : 0,
+            .frame_count = emitted.frame_event_count,
+            .frame_status = EMITTED_FRAME_DESCRIBED,
         };
-        const bool published = check_tier1_frame(&emitted, selected->count, tails, code);
-        counts->open_frames = code->frame_open && (code->frame_saved != 0 || code->frame_pointer || code->frame_size != 0);
-        counts->return_tails = code->tail_count;
+        // Its unwind table's shape (#177): open where its code doesn't end in its last return's ret, and the returns
+        // whose epilogues' rules are brackets of their own (all of an open frame's, all but the last of a closed one's).
+        const bool closed = selected->count != 0 && emitted.exit_count != 0 && emitted.exits[emitted.exit_count - 1] == selected->count - 1;
+        const bool framed = emitted.frame_event_count != 0;
+        counts->open_frames = framed && !closed;
+        counts->return_tails = !framed ? 0 : closed ? emitted.exit_count - 1 : emitted.exit_count;
         if (!published)
         {
             arena_pop_to(output, mark);
-            *code = (Tier0Code){ 0 };
+            *code = (EmittedCode){ 0 };
             *counts = (CheckTier1Counts){ 0 };
             *operation = TIER1_EMIT_FRAME;
             stage = CHECK_TIER1_EMISSION;

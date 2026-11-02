@@ -164,16 +164,31 @@ has the commands, the host and the raw logs; [the value-numbering
 guide](ir-value-numbering.md) has the rest of the figures.
 
 Tier 1's functions have unwind tables as Tier 0's do, by default and under the
-same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables"):
-their frames are Tier 0's frame protocol (callee-saved registers pushed, one
-subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
-realignment after the subtraction), which Tier 1's code publishes to the
-emission (`check_tier1_frame`), its early returns' epilogues as teardowns the
-tables remember and restore around, and a function whose code doesn't end in its
-last epilogue (a loop's latch last) as an open frame ([the frame
-guide](tier1-frame.md)'s "Unwind tables", #177). The driver refuses what Tier
-1's code can't carry yet: `-g`'s rows. Several source files compile as without
-the option, each unit's report added to the command's.
+same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables").
+Tier 1's code is the emission's tier-neutral result (`EmittedCode`, #1056: [the
+emission metadata guide](emission-metadata.md)), with its frame emitter's own
+frame events (`tier1_frame_emit`: each push, pointing, allocation, release and
+pop at the record that makes it, its early returns' epilogues bracketed by the
+body's rules remembered and restored, a function whose code doesn't end in its
+last epilogue an open frame), which the emission resolves after branch sizing
+into the fixed-frame CFI where the frame is one and a row program otherwise ([the
+frame guide](tier1-frame.md)'s "Unwind tables", #177). Several source files
+compile as without the option, each unit's report added to the command's.
+
+### Debug information
+
+`--tier1 -g` compiles (#1056's bounded subset). Tier 1's IR keeps no source
+positions, so a Tier 1 function's DWARF has its name and range and rows at its
+granularity alone: every instruction from its entry to its last epilogue at its
+declaration's line (its body's start the function's breakpoint row) and the
+closing brace's line from its last epilogue where its frame is closed. There are
+no statement lines inside a Tier 1 function and no variable locations: a debugger
+steps over its body as one line, and a backtrace places each Tier 1 frame at its
+function's declaration. Tier 0's functions in the same program keep their
+statement rows, and the unwind tables are complete either way.
+`test-check-debug --cross-check` checks the subset with `llvm-dwarfdump --verify`
+and gdb ([the debug guide](debug.md)); statement rows need source positions
+carried through the IR, lowering to selection, which remains.
 
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the

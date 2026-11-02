@@ -350,11 +350,12 @@ designs and the compilers already built this way.
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
   #177, whose steps are Tier 0's frame protocol (callee-saved registers pushed,
   one subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
-  realignment and its R15 base after the subtraction), which the C driver's
-  unwind tables describe from Tier 1's published frame (`check_tier1_frame`,
-  early returns as tails, an open frame where the code doesn't end in its last
-  epilogue: the frame guide's "Unwind tables"; `test-check-debug --cross-check`
-  unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every instruction).
+  realignment and its R15 base after the subtraction), whose native emitter
+  (`tier1_frame_emit`) writes the frame's events with its records (#1056: each
+  epilogue bracketed, a probe loop's CFA in r11), which the C driver's unwind
+  tables resolve (the frame guide's "Unwind tables"; `test-check-debug
+  --cross-check` unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every
+  instruction, and with `-g`).
   Its frame objects share slots by their blocks' lifetimes, which `--tier1` asks
   the checked program for (`c_check_program_lifetime.c`: a block a jump enters
   past its opening keeps its objects' whole-function lifetimes) and the IR
@@ -539,7 +540,9 @@ designs and the compilers already built this way.
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
-  unwind tables alike, #177's `check_tier1_frame`; without `-g`; `--tier1-report` and
+  code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
+  Tier 1's rows at the function's granularity, the Tier 1 guide's "Debug
+  information"; `--tier1-report` and
   `--tier1-refusals` say which step refused the others, and
   `--tier1-no-rematerialize` compiles them without rematerialization and
   `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
@@ -980,8 +983,11 @@ designs and the compilers already built this way.
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
   batch, and for Tier 1's open frames (`UnwindFunction.open`, #177) no epilogue
-  at the end, each return a tail. `check_program_emit` writes the C driver's
-  unwind tables so, one EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  at the end, each return a tail, and row programs (#1056: resolved frame rows,
+  `unwind_rows_scalar`, the fixed writer's bytes for a fixed shape's rows).
+  `check_program_emit` writes the C driver's unwind tables from each function's
+  frame events (`emitted_code.c`), one EH_FRAME atom of them after the last
+  function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
   frame against the analyzer and actual Tier 0 code, a frame pointer's and
   realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges
@@ -1000,11 +1006,28 @@ designs and the compilers already built this way.
   `test-emission-metadata [--seed N]`, built by `build.sh` and run by the
   correctness inventory; the standalone wrapper `tests/emission-metadata/test.c`
   gives the isolated baseline, AVX-512F and sanitizer commands. The driver's
-  `-g` source-row path (`c_check_debug.c`) validates Tier 0's declaration, entry
-  and epilogue rows through it and fails closed on disagreement; the common
-  emitted-function result, producer-owned frame publication, Tier 1 `-g` and the
-  unwind writer remain. #1056 remains open. [The guide](docs/emission-metadata.md)
-  records the record-boundary, ownership and remaining acceptance contracts.
+  `-g` source-row path (`c_check_debug.c`) validates the emitted code's source
+  events through it and fails closed on disagreement. [The
+  guide](docs/emission-metadata.md) records the record-boundary, ownership,
+  emitted-function and verifier contracts and what remains.
+- `src/buster/compiler/emitted_code.c` is #1056's tier-neutral emitted function,
+  `EmittedCode`, which `check_program_emit` consumes and no `Tier0Code` reaches:
+  records, branch columns, references, labels, optional source events (-g) and
+  the producers' frame events. Tier 0's code adapts to it (`emitted_from_tier0`:
+  its published frame as events at record boundaries) and Tier 1's publishes it
+  (`check_tier1_compile`, its frame emitter's own events); `emitted_unwind`
+  resolves the events through the final layout after branch sizing, and
+  `unwind.c` writes the fixed-frame CFI where they spell a fixed frame (the same
+  bytes as before) and a row program otherwise (`BUSTER_UNWIND_ROWS`,
+  `unwind_rows_scalar`), e.g. a probe loop's CFA in r11. `emitted_verify_frames`
+  proves the events against the records and their control flow (a dataflow of
+  register values as CFA offsets, entry values and save slots, checked at every
+  reached record), with `--verify` and in the tests. `emitted_code_test.c`
+  supplies `test-emitted-code [--seed N] [--count N] [--cross-check] [--keep]`:
+  row programs against the fixed writer for every descriptor, Tier 0's programs
+  and the Tier 1 planner's every flag against the previous readers byte for byte,
+  mutants refuted, and with `--cross-check` a probe frame natively under gdb at
+  every instruction.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the
@@ -1611,6 +1634,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler test-emission-metadata
+./build/compiler test-emitted-code --cross-check
 ./build/compiler benchmark-backend
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug

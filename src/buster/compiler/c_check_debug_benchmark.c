@@ -80,8 +80,8 @@ static uint64_t check_debug_benchmark_rows(CheckDebugBenchmarkRows* rows, uint32
         const uint32_t* offsets = rows->offsets + rows->offset_first[f];
         uint32_t* row_offsets = rows->row_offsets[path] + count;
         uint32_t* row_tokens = rows->row_tokens[path] + count;
-        count += path == 0 ? check_debug_rows_scalar(entry_records, tokens, BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES, offsets, rows->lengths[f], 1, 2, row_offsets, row_tokens) :
-                             check_debug_rows(entry_records, tokens, BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES, offsets, rows->lengths[f], 1, 2, row_offsets, row_tokens);
+        count += path == 0 ? check_debug_rows_scalar(entry_records, 0, tokens, BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES, offsets, rows->lengths[f], 1, 2, row_offsets, row_tokens) :
+                             check_debug_rows(entry_records, 0, tokens, BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES, offsets, rows->lengths[f], 1, 2, row_offsets, row_tokens);
     }
     return count;
 }

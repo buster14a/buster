@@ -1329,6 +1329,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
     emitted->exits = ok ? ir_allocate(output, (uint64_t)returns + 1, 4, &ok) : 0;
     emitted->exit_count = 0;
+    // The frame's events (#1056): the prologue's, and each return's epilogue's.
+    emitted->frame_events = ok ? ir_allocate(output, BUSTER_TIER1_FRAME_EMIT_EVENTS * ((uint64_t)returns + 1), sizeof(EmissionFrameEvent), &ok) : 0;
+    emitted->frame_event_count = 0;
     transitions.offsets = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 2, 4, &ok) : 0;
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.values = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
@@ -1431,10 +1434,13 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         const bool selected = !plan->covered[node] && function->op[node] != IR_PHI && function->op[node] != IR_PARAM;
         dropped[node] = selected && v != BUSTER_TIER1_CFG_NONE && tier1_emit_cfg_dead_definition(emitted, v, base + 2 * node + 1, dropped, base);
     }
+    buffer.events = emitted->frame_events;
+    buffer.event_capacity = emitted->frame_events != 0 ? (uint32_t)(BUSTER_TIER1_FRAME_EMIT_EVENTS * ((uint64_t)returns + 1)) : 0;
     if (error == TIER1_EMIT_OK && tier1_frame_emit(&emitted->frame, false, &buffer) != TIER1_FRAME_EMIT_OK)
     {
         error = TIER1_EMIT_FRAME;
     }
+    emitted->body_record = buffer.count;
     // A narrow parameter into its canonical 32-bit storage, in its register before anything reads it: its caller
     // extends it by its own type (sign or zero), which the canonical form doesn't keep.
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
@@ -1768,6 +1774,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         code->count = buffer.count;
         code->branch_count = buffer.branch_count;
+        emitted->frame_event_count = buffer.event_count;
         code->node_first[count] = buffer.count;
         code->error_node = BUSTER_IR_NONE;
         code->arena_bytes = output->length - output_mark;

@@ -380,8 +380,11 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
     // one of its pushes.
     const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
-    if (code == 0 || final_offsets == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 ||
-        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || final_offsets[0] != 0)
+    // Without final offsets, each transition's position is its record boundary (the record after it's index), as
+    // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
+    if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 ||
+        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
+        (final_offsets == 0 && size != code->count))
     {
         error = UNWIND_ERROR_INVALID;
     }
@@ -468,7 +471,7 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     uint32_t previous = 0;
     for (uint32_t event = 0; error == UNWIND_OK && event < count; event += 1)
     {
-        const uint32_t end = final_offsets[events[event] + 1];
+        const uint32_t end = final_offsets != 0 ? final_offsets[events[event] + 1] : events[event] + 1;
         error = end > previous && end < size ? UNWIND_OK : UNWIND_ERROR_INVALID;
         built.offsets[event] = end;
         previous = end;
@@ -524,7 +527,7 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
         ends[ended++] = jump;
         for (uint32_t event = 0; error == UNWIND_OK && event < ended; event += 1)
         {
-            const uint32_t end = final_offsets[ends[event] + 1];
+            const uint32_t end = final_offsets != 0 ? final_offsets[ends[event] + 1] : ends[event] + 1;
             error = end > previous && end < bound ? UNWIND_OK : UNWIND_ERROR_INVALID;
             tails[written] = end;
             written += 1;

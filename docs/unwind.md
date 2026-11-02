@@ -110,20 +110,45 @@ the reader of a function without tail calls.
 
 ### Early returns and open frames (#177)
 
-Tier 1's code puts an epilogue before every return's `ret`, and publishes its
-frame as Tier 0's (the [Tier 1 frame guide](tier1-frame.md)'s "Unwind tables").
 An early return's teardown and `ret` are a tail's: the same release and pops,
-after which the body's rules hold again, so `Tier0Code.tail_records` lists each
-return's `ret` but the code's last record. A function whose code doesn't end in
+after which the body's rules hold again. A function whose code doesn't end in
 its last epilogue's `ret` (a loop's latch last, a call that doesn't return, a
-trap) is open: `Tier0Code.frame_open` and `UnwindFunction.open`, whose events are
-the prologue's alone (`n + 1` or `n`, and with a frame pointer `n + 2`), whose
-CFI has no epilogue at its end, and every one of whose returns is a tail.
-`unwind_tier0_frame_tails` refuses an open frame whose last record is a `ret`,
-which would be an epilogue read as the body's. A frameless function's open
-description is the closed one (no transitions either way), which keeps it on the
-vector writer's path; the vector writer leaves any other open function to the
-exact writer, lane by lane, as it leaves tail calls'.
+trap) is open: `UnwindFunction.open`, whose events are the prologue's alone
+(`n + 1` or `n`, and with a frame pointer `n + 2`), whose CFI has no epilogue at
+its end, and every one of whose returns is a tail. `unwind_tier0_frame_tails`
+refuses an open frame whose last record is a `ret`, which would be an epilogue
+read as the body's. A frameless function's open description is the closed one
+(no transitions either way), which keeps it on the vector writer's path; the
+vector writer leaves any other open function to the exact writer, lane by lane,
+as it leaves tail calls'. Tier 1's code no longer publishes its frame as Tier
+0's: its frame emitter's own events say the same ("Row programs (#1056)" below).
+
+### Row programs (#1056)
+
+The C driver's emission reads every function's frame as frame events at record
+boundaries (`EmittedCode`, [the emission metadata guide](emission-metadata.md)):
+Tier 0's, which its adapter derives from the published frame through
+`unwind_tier0_frame_tails` (its transitions at their records' boundaries when
+given no final offsets), and Tier 1's, its frame emitter's own. After branch
+sizing they resolve into rows (`EmissionFrameRow`: an offset and a rule change)
+and lower to a descriptor (`unwind_rows_function`): the fixed shape where the
+rows are exactly one's (`unwind_function_rows` of it: pushes, one allocation,
+its release and pops), which the vector writer takes, and otherwise a row program
+(`UnwindFunction.open == BUSTER_UNWIND_ROWS`, its rows in `rows`), which the
+exact writer writes as call-frame instructions in their order
+(`unwind_rows_scalar`) and the vector writer leaves to it, as it leaves open
+functions. For any fixed shape's rows (a frame pointer's, tail calls', open
+ones) a row program is the fixed writer's bytes, which `test-emitted-code`
+checks for every descriptor `test-unwind` writes; so the driver's tables are the
+same bytes as before. A shape the fixed descriptor can't express, a probe loop's
+CFA in r11 between the loop's bound and its exit, is a row program only.
+`unwind_rows_check` refuses rows the writer can't encode (a saved register's
+offset that isn't a multiple of the data alignment, a negative CFA offset, rsp's
+or the return address's own rule, states remembered deeper than 16), and
+`unwind_rows_canonical` drops rows at a function's end (a closed frame's last
+epilogue's restored state, with its remembering). Rows carry signed 32-bit
+values: a frame whose CFA would pass `INT32_MAX` (within 56 bytes of 2 GB) has no
+events, where the fixed descriptor took it.
 
 ## Format and linker handoff
 
@@ -192,9 +217,10 @@ exception or a thread's cancellation passing through the function); with
 `-fexceptions` alone, clang gives an FDE only to a function that may unwind (one
 that calls), and the driver to every function.
 
-`check_program_emit` (with `unwind`) reads each function's published frame
-after branch sizing, its bodies' then its helpers' (a frame that isn't its
-records is an internal compiler error), and after the last function writes their
+`check_program_emit` (with `unwind`) resolves each function's frame events
+after branch sizing ("Row programs" above), its bodies' then its helpers' (a
+frame its producer couldn't describe is an internal compiler error, and with
+`--verify` so are events its records don't establish, `emitted_verify_frames`), and after the last function writes their
 FDEs with one shared CIE into one EH_FRAME atom, each FDE's initial location a
 PC32 fixup to its function's symbol. An executable's writer indexes them in
 `.eh_frame_hdr` with the C runtime's; `-c`'s object has them as its `.eh_frame`,
