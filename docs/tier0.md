@@ -294,7 +294,10 @@ register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggrega
 as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). So is each of a
 vector's that LLVM splits over two to four of the target's widest vector registers (`tier0_split_vector_parts`, #137: a
 32- or 64-byte vector without AVX, in xmm0 to xmm3, or a 64-byte one with AVX alone, in ymm0 and ymm1), each register
-`part_bytes` of it whole, one after another, which the epilogue loads and a call's object stores. A STACK location with
+`part_bytes` of it whole, one after another, which the epilogue loads and a call's object stores. So are the elements of
+an extended vector of three doubles or three longs, which LLVM returns one per register at the baseline (#137): in xmm0,
+xmm1 and st0, and in rax, rdx and rcx, 8 bytes each from the object's first (`tier0_element_parts`; st0's an `fld` and an
+`fstp` of 8 bytes, `tier0_element_x87`, so that a call leaves the x87 stack as it found it). A STACK location with
 `BUSTER_ABI_FLAG_HIGH` or `BUSTER_ABI_FLAG_LOW` is one part too, the high or the low eightbyte alone, in its 8-byte
 slot: a copy of the aggregate's bytes would run into the next argument's slot (#137). A part loads only the
 aggregate's own bytes, which may end at a page's end:

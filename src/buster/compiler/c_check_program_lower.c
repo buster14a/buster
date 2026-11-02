@@ -1821,14 +1821,17 @@ static uint32_t check_lower_vector_of(const CheckLowerWriter* writer, TypeId typ
 // one's takes (LLVM demotes a result of more than four parts, of __int128s' included, to a memory result), rax and rdx,
 // an _Atomic <1 x i128>'s (an i128 to LLVM), which its 16-byte object returns from as a 128-bit integer's does, or the
 // two to four of the target's vector registers LLVM splits a wider one over (abi_value_result), which its object returns
-// from too, a register's part after another (tier0_split_vector_parts, #137).
+// from too, a register's part after another (tier0_split_vector_parts, #137), or three doubles' elements in xmm0, xmm1
+// and st0, which LLVM returns one per register (tier0_element_parts, #137; three longs' rax, rdx and rcx have no vector
+// register first).
 static bool check_lower_vector_result(const CheckLowerWriter* writer, TypeId type)
 {
     const AbiReturn returned = writer->abi_table->results[type_index(type)];
     const bool split = returned.registers[0] == BUSTER_ABI_REGISTER_VECTOR && returned.registers[1] == (BUSTER_ABI_REGISTER_VECTOR | 1) &&
                        (returned.part_bytes == 16 || returned.part_bytes == 32 || returned.part_bytes == 64);
+    const bool elements = tier0_element_parts(returned, (uint32_t)type_size(writer->program->types, type)) != 0;
     return check_lower_vector_of(writer, type) == 0 || returned.kind != BUSTER_ABI_RESULT_REGISTERS ||
-           returned.registers[1] == BUSTER_ABI_REGISTER_NONE || (returned.registers[0] & BUSTER_ABI_REGISTER_VECTOR) == 0 || split;
+           returned.registers[1] == BUSTER_ABI_REGISTER_NONE || (returned.registers[0] & BUSTER_ABI_REGISTER_VECTOR) == 0 || split || elements;
 }
 
 // Appends an entry of a class the function takes: check_lower_emit's, and the entries of the half-precision classes'

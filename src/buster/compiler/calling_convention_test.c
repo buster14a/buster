@@ -4136,9 +4136,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     }
     if (!world->gcc && (world->vectors || world->narrow_vectors))
     {
-        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes.
-        // A narrow world leaves out the two whose results LLVM gives a register per element at 16 bytes, which the producer
-        // refuses: three doubles' in xmm0, xmm1 and st0, and three longs' in rax, rdx and rcx.
+        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes;
+        // at 16 bytes LLVM returns three doubles' and three longs' elements a register each, in xmm0, xmm1 and st0 and in
+        // rax, rdx and rcx (tier0_element_parts, #137).
         const uint32_t extended[][2] = {
             { BUSTER_TYPE_FLOAT, 3 },
             { BUSTER_TYPE_INT, 3 },
@@ -4152,11 +4152,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(extended); i += 1)
         {
-            const bool elementwise = extended[i][1] == 3 && (extended[i][0] == BUSTER_TYPE_DOUBLE || extended[i][0] == BUSTER_TYPE_LONG);
-            if (!world->narrow_vectors || !elementwise)
-            {
-                abi_test_world_add(world, type_vector(table, extended[i][0], extended[i][1], true));
-            }
+            abi_test_world_add(world, type_vector(table, extended[i][0], extended[i][1], true));
         }
     }
     if (!world->gcc && world->compiled && (world->vectors || world->narrow_vectors))

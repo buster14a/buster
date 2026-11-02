@@ -1029,11 +1029,42 @@ static uint32_t tier0_split_vector_parts(AbiReturn result, uint32_t size)
     return shape && count >= 2 && size == count * result.part_bytes ? count : 0;
 }
 
-// The parts of an aggregate result of `size` bytes in registers: eightbytes (tier0_parts_of), or a split vector's whole
-// vector registers (tier0_split_vector_parts), up to BUSTER_ABI_RESULT_PARTS of them.
+// How many registers hold a result of `size` bytes whose elements LLVM returns one per register (#137, abi_vector_llvm:
+// an extended vector in memory of three 8-byte elements): rax, rdx and rcx for integers, xmm0, xmm1 and st0 for doubles,
+// each 8 bytes of the result's object, the third at 16 (tier0_element_x87 for st0's); 0 for any other result.
+static uint32_t tier0_element_parts(AbiReturn result, uint32_t size)
+{
+    const bool integers = result.registers[0] == BUSTER_ABI_RAX && result.registers[1] == BUSTER_ABI_RDX && result.registers[2] == BUSTER_ABI_RCX;
+    const bool doubles = result.registers[0] == BUSTER_ABI_REGISTER_VECTOR && result.registers[1] == (BUSTER_ABI_REGISTER_VECTOR | 1) &&
+                         result.registers[2] == BUSTER_ABI_REGISTER_X87;
+    const bool shape = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.part_bytes == 8 && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 &&
+                       result.registers[3] == BUSTER_ABI_REGISTER_NONE && (integers || doubles) && size >= 24 && size <= 32;
+    return shape ? 3 : 0;
+}
+
+// Whether a result's elements are three doubles, the third in st0 (tier0_element_parts), which an fld and an fstp of
+// its 8 bytes move.
+static bool tier0_element_x87(AbiReturn result)
+{
+    return tier0_element_parts(result, 32) != 0 && result.registers[2] == BUSTER_ABI_REGISTER_X87;
+}
+
+// The parts of an aggregate result of `size` bytes in registers: eightbytes (tier0_parts_of), a split vector's whole
+// vector registers (tier0_split_vector_parts), up to BUSTER_ABI_RESULT_PARTS of them, or three elements' general or
+// vector registers (tier0_element_parts, but st0's, which tier0_element_x87 takes).
 static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* parts)
 {
-    const uint32_t split = tier0_split_vector_parts(result, size);
+    const uint32_t elements = tier0_element_parts(result, size) != 0 ? (tier0_element_x87(result) ? 2u : 3u) : 0u;
+    for (uint32_t k = 0; k < elements; k += 1)
+    {
+        parts[k] = (Tier0Part){
+            .reg = tier0_abi_register(result.registers[k]),
+            .offset = (uint8_t)(8 * k),
+            .bytes = 8,
+            .load = BUSTER_TIER0_PART_EXACT,
+        };
+    }
+    const uint32_t split = elements == 0 ? tier0_split_vector_parts(result, size) : 0;
     for (uint32_t k = 0; k < split; k += 1)
     {
         parts[k] = (Tier0Part){
@@ -1043,7 +1074,7 @@ static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* p
             .load = BUSTER_TIER0_PART_EXACT,
         };
     }
-    return split != 0 ? split :
+    return elements != 0 ? elements : split != 0 ? split :
            result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, parts) : 0;
 }
 
@@ -1136,12 +1167,13 @@ static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
     const bool eightbytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || narrow || vector) &&
                             result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
                             tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
-    return eightbytes || (size != 0 && tier0_x87_result_valid(result, size)) || tier0_split_vector_parts(result, size) != 0;
+    return eightbytes || (size != 0 && tier0_x87_result_valid(result, size)) || tier0_split_vector_parts(result, size) != 0 ||
+           tier0_element_parts(result, size) != 0;
 }
 
 // The bytes a call's aggregate result in registers stores into its object (tier0_emit_call): each part's register whole,
-// 8 bytes from its eightbyte's offset, or 16, 32 or 64 for a vector's (each of a split vector's registers, one after
-// another), or 16 for an x87 register's (whose fstp writes 10 of them).
+// 8 bytes from its eightbyte's offset (three elements' 24, tier0_element_parts), or 16, 32 or 64 for a vector's (each of
+// a split vector's registers, one after another), or 16 for an x87 register's (whose fstp writes 10 of them).
 static uint32_t tier0_result_extent(AbiReturn result)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
@@ -1151,7 +1183,8 @@ static uint32_t tier0_result_extent(AbiReturn result)
     {
         registers += result.registers[k] != BUSTER_ABI_REGISTER_NONE ? 1 : 0;
     }
-    return x87 != 0                     ? 16 * x87
+    return tier0_element_parts(result, 32) != 0 ? 24
+           : x87 != 0                    ? 16 * x87
            : result.part_bytes >= 16    ? result.part_bytes * (registers != 0 ? registers : 1)
            : high || result.registers[1] != BUSTER_ABI_REGISTER_NONE ? 16
                                                                      : 8;
@@ -5783,7 +5816,12 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
             }
             for (uint32_t k = 0; k < BUSTER_ABI_RESULT_PARTS && parts == 0; k += 1)
             {
-                if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+                if (returned.registers[k] == BUSTER_ABI_REGISTER_X87)
+                {
+                    // The third of three doubles, in st0 (tier0_element_x87), popped.
+                    tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M64, 0, home.reg, home.mode, home.displacement + 8 * (int32_t)k, 0));
+                }
+                else if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
                 {
                     // A split vector's registers hold its parts one after another (tier0_split_vector_parts).
                     const uint32_t offset = returned.part_bytes >= 16 ? k * returned.part_bytes : high ? 8 : 8 * k;
@@ -7890,7 +7928,12 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
             }
             for (uint32_t k = 0; k < BUSTER_ABI_RESULT_PARTS && parts == 0; k += 1)
             {
-                if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+                if (returned.registers[k] == BUSTER_ABI_REGISTER_X87)
+                {
+                    // The third of three doubles, in st0 (tier0_element_x87), popped.
+                    tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M64, 0, home.reg, home.mode, home.displacement + 8 * (int32_t)k, 0));
+                }
+                else if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
                 {
                     // A split vector's registers hold its parts one after another (tier0_split_vector_parts).
                     const uint32_t offset = returned.part_bytes >= 16 ? k * returned.part_bytes : high ? 8 : 8 * k;
@@ -8513,6 +8556,11 @@ static __attribute__((noinline)) void tier0_load_result(const Tier0Function* fun
     {
         tier0_put(writer, tier0_instruction(X86_FORM_FLD_M80, 0, X86_REGISTER_RAX, BUSTER_X86_MEMORY_BASE, 16 * (int32_t)(k - 1), 0));
     }
+    if (tier0_element_x87(function->result))
+    {
+        // The third of three doubles into st0 (tier0_element_x87).
+        tier0_put(writer, tier0_instruction(X86_FORM_FLD_M64, 0, X86_REGISTER_RAX, BUSTER_X86_MEMORY_BASE, 16, 0));
+    }
     const uint32_t count = x87 == 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
     for (uint32_t k = 0; k < count; k += 1)
     {
@@ -8539,7 +8587,7 @@ static __attribute__((noinline)) uint32_t tier0_result_records(const Tier0Functi
     Tier0Part parts[BUSTER_ABI_RESULT_PARTS];
     const uint32_t x87 = tier0_x87_parts(function->result);
     const uint32_t count = x87 == 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
-    uint32_t records = x87;
+    uint32_t records = x87 + (tier0_element_x87(function->result) ? 1u : 0u);
     for (uint32_t k = 0; k < count; k += 1)
     {
         records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes) : 0);
