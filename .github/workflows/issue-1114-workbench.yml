@@ -5,17 +5,32 @@ on:
 permissions:
   contents: read
 jobs:
-  snapshot:
+  tools:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Archive tracked public source only
-        run: git archive --format=tar.gz HEAD > source.tar.gz
+      - name: Install qualified external tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Package tools and their runtime for the disposable test sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tools/bin tools/lib tools/share
+          cp -a "$RUNNER_TEMP/llvm-23.1.4/lib/clang" tools/lib/
+          cp "$RUNNER_TEMP/llvm-23.1.4/LICENSE.TXT" tools/LLVM-LICENSE.TXT
+          for name in clang-23 lld llvm-dwarfdump; do cp "$(command -v "$name")" "tools/bin/$name"; done
+          cp /usr/bin/gdb tools/bin/gdb
+          cp -a /usr/share/gdb tools/share/gdb
+          for binary in tools/bin/*; do ldd "$binary" | awk '/=> \// {print $3} /^\s*\// {print $1}'; done | sort -u > libraries.txt
+          while read -r library; do cp -L "$library" tools/lib/; done < libraries.txt
+          cp -L /lib64/ld-linux-x86-64.so.2 tools/lib/
+          cp -a /usr/share/doc/gdb tools/share/gdb-license
+          tar -czf tools.tar.gz tools
       - uses: actions/upload-artifact@v4
         with:
-          name: issue-1114-source
-          path: source.tar.gz
+          name: issue-1114-tools
+          path: tools.tar.gz
           retention-days: 1
