@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          fetch-depth: 4
+          fetch-depth: 1
       - name: Split the reviewed documentation without changing compiler code
         shell: bash
         env:
@@ -25,8 +25,13 @@ jobs:
           test "$(git hash-object AGENTS.md)" = 4275633ecec326fd87ea551dfc3751491a4b0a11
           cc -std=c17 -Wall -Wextra -Werror -g -fsanitize=address,undefined .github/issue1105-split.c -o "$RUNNER_TEMP/split-guide"
           "$RUNNER_TEMP/split-guide"
+          for path in docs/commands/*.md; do
+              awk '{ lines[NR]=$0; if ($0 !~ /^[[:space:]]*$/) last=NR } END { for (i=1; i<=last; ++i) print lines[i] }' "$path" > "$RUNNER_TEMP/guide"
+              cat "$RUNNER_TEMP/guide" > "$path"
+          done
+          grep -n -A8 -B3 '1,357\|token-identical' docs/commands/preprocessor.md || true
           base=06bcc8980b3ab331a545a860f556b3bf1527d48f
-          git cat-file -e "$base^{commit}"
+          git fetch --no-tags --depth=1 origin "$base"
           git read-tree "$base"
           git add AGENTS.md CLAUDE.md docs/commands
           git diff --cached --check
