@@ -104,9 +104,11 @@ patterns are:
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
   to the consumer (#141). It moves past the nodes between them that neither write
-  memory, call nor access a volatile object (arithmetic, constants, addresses,
-  other nonvolatile loads) and past none that do: a store to any address, a
-  call, a volatile load or store. A pass of its own after the plan's pass over
+  memory, call, access a volatile object, fence nor move rsp (arithmetic,
+  constants, addresses, other nonvolatile loads) and past none that do: a store
+  to any address, a call, a volatile load or store, a fence of any order or
+  scope (a signal fence's too), an allocation or a restore of the dynamic
+  stack. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
@@ -394,8 +396,15 @@ vector with an exact scalar twin (`tier1_burs_*_scalar`):
 
 The cover is the cheapest the grammar has for each tree, and the grammar has
 every candidate the generator makes for the operators it covers, so it is never
-costlier than munch's. On Lua 5.4.8's 1,081 functions as `--tier1` plans them,
-80,411 of 98,565 nodes take their rule's candidate and 42 munch's.
+costlier than munch's in the grammar's cost. That cost is each pattern's
+structural bound on its records, not the records the consumer writes: an
+addition of two loads costs 3 as `lea` of the two loads' registers and 4 as a
+load and an `add` from memory, whose records are 3 and 2 (`mov`, `mov`, `lea`
+against `mov`, `add`). In aggregate the vector path writes fewer records: on the
+frozen `sqlite3.c` by `--tier1`, 346,741 against the scalar twin's 348,554, and
+on Lua 5.4.8's 34 sources 76,475 against 76,681 (#1117's post-merge review).
+On Lua 5.4.8's 1,081 functions as `--tier1` plans them, 80,411 of 98,565 nodes
+take their rule's candidate and 42 munch's.
 
 A reverse node pass then marks what the code computes:
 the nodes with an effect (stores, calls, terminators, volatile loads), the

@@ -27,7 +27,9 @@
 //   displacement doesn't fit 32 bits has no candidate at all: its class is the REG leaf's (tier1_burs_displacement),
 //   whose pattern the plan builds for every node, so that the vector path refuses it as the scalar twin does. The cover is
 //   the cheapest the grammar has for each tree, and the grammar has every candidate the generator makes for the
-//   operators it covers, so it is never costlier than munch's.
+//   operators it covers, so it is never costlier than munch's in the grammar's cost: each pattern's structural bound on
+//   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
+//   cheaper and a record longer as a lea of their registers than as an add from memory).
 
 #include <sys/mman.h>
 
