@@ -1531,10 +1531,11 @@ the producer lowers with AVX-512 (#717: GNU's of 4, 8, 16, 32 and 64 bytes of
 classes the record runs' worlds already drew: an INTEGER eightbyte for 4
 bytes, an SSE one for 8 and MEMORY for one `double`; and clang's extended ones
 of 16, 32 and 64 bytes in clang's runs,
-`AbiTestWorld.vectors`), at 16 bytes the vectors its target's registers hold
-(`-march=x86-64`: of 4, 8 and 16 bytes, each in SSE's registers or as the
-integer the convention passes, and clang's extended ones of 16 bytes,
-`AbiTestWorld.narrow_vectors`), in clang's runs `_Atomic`s of every type C makes
+`AbiTestWorld.vectors`), and at 16 bytes the same vectors (`-march=x86-64`,
+`AbiTestWorld.narrow_vectors`): those of 32 and 64 bytes are arguments in
+memory and results LLVM splits over two or four of SSE's registers, which
+Tier 0 returns and stores a register after another (`tier0_split_vector_parts`),
+in clang's runs `_Atomic`s of every type C makes
 atomic but a `_BitInt`, which clang refuses (#720's lowering of C11's atomics,
 `abi_test_compiled_atomic`: integers, `bool` and the 128-bit ones among them,
 enums, pointers, every floating type, `_Float16` and `__bf16` among them,
@@ -1547,9 +1548,7 @@ a value aligned past 8 is an object), with flexible array members,
 bit-fields, packing and member alignments. They leave out what the producer
 refuses by name: a vector of 1 or 2 bytes (Tier 0's VECTOR has no such width)
 or of `bool` (whose elements pack a bit each, of which the lowering makes no
-value), and at 16 bytes a vector of 32 or 64 bytes (its target's registers are
-16 bytes wide, so LLVM returns one in several of them, a result the producer
-refuses), but in a struct or a union passed in memory; a complex `_BitInt` past 128 bits of an odd number of limbs,
+value); a complex `_BitInt` past 128 bits of an odd number of limbs,
 which clang lays out wrong (above); and the record
 runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
 of their own (above). C23's enums of a fixed underlying type, structs

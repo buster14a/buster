@@ -3705,8 +3705,8 @@ struct AbiTestWorld
     // A compiled world for x86-64-v4, whose C passes vectors too: those of 16, 32 and 64 bytes the producer takes (#717),
     // which need AVX-512F and AVX-512VL.
     bool vectors;
-    // A compiled world for x86-64's baseline, whose C passes the vectors its target's registers hold: of 4, 8 and 16
-    // bytes, in SSE's registers (#137).
+    // A compiled world for x86-64's baseline, whose C passes the same vectors in SSE's 16-byte registers (#137): those of
+    // 32 and 64 bytes in memory as arguments, and split over two or four of the registers as results.
     bool narrow_vectors;
 };
 
@@ -4124,7 +4124,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements) && (!world->compiled || world->vectors || world->narrow_vectors); e += 1)
     {
         const bool floating = type_kind(table, elements[e]) == BUSTER_TYPE_KIND_FLOATING;
-        for (uint64_t bytes = world->compiled ? 4 : 2; bytes <= (world->narrow_vectors ? 16u : 64u); bytes *= 2)
+        for (uint64_t bytes = world->compiled ? 4 : 2; bytes <= 64; bytes *= 2)
         {
             const bool gcc_divergent = (floating && bytes <= 4) || (elements[e] == BUSTER_TYPE_INT128 && bytes == 16);
             if (bytes >= type_size(table, elements[e]) && !(world->gcc && gcc_divergent))
@@ -4136,8 +4136,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     }
     if (!world->gcc && (world->vectors || world->narrow_vectors))
     {
-        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes
-        // (those of 16 bytes alone in a narrow world).
+        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes.
+        // A narrow world leaves out the two whose results LLVM gives a register per element at 16 bytes, which the producer
+        // refuses: three doubles' in xmm0, xmm1 and st0, and three longs' in rax, rdx and rcx.
         const uint32_t extended[][2] = {
             { BUSTER_TYPE_FLOAT, 3 },
             { BUSTER_TYPE_INT, 3 },
@@ -4149,9 +4150,13 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             { BUSTER_TYPE_SHORT, 9 },
             { BUSTER_TYPE_CHAR, 17 },
         };
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(extended) && (world->vectors || i < 2); i += 1)
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(extended); i += 1)
         {
-            abi_test_world_add(world, type_vector(table, extended[i][0], extended[i][1], true));
+            const bool elementwise = extended[i][1] == 3 && (extended[i][0] == BUSTER_TYPE_DOUBLE || extended[i][0] == BUSTER_TYPE_LONG);
+            if (!world->narrow_vectors || !elementwise)
+            {
+                abi_test_world_add(world, type_vector(table, extended[i][0], extended[i][1], true));
+            }
         }
     }
     if (!world->gcc && !world->compiled)
@@ -4292,9 +4297,8 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         }
         else
         {
-            // A wide vector wrapped, alone or in a union with something smaller (of 16 bytes in a narrow world, whose
-            // target returns a wider one in several of its registers, which the producer refuses).
-            const TypeId vector = type_vector_size(table, elements[type_test_below(&random, 7)], 16u << (world->narrow_vectors ? 0 : type_test_below(&random, 3)));
+            // A wide vector wrapped, alone or in a union with something smaller.
+            const TypeId vector = type_vector_size(table, elements[type_test_below(&random, 7)], 16u << type_test_below(&random, 3));
             TypeMember members[2] = {
                 type_test_member(type_test_new_name(&world->types), vector, BUSTER_TYPE_NOT_BIT_FIELD),
                 type_test_member(type_test_new_name(&world->types), abi_test_world_pick(world, &random, true), BUSTER_TYPE_NOT_BIT_FIELD),

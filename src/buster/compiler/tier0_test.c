@@ -4158,6 +4158,9 @@ static const Tier0TestPassing tier0_test_passings[] = {
         BUSTER_TIER0_TEST_AGGREGATE(10, 1, STACK, BUSTER_TIER0_TEST_LOW, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 16),
         BUSTER_TIER0_TEST_VALUE(I64, STACK, BUSTER_TIER0_TEST_N, 24),
     }, BUSTER_TIER0_TEST_NO_RESULT, 0 },
+    // A vector LLVM splits over two of the target's vector registers (#137: a 32-byte one without AVX), a part each.
+    { "a vector result split over xmm0 and xmm1", 0, 0, { { 0 } },
+      BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 16, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_X(1)), 32 },
 };
 
 // The words of the stack a probe records and a driver passes, a hidden result's bytes, each parameter's place in the out
@@ -4753,7 +4756,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
             }
             else if (fixture->result_size != 0)
             {
-                Tier0Part parts[2];
+                Tier0Part parts[BUSTER_ABI_RESULT_PARTS];
                 const uint32_t part_count = tier0_result_parts(fixture->result, fixture->result_size, parts);
                 bool same = part_count != 0;
                 for (uint32_t k = 0; k < part_count; k += 1)
@@ -4895,7 +4898,7 @@ static void tier0_test_aggregate_functions(Tier0TestTally* tally)
             }
             else if (fixture->result_size != 0)
             {
-                Tier0Part parts[2];
+                Tier0Part parts[BUSTER_ABI_RESULT_PARTS];
                 const uint32_t part_count = tier0_result_parts(fixture->result, fixture->result_size, parts);
                 bool same = part_count != 0;
                 for (uint32_t k = 0; k < part_count; k += 1)
