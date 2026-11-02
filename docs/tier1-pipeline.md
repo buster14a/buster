@@ -58,7 +58,7 @@ changes to compiler options or production routing.
 ## Supported fixtures and independent oracles
 
 Each supported function takes three `uint64_t` parameters and returns a
-`uint64_t`. Fifteen original fixtures cover:
+`uint64_t`. Seventeen original fixtures cover:
 
 | Fixture | Handoff exercised |
 | --- | --- |
@@ -77,6 +77,8 @@ Each supported function takes three `uint64_t` parameters and returns a
 | Eight values and a counter around a loop | Pressure past five registers across a back edge: spill slots meeting edge moves |
 | A call of the helper in a loop | Caller-save rows around a call inside a loop, the result carried by a phi |
 | `x = a; if (b & 1) x ^= c; return x + (b >> 1)` | A critical edge into a phi's join, through a stub |
+| `(uint64_t)((double)a * 0.75 + 1.0)` | Floating values (#141): an unsigned 64-bit integer to a double and back, past 2^63 both ways, `F64` arithmetic in the vector class, the CFG consumer |
+| `a`, with the stack's position saved and restored around it | The dynamic stack (#141): a frame pointer, and the saved position in a register, the CFG consumer |
 
 Every fixture runs through scalar and vector paths, with rematerialization both
 disabled and enabled. A five-register pool contains the three required System V
@@ -142,11 +144,13 @@ values around a loop past the registers 5.05, 4.44 and 3.72; a call in a loop
 
 ## Unsupported cases and limits
 
-An additional valid typed fixture, floating-point arithmetic, passes through
-lowering, promotion and optimization on both paths and must return
-`TIER1_SELECT_ERROR_UNSUPPORTED`. Its two refusals must preserve the failing
-stage's result and restore its output and scratch arena lengths. It is never
-executed as native code.
+No fixture here is refused any longer: the floating-point fixture that had to
+return `TIER1_SELECT_ERROR_UNSUPPORTED` is the floating fixture above since Tier
+1 takes floating values (#141). Refusals, with their rollback of the result and
+the arenas, are `test-tier1-select`'s (unsupported operations, an over-aligned
+slot's address, the straight-line emitter's calls) and the C driver's
+(`test-check-lanes --tier1-outcomes`, whose mixed fixture's long double Tier 1
+refuses, as [the outcomes guide](tier1-outcomes.md) says).
 
 The straight-line consumer takes one block or a physical straight-line chain
 whose intermediate terminators branch to the next block and whose final block
@@ -163,9 +167,11 @@ branch whose true successor follows is inverted. Where the IR's entry has
 predecessors, an empty entry block goes before it. The terminal tests' nonempty
 self-loops, conditional returns and phis go through it now, keeping their calls
 and jumps back, with no trap in their place.
-Indirect/variadic/wide-ABI calls, floating point, dynamic/variadic frames, dynamic shifts, division,
-undefined values and unsupported conversions remain outside this integration
-subset. See [selection](tier1-selection.md), [liveness](tier1-liveness.md),
+The fixtures don't exercise indirect, variadic or by-value aggregates' calls,
+variadic definitions, arguments past the registers, variable shifts, division or
+undefined values; Tier 1 takes them all, and `test-tier1-emit`'s native fixtures
+and `test-checker-driver`'s `--tier1` fixtures run them against clang. What Tier
+1 still refuses is [the Tier 1 guide](tier1.md)'s list. See [selection](tier1-selection.md), [liveness](tier1-liveness.md),
 [allocation](tier1-allocation.md), and [frames](tier1-frame.md) for their contracts.
 
 These are bounded integration fixtures, not source-corpus qualification. The

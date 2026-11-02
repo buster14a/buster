@@ -561,15 +561,19 @@ static bool check_deferred_test_sparse_pages(void)
                         small < bytes ? small : bytes - 1,
                         bytes - 1,
                     };
+                    // The base pages are advised against huge pages only from 2 MB of them; fewer, the layout keeps them
+                    // base pages (lane.c's arena_reserve_policy, #652).
+                    const uint64_t base_pages = arena.capacity > arena.small ? arena.small : arena.mapping_bytes;
                     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
                     {
                         const bool huge = !shared && offsets[i] >= small;
                         const uintptr_t address = (uintptr_t)arena.base + offsets[i];
                         bool found = false;
                         const bool no_huge_flag = lane_test_vm_flag(address, "nh", &found);
-                        valid = found && no_huge_flag == !huge;
+                        valid = found && no_huge_flag == (!huge && base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES);
                         const bool huge_flag = lane_test_vm_flag(address, "hg", &found);
                         valid = valid && found && huge_flag == huge && arena.base[offsets[i]] == 0;
+                        valid = valid && (huge || (!lane_test_huge_capable(address, &found) && found));
                     }
                     if (valid)
                     {

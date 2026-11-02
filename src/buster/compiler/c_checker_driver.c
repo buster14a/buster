@@ -369,6 +369,10 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 #include "c_check_warning_render.c"
 
+// Tier 1's selection state tables (tier1_select_burs.c), which main.c includes after this file: --tier1 builds them before
+// any lane compiles a unit.
+static bool tier1_select_initialize(void);
+
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
 static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -2681,6 +2685,8 @@ struct CheckDriverCommand
     // --scalar, --verify, --dump-typed, --dump-static, -w, -flazy-system-headers and --lower-all.
     bool scalar;
     bool verify;
+    // --check-transitions: the checker's vector path by its memoized transitions (CheckOptions.transitions, #1050).
+    bool check_transitions;
     bool dump;
     bool dump_static;
     bool quiet;
@@ -2892,9 +2898,21 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // reports share source order with declaration reports, but this fragment can never be emitted.
             if (input_valid || input.diagnostic_graph)
             {
-                const CheckOptions check_options = { .scalar = scalar, .verify = verify };
+                const CheckOptions check_options = {
+                    .scalar = scalar,
+                    .verify = verify,
+                    .transitions = command->check_transitions,
+                    .verify_transitions = verify,
+                };
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
+                if (stage_clock != NULL)
+                {
+                    stage_clock->transition_hits += stream.statistics.transition_hits;
+                    stage_clock->transition_misses += stream.statistics.transition_misses;
+                    stage_clock->transition_folds += stream.statistics.transition_folds;
+                    stage_clock->transition_entries += stream.statistics.transition_entries;
+                }
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
@@ -3477,6 +3495,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool scalar = false;
     // --verify checks every function's records with x86_validate (the c-testsuite harness passes it).
     bool verify = false;
+    // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
+    bool check_transitions = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -3768,6 +3788,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             verify = true;
         }
+        else if (strcmp(arguments[i], "--check-transitions") == 0)
+        {
+            check_transitions = true;
+        }
         else if (strcmp(arguments[i], "--tier1") == 0)
         {
             lanes.tier1 = true;
@@ -3993,6 +4017,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .options = options,
         .scalar = scalar,
         .verify = verify,
+        .check_transitions = check_transitions,
         .dump = dump,
         .dump_static = dump_static,
         .quiet = quiet,
@@ -4047,7 +4072,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
@@ -4104,7 +4129,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
         if (lanes.tier1 && !check_tier1_ready)
         {
-            check_tier1_ready = x86_zen5_initialize();
+            check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
         }
         // The command runs on its session's lanes (#905), which start here, after its options and before any source is
         // read (check_driver_run).

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Foreign resolution's executable handoff (foreign_link.c). foreign_test.c includes this file after its helpers.
 // Original assembly inputs test canonical globals, local and section symbols, common allocation, selected COMDAT
@@ -7,6 +8,7 @@
 // Every exact/vector resolution and lane count builds a fresh Link; their executable bytes must agree. GNU ld and
 // lld link and run the same inputs with --cross-check. Conversion failures are checked before any output is written.
 
+#include "buster/compiler/test_paths.h"
 typedef struct ForeignLinkTestSource ForeignLinkTestSource;
 struct ForeignLinkTestSource
 {
@@ -594,7 +596,7 @@ static int run_foreign_link_benchmark(int argc, char** argv)
     };
     uint32_t size_count = 3;
     uint32_t runs = 21;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     bool keep = false;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)

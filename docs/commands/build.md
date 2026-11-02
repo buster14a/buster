@@ -32,8 +32,9 @@ requirements. [Command index](README.md).
   process.
   Each executable it links then writes itself with the backend's tables built
   (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
-  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize` and
-  `unwind_initialize` write is in a section of its own (`buster_baked`:
+  `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
+  `unwind_initialize` and `tier1_select_initialize` write is in a section of
+  its own (`buster_baked`:
   `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
   module's statics, baked in the checker's unit, the C driver's), so a compile
   starts with them built; the file's build ID is recomputed over the baked

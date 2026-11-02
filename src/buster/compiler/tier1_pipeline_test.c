@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Original typed-stream fixtures through the real Tier 1 pipeline. Include after tier0_generate.c, tier0_test.c,
 // ir_lower.c, ssa_ir.c, ir_optimize.c and tier1_emit.c, with their dependencies. No alternate frontend or IR producer
@@ -12,6 +13,7 @@
 // consumer's edge moves. Floating point traverses the upstream stages and must stop explicitly before native
 // execution. These fixtures do not qualify a source corpus. Native calls and external tools run in bounded child processes; all temporary files use TMPDIR.
 
+#include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -25,7 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUSTER_TIER1_PIPELINE_CASES 15
+#define BUSTER_TIER1_PIPELINE_CASES 17
 #define BUSTER_TIER1_PIPELINE_CALL_CASES 3
 #define BUSTER_TIER1_PIPELINE_FUNCTIONS 2
 #define BUSTER_TIER1_PIPELINE_INPUTS 32
@@ -77,7 +79,8 @@ struct Tier1PipelineTest
     uint32_t native_results;
     uint32_t clang_results;
     uint32_t resolved_calls;
-    uint32_t refused;
+    // The bottom-up rewrite's twins on every function planned (tier1_burs_check_function, #141).
+    Tier1BursCheck burs;
     // The CFG consumer's functions, and what their edges took.
     uint32_t general;
     uint64_t edge_moves;
@@ -550,11 +553,25 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
     }
+    else if (shape == 8)
+    {
+        // The stack's position saved and restored around a's (#141): the dynamic stack's, whose frame pointer makes the
+        // function the CFG consumer's.
+        tier0_emit(program, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    }
     else
     {
+        // An unsigned 64-bit integer to a double and back (#141): (double)a * 0.75 + 1.0, past 2^63 both ways for half the
+        // inputs, and within an unsigned 64-bit integer's range for every one.
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F64, 0);
-        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, UINT64_C(0x4008000000000000));
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, UINT64_C(0x3fe8000000000000));
+        tier0_emit(program, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_F64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, UINT64_C(0x3ff0000000000000));
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_F64, 0);
         tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
     }
@@ -1176,6 +1193,8 @@ static const uint32_t tier1_pipeline_shapes[BUSTER_TIER1_PIPELINE_CASES] = {
     13,
     14,
     15,
+    16,
+    8,
 };
 
 static void tier1_pipeline_supported(Tier1PipelineTest* test)
@@ -1231,6 +1250,12 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_again(&function, &dominance, &plan, true, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
                                                          "the verified function's plan is the verifying plan's");
+                        ok = ok && tier1_pipeline_expect(test, plan.vector || tier1_select_test_plan_costs(&plan, &test->arenas[TIER1_PIPELINE_SCRATCH]) == 0,
+                                                         "each computed node's cost is its pattern's subtree cost, by the scalar path");
+                        const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
+                        tier1_burs_check_function(&test->burs, &function, &test->arenas[TIER1_PIPELINE_SCRATCH]);
+                        ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,
+                                                         "the bottom-up rewrite's twins classify, label and choose alike, every covered class with a candidate");
                     }
                     Tier1EmitResult* emitted = &bodies[f];
                     if (ok)
@@ -1312,47 +1337,6 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
     }
 }
 
-static void tier1_pipeline_refusals(Tier1PipelineTest* test)
-{
-    const uint32_t shapes[] = {
-        8,
-    };
-    for (uint32_t fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(shapes); fixture_index += 1)
-    {
-        const uint32_t shape = shapes[fixture_index];
-        test->fixture = shape;
-        Tier1PipelineFixture fixture;
-        Tier1PipelineFixture original;
-        tier1_pipeline_fixture(&fixture, shape);
-        memcpy(&original, &fixture, sizeof(fixture));
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            test->vector = path != 0;
-            test->rematerialize = false;
-            tier1_pipeline_reset(test);
-            Tier0Functions functions;
-            IrFunction function;
-            IrDominance dominance;
-            const bool ready = tier1_pipeline_upstream(test, &fixture.program, fixture.program.function_count - 1, &functions, &function, &dominance);
-            if (ready)
-            {
-                Arena* selected = &test->arenas[TIER1_PIPELINE_SELECTED];
-                Arena* scratch = &test->arenas[TIER1_PIPELINE_SCRATCH];
-                Tier1SelectPlan plan;
-                memset(&plan, 0xa5, sizeof(plan));
-                Tier1SelectPlan prior;
-                memcpy(&prior, &plan, sizeof(plan));
-                uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selection = tier1_select_plan(&function, &dominance, selected, scratch, test->vector, &plan, &node);
-                const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "floating point receives explicit unsupported status");
-                tier1_pipeline_expect(test, selected->length == 0 && scratch->length == 0 && memcmp(&plan, &prior, sizeof(plan)) == 0, "unsupported selection rolls back arenas and result");
-                test->refused += refused;
-            }
-            tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "unsupported compilation preserves the original typed fixture");
-        }
-    }
-}
-
 // The C side's prelude and each fixture's formula, by fixture index: statements that set `result` from a, b and c (which
 // they may change). Separate source formulas intentionally know nothing about SSA IDs, selected patterns or
 // allocations. Signed narrow inputs are reconstructed with in-range arithmetic before casting, without host truncation.
@@ -1379,6 +1363,8 @@ static const char* const tier1_pipeline_formulas[BUSTER_TIER1_PIPELINE_CASES] = 
     "uint64_t v[8]; for (unsigned k = 0; k < 8; ++k) v[k] = a ^ constant(k); for (uint64_t i = c & 7; i != 0; i -= 1) for (unsigned k = 0; k < 8; ++k) v[k] = (v[k] + v[(k + 1) % 8]) ^ b; result = v[0]; for (unsigned k = 1; k < 8; ++k) result ^= v[k];",
     "uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b;",
     "uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1);",
+    "result = (uint64_t)((double)a * 0.75 + 1.0);",
+    "result = a;",
 };
 
 static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const char* path)
@@ -1407,8 +1393,7 @@ static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const ch
 
 static void tier1_pipeline_clang(Tier1PipelineTest* test, const char* clang)
 {
-    const char* temporary = getenv("TMPDIR");
-    temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
+    const char* temporary = oracle_temporary_directory();
     char directory[4096];
     char source[4096];
     char binary[4096];
@@ -1553,22 +1538,23 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_mutation_regression(&test);
             tier1_pipeline_deadline_regression(&test);
             tier1_pipeline_supported(&test);
-            tier1_pipeline_refusals(&test);
             if (cross_check && test.failures == 0)
             {
                 tier1_pipeline_clang(&test, clang);
             }
             tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
             tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
-            tier1_pipeline_expect(&test, test.refused == 2, "every remaining unsupported shape is refused on both paths");
-            tier1_pipeline_expect(&test, test.general == 7 * 4 && test.edge_moves != 0 && test.edge_stubs != 0, "every control-flow fixture goes through the CFG consumer, whose edges move values, critical ones through stubs");
+            tier1_pipeline_expect(&test, test.general == 9 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
+                                  "every control-flow fixture, the floating one and the dynamic stack's go through the CFG consumer, whose edges move values, critical ones through stubs");
             tier1_pipeline_expect(&test, test.certified != 0 && test.certificate_facts != 0, "the emitter certified its allocations, CFG ones with block-entry facts");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, seed);
+        printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " twin mismatches\n", test.burs.functions,
+               test.burs.nodes, test.burs.matched, test.burs.fallbacks, test.burs.mismatches);
+        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {
             arena_release(&test.arenas[a]);

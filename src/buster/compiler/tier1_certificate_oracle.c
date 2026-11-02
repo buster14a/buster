@@ -429,9 +429,13 @@ static bool tier1_cert_oracle_rename(Tier1CertOracle* oracle, uint64_t* state, T
         {
             valid = rename.destination != edge.renames[previous].destination;
         }
+        // An undefined source (BUSTER_CERT_NONE) is any bits, so every byte of every unit holds the destination's: the
+        // edge constrains nothing of it.
+        const uint64_t width = oracle->program->values[rename.destination].width;
+        const uint64_t all = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
         for (uint32_t u = 0; valid && u < units; u += 1)
         {
-            state[(size_t)u * values + rename.destination] = oracle->saved[(size_t)u * values + rename.source];
+            state[(size_t)u * values + rename.destination] = rename.source == BUSTER_CERT_NONE ? all : oracle->saved[(size_t)u * values + rename.source];
         }
     }
     return valid;

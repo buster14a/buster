@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The constraint catalogue (#133's first "Done when" item): for each Constraints paragraph of C17's 6.4 to 6.10, a
 // violation of each of its rules and a valid twin, and fixtures of the conversions (6.3), the constant expressions (6.6)
@@ -15,6 +16,7 @@
 // written from the standard's text and probed with clang 23; none is imported. Include after c_check_corpus.c, as
 // c_check_mutation_test.c is.
 
+#include "buster/compiler/test_paths.h"
 typedef enum CheckConstraintOutcome
 {
     // clang rejects the violation.
@@ -2744,8 +2746,8 @@ static void check_test_constraint_preprocess(CheckTest* test, const char* name, 
 static void check_test_constraints(CheckTest* test, const char* clang)
 {
     char directory[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-constraints-XXXXXX", temporary != NULL ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-constraints-XXXXXX", temporary);
     const bool made = mkdtemp(directory) != NULL;
     check_test_expect(test, made, "the constraint catalogue's directory");
     const PPOptions options =

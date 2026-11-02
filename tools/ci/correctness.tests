@@ -96,6 +96,11 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # #134: programs whose functions have gotos into and out of loops, switches whose cases fall through and breaks and
 # continues at depth, each built by clang -O0 and run for its output, then checked as c-testsuite's programs are.
 ./build/compiler test-ssa-source --generate 48 --clang clang
+== Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
+# #141: the same programs' generator at a seed of its own, the IR with its blocks' lifetime markers, at whose starts
+# promotion makes a block's locals undefined; each block's own locals are assigned and read under one condition, and
+# all three forms must give clang -O0's output.
+./build/compiler test-ssa-source --generate 24 --seed 141 --lifetimes --clang clang
 == Test the preprocessor's cases against clang [2 CPUs]
 # --clang also preprocesses each case with clang -E and compares the tokens. A worker per CPU of the
 # heading's shares the fuzz batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of threads
