@@ -40,6 +40,10 @@ static void copy_executable(const char *destination)
 static int mock(int argc, char **argv)
 {
     const char *fault = getenv("BUSTER_SELFHOST_TEST_FAULT");
+    if (!fault)
+    {
+        fault = "";
+    }
     bool stage2 = strstr(argv[0], "/compiler") != NULL;
     int result = 0;
     if (strstr(argv[0], ".exe"))
@@ -187,12 +191,12 @@ static void verify_probes(const char *directory)
         pid_t child = fork();
         if (child == 0)
         {
-            execlp("clang", "clang", "-O0", "-fwrapv", "-funsigned-char", "-fno-strict-aliasing", source, "-o", output, (char *)NULL);
+            execlp("cc", "cc", "-O0", "-fwrapv", "-funsigned-char", "-fno-strict-aliasing", source, "-o", output, (char *)NULL);
             _exit(127);
         }
         if (wait_child(child) != 0)
         {
-            fail("probe %u does not compile with Clang", i);
+            fail("probe %u does not compile with cc", i);
         }
         child = fork();
         if (child == 0)
@@ -262,6 +266,7 @@ int main(int argc, char **argv)
             "missing-source",
             "existing-output",
             "inventory-drift",
+            "inventory-comment",
             "bad-timeout",
         };
         const char *const flags[] =
@@ -296,9 +301,10 @@ int main(int argc, char **argv)
                 make_directory("tools/ci");
                 FILE *inventory = open_file("tools/ci/correctness.tests", "w");
                 size_t smoke_count = sizeof(selfhost_smoke) / sizeof(selfhost_smoke[0]);
+                const char *inventory_prefix = strcmp(fault, "inventory-comment") == 0 ? "# " : "";
                 for (size_t i = 0; i < smoke_count; ++i)
                 {
-                    fprintf(inventory, "./build/compiler %s%s\n", selfhost_smoke[i], strcmp(fault, "inventory-drift") == 0 ? "-old" : "");
+                    fprintf(inventory, "%s./build/compiler %s%s\n", inventory_prefix, selfhost_smoke[i], strcmp(fault, "inventory-drift") == 0 ? "-old" : "");
                 }
                 close_file(inventory);
                 write_text("first.c", "int first;\n");

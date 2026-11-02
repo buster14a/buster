@@ -1,5 +1,9 @@
-name: Native self-host qualification
+name: Self-host qualification
 
+# The qualification runs entirely on GitHub-hosted runners, so that it never
+# takes the shared 9700X from other work. It runs when the gate, the build
+# script or the correctness inventory changes, on the daily schedule (to catch
+# compiler drift), and on manual dispatch. It is not a required per-PR check.
 on:
   pull_request:
     paths:
@@ -7,6 +11,8 @@ on:
       - 'tools/ci/selfhost.c'
       - 'tests/ci/selfhost.c'
       - 'tools/ci/correctness.tests'
+      - 'tools/ci/setup-hosted.sh'
+      - 'src/buster/compiler/host_isa.h'
       - 'build.sh'
   push:
     branches: [main]
@@ -15,42 +21,31 @@ on:
       - 'tools/ci/selfhost.c'
       - 'tests/ci/selfhost.c'
       - 'tools/ci/correctness.tests'
+      - 'tools/ci/setup-hosted.sh'
+      - 'src/buster/compiler/host_isa.h'
       - 'build.sh'
-  # Continue the existing daily/manual main qualification, not every PR or main push.
-  # The upstream success includes both hosted variants, sanitizers, fuzzing and native correctness.
-  workflow_run:
-    workflows: ['Tests and Zen 5 benchmarks']
-    types: [completed]
-    branches: [main]
+  schedule:
+    - cron: '47 5 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: buster-fast-selfhost-${{ github.event.workflow_run.id || github.event.pull_request.number || github.ref }}
+  group: buster-selfhost-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   harness:
     name: Self-host harness regression tests
-    # workflow_run has a privileged execution context: accept only successful scheduled/manual runs
-    # of this repository's main branch. Forks and PR-triggered upstream runs never reach the hardware.
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.repository_id == '1421805693' &&
-       github.event.workflow_run.head_repository.id == 1421805693 &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch'))
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - name: Check the real inventory and the harness, including fatal sanitizers
@@ -60,9 +55,9 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1
         run: |
           set -euo pipefail
-          clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/selfhost.c -o "$RUNNER_TEMP/selfhost"
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/selfhost.c -o "$RUNNER_TEMP/selfhost"
           "$RUNNER_TEMP/selfhost" --check-inventory
-          clang -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all tests/ci/selfhost.c -o "$RUNNER_TEMP/test-selfhost"
+          cc -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all tests/ci/selfhost.c -o "$RUNNER_TEMP/test-selfhost"
           "$RUNNER_TEMP/test-selfhost"
 
       - name: Preserve harness failure diagnostics
@@ -71,18 +66,17 @@ jobs:
         with:
           name: selfhost-harness-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selfhost-tests.*
+          if-no-files-found: warn
           retention-days: 7
 
-  native:
-    name: Native self-host bootstrap and probe equivalence
+  bootstrap:
+    name: Self-host bootstrap and probe equivalence
     needs: harness
-    if: github.event_name == 'workflow_run' && needs.harness.result == 'success'
-    runs-on:
-      group: buster-9700x-service-dispatch
-      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    # Initial qualification budget, not a throughput acceptance threshold. Record the actual cost
-    # before considering per-PR execution. The runner job hook holds the existing shared host lock.
-    timeout-minutes: 60
+    runs-on: ubuntu-26.04
+    # This is an initial budget on a hosted runner, not a throughput acceptance
+    # threshold. The first artifact records the actual cost; 900 s bounds each
+    # subprocess.
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -95,74 +89,98 @@ jobs:
       BUSTER_BUILD_DEFINES: ''
       BUSTER_HOST_RUNTIME: ''
     steps:
-      - name: Verify the approved host
-        run: |
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Never substitute workflow_run's github.sha (the latest default-branch commit).
-          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
-      - name: Stage the same official toolchain as native correctness
-        run: bash tools/ci/setup-benchpress.sh
+      - name: Record the host and select the compiler path
+        id: host
+        run: |
+          set -euo pipefail
+          artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$artifacts"
+          {
+              printf 'revision=%s\n' "$GITHUB_SHA"
+              printf 'event=%s\n' "$GITHUB_EVENT_NAME"
+              printf 'host_arch=%s\n' "$BUSTER_HOST_ARCH"
+              uname -a
+              clang --version
+              grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+              printf 'available_cpus=%s\n' "$(nproc)"
+          } > "$artifacts/metadata.txt"
+          host_compiler=clang
+          command -v clang >/dev/null 2>&1 || host_compiler=cc
+          printf 'host_check_compiler=%s\n' "$host_compiler" >> "$artifacts/metadata.txt"
+          defines=$("$host_compiler" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
+          if grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
+              printf 'host_path=vector\n' >> "$artifacts/metadata.txt"
+              printf 'vector=1\n' >> "$GITHUB_OUTPUT"
+          else
+              printf 'host_path=scalar\n' >> "$artifacts/metadata.txt"
+              printf 'vector=0\n' >> "$GITHUB_OUTPUT"
+              printf '%s\n' '::warning::This hosted runner has no complete host vector path; the self-host bootstrap is skipped because baseline self-hosting is blocked by #1108.'
+          fi
 
-      - name: Build stage 1 and qualify the native self-host
-        env:
-          QUALIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
-          UPSTREAM_RUN: ${{ github.event.workflow_run.html_url }}
+      - name: Stage the official Clang 23 toolchain
+        if: steps.host.outputs.vector == '1'
+        run: |
+          set -euo pipefail
+          bash tools/ci/setup-hosted.sh
+          artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          {
+              printf 'official_toolchain:\n'
+              clang --version
+          } >> "$artifacts/metadata.txt"
+
+      - name: Build stage 1 and qualify the self-host
+        if: steps.host.outputs.vector == '1'
         run: |
           set -euo pipefail
           unset CPATH C_INCLUDE_PATH
           artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          mkdir "$artifacts"
-          printf 'SELFHOST_ARTIFACTS=%s\n' "$artifacts" >> "$GITHUB_ENV"
-          test "$(git rev-parse HEAD)" = "$QUALIFIED_SHA"
-          printf 'revision=%s\nupstream=%s\nhost_arch=%s\n' "$QUALIFIED_SHA" "$UPSTREAM_RUN" "$BUSTER_HOST_ARCH" > "$artifacts/metadata.txt"
-          clang --version >> "$artifacts/metadata.txt"
-          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo >> "$artifacts/metadata.txt"
-          defines=$(clang -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-              echo '::error::Self-host qualification requires the complete native vector path (#1108 still blocks baseline self-hosting).'
-              exit 1
-          fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           # Redirect before consuming; process substitution would hide an exporter failure.
           ./build.sh print-sources > "$artifacts/sources.argv"
           ./build.sh print-compile-flags > "$artifacts/flags.argv"
-          taskset -c 0-7 ./build.sh 2>&1 | tee "$artifacts/build.log"
+          ./build.sh 2>&1 | tee "$artifacts/build.log"
           sha256sum build/compiler tools/ci/selfhost.c >> "$artifacts/metadata.txt"
           clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/selfhost.c -o "$artifacts/qualify"
-          taskset -c 0-7 "$artifacts/qualify" "$PWD/build/compiler" "$artifacts/sources.argv" "$artifacts/flags.argv" "$artifacts/result" 600 2>&1 | tee "$artifacts/qualification.log"
+          "$artifacts/qualify" "$PWD/build/compiler" "$artifacts/sources.argv" "$artifacts/flags.argv" "$artifacts/result" 900 2>&1 | tee "$artifacts/qualification.log"
           test -s "$artifacts/result/PASS"
 
       - name: Publish the qualification summary
-        if: always() && env.SELFHOST_ARTIFACTS != ''
+        if: always()
         run: |
-          if [ -f "$SELFHOST_ARTIFACTS/result/PASS" ]; then
-              cat "$SELFHOST_ARTIFACTS/result/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [ -s "$artifacts/result/PASS" ]; then
+              cat "$artifacts/result/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          elif [ '${{ steps.host.outcome }}' = 'success' ] && [ '${{ steps.host.outputs.vector }}' != '1' ]; then
+              printf '%s\n' \
+                  '## Self-host qualification' \
+                  '' \
+                  'SKIPPED: this hosted runner does not expose the complete host vector feature set,' \
+                  'and baseline self-hosting is still blocked by #1108. The harness regression job still ran.' \
+                  >> "$GITHUB_STEP_SUMMARY"
           else
-              printf '## Native self-host qualification\n\nFAILED or interrupted before completion. See command logs and partial timings in the artifact.\n' >> "$GITHUB_STEP_SUMMARY"
+              printf '## Self-host qualification\n\nFAILED or interrupted before completion. See command logs and partial timings in the artifact.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Preserve inputs, timings and both sides of every probe comparison
-        if: always() && env.SELFHOST_ARTIFACTS != ''
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: selfhost-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          name: selfhost-${{ github.sha }}-${{ github.run_attempt }}
           path: |
-            ${{ env.SELFHOST_ARTIFACTS }}/metadata.txt
-            ${{ env.SELFHOST_ARTIFACTS }}/*.argv
-            ${{ env.SELFHOST_ARTIFACTS }}/*.log
-            ${{ env.SELFHOST_ARTIFACTS }}/result/*.log
-            ${{ env.SELFHOST_ARTIFACTS }}/result/timings.tsv
-            ${{ env.SELFHOST_ARTIFACTS }}/result/summary.md
-            ${{ env.SELFHOST_ARTIFACTS }}/result/PASS
-            ${{ env.SELFHOST_ARTIFACTS }}/result/probe-*
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/metadata.txt
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/*.argv
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/*.log
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/timings.tsv
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/summary.md
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/PASS
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/probe-*
             LICENSE
             THIRD_PARTY_NOTICES.md
             LICENSES/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14

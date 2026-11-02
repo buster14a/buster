@@ -2,9 +2,12 @@
 // Native self-host qualification (#1111). Run from the repository root with build.sh's NUL-delimited
 // source/flag exports. One unit and one compiler lane at a time bound bootstrap memory (#1109).
 // All outputs live in a new directory: a failed command cannot reuse an earlier successful output.
+// Each command runs in a process group with this program's own deadline, so wait4 reports the
+// command's peak RSS rather than a timeout(1) wrapper's.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,6 +24,8 @@
 #define BUSTER_SELFHOST_LIST_ARGS 4096
 #define BUSTER_SELFHOST_LARGE_COUNT 8000
 #define BUSTER_SELFHOST_PROBES 5
+#define BUSTER_SELFHOST_KILL_GRACE_NS (10ull * 1000000000ull)
+#define BUSTER_SELFHOST_POLL_NS (10000000ull)
 
 typedef struct Arguments Arguments;
 struct Arguments
@@ -34,10 +39,22 @@ typedef struct Qualification Qualification;
 struct Qualification
 {
     const char *directory;
-    const char *seconds;
+    long timeout_seconds;
     FILE *timings;
     unsigned sequence;
 };
+
+// The gate runs one command at a time. A cancelled CI job must not leave a large compile behind.
+static volatile sig_atomic_t selfhost_active_child = -1;
+
+static void forward_signal(int number)
+{
+    if (selfhost_active_child > 0)
+    {
+        kill(-selfhost_active_child, SIGKILL);
+    }
+    _exit(128 + number);
+}
 
 static const char *const selfhost_smoke[] =
 {
@@ -199,12 +216,8 @@ static uint64_t run_command(Qualification *qualification, const char *phase, con
     {
         count++;
     }
-    char **command = allocate(count + 6, sizeof(char *));
-    command[0] = "timeout";
-    command[1] = "--signal=TERM";
-    command[2] = "--kill-after=10s";
-    command[3] = (char *)qualification->seconds;
-    memcpy(command + 4, arguments, (count + 1) * sizeof(char *));
+    char **command = allocate(count + 1, sizeof(char *));
+    memcpy(command, arguments, (count + 1) * sizeof(char *));
     char *log = format_path("%s/%03u.log", qualification->directory, qualification->sequence);
     int descriptor = open(log, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (descriptor < 0)
@@ -227,29 +240,103 @@ static uint64_t run_command(Qualification *qualification, const char *phase, con
     }
     if (child == 0)
     {
+        // A process group of its own lets the deadline stop the command's own children too.
+        if (setpgid(0, 0) != 0)
+        {
+            _exit(127);
+        }
+        int null = open("/dev/null", O_RDONLY);
+        if (null >= 0)
+        {
+            dup2(null, STDIN_FILENO);
+            close(null);
+        }
         if (dup2(descriptor, STDOUT_FILENO) < 0 || dup2(descriptor, STDERR_FILENO) < 0)
         {
             _exit(127);
         }
         close(descriptor);
         execvp(command[0], command);
-        dprintf(STDERR_FILENO, "exec timeout: %s\n", strerror(errno));
+        dprintf(STDERR_FILENO, "exec %s: %s\n", command[0], strerror(errno));
         _exit(127);
     }
+    // The child sets its own group before exec; a racing parent call is harmless.
+    if (setpgid(child, child) != 0 && errno != EACCES && errno != ESRCH)
+    {
+        fail("setpgid: %s", strerror(errno));
+    }
+    selfhost_active_child = child;
     close(descriptor);
+    uint64_t deadline = start + (uint64_t)qualification->timeout_seconds * 1000000000ull;
     int status = 0;
     struct rusage usage = {0};
-    pid_t waited;
-    do
+    bool timed_out = false;
+    for (;;)
     {
-        waited = wait4(child, &status, 0, &usage);
-    } while (waited < 0 && errno == EINTR);
-    if (waited != child)
-    {
-        fail("wait4: %s", strerror(errno));
+        pid_t waited = wait4(child, &status, WNOHANG, &usage);
+        if (waited == child)
+        {
+            break;
+        }
+        if (waited < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            fail("wait4: %s", strerror(errno));
+        }
+        uint64_t now = now_ns();
+        if (now >= deadline)
+        {
+            timed_out = true;
+            if (kill(-child, SIGTERM) != 0)
+            {
+                kill(child, SIGTERM);
+            }
+            uint64_t kill_at = now + BUSTER_SELFHOST_KILL_GRACE_NS;
+            for (;;)
+            {
+                waited = wait4(child, &status, WNOHANG, &usage);
+                if (waited == child)
+                {
+                    break;
+                }
+                if (waited < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    fail("wait4: %s", strerror(errno));
+                }
+                if (now_ns() >= kill_at)
+                {
+                    if (kill(-child, SIGKILL) != 0)
+                    {
+                        kill(child, SIGKILL);
+                    }
+                    do
+                    {
+                        waited = wait4(child, &status, 0, &usage);
+                    } while (waited < 0 && errno == EINTR);
+                    if (waited != child)
+                    {
+                        fail("wait4: %s", strerror(errno));
+                    }
+                    break;
+                }
+                struct timespec pause = {0, (long)BUSTER_SELFHOST_POLL_NS};
+                nanosleep(&pause, NULL);
+            }
+            break;
+        }
+        struct timespec pause = {0, (long)BUSTER_SELFHOST_POLL_NS};
+        nanosleep(&pause, NULL);
     }
+    selfhost_active_child = -1;
     uint64_t elapsed = now_ns() - start;
-    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    int code = timed_out ? 124 : (WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status));
     fprintf(qualification->timings, "%u\t%s\t%s\t%llu\t%ld\t%d\n", qualification->sequence, phase, label, (unsigned long long)elapsed, usage.ru_maxrss, code);
     if (fflush(qualification->timings) != 0)
     {
@@ -274,14 +361,23 @@ static void check_inventory(void)
     size_t capacity = 0;
     while (getline(&line, &capacity, file) >= 0)
     {
+        const char *text = line;
+        while (*text == ' ' || *text == '\t')
+        {
+            text++;
+        }
+        if (*text == '#')
+        {
+            continue;
+        }
         for (size_t i = 0; i < sizeof(found) / sizeof(found[0]); ++i)
         {
             const char *prefix = "./build/compiler ";
             size_t prefix_size = strlen(prefix);
             size_t name_size = strlen(selfhost_smoke[i]);
-            if (strncmp(line, prefix, prefix_size) == 0 && strncmp(line + prefix_size, selfhost_smoke[i], name_size) == 0)
+            if (strncmp(text, prefix, prefix_size) == 0 && strncmp(text + prefix_size, selfhost_smoke[i], name_size) == 0)
             {
-                char end = line[prefix_size + name_size];
+                char end = text[prefix_size + name_size];
                 found[i] |= end == '\0' || end == '\n' || end == ' ' || end == '\t';
             }
         }
@@ -379,6 +475,13 @@ static int qualify(int argc, char **argv)
     {
         fail("command timeout must be between 1 and 3600 seconds");
     }
+    struct sigaction action = {0};
+    action.sa_handler = forward_signal;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGINT, &action, NULL) != 0 || sigaction(SIGTERM, &action, NULL) != 0 || sigaction(SIGHUP, &action, NULL) != 0)
+    {
+        fail("cannot install signal handlers: %s", strerror(errno));
+    }
     Arguments sources = read_arguments(argv[2]);
     Arguments flags = read_arguments(argv[3]);
     // Match #1111's default-tier bootstrap instead of inheriting Clang's -O3 and warning policy.
@@ -429,7 +532,7 @@ static int qualify(int argc, char **argv)
     Qualification qualification =
     {
         .directory = directory,
-        .seconds = seconds,
+        .timeout_seconds = timeout,
         .timings = open_file(timings_path, "wx"),
         .sequence = 0,
     };
