@@ -403,6 +403,13 @@ static bool tier1_cfg_test_mutant(Tier1CfgTestTally* tally, const Tier1CfgInput*
     return rejected;
 }
 
+// One malformed shape: both checkers must refuse it before reading through it.
+static void tier1_cfg_test_shape(Tier1CfgTestTally* tally, const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* output, Arena* scratch)
+{
+    tally->shape_killed += tier1_cfg_test_mutant(tally, input, result, output, scratch, &tally->shape_refused);
+    tally->shape_mutants += 1;
+}
+
 // Allocates one case by both entry points and checks each result. Mutants of the first result with moves: every
 // edge move's destination redirected to an unused register, and one interval fragment's register swapped.
 // `temp_slots` are the classes whose temporary slot the case must use, `split_moves` the fewest moves at splits it must
@@ -603,16 +610,14 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                 {
                     const uint32_t kept = result.value_interval_offsets[1];
                     result.value_interval_offsets[1] = intervals + 1;
-                    tally->shape_killed += tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->shape_refused);
-                    tally->shape_mutants += 1;
+                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
                     result.value_interval_offsets[1] = kept;
                 }
                 if (intervals >= 2)
                 {
                     const uint32_t kept = allocation->fragment_offsets[1];
                     allocation->fragment_offsets[1] = allocation->fragment_count + 1;
-                    tally->shape_killed += tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->shape_refused);
-                    tally->shape_mutants += 1;
+                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
                     allocation->fragment_offsets[1] = kept;
                 }
                 // A spill fragment where the allocation has no slots, its columns absent; and a register left on a
@@ -640,13 +645,42 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     }
                     if (allocation->kinds[f] != kind || allocation->registers[f] != reg)
                     {
-                        tally->shape_killed += tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->shape_refused);
-                        tally->shape_mutants += 1;
+                        tier1_cfg_test_shape(tally, input, &result, output, scratch);
                         *allocation = kept;
                         allocation->kinds[f] = kind;
                         allocation->registers[f] = reg;
                     }
                 }
+                // Columns: slots counted without their columns and past the values, a fragment column, the edges'
+                // placements and a move column absent, and fragments that no interval owns, after the last and
+                // before the first.
+                const Tier1CfgAllocation whole = result;
+                result.allocation.spill_count = whole.allocation.spill_count != 0 ? whole.allocation.spill_count : 1;
+                result.allocation.spill_ids = 0;
+                result.allocation.spill_values = 0;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result = whole;
+                result.allocation.spill_count = input->value_count + 1;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result = whole;
+                result.allocation.starts = 0;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result = whole;
+                result.edge_placements = 0;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result = whole;
+                if (result.move_count != 0)
+                {
+                    result.move_values = 0;
+                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                    result = whole;
+                }
+                result.allocation.fragment_count += 1;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result = whole;
+                allocation->fragment_offsets[0] = 1;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                allocation->fragment_offsets[0] = 0;
                 Tier1CfgCheck again;
                 tier1_cfg_test_expect(tally, tier1_cfg_verify(input, &result, scratch, &again), "the checker accepts the restored allocation");
                 tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, false), "the certificate checker proves the restored allocation");

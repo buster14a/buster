@@ -423,8 +423,9 @@ static bool check_tier1_ready = false;
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
 // branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns
 // an explicit success, unsupported, resource or internal outcome. With `certify` (--verify), each allocation must
-// pass its certificate (#939, Tier1EmitOptions.certify), or the body is an internal failure. A failed attempt leaves
-// output unchanged and clears code/counts, retaining its cause and location by value.
+// pass its certificate (#939, Tier1EmitOptions.certify): a refusal is an internal failure, and the checker's capacity a
+// resource failure. A failed attempt leaves output unchanged and clears code/counts, retaining its cause and location
+// by value.
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
                                            bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
 // Releases a lane's arenas for the pipeline.

@@ -17,12 +17,15 @@ requirements. [Command index](README.md).
   allocations: the source from the input, and the stream, entry facts and edges
   from the allocation, whose shape it bounds before reading through it.
   `test-tier1-cfg` proves every allocation (the oracle every 16th,
-  `--oracle-every N`), and its mutants, malformed shapes among them;
+  `--oracle-every N`), and its mutants, malformed shapes among them, which
+  `tier1_cfg_verify` refuses alike;
   `test-tier1-cfg-source` proves every one of real C.
 - The emitter checks its allocations under `Tier1EmitOptions.certify`, which its
-  tests and the driver's `--verify` set. A refusal is the emission stage's
-  cause `certificate`, an internal failure that fails `--tier1 --verify`'s
-  compile ([the outcomes guide](../../docs/tier1-outcomes.md)).
+  tests and the driver's `--verify` set. A failure is the emission stage's
+  cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and
+  the checker's capacity (`TIER1_EMIT_MEMORY`) a resource failure. Either fails
+  `--tier1 --verify`'s compile ([the outcomes
+  guide](../../docs/tier1-outcomes.md)).
 - `tier1_problem_certify` is the gate #938's quality publisher must call; no
   publisher exists yet.
 - [The certificate guide](../../docs/tier1-certificate.md) records the trust

@@ -97,8 +97,9 @@ struct Tier1EmitOptions
     uint32_t symbol_count;
     // #939: check each allocation before code is emitted from it, by the certificate checker of its kind: a CFG
     // allocation's published program (tier1_certificate_cfg_check), a straight-line allocation's fragments
-    // (tier1_allocation_certificate_check). A refusal is TIER1_EMIT_CERTIFICATE, with the checker's Tier1CertError as
-    // the diagnostic's TIER1_EMIT_CAUSE_CERTIFICATE. The C driver's --verify sets it.
+    // (tier1_allocation_certificate_check). A refusal is TIER1_EMIT_CERTIFICATE and the checker's capacity
+    // TIER1_EMIT_MEMORY, each with the checker's Tier1CertError as the diagnostic's TIER1_EMIT_CAUSE_CERTIFICATE. The C
+    // driver's --verify sets it.
     bool certify;
     Tier1EmitDiagnostic* diagnostic;
 };

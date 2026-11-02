@@ -1252,11 +1252,34 @@ static bool tier1_cfg_apply(const Tier1CfgInput* input, const Tier1CfgAllocation
     return valid;
 }
 
+// The allocation's columns, as the certificate's shape requires them (tier1_certificate_cfg.c), before anything reads
+// through them: each present where its count needs it, the interval and fragment maps' ends, the slots' count within
+// the values and each slot's value in range. What the columns' entries mean is left to the checks that read them.
+static bool tier1_cfg_verify_columns(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    const Tier1Allocation* allocation = &result->allocation;
+    const uint32_t values = input->value_count;
+    bool valid = result->value_interval_offsets != 0 && (intervals->count == 0 || (intervals->values != 0 && intervals->classes != 0 && intervals->starts != 0 && intervals->ends != 0));
+    valid = valid && allocation->interval_count == intervals->count && allocation->fragment_offsets != 0 && allocation->fragment_offsets[0] == 0 && allocation->fragment_offsets[intervals->count] == allocation->fragment_count;
+    valid = valid && (allocation->fragment_count == 0 || (allocation->starts != 0 && allocation->ends != 0 && allocation->kinds != 0 && allocation->registers != 0));
+    valid = valid && allocation->spill_count <= values && (allocation->spill_count == 0 || (allocation->spill_values != 0 && allocation->spill_ids != 0));
+    for (uint32_t s = 0; valid && s < allocation->spill_count; s += 1)
+    {
+        valid = allocation->spill_values[s] < values;
+    }
+    valid = valid && result->edge_move_offsets != 0 && result->split_move_offsets != 0 && result->edge_placements != 0;
+    valid = valid && (result->move_count == 0 || (result->move_sources != 0 && result->move_destinations != 0 && result->move_values != 0));
+    valid = valid && (result->split_count == 0 || result->split_positions != 0);
+    return valid;
+}
+
 static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* scratch, Tier1CfgCheck* check)
 {
     const uint64_t saved = scratch->length;
     *check = (Tier1CfgCheck){ 0 };
     bool valid = tier1_cfg_input_valid(input, scratch) || tier1_cfg_fail(check, "invalid input", 0, 0, 0);
+    valid = valid && (tier1_cfg_verify_columns(input, result) || tier1_cfg_fail(check, "the allocation's columns", 0, 0, 0));
     const uint32_t blocks = input->block_count;
     const uint32_t values = input->value_count;
     const Tier1Allocation* allocation = &result->allocation;

@@ -212,8 +212,12 @@ are harmless where they hold the same contents on every incoming edge, as a
 phi and its own operand can. Every other mutant `test-tier1-cfg` makes fails
 both checkers. That includes the malformed shapes: an interval map or an
 interval's fragments forged past their columns, a spill where the allocation
-has no slot columns, and a register left on a slot's fragment. Both checkers
-refuse each before reading through it.
+has no slot columns, a register left on a slot's fragment, slots counted
+without their columns or past the values, a fragment column, the edges'
+placements or a move column absent, and fragments no interval owns. Both
+checkers refuse each before reading through it: `tier1_cfg_verify` checks the
+allocation's columns as the certificate's shape does
+(`tier1_cfg_verify_columns`).
 
 ## Slow oracle
 
