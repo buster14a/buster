@@ -55,9 +55,11 @@
 //   them: each backtrace's frames are the function and main.
 // - The Tier 1 fixture with -g (#1056's bounded subset: a Tier 1 function's rows are its own, the declaration's line
 //   from its entry to its last epilogue and the closing brace's there; docs/tier1.md's "Debug information"), by each
-//   path and by --lanes 1 and 8 into the vector path's bytes: it runs as without -g, llvm-dwarfdump --verify passes, and
-//   gdb, stopped at depth (a Tier 1 function) each of the 14 times it runs, places it at its declaration's line and its
-//   caller at the caller's: a Tier 1 caller's declaration line, main's (Tier 0's) the line of its call.
+//   path and by --lanes 1 and 8 and --id-order into the vector path's bytes: it runs as without -g, llvm-dwarfdump
+//   --verify passes, and gdb, stopped at depth (a Tier 1 function) each of the 14 times it runs, places it at its
+//   declaration's line and its caller at the caller's: a Tier 1 caller's declaration line, main's (Tier 0's) the line of
+//   its call. And its -c -g object by each path, which llvm-dwarfdump --verify passes, linked by cc through GNU ld into
+//   a program that runs, which gdb places the same way.
 
 static const char check_unwind_test_text[] =
     "#include <execinfo.h>\n"
@@ -852,9 +854,11 @@ static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* direc
     }
 }
 
-// The Tier 1 fixture by --tier1 --tier1-refusals --verify (and --scalar with `scalar`, --lanes with `lanes`), into an
-// executable or with `object` an object, with unwind tables or without (`tables`); its refusals go to `output`.err.
-static bool check_unwind_test_tier1_compile_debug(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes, bool debug)
+// The Tier 1 fixture by --tier1 --tier1-refusals --verify (and --scalar with `scalar`, --lanes with `lanes`, -g with
+// `debug`, --id-order with `id_order`), into an executable or with `object` an object, with unwind tables or without
+// (`tables`); its refusals go to `output`.err.
+static bool check_unwind_test_tier1_compile_debug(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes, bool debug,
+                                                  const char* id_order)
 {
     char errors[PATH_MAX + 8];
     snprintf(errors, sizeof(errors), "%s.err", output);
@@ -871,6 +875,9 @@ static bool check_unwind_test_tier1_compile_debug(const char* source, const char
     arguments[count] = lanes != 0 ? (char*)"--lanes" : 0;
     arguments[count + 1] = (char*)lanes;
     count += lanes != 0 ? 2 : 0;
+    arguments[count] = id_order != 0 ? (char*)"--id-order" : 0;
+    arguments[count + 1] = (char*)id_order;
+    count += id_order != 0 ? 2 : 0;
     arguments[count] = (char*)"-o";
     arguments[count + 1] = (char*)output;
     arguments[count + 2] = (char*)source;
@@ -880,7 +887,7 @@ static bool check_unwind_test_tier1_compile_debug(const char* source, const char
 
 static bool check_unwind_test_tier1_compile(const char* source, const char* output, bool tables, bool object, bool scalar, const char* lanes)
 {
-    return check_unwind_test_tier1_compile_debug(source, output, tables, object, scalar, lanes, false);
+    return check_unwind_test_tier1_compile_debug(source, output, tables, object, scalar, lanes, false, 0);
 }
 
 // Whether the Tier 1 fixture's program runs as its unwind tables (or their absence) make it: with them, it returns 0
@@ -987,43 +994,18 @@ static uint32_t check_unwind_test_tier1_line(const char* name)
     return line;
 }
 
-// The Tier 1 fixture with -g (#1056; see the file's comment).
-static void check_unwind_test_tier1_debug(CheckDebugTestTally* tally, const char* source, const char* directory, Arena* arena)
+// gdb at depth in `program` (the Tier 1 fixture with -g), each of the 14 times it runs: depth at its declaration's line,
+// its caller at a Tier 1 caller's declaration's line or at main's line of its call. `tag` names the script's files.
+static void check_unwind_test_tier1_lines(CheckDebugTestTally* tally, const char* program, const char* directory, const char* tag, Arena* arena)
 {
-    char outputs[2][PATH_MAX + 32];
-    String8 files[2] = { 0 };
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_tier1_g%s", directory, path == 0 ? "" : ".scalar");
-        const bool made = check_unwind_test_tier1_compile_debug(source, outputs[path], true, false, path != 0, 0, true);
-        check_debug_test_expect(tally, made, path == 0 ? "the driver links the Tier 1 fixture by --tier1 -g" : "the driver links the Tier 1 fixture by --tier1 -g --scalar",
-                                outputs[path]);
-        files[path] = made ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
-        check_debug_test_expect(tally, files[path].pointer != 0 && check_unwind_test_tier1_run(outputs[path], true, arena),
-                                "the Tier 1 program with -g runs and walks as without it", outputs[path]);
-        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", outputs[path], 0 };
-        check_debug_test_expect(tally, files[path].pointer != 0 && object_test_run(verify, "/dev/null", "/dev/null") == 0,
-                                "llvm-dwarfdump --verify passes the Tier 1 program's DWARF", outputs[path]);
-    }
-    for (uint32_t count = 0; files[0].pointer != 0 && count < 2; count += 1)
-    {
-        char lanes[PATH_MAX + 40];
-        snprintf(lanes, sizeof(lanes), "%s.lanes%s", outputs[0], count == 0 ? "1" : "8");
-        const bool made = check_unwind_test_tier1_compile_debug(source, lanes, true, false, false, count == 0 ? "1" : "8", true);
-        const String8 file = made ? foreign_test_read(arena, lanes) : (String8){ 0 };
-        check_debug_test_expect(tally, file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0,
-                                count == 0 ? "the Tier 1 -g program by --lanes 1 is the same bytes" : "the Tier 1 -g program by --lanes 8 is one lane's, byte for byte", lanes);
-    }
-    // gdb at depth, each of the 14 times it runs: depth at its declaration's line, its caller at a Tier 1 caller's
-    // declaration's line or at main's line of its call.
-    char commands[PATH_MAX + 32];
-    char report[PATH_MAX + 32];
-    snprintf(commands, sizeof(commands), "%s/dbg_tier1_g.gdb", directory);
-    snprintf(report, sizeof(report), "%s/dbg_tier1_g.gdb.out", directory);
+    char commands[PATH_MAX + 48];
+    char report[PATH_MAX + 48];
+    snprintf(commands, sizeof(commands), "%s/%s.gdb", directory, tag);
+    snprintf(report, sizeof(report), "%s/%s.gdb.out", directory, tag);
     const char script[] = "set pagination off\nset confirm off\nset debuginfod enabled off\nbreak depth\ncommands\nsilent\nprintf \"TIER1_STOP\\n\"\nbt 2\n"
                           "continue\nend\nrun\n";
-    const bool scripted = files[0].pointer != 0 && foreign_test_write(commands, script, sizeof(script) - 1);
-    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-x", commands, outputs[0], 0 };
+    const bool scripted = foreign_test_write(commands, script, sizeof(script) - 1);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-x", commands, (char*)program, 0 };
     const bool ran = scripted && object_test_run(gdb, report, "/dev/null") == 0;
     const String8 text = ran ? foreign_test_read(arena, report) : (String8){ 0 };
     static const char* const callers[] = { "kept", "crowded", "early", "spin", "aligned", "aligned_spin", "aligned_early", "main" };
@@ -1060,6 +1042,71 @@ static void check_unwind_test_tier1_debug(CheckDebugTestTally* tally, const char
     if (!(placed && stops == 14) && text.pointer != 0)
     {
         printf("%.3000s\n", text.pointer);
+    }
+}
+
+// The Tier 1 fixture with -g (#1056; see the file's comment).
+static void check_unwind_test_tier1_debug(CheckDebugTestTally* tally, const char* source, const char* directory, Arena* arena)
+{
+    char outputs[2][PATH_MAX + 32];
+    String8 files[2] = { 0 };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_tier1_g%s", directory, path == 0 ? "" : ".scalar");
+        const bool made = check_unwind_test_tier1_compile_debug(source, outputs[path], true, false, path != 0, 0, true, 0);
+        check_debug_test_expect(tally, made, path == 0 ? "the driver links the Tier 1 fixture by --tier1 -g" : "the driver links the Tier 1 fixture by --tier1 -g --scalar",
+                                outputs[path]);
+        files[path] = made ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
+        check_debug_test_expect(tally, files[path].pointer != 0 && check_unwind_test_tier1_run(outputs[path], true, arena),
+                                "the Tier 1 program with -g runs and walks as without it", outputs[path]);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", outputs[path], 0 };
+        check_debug_test_expect(tally, files[path].pointer != 0 && object_test_run(verify, "/dev/null", "/dev/null") == 0,
+                                "llvm-dwarfdump --verify passes the Tier 1 program's DWARF", outputs[path]);
+    }
+    // On lanes, and with the identifiers' ids in another order (#153), the vector path's bytes.
+    for (uint32_t way = 0; files[0].pointer != 0 && way < 3; way += 1)
+    {
+        static const char* const names[3] = { "lanes1", "lanes8", "ids" };
+        static const char* const checks[3] = { "the Tier 1 -g program by --lanes 1 is the same bytes", "the Tier 1 -g program by --lanes 8 is one lane's, byte for byte",
+                                               "the Tier 1 -g program with its ids in another order is the same bytes" };
+        char other[PATH_MAX + 40];
+        snprintf(other, sizeof(other), "%s.%s", outputs[0], names[way]);
+        const bool made = check_unwind_test_tier1_compile_debug(source, other, true, false, false, way == 0 ? "1" : way == 1 ? "8" : 0, true, way == 2 ? "153" : 0);
+        const String8 file = made ? foreign_test_read(arena, other) : (String8){ 0 };
+        check_debug_test_expect(tally, file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0, checks[way],
+                                other);
+    }
+    if (files[0].pointer != 0)
+    {
+        check_unwind_test_tier1_lines(tally, outputs[0], directory, "dbg_tier1_g", arena);
+    }
+    // Its -c -g object by each path (Tier 1's paths may color slots apart, so not the same bytes), which llvm-dwarfdump
+    // --verify passes; the vector path's linked by cc through GNU ld into a program that runs and that gdb places.
+    char objects[2][PATH_MAX + 32];
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        snprintf(objects[path], sizeof(objects[path]), "%s/dbg_tier1_g%s.o", directory, path == 0 ? "" : ".scalar");
+        const bool made = check_unwind_test_tier1_compile_debug(source, objects[path], true, true, path != 0, 0, true, 0);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", objects[path], 0 };
+        check_debug_test_expect(tally, made && object_test_run(verify, "/dev/null", "/dev/null") == 0,
+                                path == 0 ? "the Tier 1 fixture's -c -g object passes llvm-dwarfdump --verify" :
+                                            "the Tier 1 fixture's -c -g --scalar object passes llvm-dwarfdump --verify",
+                                objects[path]);
+    }
+    char program[PATH_MAX + 48];
+    char errors[PATH_MAX + 56];
+    snprintf(program, sizeof(program), "%s.bfd", objects[0]);
+    snprintf(errors, sizeof(errors), "%s.err", program);
+    char* link[] = { (char*)"cc", (char*)"-fuse-ld=bfd", (char*)"-o", program, objects[0], 0 };
+    const bool linked = object_test_run(link, "/dev/null", errors) == 0;
+    check_debug_test_expect(tally, linked && check_unwind_test_tier1_run(program, true, arena), "cc links the Tier 1 -c -g object into a program that runs and walks",
+                            errors);
+    char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", program, 0 };
+    check_debug_test_expect(tally, linked && object_test_run(verify, "/dev/null", "/dev/null") == 0, "llvm-dwarfdump --verify passes the linked Tier 1 object's DWARF",
+                            program);
+    if (linked)
+    {
+        check_unwind_test_tier1_lines(tally, program, directory, "dbg_tier1_g_object", arena);
     }
 }
 

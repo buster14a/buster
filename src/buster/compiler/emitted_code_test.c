@@ -24,6 +24,8 @@
 //   the loop): proved, lowered to a row program, the fixed reader refusing it, and the same mutations refuted, the loop's
 //   exit rule anchored inside the loop and a single allocation's rule after it (what a fixed writer would say) among
 //   them;
+// - limits (emitted_test_limits): a fixed frame at the events' 32-bit edge, unsupported by name (#1149), beside one
+//   16 bytes smaller; and emitted_unwind_same's same, different and resource answers;
 // - uncovered forms (emitted_test_uncovered): code through monitorx, whose conservative record may write rsp, unproven
 //   where a rule fails on a path through it and refuted where one fails off its paths, though after an unproven one;
 //   and the driver's --verify -c -march=znver5 of monitorx's and mwaitx's leaves, by both paths;
@@ -334,7 +336,7 @@ static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* 
     for (uint32_t scalar = 0; valid && scalar < 2; scalar += 1)
     {
         const bool lowered = emitted_unwind(&emitted, layout.offsets, layout.length, scalar != 0, rows, &resolved) == UNWIND_OK;
-        emitted_test_expect(test, lowered && emitted_unwind_same(&previous, &resolved, arena) && emitted_test_same_bytes(&previous, &resolved, true),
+        emitted_test_expect(test, lowered && emitted_unwind_same(&previous, &resolved, arena) == EMITTED_SAME && emitted_test_same_bytes(&previous, &resolved, true),
                             "the resolved frame events are the fixed reader's descriptor", id);
     }
     if (valid)
@@ -470,6 +472,57 @@ static bool emitted_test_frame_code(const Tier1Frame* frame, uint32_t used, bool
     return valid;
 }
 
+// A new directory for a test's files under $TMPDIR (or /tmp), as the other tests make theirs: `name` with mkdtemp's
+// six random characters, in `directory` (`size` bytes). False where the name doesn't fit or the directory isn't made.
+static bool emitted_test_directory(char* directory, uint64_t size, const char* name)
+{
+    const char* temporary = getenv("TMPDIR");
+    const int written = snprintf(directory, size, "%s/%s-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp", name);
+    return written > 0 && (uint64_t)written < size && mkdtemp(directory) != 0;
+}
+
+// A fixed frame at the edge of the events' signed 32-bit offsets (#1149): `sub rsp, 0x7ffffff8`, whose CFA offset is
+// 2^31, is EMITTED_FRAME_LIMIT, which the emission reports as unsupported (not as an internal error), and one 16 bytes
+// smaller is described. Then emitted_unwind_same's three answers: the same CFI, different CFI, and a scratch arena
+// without room for a fixed shape's rows, which says neither (a resource failure, which the lanes retry on one).
+static void emitted_test_limits(EmittedTest* test)
+{
+    const uint32_t sizes[2] = { 0x7ffffff8u, 0x7fffffe8u };
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        X86Instruction records[3] = {
+            tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, (int32_t)sizes[k]),
+            tier1_frame_emit_immediate(X86_FORM_ADD_RM64_IMM32, X86_REGISTER_RSP, (int32_t)sizes[k]),
+            { .form = X86_FORM_RET },
+        };
+        const Tier0Code code = {
+            .records = records,
+            .count = 3,
+            .frame_size = sizes[k],
+            .error = TIER0_OK,
+        };
+        const uint64_t mark = test->arena.length;
+        const EmittedCode emitted = emitted_from_tier0(&code, true, false, false, &test->arena);
+        emitted_test_expect(test, emitted.frame_status == (k == 0 ? EMITTED_FRAME_LIMIT : EMITTED_FRAME_DESCRIBED),
+                            k == 0 ? "a frame whose CFA offset is 2^31 is past the events' offsets" : "a frame 16 bytes smaller is described", k);
+        uint32_t offsets[4] = { 0, 7, 14, 15 };
+        UnwindFunction frame;
+        const char* reason = 0;
+        const CheckProgramStatus status = check_program_emit_frame(&emitted, offsets, 15, false, false, 0, &test->scratch, &frame, &reason);
+        emitted_test_expect(test, k == 0 ? status == CHECK_PROGRAM_UNSUPPORTED && reason != 0 && strstr(reason, "#1149") != 0 && strstr(reason, "internal") == 0 : true,
+                            "the emission reports the 2 GB edge as unsupported, naming its follow-up", k);
+        arena_pop_to(&test->arena, mark);
+    }
+    const UnwindFunction pushed = { .size = 16, .saved = 1 };
+    const UnwindFunction other = { .size = 16, .saved = 2 };
+    Arena full = test->scratch;
+    full.capacity = full.length;
+    emitted_test_expect(test, emitted_unwind_same(&pushed, &pushed, &test->scratch) == EMITTED_SAME, "a fixed frame is its own CFI", 0);
+    emitted_test_expect(test, emitted_unwind_same(&pushed, &other, &test->scratch) == EMITTED_DIFFERENT, "frames of other pushes are other CFI", 0);
+    emitted_test_expect(test, emitted_unwind_same(&pushed, &pushed, &full) == EMITTED_SAME_MEMORY && full.length == test->scratch.length,
+                        "without room for a fixed frame's rows, the comparison is a resource failure", 0);
+}
+
 // One case of emitted_test_uncovered: `count` records with a branch from `branch` to `target` (UINT32_MAX for none) and
 // no frame events (the CIE's rules), whose verdict must be `expected` at `record`.
 static void emitted_test_uncovered_case(EmittedTest* test, X86Instruction* records, uint32_t count, uint32_t branch, uint32_t target, EmittedVerifyError expected,
@@ -513,7 +566,7 @@ static void emitted_test_uncovered(EmittedTest* test, const char* directory)
     emitted_test_uncovered_case(test, joined, 4, 1, 3, EMITTED_VERIFY_UNPROVEN, 3, "a return that one path through monitorx reaches is unproven", 4);
     X86Instruction apart[] = { test_rax, jne, monitorx, ret, push, ret };
     emitted_test_uncovered_case(test, apart, 6, 1, 4, EMITTED_VERIFY_REFUTED, 5, "a push off monitorx's path is refuted after an unproven return", 5);
-    char source[512], object[512], err[512];
+    char source[PATH_MAX + 32], object[PATH_MAX + 32], err[PATH_MAX + 32];
     snprintf(source, sizeof(source), "%s/leaves.c", directory);
     snprintf(object, sizeof(object), "%s/leaves.o", directory);
     snprintf(err, sizeof(err), "%s/leaves.err", directory);
@@ -656,7 +709,7 @@ static void emitted_test_tier1(EmittedTest* test)
                         }
                         if (!probed)
                         {
-                            emitted_test_expect(test, described && lowered && emitted_unwind_same(&previous, &resolved, &test->arena) &&
+                            emitted_test_expect(test, described && lowered && emitted_unwind_same(&previous, &resolved, &test->arena) == EMITTED_SAME &&
                                                           emitted_test_same_bytes(&previous, &resolved, true),
                                                 "without probes, the previous adapter's descriptor, byte for byte", id);
                         }
@@ -710,8 +763,8 @@ static bool emitted_test_probe_frame(EmittedTest* test, Tier1Frame* frame, Emitt
 // its rsp (r14) back.
 static void emitted_test_native(EmittedTest* test, bool keep)
 {
-    char directory[] = "/tmp/buster-emitted-XXXXXX";
-    bool valid = mkdtemp(directory) != 0;
+    char directory[PATH_MAX];
+    bool valid = emitted_test_directory(directory, sizeof(directory), "buster-emitted");
     Tier1Frame frame;
     static EmittedTestFrame code;
     EmittedTestLayout layout;
@@ -738,7 +791,8 @@ static void emitted_test_native(EmittedTest* test, bool keep)
     uint32_t location = 0;
     UnwindOutput frames = { .bytes = frame_bytes, .capacity = sizeof(frame_bytes), .locations = &location, .location_capacity = 1 };
     valid = valid && unwind_write(&unwind, 1, &frames, false) == UNWIND_OK;
-    char assembly[512], object[512], executable[512], out[512], err[512], commands[512], path[512];
+    char assembly[PATH_MAX + 32], object[PATH_MAX + 32], executable[PATH_MAX + 32], out[PATH_MAX + 32], err[PATH_MAX + 32], commands[PATH_MAX + 32],
+        path[PATH_MAX + 32];
     snprintf(assembly, sizeof(assembly), "%s/fixture.s", directory);
     snprintf(object, sizeof(object), "%s/fixture.o", directory);
     snprintf(executable, sizeof(executable), "%s/fixture", directory);
@@ -881,8 +935,9 @@ static int run_emitted_code_tests(int argc, char** argv)
         emitted_test_rows(&test);
         emitted_test_tier0(&test, seed, rounds);
         emitted_test_tier1(&test);
-        char directory[] = "/tmp/buster-emitted-leaves-XXXXXX";
-        const bool made = mkdtemp(directory) != 0;
+        emitted_test_limits(&test);
+        char directory[PATH_MAX];
+        const bool made = emitted_test_directory(directory, sizeof(directory), "buster-emitted-leaves");
         emitted_test_expect(&test, made, "make a directory for the leaves' compile", 0);
         if (made)
         {

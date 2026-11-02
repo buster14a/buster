@@ -7,8 +7,11 @@ The C driver's emission (`check_program_emit`) consumes one tier-neutral result,
 branch columns, symbolic references, labels, optional source events and the
 frame's events. Tier 0's code (its functions, its helpers and the assembly
 templates' code) adapts to it (`emitted_from_tier0`), and Tier 1's publishes it
-itself (`check_tier1_compile`): no consumer reads a `Tier0Code`, and Tier 1 no
-longer describes its frame as Tier 0's prologue/epilogue protocol. The frame's
+itself (`check_tier1_compile`): the emission's code, rows and unwind path no
+longer consume a `Tier0Code` (`--verify`'s comparison with Tier 0's fixed-frame
+analyzer, `unwind_tier0`, still reads the records as one, and Tier 0's helpers
+carry theirs to the adapter), and Tier 1 no longer describes its frame as Tier
+0's prologue/epilogue protocol. The frame's
 events are the producers' own (Tier 1's frame emitter writes them with the
 records that make them), resolved through the final layout after branch sizing,
 written as the fixed-frame CFI where they spell a fixed frame (the same bytes as
@@ -130,8 +133,8 @@ marks on every failure.
 Layout validation has a contiguous 16-record AVX-512 path and an exact scalar
 path. Masked loads cover only the valid tail; a shifted end vector checks each
 record against its predecessor, including across batch boundaries. The module is
-included by `emission_metadata_test.c` and by `c_check_program.c` before
-`c_check_debug.c`, after the host ISA is selected. The standalone wrapper's
+included by `emission_metadata_test.c`, and by `main.c` (before `emitted_code.c`,
+`c_check_program.c` and `c_check_debug.c`), after the host ISA is selected. The standalone wrapper's
 vector command enables `BUSTER_HOST_VECTOR` through
 `BUSTER_EMISSION_METADATA_TEST_VECTOR`.
 
@@ -151,7 +154,7 @@ emission's reading of them:
 | --- | --- |
 | Code | `records`/`count`; `branches`/`targets`/`branch_count` (each branch's record and its target's, ascending, which branch sizing reads); `references` (`LinkReference`, by marked instruction); `label_records` (each label's first record, where the emission defines its symbol) |
 | Source events | `-g` only. `source_count` events, event *e* at the RIGHT side of boundary `source_records[e]` (nondecreasing), its origin `source_origins[e]` (an index into the body's typed entries, the lowering's entry tokens), or *e* itself where the column is null (Tier 0's: an event per typed entry), or `BUSTER_EMISSION_NO_ORIGIN` for generated code; and `source_records[source_count]`, where the epilogue's closing row starts (the record count for none) |
-| Frame events | `frames`/`frame_count` (`EmissionFrameEvent`, the x86-64 namespace below) and `frame_status`: described (none means the CIE's rules throughout), undescribed (the producer's frame isn't one its events describe: the emission's backend failure at the function), no room (a resource failure, which the emission's lanes retry on one), or none asked for |
+| Frame events | `frames`/`frame_count` (`EmissionFrameEvent`, the x86-64 namespace below) and `frame_status`: described (none means the CIE's rules throughout), undescribed (the producer's frame isn't one its events describe: the emission's backend failure at the function), a limit (a fixed frame whose CFA offset passes the events' 32-bit values: unsupported, #1149), no room (a resource failure, which the emission's lanes retry on one), or none asked for |
 | Producer | `assembly` (a template's code: its events describe the frame the compiler built around the templates, which the verifier doesn't read); `error`/`node` (Tier 0's failure, which the emission reports); `deferred` (statistics) |
 
 The x86-64 unwind-register namespace is the System V psABI's DWARF numbering
@@ -169,8 +172,9 @@ records), which `unwind_tier0_frame_tails` checks are the records' (each
 transition at its record's boundary: the reader takes no final offsets for
 this), in the fixed writer's order (`unwind_function_rows`). A frame whose CFA
 would pass `INT32_MAX` (within 56 bytes of 2 GB) has no events: the events'
-values are signed 32-bit, so the emission refuses it where the old descriptor
-took it.
+values are signed 32-bit, so the adapter marks it `EMITTED_FRAME_LIMIT` and the
+emission refuses it as unsupported, by name, where the old descriptor took it
+([#1149](https://github.com/buster14a/buster/issues/1149) is the follow-up).
 
 Tier 1 (`tier1_frame_emit`, `tier1_frame_emit.c`): the frame emitter appends the
 events with the records it writes, at the boundary after the instruction that
@@ -210,7 +214,9 @@ force since the last row), and a CFA's register or offset alone changes by
 `DW_CFA_def_cfa_register` or `DW_CFA_def_cfa_offset`. With `--verify`, the
 events are proved (`emitted_verify_frames`), and where Tier 0's fixed-frame
 analyzer (`unwind_tier0`, which reads the records alone) takes the function,
-its frame must be the same CFI (`emitted_unwind_same`). A row program's rows live
+its frame must be the same CFI (`emitted_unwind_same`; a scratch arena without
+room for a fixed shape's rows is a resource failure, which the lanes retry on
+one, not a mismatch). A row program's rows live
 on the lane's scratch (a helper's in the emission's output arena), which the
 tables read once the lanes are done.
 
@@ -311,6 +317,10 @@ compiles and runs the resulting DWARF.
   Tier 0's protocol by the fixed reader), byte for byte; and with probes past a
   page without a frame pointer, a row program with its CFA in r11 that the fixed
   reader refuses; with the same mutants refuted;
+- limits: a fixed frame of `sub rsp, 0x7ffffff8` (its CFA offset 2^31) is
+  `EMITTED_FRAME_LIMIT`, which the emission reports as unsupported naming #1149,
+  and one 16 bytes smaller is described; `emitted_unwind_same` answers the same,
+  different, and, without room for a fixed shape's rows, a resource failure;
 - uncovered forms: `monitorx`'s leaf's return unproven, not refuted, and proved
   without it; a push before `monitorx` that its events don't describe refuted; a
   return that one path through `monitorx` reaches unproven; a push off its paths
@@ -402,6 +412,9 @@ Remaining beyond this change:
 - The driver requests no probes (`BUSTER_TIER1_FRAME_PROBE_STACK`); the probe
   frame's unwinding is proved and checked natively in isolation only, as the
   issue asked, before any production option.
+- Frames within 56 bytes of 2 GB: the events' signed 32-bit values can't carry
+  their CFA offsets, so the emission refuses them as unsupported
+  ([#1149](https://github.com/buster14a/buster/issues/1149)).
 - The verifier's trust boundary (stores it doesn't follow, unreached code, rules
   past a form `x86_semantics.c` doesn't cover, which it leaves unproven) and its
   scalar implementation, which runs with `--verify` and in the tests alone.

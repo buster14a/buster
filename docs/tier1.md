@@ -196,7 +196,9 @@ steps over its body as one line, and a backtrace places each Tier 1 frame at its
 function's declaration. Tier 0's functions in the same program keep their
 statement rows, and the unwind tables are complete either way.
 `test-check-debug --cross-check` checks the subset with `llvm-dwarfdump --verify`
-and gdb ([the debug guide](debug.md)); statement rows need source positions
+and gdb, as an executable (by each path, on lanes and with its identifiers' ids
+in another order, into the same bytes) and as a `-c -g` object linked by `cc`
+([the debug guide](debug.md)); statement rows need source positions
 carried through the IR, lowering to selection, which remains.
 
 Beyond the straight-line subset, the CFG consumer takes frame objects'

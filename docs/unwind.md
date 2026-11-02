@@ -148,7 +148,8 @@ or the return address's own rule, states remembered deeper than 16), and
 `unwind_rows_canonical` drops rows at a function's end (a closed frame's last
 epilogue's restored state, with its remembering). Rows carry signed 32-bit
 values: a frame whose CFA would pass `INT32_MAX` (within 56 bytes of 2 GB) has no
-events, where the fixed descriptor took it.
+events, where the fixed descriptor took it; the emission refuses it as
+unsupported ([#1149](https://github.com/buster14a/buster/issues/1149)).
 
 ## Format and linker handoff
 

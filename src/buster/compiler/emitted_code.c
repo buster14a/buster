@@ -4,8 +4,10 @@
 // The tier-neutral emitted function (#1056): what a code generator hands the C driver's emission (check_program_emit),
 // which sizes its branches, encodes it, publishes its atom, symbols and fixups, and from its metadata writes its source
 // rows (-g) and its unwind table. Tier 0's code (tier0_compile's, its helpers', the assembly templates') adapts to it
-// (emitted_from_tier0), and Tier 1's publishes it itself (check_tier1_compile): no consumer reads a Tier0Code, and no
-// producer describes its frame as another's.
+// (emitted_from_tier0), and Tier 1's publishes it itself (check_tier1_compile): the emission's code, rows and unwind
+// path no longer consume a Tier0Code (--verify's comparison with Tier 0's fixed-frame analyzer, unwind_tier0, still reads
+// the records as one, and Tier 0's helpers carry theirs to the adapter), and no producer describes its frame as
+// another's.
 //
 // Its slices, all borrowed from the producer's arenas, which outlive the emission's reading of them:
 //
@@ -28,7 +30,8 @@
 //
 // emitted_verify_frames proves the frame events against the records and their control flow (with --verify, and in the
 // tests): see its comment. Producers' own checks run at their production; a frame a producer can't describe is
-// EMITTED_FRAME_UNDESCRIBED, which the emission reports as the backend's failure at the function.
+// EMITTED_FRAME_UNDESCRIBED, which the emission reports as the backend's failure at the function, and a fixed frame
+// whose CFA offset passes the events' signed 32-bit values EMITTED_FRAME_LIMIT, which it reports as unsupported (#1149).
 
 #define BUSTER_EMITTED_UNKNOWN INT32_MIN
 #define BUSTER_EMITTED_NONE 0xffu
@@ -45,6 +48,9 @@ typedef enum EmittedFrameStatus
     EMITTED_FRAME_DESCRIBED,
     // The producer's frame is one its events can't describe, or isn't the frame it published.
     EMITTED_FRAME_UNDESCRIBED,
+    // A fixed frame whose CFA offset passes the events' signed 32-bit values (emitted_cfa_fits): within 56 bytes of 2 GB,
+    // which the fixed descriptor alone described (#1149).
+    EMITTED_FRAME_LIMIT,
     // No room for the events.
     EMITTED_FRAME_MEMORY,
 } EmittedFrameStatus;
@@ -108,7 +114,16 @@ struct EmittedVerdict
 static __attribute__((unused)) EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool sources, bool assembly, Arena* arena);
 static __attribute__((unused)) UnwindError emitted_unwind(const EmittedCode* code, const uint32_t* offsets, uint32_t length, bool scalar, EmissionFrameRow* rows,
                                                           UnwindFunction* output);
-static __attribute__((unused)) bool emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b, Arena* scratch);
+// Whether two descriptors are the same CFI (emitted_unwind_same).
+typedef enum EmittedSame
+{
+    EMITTED_SAME,
+    EMITTED_DIFFERENT,
+    // No room in the scratch arena for a fixed descriptor's rows: neither, as a resource failure.
+    EMITTED_SAME_MEMORY,
+} EmittedSame;
+
+static __attribute__((unused)) EmittedSame emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b, Arena* scratch);
 static __attribute__((unused)) EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scratch);
 
 // Whether a fixed frame's largest CFA offset, its pushes' and its allocation's, is one the events' signed 32-bit values
@@ -130,7 +145,8 @@ static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 // `frames` its frame's events, from the frame it published (Tier0Code.frame_*, tail_records) and the records that make
 // it, which unwind_tier0_frame_tails checks are the frame's: its transitions at their records' boundaries, in the
 // fixed writer's order (unwind_function_rows), from `arena`. A frame that isn't the published one is
-// EMITTED_FRAME_UNDESCRIBED; no room, EMITTED_FRAME_MEMORY, with nothing left in `arena`.
+// EMITTED_FRAME_UNDESCRIBED; one whose CFA offset the events' values can't carry, EMITTED_FRAME_LIMIT; no room,
+// EMITTED_FRAME_MEMORY, with nothing left in `arena`.
 static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool sources, bool assembly, Arena* arena)
 {
     EmittedCode result = {
@@ -164,11 +180,12 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
         result.frame_status = events != 0 && rows != 0 && (tail_room == 0 || tails != 0) ? EMITTED_FRAME_DESCRIBED : EMITTED_FRAME_MEMORY;
         UnwindFunction boundaries;
         // Each transition at its record's boundary: unwind_tier0_frame_tails without final offsets. A CFA past the
-        // events' offsets (emitted_cfa_fits) is one no event describes.
-        if (result.frame_status == EMITTED_FRAME_DESCRIBED &&
-            (unwind_tier0_frame_tails(code, 0, code->count, &boundaries, tails) != UNWIND_OK || !emitted_cfa_fits(boundaries.saved, boundaries.frame_size)))
+        // events' offsets (emitted_cfa_fits) is one no event carries.
+        if (result.frame_status == EMITTED_FRAME_DESCRIBED)
         {
-            result.frame_status = EMITTED_FRAME_UNDESCRIBED;
+            const bool read = unwind_tier0_frame_tails(code, 0, code->count, &boundaries, tails) == UNWIND_OK;
+            result.frame_status = !read ? EMITTED_FRAME_UNDESCRIBED : !emitted_cfa_fits(boundaries.saved, boundaries.frame_size) ? EMITTED_FRAME_LIMIT :
+                                                                                                                                   EMITTED_FRAME_DESCRIBED;
         }
         const uint32_t count = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
         result.frame_status = count <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
@@ -237,7 +254,8 @@ static UnwindError emitted_unwind(const EmittedCode* code, const uint32_t* offse
     return error;
 }
 
-// A descriptor's rows: a row program's, or a fixed shape's (unwind_function_rows), from `scratch`; null without room.
+// A descriptor's rows: a row program's, or a fixed shape's (unwind_function_rows), from `scratch`; UINT32_MAX rows
+// without room.
 static const EmissionFrameRow* emitted_descriptor_rows(const UnwindFunction* function, Arena* scratch, uint32_t* count)
 {
     const EmissionFrameRow* rows = function->rows;
@@ -253,15 +271,17 @@ static const EmissionFrameRow* emitted_descriptor_rows(const UnwindFunction* fun
 }
 
 // Whether two descriptors are the same CFI: the same size and the same rows in order, a remembered state's offset aside
-// (the writers take none for it: unwind_rows_scalar). Leaves `scratch` as it was.
-static bool emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b, Arena* scratch)
+// (the writers take none for it: unwind_rows_scalar); EMITTED_SAME_MEMORY where `scratch` has no room for a fixed
+// shape's rows, which says neither. Leaves `scratch` as it was.
+static EmittedSame emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     uint32_t a_count = 0;
     uint32_t b_count = 0;
     const EmissionFrameRow* a_rows = emitted_descriptor_rows(a, scratch, &a_count);
     const EmissionFrameRow* b_rows = emitted_descriptor_rows(b, scratch, &b_count);
-    bool same = a->size == b->size && a_count == b_count && a_count != UINT32_MAX;
+    const bool room = a_count != UINT32_MAX && b_count != UINT32_MAX;
+    bool same = room && a->size == b->size && a_count == b_count;
     for (uint32_t i = 0; same && i < a_count; i += 1)
     {
         const EmissionFrameRow x = a_rows[i];
@@ -269,7 +289,7 @@ static bool emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b
         same = x.kind == y.kind && x.reg == y.reg && x.value == y.value && (x.offset == y.offset || x.kind == EMISSION_FRAME_REMEMBER_STATE);
     }
     arena_pop_to(scratch, mark);
-    return same;
+    return !room ? EMITTED_SAME_MEMORY : same ? EMITTED_SAME : EMITTED_DIFFERENT;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -11,7 +11,9 @@
 //
 // emission_metadata_check checks the bounded protocol, NOT the truth of unwind rules about machine instructions or
 // control flow. A backend must independently prove those facts before publication. In particular, balanced CFI state
-// operations are not a CFG proof. The current driver and fixed-frame writer are not migrated by this module.
+// operations are not a CFG proof: emitted_code.c's emitted_verify_frames is the driver's proof of frame events (with
+// --verify and in the tests). The C driver's emission resolves its functions' events through this module after branch
+// sizing (emitted_unwind) and validates its -g source rows against it (c_check_debug.c).
 //
 // Count/place/fill: emission_metadata_plan validates and publishes required counts; the caller reserves disjoint
 // destination slices; emission_metadata_resolve validates again before any store, fills and publishes the result last.
