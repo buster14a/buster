@@ -103,8 +103,8 @@ static CheckValue check_init_constant_value(const CheckInitWalker* walker, uint3
 
 static bool check_init_constant_known(const CheckValue* value)
 {
-    return (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING) &&
-           value->fault == CHECK_FAULT_NONE && (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
+    return check_value_evaluated_constant(value) &&
+           (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING);
 }
 
 static unsigned __int128 check_init_bytes_integer(const uint8_t* bytes, uint32_t size)
@@ -346,7 +346,7 @@ static bool check_init_vector_literal(CheckInitWalker* walker, uint32_t node, ui
         {
             const CheckAction action = {
                 .op = CHECK_OP_INITIALIZE, .operands = { value }, .type = element,
-                .node = value_node, .extensions = check_init_extensions(walker, first),
+                .node = value_node, .context = check_init_context(walker, value_node, first),
             };
             CheckActionResult converted = { 0 };
             check_action_scalar(walker->types, &action, &converted);

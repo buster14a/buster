@@ -281,21 +281,21 @@ static void check_varargs_test_fixtures(CheckVarargsTest* test, TypeTable* table
         .operands = { value },
         .argument_count = 2,
         .requested_type = late_enum,
-        .tag_completions = completions,
-        .tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
-        .source_position = 899,
+        .context.tag_completions = completions,
+        .context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
+        .context.source_position = 899,
     };
     check_varargs(table, &context, &action, &result, 1);
     check_varargs_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE && result.action.diagnostic_operand == 1,
                               "later enum completion cannot authorize an earlier va_arg type name");
-    action.source_position = 900;
+    action.context.source_position = 900;
     check_varargs(table, &context, &action, &result, 1);
     check_varargs_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "exclusive type-name end includes its completed tag");
-    action.tag_completion_count = tag;
+    action.context.tag_completion_count = tag;
     check_varargs(table, &context, &action, &result, 1);
     check_varargs_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "completion history capacity is checked before reading a tag position");
-    action.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
-    action.source_position = 899;
+    action.context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+    action.context.source_position = 899;
     action.requested_type = type_pointer(table, late_enum);
     check_varargs(table, &context, &action, &result, 1);
     check_varargs_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "pointer request does not require its pointed-to enum to be complete");
