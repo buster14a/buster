@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Native self-host qualification (#1111). Run from the repository root with build.sh's NUL-delimited
+// Self-host qualification (#1111). Run from the repository root with build.sh's NUL-delimited
 // source/flag exports. One unit and one compiler lane at a time bound bootstrap memory (#1109).
 // All outputs live in a new directory: a failed command cannot reuse an earlier successful output.
 // Each command runs in a process group with this program's own deadline, so wait4 reports the
@@ -614,7 +614,7 @@ static int qualify(int argc, char **argv)
     close_file(qualification.timings);
     char *summary_path = format_path("%s/summary.md", directory);
     FILE *summary = open_file(summary_path, "wx");
-    fprintf(summary, "## Native self-host qualification\n\nPASS: %zu units; %zu smoke commands; %u probes; %u byte comparisons; %u executable runs.\n\n", sources.count, smoke_count, BUSTER_SELFHOST_PROBES, BUSTER_SELFHOST_PROBES * 2, BUSTER_SELFHOST_PROBES * 2);
+    fprintf(summary, "## Self-host qualification\n\nPASS: %zu units; %zu smoke commands; %u probes; %u byte comparisons; %u executable runs.\n\n", sources.count, smoke_count, BUSTER_SELFHOST_PROBES, BUSTER_SELFHOST_PROBES * 2, BUSTER_SELFHOST_PROBES * 2);
     fprintf(summary, "| Phase | Wall seconds |\n| --- | ---: |\n| Sequential unit compilation | %.3f |\n| Host link | %.3f |\n| Stage 2 smoke | %.3f |\n| Probe compilation, comparison and execution | %.3f |\n| Total | %.3f |\n\n", (double)bootstrap_ns / 1e9, (double)link_ns / 1e9, (double)smoke_ns / 1e9, (double)probe_ns / 1e9, (double)(now_ns() - start) / 1e9);
     fprintf(summary, "Stage 1: %lld bytes. Stage 2: %lld bytes. Per-command time, peak RSS and exit status are in `timings.tsv`.\n\nThis is probe-output equivalence, not a full stage-2/stage-3 compiler-binary fixed point or Tier 1 qualification.\n", (long long)stage1_bytes, (long long)stage2_bytes);
     close_file(summary);
