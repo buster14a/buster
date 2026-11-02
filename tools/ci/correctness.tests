@@ -118,7 +118,7 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # The snippets, each also checked against clang, the generated inputs and the driver's checks.
 ./build/compiler test-parser --clang
 ./build/compiler test-parser --clang tests/parser-handoff/pragma-heavy.c
-== Test mixed source, object, archive and shared-library input routing
+== Test mixed source, object, archive and shared-library input routing [2 CPUs]
 ./build/compiler test-source-driver
 == Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
 # --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 4 parts, one CPU
