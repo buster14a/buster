@@ -2312,7 +2312,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                                              read_token != BUSTER_CHECK_NONE && read_token >= self_begin && read_token < self_end;
             // A brace initializer's own read is reported directly: its object is initialized even though no value
             // column wrote it before the read, and the normal path's write ordering would hide the warning.
-            if (local && scalar && braced && self_initialization)
+            if (local && !parameter && scalar && braced && self_initialization)
             {
                 const char* message = check_warning_text(scratch, "variable '%.*s' is uninitialized when used within its own initialization",
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
