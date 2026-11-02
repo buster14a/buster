@@ -102,8 +102,9 @@ compiles each function the pipeline takes by Tier 1 and every other function by
 Tier 0, as without the option, into one System V program
 (`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
 lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code and CFG
-cleanup), its CFG and dominators analyzed, selected and emitted, the CFG
-consumer allocating it over its CFG (`tier1_cfg.c`); with `--scalar`, every step
+cleanup), whose final verification retains the CFG and dominators for selection
+(#1055), selected and emitted, the CFG consumer allocating it over its CFG
+(`tier1_cfg.c`); with `--scalar`, every step
 by its scalar twin. Its records, branch columns and references take Tier 0's
 place in the emission (`check_program_emit_tier1`), on the emission's lanes,
 each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
