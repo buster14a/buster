@@ -300,7 +300,7 @@ static void check_complex_conjugate(TypeTable* table, const CheckAction* action,
             bool sign = false;
             check_action_integer_type(table, element, &width, &sign);
             const CheckIntegerFold fold = { .active = true, .op = CHECK_OP_NEGATIVE, .left = imaginary.integer, .width = width,
-                                           .right_width = width, .is_signed = sign, .right_signed = sign, .node = action->node, .extensions = action->extensions };
+                                           .right_width = width, .is_signed = sign, .right_signed = sign, .node = action->node, .extensions = action->context.extensions };
             check_action_fold_integer(fold, &imaginary);
             result->value.integer = (unsigned __int128)(uint64_t)input.integer | (imaginary.integer << 64);
             check_action_inherit(&result->value, &imaginary);

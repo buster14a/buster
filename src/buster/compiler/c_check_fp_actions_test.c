@@ -38,7 +38,7 @@ static void check_test_fp_action_guards(CheckTest* test, TypeTable* table)
                     const uint32_t kind = (rotation + i) % BUSTER_ARRAY_LENGTH(fixtures);
                     const bool enabled = ((i + phase) & 1) != 0;
                     actions[i] = fixtures[kind];
-                    actions[i].fp_environment = enabled ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
+                    actions[i].context.fp_environment = enabled ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
                     check_action_scalar(table, actions + i, scalar + i);
                     const bool marked = kind == 2 || (kind < 2 && enabled);
                     check_test_expect(test, ((scalar[i].value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0) == marked &&
@@ -63,7 +63,7 @@ static void check_test_fp_action_values(CheckTest* test, TypeTable* table)
     CheckAction divide = { .op = CHECK_OP_DIVIDE, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1),
                                                               check_test_float(BUSTER_TYPE_DOUBLE, 3) } };
     const CheckActionResult ordinary = check_test_action(test, table, divide);
-    divide.fp_environment = BUSTER_CHECK_FP_ENV_ACCESS;
+    divide.context.fp_environment = BUSTER_CHECK_FP_ENV_ACCESS;
     const CheckActionResult strict = check_test_action(test, table, divide);
     check_test_expect(test, strict.diagnostic == CHECK_DIAG_NONE && strict.value.constant_kind == CHECK_CONSTANT_FLOATING &&
                            strict.value.floating == ordinary.value.floating && (strict.value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0 &&
@@ -80,7 +80,7 @@ static void check_test_fp_action_values(CheckTest* test, TypeTable* table)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operations); i += 1)
     {
         CheckAction action = operations[i];
-        action.fp_environment = BUSTER_CHECK_FP_ENV_ACCESS;
+        action.context.fp_environment = BUSTER_CHECK_FP_ENV_ACCESS;
         const CheckActionResult result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind != CHECK_CONSTANT_NONE &&
                                ((result.value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0) == (i < 4),
@@ -96,7 +96,7 @@ static void check_test_fp_action_values(CheckTest* test, TypeTable* table)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(selected); i += 1)
     {
         CheckAction action = selected[i];
-        action.fp_environment = BUSTER_CHECK_FP_ENV_ACCESS;
+        action.context.fp_environment = BUSTER_CHECK_FP_ENV_ACCESS;
         const CheckActionResult result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE &&
                                ((result.value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0) == (i >= 3),

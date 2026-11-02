@@ -80,11 +80,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .flags = check_input_overload_flags(input->attributes[token]) | (reader->defined[token] ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
         };
         const CheckOverloadContext context = {
-            .tag_completions = reader->tag_completions,
-            .transparent_unions = reader->transparent_unions,
-            .tag_completion_count = reader->types->tags.count,
-            .source_position = point,
-            .extensions = check_input_expression_extensions(reader->parser),
+            .semantic = check_input_context(reader, point, token, false),
         };
         CheckOverloadIndex* index = &reader->overload_index;
         uint64_t signature_hash = 0;

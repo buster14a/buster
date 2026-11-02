@@ -53,12 +53,7 @@ struct CheckVarargsAction
     // Parameter declaration identity after stripping parens/casts, or NO_PARAMETER for another expression.
     uint32_t second_argument_declaration;
     uint32_t node;
-    // Optional source-time completion history. Null uses the current table, as direct action callers do.
-    // source_position is the exclusive end of the expression/type name, not the diagnostic node identity.
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
+    CheckContext context;
 };
 
 typedef struct CheckVarargsResult CheckVarargsResult;
@@ -79,21 +74,7 @@ static bool check_varargs_start(CBuiltinId id)
 
 static bool check_varargs_source_complete(const TypeTable* table, TypeId type, const CheckVarargsAction* input)
 {
-    bool complete = type_is_complete(table, type);
-    if (complete && input->tag_completions != NULL)
-    {
-        TypeId base = type_strip_aligned(table, type);
-        while (type_kind_is_array(type_kind(table, base)))
-        {
-            base = type_strip_aligned(table, type_element(table, base));
-        }
-        const uint8_t kind = type_kind(table, base);
-        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
-        {
-            const uint32_t tag = table->types.index[type_index(base)];
-            complete = tag < input->tag_completion_count && input->tag_completions[tag] <= input->source_position;
-        }
-    }
+    const bool complete = check_context_source_complete(table, type, &input->context);
     return complete;
 }
 
@@ -141,10 +122,7 @@ static void check_varargs_list(TypeTable* table, const CheckVarargsAction* input
 {
     CheckAction action = {
         .node = input->node,
-        .tag_completions = input->tag_completions,
-        .tag_completion_count = input->tag_completion_count,
-        .source_position = input->source_position,
-        .extensions = input->extensions,
+        .context = input->context,
     };
     action.operands[index] = input->operands[index];
     CheckActionResult* result = &output->action;

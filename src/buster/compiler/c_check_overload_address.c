@@ -33,7 +33,7 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
         const CheckOverloadCandidate* candidate = candidates + current;
         valid = check_overload_candidate_valid(table, candidate) && candidate->scope == scope &&
                 (candidate->previous == UINT32_MAX || candidate->previous < current) &&
-                (context->source_position == 0 || candidate->position <= context->source_position);
+                (context->semantic.source_position == 0 || candidate->position <= context->semantic.source_position);
         multiple |= candidate->canonical != identity;
         length += 1;
     }
