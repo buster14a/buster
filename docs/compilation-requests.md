@@ -93,9 +93,9 @@ with `emits` false, as the driver's `-fsyntax-only` reads them.
 These are the only departures from `-c`'s preparation, and each is explicit:
 
 - the scalar twins: `CheckSourceRequest.scalar`, or `--scalar` among the
-  options, which the preprocessor's twins read too (`PPOptions.scalar`). Either
-  one sets `CheckSource.scalar`, which every stage takes, and so does each
-  client's emission after them, as the driver's `-c --scalar` does;
+  options. Either one sets `PPOptions.scalar`, which the preprocessor's twins
+  read, and `CheckSource.scalar`, which every later stage takes, and so does
+  each client's emission after them, as the driver's `-c --scalar` does;
 - the tests' injected failures (`CheckSourceRequest.fault`);
 - what each client does after the preparation: its selection mode
   (`benchmark-lowering-source` also lowers everything), forced lane counts,
@@ -170,8 +170,8 @@ The default `test-checker` run deals them to its parts too. The checks:
 - **Receipts:** stable across two preparations, changed by `-march`, `-D`,
   `-funsigned-char`, `--scalar`, `-I` and the overrides, and only `-march`
   changes the target's text. `--scalar` among the options is the receipt's
-  path. A file left out at the target-feature check has its receipt, and a
-  refused request has none.
+  path, and the request's override gives the same receipt. A file left out at
+  the target-feature check has its receipt, and a refused request has none.
 - **Reading:** `check_request_read` with the file among the options, an
   option's value that looks like a refused option, `-o`, no room and a
   refusal; and each refusal's message against the driver's literal text.

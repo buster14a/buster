@@ -14,7 +14,8 @@
 //   the preprocessor and keeps the unit's own fields;
 // - receipts: one file prepared twice gives the same digest and text; another -march, -D, -funsigned-char, --scalar,
 //   -I or override changes the digest, and only -march the target's text; --scalar among the options is the receipt's
-//   path; a file left out at the target-feature check has its receipt, and a refused request has none;
+//   path, and the request's scalar override gives its receipt; a file left out at the target-feature check has its
+//   receipt, and a refused request has none;
 // - parity: original fixtures (scalar code with static data and a switch's jump table, 32-byte and 64-byte vectors, a
 //   function's target attribute, predefined and command-line macros, an always_inline callee whose target the caller
 //   lacks) prepared as the source clients prepare them and emitted, published and built as -c builds its object
@@ -350,10 +351,10 @@ static void check_test_request_program_options(CheckTest* test)
 
 // The receipt of `file` prepared with `options` and the client's `overrides` (check_source_receipt) in *receipt:
 // whether it was prepared.
-static bool check_request_test_receipt(const char* file, char** options, uint32_t count, const char* overrides, CheckRequestReceipt* receipt)
+static bool check_request_test_receipt(const char* file, char** options, uint32_t count, bool scalar, const char* overrides, CheckRequestReceipt* receipt)
 {
     CheckSource source;
-    const bool ready = check_source_prepare(&source, file, options, count, (CheckSourceRequest){ .emits = true });
+    const bool ready = check_source_prepare(&source, file, options, count, (CheckSourceRequest){ .emits = true, .scalar = scalar });
     const bool known = check_source_receipt(&source, overrides, receipt);
     check_source_release(&source);
     return ready && known;
@@ -383,12 +384,14 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
             options[count] = (char*)sets[s][count];
             count += 1;
         }
-        ready = check_request_test_receipt(file, options, count, "client:test", receipts + s);
+        ready = check_request_test_receipt(file, options, count, false, "client:test", receipts + s);
     }
     char* included[] = { "-nostdinc", include };
     char* first[] = { "-nostdinc" };
-    ready = ready && check_request_test_receipt(file, included, 2, "client:test", receipts + SETS);
-    ready = ready && check_request_test_receipt(file, first, 1, "client:other", receipts + SETS + 1);
+    CheckRequestReceipt requested = { 0 };
+    ready = ready && check_request_test_receipt(file, included, 2, false, "client:test", receipts + SETS);
+    ready = ready && check_request_test_receipt(file, first, 1, false, "client:other", receipts + SETS + 1);
+    ready = ready && check_request_test_receipt(file, first, 1, true, "client:test", &requested);
     check_test_expect(test, ready, "request: the receipts' preparations");
     if (ready)
     {
@@ -412,6 +415,8 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
                           "request: the receipt names -c's output requirements, the path and the client's overrides");
         check_test_expect(test, strstr(receipts[5].text, " overrides=path:scalar,client:test") != 0,
                           "request: --scalar among the options is the receipt's path");
+        check_test_expect(test, requested.digest == receipts[5].digest && strcmp(requested.text, receipts[5].text) == 0,
+                          "request: the request's scalar override is --scalar's configuration, the preprocessor's included");
     }
 }
 

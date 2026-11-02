@@ -57,8 +57,8 @@ struct CheckSourceRequest
     bool select;
     // The client emits code: the request's code generation refusals apply (-fPIC), as they do to -c and a link.
     bool emits;
-    // --scalar's override: the checker's, the data's and the selection's scalar twins, and the program's scalar path.
-    // `--scalar` among the options asks for it too, as the driver's does (CheckSource.scalar).
+    // --scalar's override: the preprocessor's, the checker's, the data's and the selection's scalar twins, and the
+    // program's scalar path. `--scalar` among the options asks for it too, as the driver's does (CheckSource.scalar).
     bool scalar;
     // The tests' injected failure: the stage it stops the file at (CHECK or PROGRAM; READY for none), as a real failure
     // there would, the checker's running out of a resource, or the program's with `fault_unsupported` a refusal by name
@@ -88,9 +88,9 @@ struct CheckSource
     CheckProgramSelection selected;
     CheckSourceStage stage;
     uint32_t target_feature_errors;
-    // The scalar path the file was prepared by: the request's override or `--scalar` among its options (PPOptions.scalar,
-    // which the preprocessor's twins read), so that every stage, and the client's emission after them, takes the same
-    // path, as the driver's -c --scalar does.
+    // The scalar path the file was prepared by: the request's override or `--scalar` among its options, both set in
+    // PPOptions.scalar, which the preprocessor's twins read, so that every stage, and the client's emission after them,
+    // takes the same path, as the driver's -c --scalar does.
     bool scalar;
 };
 
@@ -109,7 +109,10 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
     Preprocessor* pp = source->pp;
     Parser* parser = source->parser;
     CheckCorpusPath* path = &source->path;
-    source->scalar = request.scalar || source->options.scalar;
+    // The request's override reaches the preprocessor's twins as --scalar among the options does, so the configuration
+    // every stage reads, and the receipt's digest, names the path the file takes; a refused request's stays zero.
+    source->options.scalar = requested && (request.scalar || source->options.scalar);
+    source->scalar = source->options.scalar;
     const bool scalar = source->scalar;
     const bool preprocessed = requested && intern_initialize(source->identifiers) && pp_initialize(pp, &source->options, source->identifiers) && pp_run(pp, source->input);
     bool accepted = preprocessed && check_corpus_check_policy(path, parser, pp, scalar, source->options.quiet);
