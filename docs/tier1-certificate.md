@@ -321,9 +321,12 @@ evidence is still required before selecting a production fast-path policy.
     `test-tier1-masks` and the call, division, label, narrow, terminal,
     dropped-definition and variadic suites they include.
   - `test-tier1-pipeline` requires certified emissions with facts.
-  - The C driver's `--verify` sets it with `--tier1`. There, a refused
-    certificate is the `certificate` stage of `--tier1-report` and fails the
-    compile, rather than leaving the body to Tier 0, which would hide it.
+  - The C driver's `--verify` sets it with `--tier1`. The emitter's
+    `Tier1EmitDiagnostic` keeps the checker's `Tier1CertError` as the nested
+    cause `certificate` of the emission stage ([the outcomes
+    guide](tier1-outcomes.md)). A refusal is an internal failure and capacity a
+    resource failure, so either fails the compile rather than leaving the body
+    to Tier 0, which would hide it.
 - **#938's harness** gates each allocation of an imported problem on
   `tier1_problem_certify` (`tier1_problem_intervals.c`). That runs the fragment
   checker on the adapter's one-block problems and names a refusal

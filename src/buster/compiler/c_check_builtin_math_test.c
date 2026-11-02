@@ -201,16 +201,16 @@ static void check_builtin_math_test_constraints(CheckBuiltinMathTest* test, Type
     uint32_t completions[512] = { 0 };
     completions[tag] = 90;
     values[0] = check_test_integer(enumeration, 7);
-    action.tag_completions = completions;
-    action.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
-    action.source_position = 89;
+    action.context.tag_completions = completions;
+    action.context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+    action.context.source_position = 89;
     check_builtin_math_one(table, &action, &result);
     check_builtin_math_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "math conversion cannot observe an enum's future completion");
-    action.source_position = 90;
+    action.context.source_position = 90;
     check_builtin_math_one(table, &action, &result);
     check_builtin_math_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.folded && result.action.value.floating == -7,
         "completed enum converts before exact sign copy");
-    action.tag_completions = NULL;
+    action.context.tag_completions = NULL;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_builtin_math_test_ids); i += 1)
     {
         action.id = check_builtin_math_test_ids[i];
