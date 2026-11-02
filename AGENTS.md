@@ -457,7 +457,7 @@ acceptance boundaries. [Detailed section index](docs/commands/README.md#detailed
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
 - `benchmark-link` — `link_benchmark.c` — [guide](docs/commands/link-benchmark.md).
 - `test-lowering, benchmark-lowering-source` — `c_lowering.c` — [guide](docs/commands/lowering.md).
-- `measure-lowering-templates`, `test-lowering-templates` — `c_check_lower_inventory.c`, `c_check_program_templates.c` — [guide](docs/commands/lowering.md#node-templates-1048).
+- `test-lowering-templates, measure-lowering-templates` — `c_check_program_templates.c` — [guide](docs/commands/lowering.md#node-templates-1048).
 - `test-object-writer, benchmark-object-writer` — `object_writer.c` — [guide](docs/commands/object-writer.md).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
 - `parallel, test-parallel` — `parallel.c` — [guide](docs/commands/parallel.md).
