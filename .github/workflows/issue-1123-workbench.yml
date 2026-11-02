@@ -5,24 +5,43 @@ on:
 permissions:
   contents: write
 jobs:
-  publish:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+  focused:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
+      BUSTER_ORACLE_CACHE: check
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      - name: Verify and publish the original source patch
+      - name: Apply verified cleanup and publish source-only follow-up
         run: |
-          base64 -d .issue-1123.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/issue1123.patch"
-          printf '%s  %s\n' d6cdd1359d0f0beee51e79a47893b99fc74c387fc7894aede75c7891ebad796d "$RUNNER_TEMP/issue1123.patch" | sha256sum --check
-          git fetch origin df007cd52c074223cfa6deddb14b058714c0ed53
-          git switch --detach df007cd52c074223cfa6deddb14b058714c0ed53
-          git switch -c agent/1123-linker-options
-          git apply --check "$RUNNER_TEMP/issue1123.patch"
-          git apply "$RUNNER_TEMP/issue1123.patch"
+          printf '%s' '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' | base64 -d | gzip -d > "$RUNNER_TEMP/cleanup.patch"
+          printf '%s  %s\n' c6ab5131ceac59995a35cbbae8fcf7d1eabb39766ef25148dbeb3f716ee6c14f "$RUNNER_TEMP/cleanup.patch" | sha256sum --check
+          git fetch origin fab0aed3f7c1f1c7c0521bc27f117e81b566aea5
+          git switch --detach fab0aed3f7c1f1c7c0521bc27f117e81b566aea5
+          git apply --check "$RUNNER_TEMP/cleanup.patch"
+          git apply "$RUNNER_TEMP/cleanup.patch"
           git diff --check
-          git add src/buster/compiler
+          git add docs/foreign-driver.md src/buster/compiler/foreign_driver.c src/buster/compiler/linker_options.c
           git config user.name 'OpenAI agent'
           git config user.email 'agent@openai.com'
-          git commit -m 'fix(driver): honor forwarded linker options and emit runtime paths' -m 'Fixes #1123. Preserve ordered -Wl/-Xlinker arguments, support shared runtime paths and entry selection, retain no-as-needed DSOs, and refuse unsupported linker requests before output publication.' -m 'Agent session: current ChatGPT conversation; this environment exposes no session ID or private permalink.' -m 'Model: OpenAI / GPT-6 Astra Pro'
+          git commit -m 'refactor(driver): keep shared linker option parsing in one place' -m 'Document runtime search paths and remove the foreign driver branches now handled by the shared parser.' -m 'Agent session: current ChatGPT conversation; no private permalink or session ID is exposed.' -m 'Model: OpenAI / GPT-6 Astra Pro'
           git push origin HEAD:refs/heads/agent/1123-linker-options
           git rev-parse HEAD
+      - name: Install official toolchain and test dependencies
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build compiler
+        run: ./build.sh
+      - name: Validate compiler driver regressions
+        run: ./build/compiler test-checker-driver --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue1123-driver.log"
+      - name: Validate foreign linker regressions
+        if: always() && steps.build.outcome != 'failure'
+        run: ./build/compiler test-foreign --functions 1 2>&1 | tee "$RUNNER_TEMP/issue1123-foreign.log"
+      - name: Preserve focused validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue1123-focused-validation
+          path: ${{ runner.temp }}/issue1123-*.log
+          retention-days: 3
