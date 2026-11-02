@@ -11091,6 +11091,103 @@ static bool check_lower_local_declaration(const CheckInput* input, uint32_t toke
            input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
 }
 
+// The counts of the program's nodes that bound the lowering's room (check_lower_prepare): its builtins (the integer
+// ones too, whose recipes share a pool), the nodes that may lower an atomic access (an atomic builtin, or a node whose type
+// or whose update's destination is _Atomic), and the C library's calls of a libm builtin of a vector, one a lane, with
+// their arguments (check_lower_vector_calls).
+typedef struct CheckLowerNodeCounts CheckLowerNodeCounts;
+struct CheckLowerNodeCounts
+{
+    uint32_t builtins;
+    uint32_t integer_builtins;
+    uint32_t atomics;
+    uint64_t lane_calls;
+    uint64_t lane_arguments;
+};
+
+// Node `node`'s part of the counts, by the rules: the scalar twin's step (check_lower_node_counts_scalar).
+static void check_lower_node_count(const CheckProgram* program, uint32_t node, CheckLowerNodeCounts* counts)
+{
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    const CheckOp op = input->graph.ops[node];
+    counts->integer_builtins += op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW;
+    counts->builtins += op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT;
+    const uint32_t left = input->graph.operand0[node];
+    const bool update = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    const TypeId type = program->stream != NULL && check_stream_has_values(program->stream) ? check_stream_type(program->stream, node) : 0;
+    const TypeId target = update && left < node && program->stream != NULL ? check_stream_type(program->stream, left) : 0;
+    counts->atomics += op == CHECK_OP_BUILTIN_ATOMIC || (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
+                       (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
+    const uint8_t kind = type != 0 ? type_kind(types, type_strip_aligned(types, type)) : BUSTER_TYPE_KIND_NONE;
+    const CBuiltinId member = (CBuiltinId)input->graph.members[node];
+    if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
+        (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
+    {
+        const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
+        counts->lane_calls += lanes;
+        counts->lane_arguments += lanes * input->graph.argument_counts[node];
+    }
+}
+
+// Every node's counts by the rules, one node at a time: check_lower_node_counts' scalar twin, which --scalar takes.
+static CheckLowerNodeCounts check_lower_node_counts_scalar(const CheckProgram* program)
+{
+    CheckLowerNodeCounts counts = { 0 };
+    const uint32_t nodes = program->input != NULL ? program->input->graph.count : 0;
+    for (uint32_t node = 0; node < nodes; node += 1)
+    {
+        check_lower_node_count(program, node, &counts);
+    }
+    return counts;
+}
+
+_Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the graph's ops load 16 to a vector");
+
+// The same, by 16 nodes' ops at a time. Every term but the atomic types' and the libm builtins' is the op's alone: masks
+// of the ops' compares, which population counts add up. A node's type or its update's destination is _Atomic only where
+// the type table has an _Atomic kind (type_strip_aligned's base is a type of the table too), so a unit without one, which
+// is nearly every unit, reads no node's type; a unit with one takes the rules for every node. A vector builtin's node,
+// rare, takes the rules for its lane calls, of which the masks count no other term. The loads are masked to the graph's
+// nodes.
+static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
+{
+    const TypeTable* types = program->types;
+    const CheckGraph* graph = program->input != NULL ? &program->input->graph : NULL;
+    const uint32_t nodes = graph != NULL ? graph->count : 0;
+    const bool atomic_types = nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_ATOMIC, types->types.count) != NULL;
+    CheckLowerNodeCounts counts = { 0 };
+    if (atomic_types)
+    {
+        counts = check_lower_node_counts_scalar(program);
+    }
+    else
+    {
+        const __m512i unary = _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY);
+        const __m512i overflow = _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW);
+        const __m512i misc = _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC);
+        const __m512i floating = _mm512_set1_epi32(CHECK_OP_BUILTIN_FLOAT);
+        const __m512i atomic = _mm512_set1_epi32(CHECK_OP_BUILTIN_ATOMIC);
+        const __m512i vector = _mm512_set1_epi32(CHECK_OP_BUILTIN_VECTOR);
+        for (uint32_t first = 0; first < nodes; first += 16)
+        {
+            const uint32_t left = nodes - first;
+            const __mmask16 active = left < 16 ? (__mmask16)((1u << left) - 1) : (__mmask16)UINT16_MAX;
+            const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
+            const __mmask16 integer = _mm512_mask_cmpeq_epi32_mask(active, ops, unary) | _mm512_mask_cmpeq_epi32_mask(active, ops, overflow);
+            const __mmask16 builtin = integer | _mm512_mask_cmpeq_epi32_mask(active, ops, misc) | _mm512_mask_cmpeq_epi32_mask(active, ops, floating);
+            counts.integer_builtins += (uint32_t)__builtin_popcount(integer);
+            counts.builtins += (uint32_t)__builtin_popcount(builtin);
+            counts.atomics += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(active, ops, atomic));
+            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector); lanes != 0; lanes &= lanes - 1)
+            {
+                check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
+            }
+        }
+    }
+    return counts;
+}
+
 // Keeps `object`'s local_map entry (CheckLowerShared.locals): marked, and none until a body writes it.
 static void check_lower_local_keep(CheckLowerShared* shared, uint32_t object, uint32_t count)
 {
@@ -11116,38 +11213,16 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const TypeTable* types = program->types;
     const uint32_t count = input != 0 ? input->token_count : 0;
     const uint32_t nodes = input != 0 ? input->graph.count : 0;
-    uint32_t builtin_count = 0;
-    uint32_t atomic_capacity = 0;
-    uint32_t integer_builtin_count = 0;
     // A libm builtin of a vector (check_lower_vector_calls) calls the C library's function once an element, past what the
     // per-node bounds below give a node (#934's review): its lanes' calls and their arguments, and each call's entries, its
     // SET and CALL, an argument's LOAD, and the element addresses of each argument and of the result (up to 13 with two
     // arguments).
-    uint64_t lane_calls = 0;
-    uint64_t lane_arguments = 0;
-    for (uint32_t node = 0; node < nodes; node += 1)
-    {
-        integer_builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW;
-        builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW ||
-                         input->graph.ops[node] == CHECK_OP_BUILTIN_MISC || input->graph.ops[node] == CHECK_OP_BUILTIN_FLOAT;
-        const CheckOp op = input->graph.ops[node];
-        const uint32_t left = input->graph.operand0[node];
-        const bool update = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
-        const TypeId type = program->stream != NULL && check_stream_has_values(program->stream) ? check_stream_type(program->stream, node) : 0;
-        const TypeId target = update && left < node && program->stream != NULL ? check_stream_type(program->stream, left) : 0;
-        atomic_capacity += op == CHECK_OP_BUILTIN_ATOMIC ||
-                           (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
-                           (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
-        const uint8_t kind = type != 0 ? type_kind(types, type_strip_aligned(types, type)) : BUSTER_TYPE_KIND_NONE;
-        const CBuiltinId member = (CBuiltinId)input->graph.members[node];
-        if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
-            (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
-        {
-            const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
-            lane_calls += lanes;
-            lane_arguments += lanes * input->graph.argument_counts[node];
-        }
-    }
+    const CheckLowerNodeCounts node_counts = BUSTER_SCALAR_PATH(scalar) ? check_lower_node_counts_scalar(program) : check_lower_node_counts(program);
+    const uint32_t builtin_count = node_counts.builtins;
+    const uint32_t atomic_capacity = node_counts.atomics;
+    const uint32_t integer_builtin_count = node_counts.integer_builtins;
+    const uint64_t lane_calls = node_counts.lane_calls;
+    const uint64_t lane_arguments = node_counts.lane_arguments;
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
     // no stream, and is refused below without reading one.

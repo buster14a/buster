@@ -454,6 +454,29 @@ facts. The closure can run over prefix sums of the slots' counts. The vector
 pass's results are to be checked against these scalar ones, and the lowering
 against the tasks, by the same command.
 
+## The preparation's node counts (#1048)
+
+Before the bodies, `check_lower_prepare` bounds the writers' room by counts
+over every node of the unit's graph: its builtins (the integer ones too, which
+share a recipe pool), the nodes that may lower an atomic access (an atomic
+builtin, or a node whose type or whose update's destination is `_Atomic`), and
+the C library's calls of a vector's libm builtins, one a lane. Its loop read
+both types' kinds through `type_strip_aligned` for every node. callgrind on
+`sqlite3.c` (#136's options, a baseline build of main at `171d6301`) counts
+49.1 M instructions in `check_lower_prepare`, 19.6 M of them that loop's,
+about 30 for each of the graph's 647,114 nodes.
+
+`check_lower_node_counts` takes the counts from the ops alone, 16 at a time:
+the masks of their compares, which population counts add up. A node's type,
+or its update's destination, is `_Atomic` only where the type table has an
+`_Atomic` kind (an aligned typedef's base is a type of the table too), so a
+unit without one reads no node's type, and a unit with one takes the rules
+for every node. A vector builtin's node takes the rules for its lane calls.
+The loop is the scalar twin (`check_lower_node_counts_scalar`, which
+`--scalar` takes), and `test-checker` compares the two on every boundary
+fixture of its program tests, among them a vector's libm builtins and an
+`_Atomic` global.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
