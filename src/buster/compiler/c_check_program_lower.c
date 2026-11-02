@@ -9570,12 +9570,14 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
     writer->source = token;
 }
 
-// The tasks' loop, as check_lower_drain, check_lower_drain_bit_ints and check_lower_drain_sources compile it: with
-// `sources`, each task's token set before it runs (check_lower_task_source); with `bit_ints`, a program's that has a
-// _BitInt type (CheckLowerWriter.bit_ints), whose expressions and conversions it tests for one. Constants in each but the
-// last's `bit_ints`, so that the plain loop does none of it: the tests for a _BitInt took 3.9 million of sqlite3.c's
-// instructions there (#137).
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints)
+// The tasks' loop, as check_lower_drain, check_lower_drain_bit_ints, check_lower_drain_sources and
+// check_lower_drain_templates compile it: with `sources`, each task's token set before it runs (check_lower_task_source);
+// with `bit_ints`, a program's that has a _BitInt type (CheckLowerWriter.bit_ints), whose expressions and conversions it
+// tests for one; with `templates`, a body whose node templates are ready (CheckLowerWriter.template_ready), whose closed
+// subtrees it splices. Constants in each but the sources' `bit_ints`, so that the plain loop does none of it: the tests
+// for a _BitInt took 3.9 million of sqlite3.c's instructions there (#137), and the templates' test would run on every
+// expression of every compile, which takes none of them.
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -9596,7 +9598,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
         if (__builtin_expect(kind <= CHECK_LOWER_INSTRUCTION, 1))
         {
-            if (kind == CHECK_LOWER_EXPRESSION && !sources && !bit_ints && writer->template_ready && check_lower_template_splice(writer, node, flags))
+            if (templates && kind == CHECK_LOWER_EXPRESSION && check_lower_template_splice(writer, node, flags))
             {
                 // A closed subtree of #1048's node templates: its entries copied from the body's pass (c_check_program_templates.c).
             }
@@ -9713,14 +9715,22 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false);
+    check_lower_drain_body(writer, false, false, false);
 }
 
 // The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
 // (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, true);
+    check_lower_drain_body(writer, false, true, false);
+}
+
+// The tasks' loop for a body whose node templates are ready (CheckLowerWriter.template_ready, #1048): a copy of its own
+// (check_lower_drain_body), which no compile reaches while none takes the templates. Its writer has neither -g's tokens
+// nor a _BitInt type (CheckLowerShared.templates_allowed).
+static __attribute__((noinline)) void check_lower_drain_templates(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false, false, true);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
@@ -9730,7 +9740,7 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     {
         writer->owners->draining = true;
     }
-    check_lower_drain_body(writer, true, writer->bit_ints);
+    check_lower_drain_body(writer, true, writer->bit_ints, false);
     if (writer->owners != NULL)
     {
         writer->owners->draining = false;
@@ -12035,6 +12045,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 check_lower_drain_bit_ints(writer);
             }
+            else if (writer->template_ready)
+            {
+                check_lower_drain_templates(writer);
+            }
             else
             {
                 check_lower_drain(writer);
@@ -12084,6 +12098,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             else if (writer->bit_ints)
             {
                 check_lower_drain_bit_ints(writer);
+            }
+            else if (writer->template_ready)
+            {
+                check_lower_drain_templates(writer);
             }
             else
             {

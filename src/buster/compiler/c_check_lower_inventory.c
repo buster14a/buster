@@ -27,8 +27,11 @@
 // A node is an exception, by the issue's list, where its body tracks its stack, it was popped more than once, or it is a
 // call, a builtin or va_arg, a logical operator or a conditional, a statement expression, a variable-length array's
 // bound, extent or size, a bit-field's access, or of a complex, _BitInt, atomic, vector or half-precision type. The other
-// nodes are ordinary: the table's candidates, by their keys' node counts. --allow CATEGORY counts a category as
-// ordinary, and --ignore-tracking classifies a tracked body's nodes by the other rules.
+// nodes are ordinary: none of the issue's exceptions, the candidates of a table that takes everything else, by their
+// keys' node counts. That is an upper bound, broader than c_check_program_templates.c's table, which takes no long
+// double, __int128, aggregate value or copy, update, __real__, __imag__ or run-time sizeof and alignof (docs/c-lowering.md).
+// --allow CATEGORY counts a category as ordinary, and --ignore-tracking classifies a tracked body's nodes by the other
+// rules.
 //
 // The report gives the maximal subtrees of nodes in deterministic keys (how many, their nodes, by size, and the
 // statements' expressions they cover whole), the abstract patterns' coverage in nodes and entries, the totals (bodies,
@@ -337,7 +340,8 @@ static void lower_inventory_count(LowerInventoryKey* entry, const uint8_t* patte
     uint32_t found = BUSTER_LOWER_INVENTORY_PATTERNS;
     for (uint32_t i = 0; i < entry->pattern_count; i += 1)
     {
-        found = entry->pattern_hashes[i] == hash ? i : found;
+        const bool same = entry->pattern_hashes[i] == hash && entry->pattern_lengths[i] == length && memcmp(entry->patterns[i], pattern, length) == 0;
+        found = same ? i : found;
     }
     if (found == BUSTER_LOWER_INVENTORY_PATTERNS && entry->pattern_count < BUSTER_LOWER_INVENTORY_PATTERNS)
     {
@@ -380,7 +384,8 @@ struct LowerInventoryScratch
 
 // Pop `p`'s pattern (node `node`'s) into `pattern`, BUSTER_LOWER_INVENTORY_PATTERN_BYTES at most: its own entries ('K',
 // kind, class), the conversions it asked of its operands ('V', kind, class), and each child's subtree once ('C'), in the
-// entries' order; '?' for an entry of the subtree that no child's holds. Its length.
+// entries' order; '?' for an entry of the subtree that no child's holds. A pattern too long for the bytes ends with '!'
+// after its last whole element, which the room always keeps for it. Its length, all of it written.
 static uint32_t lower_inventory_pattern(LowerInventory* inventory, const LowerInventoryScratch* s, const Tier0Function* function, const uint32_t* owners,
                                         uint32_t p, uint32_t node, uint8_t* pattern)
 {
@@ -394,7 +399,7 @@ static uint32_t lower_inventory_pattern(LowerInventory* inventory, const LowerIn
         const bool mine = (owner & BUSTER_CHECK_LOWER_OWNER_CONTROL) == 0 && (owner & ~BUSTER_CHECK_LOWER_OWNER_CONVERSION) == node;
         if (mine)
         {
-            fits = length + 3 <= BUSTER_LOWER_INVENTORY_PATTERN_BYTES;
+            fits = length + 3 < BUSTER_LOWER_INVENTORY_PATTERN_BYTES;
             if (fits)
             {
                 pattern[length++] = (owner & BUSTER_CHECK_LOWER_OWNER_CONVERSION) != 0 ? 'V' : 'K';
@@ -409,7 +414,7 @@ static uint32_t lower_inventory_pattern(LowerInventory* inventory, const LowerIn
                 child = s->next_sibling[child];
             }
             const bool held = child != none && s->low[child] <= e;
-            fits = length + 1 <= BUSTER_LOWER_INVENTORY_PATTERN_BYTES;
+            fits = length + 1 < BUSTER_LOWER_INVENTORY_PATTERN_BYTES;
             if (fits)
             {
                 pattern[length++] = held ? 'C' : '?';
@@ -428,7 +433,7 @@ static uint32_t lower_inventory_pattern(LowerInventory* inventory, const LowerIn
     if (!fits)
     {
         inventory->long_patterns += 1;
-        length = BUSTER_LOWER_INVENTORY_PATTERN_BYTES;
+        pattern[length++] = '!';
     }
     return length;
 }
@@ -444,7 +449,7 @@ static bool lower_inventory_prefixed(const uint8_t* pattern, uint32_t length)
     {
         prefixed = prefixed || (own && pattern[i] == 'C');
         own = own || pattern[i] == 'K';
-        i += pattern[i] == 'C' || pattern[i] == '?' ? 1 : 3;
+        i += pattern[i] == 'C' || pattern[i] == '?' || pattern[i] == '!' || i + 2 >= length ? 1 : 3;
     }
     return prefixed;
 }
@@ -606,6 +611,8 @@ struct LowerSource
     bool valid;
     bool preprocessed;
     bool accepted;
+    // Whether the checker ran out of a resource (CheckCorpusPath.resource): a failure, never a source the checker rejects.
+    bool exhausted;
     bool prepared;
 };
 
@@ -637,6 +644,7 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
     source->valid = valid;
     source->preprocessed = valid && intern_initialize(&source->identifiers) && pp_initialize(&source->pp, &pp_options, &source->identifiers) && pp_run(&source->pp, input);
     source->accepted = source->preprocessed && check_corpus_check_policy(&source->path, &source->parser, &source->pp, false, pp_options.quiet);
+    source->exhausted = source->preprocessed && !source->accepted && source->path.resource;
     CheckCorpusPath* path = &source->path;
     bool prepared = source->accepted && check_data_prepare(&source->data, &path->input, &path->stream, &path->initializers, &path->types,
                                                            source->parser.options.scalar, &path->output_arena, &path->scratch);
@@ -667,7 +675,8 @@ static void lower_source_close(LowerSource* source)
 // What stopped `source` before its selected program, for a report.
 static const char* lower_source_failure(const LowerSource* source)
 {
-    return !source->preprocessed ? "it couldn't be preprocessed" : !source->accepted ? "the checker rejected it" : "its program couldn't be prepared";
+    return !source->preprocessed ? "it couldn't be preprocessed" : source->exhausted ? "the checker ran out of a resource" :
+           !source->accepted ? "the checker rejected it" : "its program couldn't be prepared";
 }
 
 // File `file`, read with `options`, prepared and lowered as -c lowers it, counted into `inventory`: whether it was.
@@ -758,7 +767,8 @@ static bool lower_inventory_file(LowerInventory* inventory, const char* file, ch
     if (valid && !complete && (!lowering || differing == 0))
     {
         printf("lowering-templates: file=%s failed=\"%s\"\n", file,
-               !preprocessed ? "it couldn't be preprocessed" : !accepted ? "the checker rejected it" : !prepared ? "its program couldn't be prepared" :
+               !preprocessed ? "it couldn't be preprocessed" : source.exhausted ? "the checker ran out of a resource" : !accepted ? "the checker rejected it" :
+               !prepared ? "its program couldn't be prepared" :
                owners.overflow ? "the log of pops filled" : "it couldn't be lowered");
         if (prepared && !lowering)
         {
@@ -793,7 +803,7 @@ static void lower_inventory_print_pattern(const uint8_t* pattern, uint32_t lengt
     uint32_t i = 0;
     while (i < length)
     {
-        if (pattern[i] == 'C' || pattern[i] == '?')
+        if (pattern[i] == 'C' || pattern[i] == '?' || pattern[i] == '!' || i + 2 >= length)
         {
             printf(" %c", pattern[i]);
             i += 1;
@@ -830,7 +840,7 @@ static uint32_t lower_inventory_abstract(const LowerInventoryKey* entry, uint8_t
     while (i < length)
     {
         abstract[i] = pattern[i];
-        if (pattern[i] == 'C' || pattern[i] == '?')
+        if (pattern[i] == 'C' || pattern[i] == '?' || pattern[i] == '!' || i + 2 >= length)
         {
             i += 1;
         }
@@ -860,8 +870,11 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
     const uint32_t capacity = BUSTER_LOWER_INVENTORY_TABLE;
     uint64_t* hashes = calloc(capacity, sizeof(uint64_t));
     uint64_t* counts = calloc(capacity, 2 * sizeof(uint64_t));
+    // Each slot's abstract pattern, which a match compares besides its hash.
+    uint8_t* bytes = calloc(capacity, BUSTER_LOWER_INVENTORY_PATTERN_BYTES);
+    uint32_t* lengths = calloc(capacity, sizeof(uint32_t));
     uint32_t distinct = 0;
-    if (hashes != NULL && counts != NULL)
+    if (hashes != NULL && counts != NULL && bytes != NULL && lengths != NULL)
     {
         for (uint32_t i = 0; i < capacity; i += 1)
         {
@@ -872,12 +885,15 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
                 const uint32_t length = lower_inventory_abstract(entry, abstract);
                 const uint64_t hash = (lower_inventory_hash(abstract, length) ^ length) | 1;
                 uint32_t slot = (uint32_t)hash & (capacity - 1);
-                while (hashes[slot] != 0 && hashes[slot] != hash)
+                while (hashes[slot] != 0 && (hashes[slot] != hash || lengths[slot] != length ||
+                                             memcmp(bytes + (uint64_t)slot * BUSTER_LOWER_INVENTORY_PATTERN_BYTES, abstract, length) != 0))
                 {
                     slot = (slot + 1) & (capacity - 1);
                 }
                 distinct += hashes[slot] == 0;
                 hashes[slot] = hash;
+                lengths[slot] = length;
+                memcpy(bytes + (uint64_t)slot * BUSTER_LOWER_INVENTORY_PATTERN_BYTES, abstract, length);
                 counts[2 * slot] += entry->nodes;
                 counts[2 * slot + 1] += entry->entries;
             }
@@ -902,7 +918,7 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
                     {
                         uint8_t abstract[BUSTER_LOWER_INVENTORY_PATTERN_BYTES];
                         const uint32_t length = lower_inventory_abstract(entry, abstract);
-                        example = ((lower_inventory_hash(abstract, length) ^ length) | 1) == hashes[best] ? entry : NULL;
+                        example = length == lengths[best] && memcmp(bytes + (uint64_t)best * BUSTER_LOWER_INVENTORY_PATTERN_BYTES, abstract, length) == 0 ? entry : NULL;
                     }
                 }
                 printf("lowering-templates: abstract %u nodes=%" PRIu64 " entries=%" PRIu64 " :", printed + 1, counts[2 * best], counts[2 * best + 1]);
@@ -912,7 +928,7 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
                     const uint32_t length = lower_inventory_abstract(example, abstract);
                     for (uint32_t i = 0; i < length;)
                     {
-                        if (abstract[i] == 'C' || abstract[i] == '?')
+                        if (abstract[i] == 'C' || abstract[i] == '?' || abstract[i] == '!' || i + 2 >= length)
                         {
                             printf(" %c", abstract[i]);
                             i += 1;
@@ -969,6 +985,8 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
             }
         }
     }
+    free(lengths);
+    free(bytes);
     free(counts);
     free(hashes);
 }

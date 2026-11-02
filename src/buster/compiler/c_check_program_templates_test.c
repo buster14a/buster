@@ -10,7 +10,8 @@
 // host's path): both must succeed or fail alike, and every function must have the same entries, locals (their classes,
 // flags, sizes and alignments), calls and arguments. The report gives, per file and in total, the evaluated nodes and the
 // entries, and the share the templates' closed subtrees gave. A file the checker rejects is left out; any other failure
-// or difference fails the command. With --passes N, each file's two lowerings are then timed N times each, in turns that
+// or difference fails the command: a file neither lowering lowers, the checker running out of a resource, and a corpus
+// with evaluated nodes that the templates took none of among them. With --passes N, each file's two lowerings are then timed N times each, in turns that
 // alternate which goes first, and the report gives their medians (the arenas put back after each). test-checker runs the
 // same comparison on original fixtures of every template (check_test_lowering_templates). Include after
 // c_check_lower_inventory.c and c_check_source_benchmark.c.
@@ -112,7 +113,9 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
     CheckProgramLowered templates = { 0 };
     const bool lowered_tasks = check_program_lower(&tasks, program, true, output, scratch);
     const bool lowered_templates = check_program_lower_templates(&templates, program, true, output, scratch);
-    bool same = lowered_tasks == lowered_templates && tasks.status == templates.status && tasks.token == templates.token && templates.template_mismatches == 0;
+    const bool reasons = tasks.reason == templates.reason || (tasks.reason != NULL && templates.reason != NULL && strcmp(tasks.reason, templates.reason) == 0);
+    bool same = lowered_tasks == lowered_templates && tasks.status == templates.status && tasks.token == templates.token && reasons &&
+                templates.template_mismatches == 0;
     for (uint32_t b = 0; same && lowered_tasks && b < program->body_count; b += 1)
     {
         const Tier0Function* a = tasks.functions + b;
@@ -137,10 +140,18 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
     {
         printf("lowering-templates-test: %s fast-twin-mismatches=%" PRIu64 "\n", name, templates.template_mismatches);
     }
-    if (lowered_tasks != lowered_templates || tasks.status != templates.status || tasks.token != templates.token)
+    if (lowered_tasks != lowered_templates || tasks.status != templates.status || tasks.token != templates.token || !reasons)
     {
-        printf("lowering-templates-test: %s lowered with status %u at token %u by the tasks and %u at %u with the templates\n", name, (uint32_t)tasks.status,
-               tasks.token, (uint32_t)templates.status, templates.token);
+        printf("lowering-templates-test: %s lowered with status %u at token %u (\"%s\") by the tasks and %u at %u (\"%s\") with the templates\n", name,
+               (uint32_t)tasks.status, tasks.token, tasks.reason != NULL ? tasks.reason : "", (uint32_t)templates.status, templates.token,
+               templates.reason != NULL ? templates.reason : "");
+    }
+    else if (!lowered_tasks)
+    {
+        // Both refused it alike: the file proves nothing, which fails the command as any other failure does.
+        printf("lowering-templates-test: %s failed=\"neither lowering succeeded: status %u at token %u (%s)\"\n", name, (uint32_t)tasks.status, tasks.token,
+               tasks.reason != NULL ? tasks.reason : "no reason");
+        totals->failures += 1;
     }
     totals->functions += program->body_count;
     totals->nodes += tasks.expression_nodes;
@@ -196,8 +207,8 @@ static bool lower_templates_file(LowerTemplatesTotals* totals, const char* file,
     }
     else if (valid)
     {
-        totals->failures += !source.preprocessed;
-        printf("lowering-templates-test: file=%s %s=\"%s\"\n", file, source.preprocessed ? "rejected" : "failed", lower_source_failure(&source));
+        totals->failures += !source.preprocessed || source.exhausted;
+        printf("lowering-templates-test: file=%s %s=\"%s\"\n", file, source.preprocessed && !source.exhausted ? "rejected" : "failed", lower_source_failure(&source));
     }
     lower_source_close(&source);
     return valid;
@@ -257,9 +268,16 @@ static int run_lowering_templates_tests(int count, char** arguments)
         valid = lower_templates_file(&totals, files[i], options, option_count);
         fflush(stdout);
     }
+    // A corpus whose evaluated nodes the templates took none of proves nothing about them: the tasks compared with
+    // themselves, as when the templates aren't allowed at all.
+    const bool taken = totals.nodes == 0 || totals.template_nodes != 0;
     if (valid)
     {
         lower_templates_report(&totals);
+        if (!taken)
+        {
+            printf("lowering-templates-test: failed=\"the templates took none of the %" PRIu64 " evaluated nodes\"\n", totals.nodes);
+        }
     }
     else
     {
@@ -267,7 +285,7 @@ static int run_lowering_templates_tests(int count, char** arguments)
     }
     free(files);
     free(options);
-    return valid && totals.differences == 0 && totals.failures == 0 && totals.files != 0 ? 0 : 1;
+    return valid && totals.differences == 0 && totals.failures == 0 && totals.files != 0 && taken ? 0 : 1;
 }
 
 // test-checker's section: original fixtures of every template, and of what they leave to the tasks around them,

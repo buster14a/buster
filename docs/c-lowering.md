@@ -226,8 +226,12 @@ merged in source order, without shared counters.
 
 With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
 evaluated expression occurrences, those handled by vector operation fragments,
-their percentage, and records classified. This counts repeated graph uses and
-excludes unevaluated operands and unselected definitions. Scalar leaf templates
+their percentage, and records classified; then the evaluated nodes and the
+entries #1048's node templates spliced (`templates` and `template-entries`)
+with their shares of the evaluated nodes and the entries (`template-share` and
+`entry-share`), which are 0 while no compile takes the templates. This counts
+repeated graph uses and excludes unevaluated operands and unselected
+definitions. Scalar leaf templates
 are excluded from the vector expression-node share. The optional packed type table costs four bytes per type; failure keeps
 the original expression rules available.
 
@@ -283,7 +287,15 @@ initialization), a call, a builtin or `va_arg`, `&&`, `||` and `?:`, a
 statement expression, a variable-length array's bound, extent or size, a
 bit-field's access, or a complex, `_BitInt`, atomic, vector or half-precision
 type. `--allow CATEGORY` counts a category as ordinary, and `--ignore-tracking`
-classifies a tracked body's nodes by the other rules. An abstract pattern writes
+classifies a tracked body's nodes by the other rules. "Ordinary" means none of
+those categories, an upper bound for a table that takes everything else: it
+counts `long double` and `__int128` values, aggregate values and their copies,
+updates (`+=`, `++`) that aren't a bit-field's, `__real__` and `__imag__`, and
+run-time `sizeof` and `alignof`, which the first path's table below takes none
+of. So its 93% of `sqlite3.c`'s nodes is not that table's coverage, which is
+75% (the first path's results); on a file of `long double` and `__int128`
+arithmetic the inventory counted 50 of 71 nodes ordinary where the first path
+took 6. An abstract pattern writes
 each class as what gives it, the node's own, an operand's or its conversion's
 target: the table a classifier would hold, each node taking its classes from
 its own columns.
@@ -410,8 +422,11 @@ template (`c_check_program_templates_test.c`).
 | c-testsuite's subset (220) | 430, all the same | 65.7% | 43.2% | 8,652 |
 
 The fast twin and the general rules disagreed on none of those nodes.
-`main.c`'s functions are the same too, with none taken: every body tracks its
-stack.
+`main.c` (`-march=znver5`, `build.sh`'s other flags) lowers the same too,
+11,582 functions and 2.06 million nodes, with none taken: every body tracks its
+stack. The command fails such a run, which proves nothing about the templates,
+and a file that neither lowering lowers (with `-march=native` on a host without
+AVX-512 VBMI, `main.c` is refused for its byte shuffles).
 
 It is still slower than the tasks. On this session's host (an Intel Xeon whose
 build is the scalar host path), `sqlite3.c`'s lowering took 54 to 58 ms by the
