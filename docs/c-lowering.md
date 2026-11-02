@@ -258,8 +258,12 @@ merged in source order, without shared counters.
 
 With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
 evaluated expression occurrences, those handled by vector operation fragments,
-their percentage, and records classified. This counts repeated graph uses and
-excludes unevaluated operands and unselected definitions. Scalar leaf templates
+their percentage, and records classified; then the evaluated nodes and the
+entries #1048's node templates spliced (`templates` and `template-entries`)
+with their shares of the evaluated nodes and the entries (`template-share` and
+`entry-share`), which are 0 while no compile takes the templates. This counts
+repeated graph uses and excludes unevaluated operands and unselected
+definitions. Scalar leaf templates
 are excluded from the vector expression-node share. The optional packed type table costs four bytes per type; failure keeps
 the original expression rules available.
 
@@ -270,6 +274,217 @@ missing optional workspace, addresses, VLA indirection, compound initialization
 and a neighboring body's local map. Guarded pending stacks check mixed tasks,
 labels, every entry-capacity limit, invalid classes and untouched
 output tails. Source fixtures also compare native effects with Clang.
+
+## Node templates over a body: the inventory (#1048)
+
+#1048 proposes to lower each body's postorder by node templates, data-parallel,
+instead of the task loop's push, pop and dispatch per node: each node's context
+from its parent, a template id per node, a prefix sum of the templates' entry
+counts, and an expansion of the templates into the columns, with the existing
+rules for the exceptions. Its first step is an inventory: how much of the
+lowering a table of templates covers. `measure-lowering-templates`
+(`c_check_lower_inventory.c`) takes it:
+
+```sh
+./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N] \
+    [--ignore-tracking] [--allow CATEGORY]... [-E's options] file...
+```
+
+Each file is checked and its definitions selected as `-c` selects them, then
+lowered by the task loop with each entry's owner
+(`check_program_lower_owners`): the lowering with `-g`'s source tokens, whose
+tokens are the owners instead (`CheckLowerWriter.owners`, which only that path
+reads). An entry's owner is the expression node whose task wrote it, or, marked,
+the node whose value a conversion task converts for its consumer
+(`check_lower_expression`'s, which the inventory moves from the consumer to the
+operand, as the design puts a conversion in the operand's context), or a control
+or a token for what a body writes outside the expressions. Every popped
+`EXPRESSION` task is logged with its context (the task's address, initialized,
+discard and `_BitInt` flags), its conversion's target and the owner that pushed
+it, which gives each node its children. The run lowers the file again without
+the owners and fails it unless every function's entries are the same.
+
+A node's key is what a classifier can read from the columns: its op and
+context, its type's class and facts (#570's table), whether it is a folded
+constant and of which kind, its category, a bit-field, vector-element or
+overload flag, a `VALUE`'s or constant address's object's kind (a symbol, a
+compound literal, static) and whether the constant's offset is past the
+object's start, whether a member's offset is past its record's start, its first
+two operands' types, its conversion's target, and a store's destination's
+kind. Its pattern is its own entries' kinds and classes, its conversion's
+marked apart, interleaved with its children's subtrees. A key is deterministic
+where every node of it has one pattern. A node is an exception by the issue's
+list: a body that tracks its stack, a node popped twice (a compound literal's
+initialization), a call, a builtin or `va_arg`, `&&`, `||` and `?:`, a
+statement expression, a variable-length array's bound, extent or size, a
+bit-field's access, or a complex, `_BitInt`, atomic, vector or half-precision
+type. `--allow CATEGORY` counts a category as ordinary, and `--ignore-tracking`
+classifies a tracked body's nodes by the other rules. "Ordinary" means none of
+those categories, an upper bound for a table that takes everything else: it
+counts `long double` and `__int128` values, aggregate values and their copies,
+updates (`+=`, `++`) that aren't a bit-field's, `__real__` and `__imag__`, and
+run-time `sizeof` and `alignof`, which the first path's table below takes none
+of. So its 93% of `sqlite3.c`'s nodes is not that table's coverage, which is
+75% (the first path's results); on a file of `long double` and `__int128`
+arithmetic the inventory counted 50 of 71 nodes ordinary where the first path
+took 6. An abstract pattern writes
+each class as what gives it, the node's own, an operand's or its conversion's
+target: the table a classifier would hold, each node taking its classes from
+its own columns.
+
+On `sqlite3.c` 3.53.2 (the frozen corpus's bytes, with #518's `-c` options and
+this container's system headers), 2,668 bodies:
+
+| | |
+| --- | ---: |
+| node occurrences (`lowering-nodes`' evaluated) | 266,853 |
+| entries | 407,396 |
+| entries owned by nodes / their conversions / statements and frames | 79.3% / 13.1% / 7.6% |
+| ordinary nodes, of nodes / of expression entries | 93.0% / 85.6% |
+| calls / `&&` `\|\|` `?:` / bit-fields / builtins, of nodes | 5.1% / 1.5% / 0.27% / 0.07% |
+| the same, of expression entries | 4.3% / 7.1% / 1.7% / 1.3% |
+| ordinary keys, deterministic | 2,056, 2,054 |
+| their nodes / expression entries / all entries | 92.99% / 85.54% / 79.0% |
+| abstract patterns | 187 |
+| the first 32 of them: nodes / expression entries | 88.1% / 76.1% |
+| the first 64 | 91.9% / 82.1% |
+| the first 128 | 92.9% / 85.3% |
+| bodies without an exception: of bodies / of entries | 12.4% / 2.8% |
+| maximal covered subtrees, nodes each | 80,071, 2.83 |
+| statements' expressions covered whole | 69.4% |
+
+The two undetermined keys are aggregate assignments, a `COPY` or a `memcpy`
+call by the size. Every pattern is postfix (its own entries after its
+children's) but 1,522 nodes' (updates through memory, which `DUP` the address
+or take a temporary). With `--allow '&&-||-?:'` the short-circuit and
+conditional operators are deterministic templates too (their own entries
+between their operands', their labels the payloads): 225 abstract patterns, and
+93.4% of the nodes and 87.4% of the expression entries.
+
+Lua 5.4.8's 34 units (`-std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX`): 1,104
+bodies, 67,586 nodes, 91,790 entries; 91.3% of the nodes and 85.3% of the
+expression entries ordinary, all 944 keys deterministic, 145 abstract patterns
+(the first 64: 90.4% of the nodes, 81.7% of the expression entries), 8.8% of
+the bodies without an exception, maximal covered subtrees of 2.72 nodes. Both
+corpora together have 197 abstract patterns: Lua adds 10 to `sqlite3.c`'s.
+
+This compiler's `main.c` (`-march=znver5`, `build.sh`'s other flags): 11,512
+bodies, 2.04 million nodes, 4.81 million entries, every body tracked, since a
+program with a terminal helper (`__builtin_trap` or `__builtin_unreachable`
+lowered to a helper, `CheckLowerShared.terminal`) tracks every body's stack.
+With `--ignore-tracking`: 87.7% of the nodes ordinary but 66.5% of the
+expression entries, as `&&`, `||` and `?:` hold 18.7% of them (5.0% of the
+nodes); 3,339 of 3,353 keys deterministic, 219 abstract patterns (the first 64:
+84.9% of the nodes, 64.6% of the expression entries), 19.0% of the entries a
+body's statements' and frame's, 5.4% of the bodies without an exception, and
+maximal covered subtrees of 2.23 nodes.
+
+What the design takes from it:
+
+- A table of reasonable size covers most nodes: 64 to 128 abstract templates,
+  whose key the columns give, cover 90% of the nodes of `sqlite3.c` and Lua and
+  85% of `main.c`'s.
+- The exceptions are in nearly every body: a body without one holds under 5% of
+  the entries. Falling back per body would leave the task loop nearly all of
+  them, so the exceptions take their places within a body's expansion.
+- A maximal subtree of template nodes has 2.2 to 2.9 nodes: expanding one
+  subtree at a time can't amortize its setup (#868's fragments failed so). The
+  classification, the counts' prefix sums and the expansion run over a whole
+  body or program's nodes at once, and what stays scalar (the controls and the
+  exceptions) places the expanded ranges.
+- `&&`, `||` and `?:` are 7% of `sqlite3.c`'s expression entries and 19% of
+  `main.c`'s: worth templates whose labels a prefix sum over the body's label
+  allocations numbers.
+- Stack tracking is decided per program: a program with a terminal helper
+  tracks every body, so its templates must keep the tracked stack, or tracking
+  be decided per body.
+
+## Node templates over a body: the first path (#1048)
+
+`c_check_program_templates.c` is the template path in scalar form, with the
+task loop as its exact rules. Before a body's statements, three steps run over
+its range of nodes, each shaped as a data-parallel pass will take it:
+
+1. **The scatter**, from the last node down: each node's rule, by its op alone
+   (`check_lower_template_rules`, two operands each), gives its operands their
+   contexts (value or address) and their conversions' targets. An operand two
+   nodes name is shared, and a node the tasks fold gives its operands, and
+   theirs, no evaluation.
+2. **The classification**, each node on its own from the first up: its context
+   with its discard, its template, and its entries and its conversion's in a
+   slot of eight. The fast twin (`check_lower_template_fast`) takes the common
+   shapes, each by its own rule alone: a `VALUE`'s read and address, integer
+   and address constants, `&x`, the casts, `*p`, member accesses, pointer
+   arithmetic and subscripts, the unary, binary and truth operators, and scalar
+   stores. The general rules (`check_lower_template_classify`) take the rest.
+   A template takes its operands only where the scatter gave each the context
+   and the target its rule gives it.
+3. **The closure**, in the same step once its operands are done: its entries'
+   offset in node order, and whether its subtree is closed. A subtree is closed
+   when its node is a template whose evaluated operands are closed and
+   converted, their entries in turn, and the last ending where the node's own
+   start.
+
+When the task loop pops a closed node in the context the pass gave it, it
+copies the slots of the node's subtree in node order (but the node's own
+conversion, which the task under it writes) instead of expanding the node and
+its operands task by task. It leaves the writer as its tasks would (the locals
+whose addresses it takes, the token, the counts). The table takes a `VALUE`'s
+read and address, folded constants, `&x`, the casts and conversions, `*p`,
+member accesses, the unary and binary operators of the classes I8 to F64, the
+truth tests, the comma, pointer arithmetic and subscripts, and scalar
+assignments and initializations. It never takes an atomic, complex, bit-field or
+`_BitInt` value, an overload, a compound literal, a variable-length array, a
+body with `-g`'s tokens or a tracked stack.
+
+`test-lowering-templates [--passes N] [-E's options] file...` lowers each
+file's selected program by the tasks alone and with the templates
+(`check_program_lower_templates`, on any host), and requires the same entries,
+locals, calls and arguments in every function. Its lowering with the templates
+also checks the fast twin: each node it takes is classified by the general rules
+too, which must give the same template, entries and operands, with the contexts
+and targets the scatter gave them. `--passes N` times both lowerings, without
+that check. `test-checker` runs the command on original fixtures of every
+template (`c_check_program_templates_test.c`).
+
+| | functions | evaluated nodes taken | entries taken | fast twin's nodes |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` (the system's headers) | 2,602, all the same | 75.3% | 60.8% | 259,992 |
+| Lua 5.4.8 (34 units) | 1,104, all the same | 68.9% | 55.1% | 63,182 |
+| c-testsuite's subset (220) | 430, all the same | 65.7% | 43.2% | 8,652 |
+
+The fast twin and the general rules disagreed on none of those nodes.
+`main.c` (`-march=znver5`, `build.sh`'s other flags) lowers the same too,
+11,582 functions and 2.06 million nodes, with none taken: every body tracks its
+stack. The command fails such a run, which proves nothing about the templates,
+and a file that neither lowering lowers (with `-march=native` on a host without
+AVX-512 VBMI, `main.c` is refused for its byte shuffles).
+
+It is still slower than the tasks. On this session's host (an Intel Xeon whose
+build is the scalar host path), `sqlite3.c`'s lowering took 54 to 58 ms by the
+tasks and 67 to 72 ms with the templates, 1.24 to 1.25 times (21 passes, 3
+runs, pinned). The first version of the pass, with its two passes and the
+general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
+(a baseline build) counts the pass's instructions:
+
+| pass | instructions | per node of the ranges |
+| --- | ---: | ---: |
+| the first version | 36.9 M | about 450 |
+| the three steps, the general rules for every node | 40.2 M | about 495 |
+| the three steps with the fast twin | 32.0 M | about 395 |
+
+The splices save about 12.4 M of the tasks' 111.8 M there. The pass's cost is
+spread over its steps (the scatter about a fifth, the fast twin a third, the
+classification step's bookkeeping a quarter) with no one line more than a few
+percent: the scalar steps can't pay by trimming. So no compile takes the
+templates (`CheckLowerShared.templates` is set only by
+`check_program_lower_templates`), and the default compile's objects are the
+same as before (`sqlite3.c`'s byte for byte). What remains is the issue's
+point: the three steps 64 nodes at a time. The scatter's table is by op
+alone. The fast twin's shapes read the stream's columns and #570's classes and
+facts. The closure can run over prefix sums of the slots' counts. The vector
+pass's results are to be checked against these scalar ones, and the lowering
+against the tasks, by the same command.
 
 ## Against clang -O0's objects
 

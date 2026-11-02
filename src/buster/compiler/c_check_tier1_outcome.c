@@ -49,6 +49,8 @@ typedef enum CheckTier1Cause
     CHECK_TIER1_CAUSE_ALLOCATION,
     CHECK_TIER1_CAUSE_CFG_ALLOCATION,
     CHECK_TIER1_CAUSE_FRAME,
+    // Tier1EmitOptions.certify's checker (#939): its Tier1CertError.
+    CHECK_TIER1_CAUSE_CERTIFICATE,
     CHECK_TIER1_CAUSE_COUNT,
 } CheckTier1Cause;
 
@@ -98,7 +100,7 @@ struct CheckTier1Fault
 
 static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn" };
 static const char* const check_tier1_category_names[CHECK_TIER1_CATEGORY_COUNT] = { "unattempted", "compiled", "unsupported", "resource", "internal" };
-static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame" };
+static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame", "certificate" };
 
 static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Cause cause, uint32_t error, uint32_t instruction, uint32_t detail);
 
