@@ -131,11 +131,13 @@ struct CheckValue
 
 // A value's two x87 payloads as their ten meaningful bytes, the significand and the sign and exponent, copied as
 // integer storage: an x87 load and store of one is microcoded, and the six pad bytes needn't be read (#879). The
-// destination's aggregate initialization zeroes those bytes, so a copied value's padding stays deterministic.
+// helper zeroes the destination's pad bytes itself, so its padding is deterministic whatever its caller left there.
 static void check_value_copy_floating(CheckValue* destination, const CheckValue* source)
 {
-    memcpy(destination->floating_storage, source->floating_storage, sizeof(uint64_t) + sizeof(uint16_t));
-    memcpy(destination->imaginary_storage, source->imaginary_storage, sizeof(uint64_t) + sizeof(uint16_t));
+    destination->floating_storage[0] = source->floating_storage[0];
+    destination->floating_storage[1] = source->floating_storage[1] & UINT64_C(0xffff);
+    destination->imaginary_storage[0] = source->imaginary_storage[0];
+    destination->imaginary_storage[1] = source->imaginary_storage[1] & UINT64_C(0xffff);
 }
 
 typedef enum CheckOp
