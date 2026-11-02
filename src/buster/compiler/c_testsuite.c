@@ -1067,14 +1067,21 @@ static int c_testsuite_self_test(CTestsuite* suite)
     }
     for (uint32_t scenario = 0; scenario < scenario_count; scenario += 1)
     {
+        // A scenario whose process didn't start (a failed fork) ran nothing, and fails.
+        const bool started = children[scenario] > 0;
         int status = 0;
         pid_t waited = -1;
         do
         {
-            waited = children[scenario] > 0 ? waitpid(children[scenario], &status, 0) : -1;
+            waited = started ? waitpid(children[scenario], &status, 0) : -1;
         } while (waited < 0 && errno == EINTR);
-        const bool expected = waited == children[scenario] && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        if (valid && !expected && !(waited == children[scenario] && WIFEXITED(status)))
+        const bool ended = started && waited == children[scenario] && WIFEXITED(status);
+        const bool expected = ended && WEXITSTATUS(status) == 0;
+        if (valid && !started)
+        {
+            fprintf(stderr, "test-c-testsuite: self-test, %s: its process didn't start\n", scenarios[scenario]);
+        }
+        else if (valid && !ended)
         {
             fprintf(stderr, "test-c-testsuite: self-test, %s: its process didn't run to the end\n", scenarios[scenario]);
         }

@@ -73,7 +73,8 @@ the same options, and `--keep` keeps the work directory (under `$TMPDIR` or
 
 `--self-test` (about 2 s) runs the harness on three tests of its own with a
 stand-in compiler, a shell script, in six scenarios at once, each in a process
-of its own with its own results' mapping: from a DIR and a `$TMPDIR`
+of its own with its own results' mapping (a scenario whose process doesn't
+start or end fails): from a DIR and a `$TMPDIR`
 relative to the current directory (the processes run elsewhere, so the harness
 makes every path absolute); waiting by polling as it does where `pidfd_open`
 fails; with `--cross-check` where `-c` refuses a test the direct path compiles,

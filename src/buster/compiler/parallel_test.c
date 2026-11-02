@@ -43,8 +43,9 @@
 //     captures closed as they end (#276's review);
 //   - shards: a list of six commands dealt to 2, 3 and 1 shards by costs, two of them without a line (each its CPUs
 //     times 10 s) and a line for a command the list doesn't have, each shard's commands in the list's order and every
-//     command in exactly one; 2 shards without costs; a shard without commands, which passes; and each error of the
-//     options (with the usage) and of the costs (at its line), and costs that can't be read;
+//     command in exactly one; 2 shards without costs; a shard without commands, which passes; the most shards
+//     (4294967295), the first with the costliest command and the last with none, dealt without room for each shard;
+//     and each error of the options (with the usage) and of the costs (at its line), and costs that can't be read;
 //   - the command: build/compiler parallel's report and exit status, for lists on standard input and in a file that
 //     pass and fail, a report with no reader (its failed write stops the run, and the runner ends at once), with SIGPIPE
 //     at its default and ignored, a reader that leaves after the first line, which fails a run whose command passes, a
@@ -1252,7 +1253,8 @@ static void parallel_test_command_line(ParallelTest* test)
 
 // --shard K/N and --costs: a list of six commands dealt to shards by costs, two of them without a line (each its CPUs
 // times 10 s) and a line for a command the list doesn't have; each shard's commands, in the list's order, and every
-// command in exactly one; the shards without costs; a shard without commands; and each error of the options and costs.
+// command in exactly one; the shards without costs; a shard without commands; the most shards; and each error of the
+// options and costs.
 static void parallel_test_shards(ParallelTest* test)
 {
     char list[600];
@@ -1353,6 +1355,21 @@ static void parallel_test_shards(ParallelTest* test)
             "7/7",
             false,
             "parallel: shard 7 of 7, 0 of 6 commands, at most 4 CPUs at once\n"
+            "parallel: 0 commands in * s, * s of CPU, at most 4 CPUs at once: 0 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        // The most shards: each command its own shard, the costliest the first, and the deal's room only the
+        // commands' (parallel_shards), not a word for each of the shards.
+        {
+            "1/4294967295",
+            true,
+            "parallel: shard 1 of 4294967295, 1 of 6 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU\na\n"
+            "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "4294967295/4294967295",
+            true,
+            "parallel: shard 4294967295 of 4294967295, 0 of 6 commands, at most 4 CPUs at once\n"
             "parallel: 0 commands in * s, * s of CPU, at most 4 CPUs at once: 0 passed, 0 failed, 0 skipped, 0 not started\n",
         },
     };

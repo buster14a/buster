@@ -299,8 +299,11 @@ workers counted whole; the option sets' check against `clang -dM` runs as 4
 slices of its sets, and the fuzz batch as its own checks and each mode), and the
 deal gives each, the heaviest first, to the part that weighs the least so far,
 as the runner deals its shards. The N parts together run every check once; the
-weights only balance them. The first line names the part and its checks
-(`test-preprocessor: part K of N: C of T checks`).
+weights only balance them. A part fails if its pass that runs the checks meets
+another sequence of them than the pass that weighed them (a check at another
+place or past them), so that a check whose guard came to depend on another
+check's work can't move between the parts unseen. The first line names the part
+and its checks (`test-preprocessor: part K of N: C of T checks`).
 
 The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
 the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,

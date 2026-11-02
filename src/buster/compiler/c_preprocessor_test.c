@@ -7985,6 +7985,12 @@ struct PPTestDeal
     // The checks met so far in this pass, and how many of them the part has.
     uint32_t count;
     uint32_t dealt;
+    // The checks the first pass met, and whether the second met another sequence: a check whose weight isn't the one the
+    // first pass recorded at its place, or one past them. Each part checks it, so that a check whose guard came to
+    // depend on what another check does can't move between the parts unseen, the parts' union no longer every check
+    // once.
+    uint32_t collected;
+    bool shifted;
     uint32_t weights[BUSTER_PP_TEST_MAX_SECTIONS];
     // Each check's part, from 0.
     uint32_t assigned[BUSTER_PP_TEST_MAX_SECTIONS];
@@ -8002,7 +8008,8 @@ static bool pp_test_section(PPTestDeal* deal, uint32_t weight)
     }
     else if (!deal->collecting)
     {
-        runs = index < BUSTER_PP_TEST_MAX_SECTIONS && deal->assigned[index] + 1 == deal->part;
+        deal->shifted |= index >= deal->collected || deal->weights[index] != weight;
+        runs = !deal->shifted && deal->assigned[index] + 1 == deal->part;
     }
     deal->count += 1;
     return runs;
@@ -8032,6 +8039,7 @@ static bool pp_test_deal(PPTestDeal* deal)
     // More parts than checks leave the extra parts none; the loads only need a part's room each up to the checks.
     const uint32_t parts = deal->parts < BUSTER_PP_TEST_MAX_SECTIONS ? deal->parts : BUSTER_PP_TEST_MAX_SECTIONS;
     deal->dealt = 0;
+    deal->collected = count;
     for (uint32_t k = 0; k < count; k += 1)
     {
         uint32_t lightest = 0;
@@ -8339,6 +8347,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         deal.collecting = false;
         deal.count = 0;
         passed_all = passed_all && pp_test_sections(&deal, directory, with_clang, keep, &fuzz, id_order, count);
+        // The checks the parts run are the deal's only if this pass met the first one's, check for check.
+        if (deal.shifted || deal.count != deal.collected)
+        {
+            printf("test-preprocessor: the checks run aren't the ones dealt: %u of them against %u weighed%s\n", deal.count, deal.collected,
+                   deal.shifted ? ", from one whose weight or place differs" : "");
+            passed_all = false;
+        }
     }
     else if (passed_all && tables)
     {

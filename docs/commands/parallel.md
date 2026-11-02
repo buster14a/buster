@@ -202,7 +202,9 @@ as expected with its times and CPU times written as `*`:
   them without a line (each its CPUs times 10 s) and a line for a command the
   list doesn't have, each shard's commands in the list's order and every command
   in exactly one; 2 shards without costs; a shard without commands, which
-  passes; then each error of the options (`--shard` 0/2, 3/2, 1/0, 2, a/b, /2,
+  passes; the most shards (4294967295), the first with the costliest command
+  and the last with none, which the deal takes without room for each shard
+  (past the list's commands, no shard gets one); then each error of the options (`--shard` 0/2, 3/2, 1/0, 2, a/b, /2,
   twice and without a value, and `--costs` without `--shard`, each with the
   usage) and of the costs, at its line (letters for seconds, a title without its
   blank, none, a '.' without digits, four digits after it, a sign, too many
