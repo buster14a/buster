@@ -637,7 +637,14 @@ access moved across it or eliminated past it (`BARRIER`, a call's), the floating
 environment read and its exceptions raised (`FP_ENVIRONMENT`, `FP_EXCEPTIONS`),
 errno set (`ERRNO`), no return (`TERMINATES`), a return it may not make, which a
 consumer assumes neither way (`MAY_TERMINATE`), and effects past these, which a
-consumer keeps whole (`UNMODELED`). Apart from them, its requirements are what a
+consumer keeps whole (`UNMODELED`). The two termination effects are the
+operation's own control flow: a defined non-return, or code whose control flow
+the contract can't bound. A fault is its access's or its operation's (an atomic
+load through a bad pointer faults as a plain load does, and a floating
+exception traps only where the program unmasks it), which a direct form keeps
+by those instructions' own semantics (`x86_semantics.c`'s
+`BUSTER_X86_EFFECT_FAULT` and `BUSTER_X86_EFFECT_FP_EXCEPTION` per form), not a
+call's effect. Apart from them, its requirements are what a
 direct form of the operation needs of the function it is placed in, which a
 helper's call doesn't pass to its caller (the call's convention covers the
 registers, and the helper is compiled for the unit's target): target features
