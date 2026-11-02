@@ -2,8 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Included by bind_test.c. The fake GCC tree makes search precedence independent of the host distribution; real
-// imports cover its installed runtimes. --cross-check also compiles the original issue's shapes without -L, cold
-// and with a cached runtime, through both driver paths and Clang, and checks the independently expected output.
+// imports cover its installed runtimes. Every search check goes through runtime_libraries_import, the production
+// entry point, rather than a copy of its static search. --cross-check also compiles the original issue's shapes
+// without -L, cold and with a cached runtime, through both driver paths and Clang, and checks the independently
+// expected output.
 
 static String8 bind_test_gcc_string(const char* text)
 {
@@ -17,6 +19,23 @@ static bool bind_test_gcc_same_file(const char* a, const char* b)
     return stat(a, &first) == 0 && stat(b, &second) == 0 && first.st_dev == second.st_dev && first.st_ino == second.st_ino;
 }
 
+// Imports `name` through the production entry point and copies the path it found into `path`, NUL-terminated. The
+// caller releases `libraries`.
+static RuntimeError bind_test_gcc_import(const Runtime* runtime, const char* name, const String8* directories, uint32_t directory_count,
+                                         RuntimeLibraries* libraries, char* path, uint64_t path_bytes)
+{
+    const String8 name_string = bind_test_gcc_string(name);
+    const RuntimeError error = runtime_libraries_import(libraries, runtime, &name_string, 1, directories, directory_count);
+    const String8 found = error == RUNTIME_ERROR_NONE && libraries->count != 0 ? libraries->paths[0] : (String8){ 0 };
+    const uint64_t length = found.length < path_bytes - 1 ? found.length : path_bytes - 1;
+    if (found.pointer != 0)
+    {
+        memcpy(path, found.pointer, length);
+    }
+    path[length] = 0;
+    return error;
+}
+
 static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, const char* root)
 {
     static const char* const suffixes[] = {
@@ -26,11 +45,7 @@ static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, c
         "/lib/gcc",
         "/lib/gcc/x86_64-linux-gnu",
         "/lib/gcc/x86_64-linux-gnu/99",
-        "/lib/gcc/x86_64-linux-gnu/lib64",
         "/lib64",
-        "/x86_64-linux-gnu",
-        "/x86_64-linux-gnu/lib",
-        "/x86_64-linux-gnu/lib64",
     };
     char places[BUSTER_ARRAY_LENGTH(suffixes)][BUSTER_RUNTIME_PATH_BYTES];
     bool made = true;
@@ -42,51 +57,70 @@ static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, c
     bind_test_expect(tally, made, "fake GCC installation created", 0);
     Runtime selected = *runtime;
     selected.gcc_directory = bind_test_gcc_string(places[5]);
-    selected.gcc_versions = bind_test_gcc_string(places[4]);
     const String8 directories[] = { bind_test_gcc_string(places[0]), bind_test_gcc_string(places[1]) };
-    // The independent expected order, including GCC's target and prefix lib64 directories.
-    static const uint32_t order[] = { 0, 1, 5, 6, 10, 7, 9 };
+    // The expected order, from clang's -print-search-dirs for the GCC installation: the -L directories, the selected
+    // GCC installation, its ../../../../lib64 sibling, then the system directories. The other GCC-relative paths are
+    // deliberately absent (see runtime.c).
+    static const uint32_t order[] = { 0, 1, 5, 6 };
     char files[BUSTER_ARRAY_LENGTH(order)][BUSTER_RUNTIME_PATH_BYTES];
-    for (uint32_t f = 0; made && f < BUSTER_ARRAY_LENGTH(order); f += 1)
+    Arena arena = arena_reserve(1u << 20);
+    const BindTestLibraryFile order_file = {
+        .name = "buster_1119_order",
+        .soname = "libbuster_1119_order.so.1",
+        .export = "buster_order_marker",
+    };
+    for (uint32_t f = 0; made && arena.base != 0 && f < BUSTER_ARRAY_LENGTH(order); f += 1)
     {
         const int length = snprintf(files[f], sizeof(files[f]), "%s/libbuster_1119_order.so", places[order[f]]);
-        made = length > 0 && (uint64_t)length < sizeof(files[f]) && bind_test_write_file(files[f], "", 0);
+        made = length > 0 && (uint64_t)length < sizeof(files[f]) && bind_test_write_library(places[order[f]], &order_file, &arena);
     }
-    bind_test_expect(tally, made, "search candidates created", 0);
-    const String8 name = bind_test_gcc_string("buster_1119_order");
+    bind_test_expect(tally, made && arena.base != 0, "search candidates created", 0);
+    // A nonempty archive is what the -l search refuses; an empty one adds nothing.
+    static const char archive_bytes[] = "!<arch>\n/               0           0     0     644     4         `\n\0\0\0\0";
     char path[BUSTER_RUNTIME_PATH_BYTES];
     char archive_path[BUSTER_RUNTIME_PATH_BYTES];
     snprintf(archive_path, sizeof(archive_path), "%s/libbuster_1119_order.a", places[0]);
-    bool archive = false;
-    bool ready = made && bind_test_write_file(archive_path, "!<arch>\n", 8);
-    bool found = ready && runtime_libraries_find(&selected, name, directories, 2, path, &archive);
-    bind_test_expect(tally, found && !archive && bind_test_gcc_same_file(path, files[0]), "same-directory shared library before archive", 0);
+    bool ready = made && bind_test_write_file(archive_path, archive_bytes, sizeof(archive_bytes) - 1);
+    RuntimeLibraries libraries = { 0 };
+    RuntimeError error = ready ? bind_test_gcc_import(&selected, order_file.name, directories, 2, &libraries, path, sizeof(path)) : RUNTIME_ERROR_FILE;
+    bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1 && bind_test_gcc_same_file(path, files[0]),
+                     "same-directory shared library before archive", 0);
+    runtime_libraries_release(&libraries);
     ready = ready && unlink(files[0]) == 0;
-    found = ready && runtime_libraries_find(&selected, name, directories, 2, path, &archive);
-    bind_test_expect(tally, found && archive && bind_test_gcc_same_file(path, archive_path), "earlier -L archive before later shared libraries", 0);
+    libraries = (RuntimeLibraries){ 0 };
+    error = ready ? bind_test_gcc_import(&selected, order_file.name, directories, 2, &libraries, path, sizeof(path)) : RUNTIME_ERROR_FILE;
+    bind_test_expect(tally, error == RUNTIME_ERROR_ARCHIVE && libraries.count == 0, "earlier -L archive before later shared libraries", 0);
+    runtime_libraries_release(&libraries);
     ready = ready && unlink(archive_path) == 0;
     for (uint32_t f = 1; ready && f < BUSTER_ARRAY_LENGTH(order); f += 1)
     {
-        found = runtime_libraries_find(&selected, name, directories, 2, path, &archive);
-        bind_test_expect(tally, found && !archive && bind_test_gcc_same_file(path, files[f]), "user, GCC and relative directories in order", f);
+        libraries = (RuntimeLibraries){ 0 };
+        error = bind_test_gcc_import(&selected, order_file.name, directories, 2, &libraries, path, sizeof(path));
+        bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1 && bind_test_gcc_same_file(path, files[f]),
+                         "user, GCC and relative directories in order", f);
+        runtime_libraries_release(&libraries);
         ready = unlink(files[f]) == 0;
     }
-    found = ready && runtime_libraries_find(&selected, name, directories, 2, path, &archive);
-    bind_test_expect(tally, ready && !found && !archive, "missing name stays missing", 0);
-    found = runtime_libraries_find(&selected, bind_test_gcc_string("m"), 0, 0, path, &archive);
-    bind_test_expect(tally, found, "system library fallback retained", 0);
+    libraries = (RuntimeLibraries){ 0 };
+    error = ready ? bind_test_gcc_import(&selected, order_file.name, directories, 2, &libraries, path, sizeof(path)) : RUNTIME_ERROR_FILE;
+    bind_test_expect(tally, error == RUNTIME_ERROR_MISSING && libraries.count == 0, "missing name stays missing", 0);
+    runtime_libraries_release(&libraries);
+    libraries = (RuntimeLibraries){ 0 };
+    error = bind_test_gcc_import(&selected, "m", 0, 0, &libraries, path, sizeof(path));
+    bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count != 0, "system library fallback retained", 0);
+    runtime_libraries_release(&libraries);
     selected.gcc_directory = (String8){ 0 };
-    selected.gcc_versions = (String8){ 0 };
-    found = runtime_libraries_find(&selected, name, 0, 0, path, &archive);
-    bind_test_expect(tally, !found, "empty GCC installation is not a directory", 0);
+    libraries = (RuntimeLibraries){ 0 };
+    error = bind_test_gcc_import(&selected, order_file.name, 0, 0, &libraries, path, sizeof(path));
+    bind_test_expect(tally, error == RUNTIME_ERROR_MISSING && libraries.count == 0, "empty GCC installation is not a directory", 0);
+    runtime_libraries_release(&libraries);
     selected.gcc_directory = (String8){ .pointer = "x", .length = UINT64_MAX };
-    selected.gcc_versions = selected.gcc_directory;
-    found = runtime_libraries_find(&selected, (String8){ .pointer = "x", .length = UINT64_MAX }, 0, 0, path, &archive);
-    bind_test_expect(tally, !found, "oversized slices are not truncated or read", 0);
+    libraries = (RuntimeLibraries){ 0 };
+    error = bind_test_gcc_import(&selected, order_file.name, 0, 0, &libraries, path, sizeof(path));
+    bind_test_expect(tally, error == RUNTIME_ERROR_MISSING && libraries.count == 0, "oversized slices are not truncated or read", 0);
+    runtime_libraries_release(&libraries);
 
     selected.gcc_directory = bind_test_gcc_string(places[5]);
-    selected.gcc_versions = bind_test_gcc_string(places[4]);
-    Arena arena = arena_reserve(1u << 20);
     const BindTestLibraryFile file = {
         .name = "buster_1119_only",
         .soname = "libbuster_1119_only.so.1",
@@ -94,10 +128,12 @@ static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, c
     };
     ready = made && arena.base != 0 && bind_test_write_library(places[5], &file, &arena);
     bind_test_expect(tally, ready, "GCC-only ELF library created", 0);
-    const String8 only = bind_test_gcc_string(file.name);
-    RuntimeLibraries libraries = { 0 };
-    RuntimeError error = ready ? runtime_libraries_import(&libraries, &selected, &only, 1, 0, 0) : RUNTIME_ERROR_FILE;
-    bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1, "GCC-only library imported without -L", 0);
+    char only_path[BUSTER_RUNTIME_PATH_BYTES];
+    snprintf(only_path, sizeof(only_path), "%s/lib%s.so", places[5], file.name);
+    libraries = (RuntimeLibraries){ 0 };
+    error = ready ? bind_test_gcc_import(&selected, file.name, 0, 0, &libraries, path, sizeof(path)) : RUNTIME_ERROR_FILE;
+    bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1 && bind_test_gcc_same_file(path, only_path),
+                     "GCC-only library imported without -L", 0);
     runtime_libraries_release(&libraries);
 
     char script[BUSTER_RUNTIME_PATH_BYTES];
@@ -126,6 +162,30 @@ static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, c
     error = ready ? runtime_libraries_import(&libraries, &selected, &script_name, 1, 0, 0) : RUNTIME_ERROR_FILE;
     bind_test_expect(tally, error == RUNTIME_ERROR_IMPORT, "nested script refused without recursion", 0);
     runtime_libraries_release(&libraries);
+
+    // A -l-found script is always in a directory the ordered search visits, so GNU ld's script-directory step cannot
+    // be isolated here. Its current-directory step is reachable and is checked below: the script is in the fake GCC
+    // directory, and its relative input exists only in the process's current directory.
+    char cwd_script[BUSTER_RUNTIME_PATH_BYTES];
+    char original[BUSTER_RUNTIME_PATH_BYTES];
+    snprintf(cwd_script, sizeof(cwd_script), "%s/libbuster_1119_cwd.so", places[5]);
+    static const char cwd_body[] = "GROUP ( libbuster_1119_cwd_only.so )\n";
+    const BindTestLibraryFile cwd_file = {
+        .name = "buster_1119_cwd_only",
+        .soname = "libbuster_1119_cwd_only.so.1",
+        .export = "buster_cwd_marker",
+    };
+    ready = ready && bind_test_write_file(cwd_script, cwd_body, sizeof(cwd_body) - 1) && bind_test_write_library(root, &cwd_file, &arena);
+    const bool have_cwd = getcwd(original, sizeof(original)) != 0;
+    const bool changed = ready && have_cwd && chdir(root) == 0;
+    const String8 cwd_name = bind_test_gcc_string("buster_1119_cwd");
+    libraries = (RuntimeLibraries){ 0 };
+    error = changed ? runtime_libraries_import(&libraries, &selected, &cwd_name, 1, 0, 0) : RUNTIME_ERROR_FILE;
+    snprintf(path, sizeof(path), "%s/libbuster_1119_cwd_only.so", root);
+    const bool imported = changed && error == RUNTIME_ERROR_NONE && libraries.count == 1 && bind_test_gcc_same_file(libraries.paths[0].pointer, path);
+    const bool restored = changed ? chdir(original) == 0 : have_cwd;
+    bind_test_expect(tally, imported && restored, "script's relative input found in the current directory", 0);
+    runtime_libraries_release(&libraries);
     arena_release(&arena);
 }
 
@@ -135,24 +195,22 @@ static void bind_test_gcc_installed(BindTestTally* tally, const Runtime* runtime
     for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
     {
         const String8 name = bind_test_gcc_string(names[n]);
-        char path[BUSTER_RUNTIME_PATH_BYTES];
-        bool archive = false;
-        const bool found = runtime_libraries_find(runtime, name, 0, 0, path, &archive);
+        RuntimeLibraries libraries = { 0 };
+        const RuntimeError error = runtime_libraries_import(&libraries, runtime, &name, 1, 0, 0);
+        const bool found = error != RUNTIME_ERROR_MISSING;
         if (found || n < 2)
         {
-            RuntimeLibraries libraries = { 0 };
-            const RuntimeError error = runtime_libraries_import(&libraries, runtime, &name, 1, 0, 0);
             if (error != RUNTIME_ERROR_NONE)
             {
                 printf("  -l%s: error %u, %s\n", names[n], (unsigned)error, libraries.failed);
             }
-            bind_test_expect(tally, found && error == RUNTIME_ERROR_NONE && libraries.count != 0, names[n], n);
-            runtime_libraries_release(&libraries);
+            bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count != 0, names[n], n);
         }
         else
         {
             printf("  -l%s: optional development library not installed\n", names[n]);
         }
+        runtime_libraries_release(&libraries);
     }
 }
 
@@ -253,7 +311,7 @@ static void bind_test_gcc_atomics(BindTestTally* tally, const char* root)
     arena_release(&arena);
 }
 
-static bool bind_test_gcc_libraries(const Runtime* runtime, const char* directory, bool cross_check)
+static bool bind_test_gcc_libraries(const Runtime* runtime, const char* directory, bool keep, bool cross_check)
 {
     BindTestTally tally = { .check = "GCC library search" };
     char root[BUSTER_RUNTIME_PATH_BYTES];
@@ -268,8 +326,11 @@ static bool bind_test_gcc_libraries(const Runtime* runtime, const char* director
         {
             bind_test_gcc_atomics(&tally, root);
         }
-        char* remove[] = { "rm", "-rf", "--", root, 0 };
-        bind_test_expect(&tally, object_test_run(remove, "/dev/null", "/dev/null") == 0, "private fixtures removed", 0);
+        if (!keep)
+        {
+            char* remove[] = { "rm", "-rf", "--", root, 0 };
+            bind_test_expect(&tally, object_test_run(remove, "/dev/null", "/dev/null") == 0, "private fixtures removed", 0);
+        }
     }
     return bind_test_report(&tally);
 }

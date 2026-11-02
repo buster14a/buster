@@ -2597,10 +2597,13 @@ different ELF layouts and file sizes.
 A program that calls a library besides the C runtime's (libm's `sin`, #145's c-testsuite 00174) names it as it
 names it to GCC's driver: `-lNAME`, with `-LDIR` for directories to search first. `runtime_libraries_import`
 (`runtime.c`) finds each as GNU ld does, `libNAME.so` or else `libNAME.a` in the first directory that has one, the
-`-L` ones, then glibc's library directories, and imports what it finds with the same readers the runtime's
+`-L` ones, then the runtime's selected GCC installation and the native prefix's `lib64`, then glibc's library
+directories, and imports what it finds with the same readers the runtime's
 libraries take: a shared library by `import_library`, its exports indexed, and a linker script (glibc's `libm.so`,
-`GROUP ( libm.so.6 AS_NEEDED ( libmvec.so.1 ) )`) by `import_script`, standing for the libraries it names, each an
-absolute path. Each library's version indices move past the runtime's (libc.so.6's, then the loader's) and the
+`GROUP ( libm.so.6 AS_NEEDED ( libmvec.so.1 ) )`) by `import_script`, standing for the libraries it names, by
+absolute path, relative path or `-l` name. A relative input is searched in the script's directory, the current
+directory, then the library search; only the selected `libgcc.a` is reused, by device/inode, and other archives and
+nested scripts are refused. Each library's version indices move past the runtime's (libc.so.6's, then the loader's) and the
 libraries' before it, as `runtime_move_loader_versions` moves the loader's, so that an index names one library's
 version in the link's symbols. A library named twice (its soname) is linked once. Each library's `DT_NEEDED`
 entries are read too, for the rule below.
@@ -2657,9 +2660,8 @@ needs is left to nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves th
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
 each required exactly when needed, and their versions in `.gnu.version_r`. A library's `DT_NEEDED` name is its
-soname, or without one, as GNU ld and lld name it, its file's name where the `-l` search found it and its path where a
-script names it (`runtime_libraries_name`): a script's library in a directory of its own loads without a search
-path.
+soname, or without one, as GNU ld and lld name it, its file's name where the `-l` search found it, its basename where
+a script names it relatively, and its path where a script names it absolutely (`runtime_libraries_name`).
 
 Which export a versioned reference binds to is the first named library's at its version, whatever library its need
 names, as GNU ld and lld bind it and the loader looks it up. The loader also checks each loaded library's version needs
@@ -2898,9 +2900,11 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   installation, where `-lgcc_s` finds GCC's `libgcc_s.so` first, then in the
   library directories, which that script or link names (`GROUP (
   libgcc_s.so.1 -lgcc )` on Debian and Ubuntu, an absolute path elsewhere).
-  Both paths are probes, so that installing one later leaves the snapshot
-  stale. A system without it has a runtime without it, which refuses a
-  member's reference to the unwinder as #483 did.
+  A named `-lgcc_s` resolves the script's relative `libgcc_s.so.1` and `-lgcc`
+  inputs through the same ordered search, and reuses only the selected
+  `libgcc.a` by device/inode. Both paths are probes, so that installing one
+  later leaves the snapshot stale. A system without it has a runtime without
+  it, which refuses a member's reference to the unwinder as #483 did.
 - **Its exports and versions.** `import_library` reads it as it reads
   `libc.so.6`; its version indices are moved past `libc.so.6`'s and the
   loader's (`runtime_move_versions`, which the loader's move shares), so that

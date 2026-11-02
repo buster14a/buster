@@ -3,9 +3,12 @@
 //
 // The direct driver's ordered -l search, included by runtime.c after its library readers. Reuse the GCC installation
 // that the runtime selected (and snapshots retain); never spawn a compiler or rescan GCC's versions per library.
-// This is filesystem discovery, not a symbol/byte scan: keep the existing first-file-wins probing order. The native
-// GCC-relative lib64 directories cover version-specific and target-specific runtime installations, before the
-// existing system fallbacks. This is not a general cross-toolchain/sysroot search.
+// This is filesystem discovery, not a symbol/byte scan: keep the existing first-file-wins probing order. The selected
+// GCC installation and the native prefix's lib64 (clang's ../../../../lib64 sibling) come before the existing system
+// fallbacks. The other GCC-relative paths (prefix/<triple>/lib and lib64, and the installation's ../lib64) are left
+// out: on a host with a cross or multilib sysroot they need not be native, while the native distros' libraries are in
+// the GCC directory, the prefix's lib64 or the system directories below. This is not a general cross-toolchain/sysroot
+// search.
 // Scripts may name shared libraries by absolute path, relative path or -l. Other scripts and archives remain refused,
 // except the already-imported libgcc.a, identified by device/inode rather than its spelling: Debian's libgcc_s.so
 // GROUP names it after libgcc_s.so.1. A different archive selected by -L must not silently disappear.
@@ -34,7 +37,6 @@ static bool runtime_libraries_search(const Runtime* runtime, String8 name, bool 
                                      char* path, bool* archive)
 {
     const String8 gcc = runtime->gcc_directory;
-    const String8 versions = runtime->gcc_versions;
     const bool has_gcc = gcc.pointer != 0 && gcc.length != 0 && gcc.length < BUSTER_RUNTIME_PATH_BYTES;
     bool found = false;
     *archive = false;
@@ -46,34 +48,13 @@ static bool runtime_libraries_search(const Runtime* runtime, String8 name, bool 
     {
         found = runtime_libraries_in_directory(gcc, name, exact, path, archive);
     }
-    String8 triple = { 0 };
-    if (has_gcc && versions.pointer != 0 && versions.length != 0 && versions.length < BUSTER_RUNTIME_PATH_BYTES)
-    {
-        uint64_t begin = versions.length;
-        while (begin != 0 && versions.pointer[begin - 1] != '/')
-        {
-            begin -= 1;
-        }
-        triple = (String8){ .pointer = versions.pointer + begin, .length = versions.length - begin };
-    }
-    static const struct
-    {
-        const char* prefix;
-        bool triple;
-        const char* suffix;
-    } relatives[] = {
-        { .prefix = "/../lib64", .triple = false, .suffix = "" },
-        { .prefix = "/../../../../", .triple = true, .suffix = "/lib/../lib64" },
-        { .prefix = "/../../../../lib64", .triple = false, .suffix = "" },
-        { .prefix = "/../../../../", .triple = true, .suffix = "/lib" },
+    static const char* const relatives[] = {
+        "/../../../../lib64",
     };
     for (uint32_t d = 0; has_gcc && !found && d < BUSTER_ARRAY_LENGTH(relatives); d += 1)
     {
         char buffer[BUSTER_RUNTIME_PATH_BYTES];
-        const bool target = relatives[d].triple;
-        const int length = !target || triple.length != 0 ?
-            snprintf(buffer, sizeof(buffer), "%.*s%s%.*s%s", (int)gcc.length, gcc.pointer, relatives[d].prefix,
-                     target ? (int)triple.length : 0, target ? triple.pointer : "", relatives[d].suffix) : -1;
+        const int length = snprintf(buffer, sizeof(buffer), "%.*s%s", (int)gcc.length, gcc.pointer, relatives[d]);
         if (length > 0 && (uint64_t)length < sizeof(buffer))
         {
             const String8 directory = { .pointer = buffer, .length = (uint64_t)length };

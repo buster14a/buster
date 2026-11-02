@@ -5301,7 +5301,7 @@ static int run_bind_tests(int argc, char** argv)
         bool passed = bind_test_programs(&runtime, seed, cross_check, directory, keep, &arena);
         passed = bind_test_rules(&runtime) && passed;
         passed = bind_test_libraries(&runtime, directory) && passed;
-        passed = bind_test_gcc_libraries(&runtime, directory, cross_check) && passed;
+        passed = bind_test_gcc_libraries(&runtime, directory, keep, cross_check) && passed;
         passed = bind_test_atexit_program(&runtime) && passed;
         passed = bind_test_libgcc_program(&runtime) && passed;
         passed = bind_test_room_bound(&runtime, "room", &arena) && passed;

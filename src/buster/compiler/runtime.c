@@ -378,7 +378,7 @@ static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
 
 // The shared libraries a link names with -l, which it binds after the program and before the C runtime's libraries,
 // where GCC's driver puts them on the link line (bind.c). -l NAME is lib<NAME>.so, or else lib<NAME>.a, in the first of
-// the -L directories, then the selected GCC installation and its native runtime siblings, then the system library
+// the -L directories, then the selected GCC installation and the native prefix's lib64, then the system library
 // directories (runtime_library_directories), that has one. A nonempty archive found first is refused. A linker script
 // names shared libraries by absolute or relative path or -l; its already-imported libgcc.a is reused by file identity
 // (runtime_library_search.c). Other archives and nested scripts are refused. Each
@@ -447,7 +447,7 @@ struct RuntimeLibraries
 // RUNTIME_ERROR_MISSING for a name no directory has, RUNTIME_ERROR_ARCHIVE for one found as an archive first,
 // RUNTIME_ERROR_IMPORT for a file that is neither a shared library nor a script the reader takes, or for a nested
 // script; RUNTIME_ERROR_ARCHIVE for a script's archive other than the selected libgcc.a; RUNTIME_ERROR_FILE or
-// RUNTIME_ERROR_MEMORY, with `failed` saying where. A missing script input is RUNTIME_ERROR_MISSING.
+// RUNTIME_ERROR_MEMORY, with `failed` saying where. A missing relative script input is RUNTIME_ERROR_MISSING.
 BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
                                                                     uint32_t name_count, const String8* directories, uint32_t directory_count);
 static __attribute__((unused)) void runtime_libraries_release(RuntimeLibraries* libraries);
