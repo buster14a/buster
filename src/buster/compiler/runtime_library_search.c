@@ -13,13 +13,15 @@
 // except the already-imported libgcc.a, identified by device/inode rather than its spelling: Debian's libgcc_s.so
 // GROUP names it after libgcc_s.so.1. A different archive selected by -L must not silently disappear.
 
-static bool runtime_libraries_in_directory(String8 directory, String8 name, bool exact, char* path, bool* archive)
+static bool runtime_libraries_in_directory(String8 directory, String8 name, bool exact, bool static_only, char* path, bool* archive)
 {
     const bool valid = directory.pointer != 0 && directory.length != 0 && directory.length < BUSTER_RUNTIME_PATH_BYTES &&
                        name.pointer != 0 && name.length != 0 && name.length < BUSTER_RUNTIME_PATH_BYTES;
     bool found = false;
     *archive = false;
-    for (uint32_t kind = 0; valid && !found && kind < (exact ? 1u : 2u); kind += 1)
+    const uint32_t begin = exact || !static_only ? 0 : 1;
+    const uint32_t end = exact ? 1 : 2;
+    for (uint32_t kind = begin; valid && !found && kind < end; kind += 1)
     {
         const int length = snprintf(path, BUSTER_RUNTIME_PATH_BYTES, "%.*s/%s%.*s%s", (int)directory.length, directory.pointer,
                                     exact ? "" : "lib", (int)name.length, name.pointer, exact ? "" : kind == 0 ? ".so" : ".a");
@@ -31,10 +33,11 @@ static bool runtime_libraries_in_directory(String8 directory, String8 name, bool
     return found;
 }
 
-// With exact, search the filename unchanged (a script's libgcc_s.so.1), otherwise libNAME.so then libNAME.a in EACH
-// directory. In particular, a user's archive wins over a shared library in a later user, GCC or system directory.
-static bool runtime_libraries_search(const Runtime* runtime, String8 name, bool exact, const String8* directories, uint32_t directory_count,
-                                     char* path, bool* archive)
+// With exact, search the filename unchanged (a script's libgcc_s.so.1); otherwise libNAME.so then libNAME.a in EACH
+// directory, or with static_only only libNAME.a. In particular, a user's archive wins over a shared library in a later
+// user, GCC or system directory.
+static bool runtime_libraries_search(const Runtime* runtime, String8 name, bool exact, bool static_only, const String8* directories,
+                                     uint32_t directory_count, char* path, bool* archive)
 {
     const String8 gcc = runtime->gcc_directory;
     const bool has_gcc = gcc.pointer != 0 && gcc.length != 0 && gcc.length < BUSTER_RUNTIME_PATH_BYTES;
@@ -42,11 +45,11 @@ static bool runtime_libraries_search(const Runtime* runtime, String8 name, bool 
     *archive = false;
     for (uint32_t d = 0; !found && d < directory_count; d += 1)
     {
-        found = runtime_libraries_in_directory(directories[d], name, exact, path, archive);
+        found = runtime_libraries_in_directory(directories[d], name, exact, static_only, path, archive);
     }
     if (!found && has_gcc)
     {
-        found = runtime_libraries_in_directory(gcc, name, exact, path, archive);
+        found = runtime_libraries_in_directory(gcc, name, exact, static_only, path, archive);
     }
     static const char* const relatives[] = {
         "/../../../../lib64",
@@ -58,26 +61,27 @@ static bool runtime_libraries_search(const Runtime* runtime, String8 name, bool 
         if (length > 0 && (uint64_t)length < sizeof(buffer))
         {
             const String8 directory = { .pointer = buffer, .length = (uint64_t)length };
-            found = runtime_libraries_in_directory(directory, name, exact, path, archive);
+            found = runtime_libraries_in_directory(directory, name, exact, static_only, path, archive);
         }
     }
     for (uint32_t d = 0; !found && d < BUSTER_ARRAY_LENGTH(runtime_library_directories); d += 1)
     {
         const String8 directory = { .pointer = (char*)runtime_library_directories[d], .length = strlen(runtime_library_directories[d]) };
-        found = runtime_libraries_in_directory(directory, name, exact, path, archive);
+        found = runtime_libraries_in_directory(directory, name, exact, static_only, path, archive);
     }
     return found;
 }
 
-static bool runtime_libraries_find(const Runtime* runtime, String8 name, const String8* directories, uint32_t directory_count, char* path, bool* archive)
+static bool runtime_libraries_find(const Runtime* runtime, String8 name, const String8* directories, uint32_t directory_count, char* path, bool* archive,
+                                   bool static_only)
 {
-    return runtime_libraries_search(runtime, name, false, directories, directory_count, path, archive);
+    return runtime_libraries_search(runtime, name, false, static_only, directories, directory_count, path, archive);
 }
 
 // GNU ld's relative INPUT rule: the script's directory, the current directory, then the library search. A -l input
 // instead uses the same ordered search as a command-line -l. The caller retains ownership of every input slice.
 static RuntimeError runtime_libraries_script_path(const Runtime* runtime, const char* script, const ImportScriptInput* input,
-                                                  const String8* directories, uint32_t directory_count, char* path, bool* archive)
+                                                  const String8* directories, uint32_t directory_count, bool static_only, char* path, bool* archive)
 {
     const String8 name = input->name;
     RuntimeError result = name.pointer != 0 && name.length != 0 && name.length < BUSTER_RUNTIME_PATH_BYTES ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_IMPORT;
@@ -86,7 +90,7 @@ static RuntimeError runtime_libraries_script_path(const Runtime* runtime, const 
     path[0] = 0;
     if (result == RUNTIME_ERROR_NONE && input->library)
     {
-        found = runtime_libraries_find(runtime, name, directories, directory_count, path, archive);
+        found = runtime_libraries_find(runtime, name, directories, directory_count, path, archive, static_only);
     }
     else if (result == RUNTIME_ERROR_NONE && name.pointer[0] == '/')
     {
@@ -100,9 +104,9 @@ static RuntimeError runtime_libraries_script_path(const Runtime* runtime, const 
         const char* slash = strrchr(script, '/');
         const String8 directory = slash != 0 ? (String8){ .pointer = (char*)script, .length = slash == script ? 1 : (uint64_t)(slash - script) }
                                               : (String8){ .pointer = ".", .length = 1 };
-        found = runtime_libraries_in_directory(directory, name, true, path, archive);
-        found = found || runtime_libraries_in_directory((String8){ .pointer = ".", .length = 1 }, name, true, path, archive);
-        found = found || runtime_libraries_search(runtime, name, true, directories, directory_count, path, archive);
+        found = runtime_libraries_in_directory(directory, name, true, static_only, path, archive);
+        found = found || runtime_libraries_in_directory((String8){ .pointer = ".", .length = 1 }, name, true, static_only, path, archive);
+        found = found || runtime_libraries_search(runtime, name, true, static_only, directories, directory_count, path, archive);
     }
     result = result == RUNTIME_ERROR_NONE && !found ? RUNTIME_ERROR_MISSING : result;
     return result;
@@ -119,7 +123,7 @@ static bool runtime_libraries_selected_libgcc(const Runtime* runtime, const char
 }
 
 static RuntimeError runtime_libraries_script(RuntimeLibraries* libraries, const Runtime* runtime, const char* path, String8 bytes,
-                                             const String8* directories, uint32_t directory_count, uint16_t* base)
+                                             const String8* directories, uint32_t directory_count, bool static_only, uint16_t* base)
 {
     ImportScript script = { 0 };
     libraries->import = import_script(&script, bytes, &libraries->arena);
@@ -135,7 +139,7 @@ static RuntimeError runtime_libraries_script(RuntimeLibraries* libraries, const 
         const ImportScriptInput input = inputs[i];
         char input_path[BUSTER_RUNTIME_PATH_BYTES];
         bool archive = false;
-        result = runtime_libraries_script_path(runtime, path, &input, directories, directory_count, input_path, &archive);
+        result = runtime_libraries_script_path(runtime, path, &input, directories, directory_count, static_only, input_path, &archive);
         const bool provided = result == RUNTIME_ERROR_NONE && archive && runtime_libraries_selected_libgcc(runtime, input_path);
         result = result == RUNTIME_ERROR_NONE && archive && !provided ? RUNTIME_ERROR_ARCHIVE : result;
         if (result != RUNTIME_ERROR_NONE)

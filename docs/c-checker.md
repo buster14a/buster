@@ -114,8 +114,9 @@ value of an option that takes the next argument stays that option's, as
 `pp_option_takes_value` lists them: `-o -lresult` writes `-lresult`), found as
 GNU ld finds it: `libNAME.so`, or else `libNAME.a`, in the first of the `-LDIR`
 directories, then the GCC installation the runtime selected and the native
-prefix's `lib64`, then glibc's library directories, that has one; a linker
-script (glibc's `libm.so`) stands for the libraries it names,
+prefix's `lib64`, then glibc's library directories, that has one; a static
+executable considers only `libNAME.a`. A linker script (glibc's `libm.so`)
+stands for the libraries it names,
 by absolute path, relative path or `-l` name, and the direct path reuses the
 selected `libgcc.a` and refuses other archives. Binding takes a name
 from them before `libc.so.6`, where GCC's driver puts them on the line, and the

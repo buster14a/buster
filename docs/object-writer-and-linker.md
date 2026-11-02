@@ -2598,7 +2598,7 @@ A program that calls a library besides the C runtime's (libm's `sin`, #145's c-t
 names it to GCC's driver: `-lNAME`, with `-LDIR` for directories to search first. `runtime_libraries_import`
 (`runtime.c`) finds each as GNU ld does, `libNAME.so` or else `libNAME.a` in the first directory that has one, the
 `-L` ones, then the runtime's selected GCC installation and the native prefix's `lib64`, then glibc's library
-directories, and imports what it finds with the same readers the runtime's
+directories; a static executable considers only `libNAME.a`. It imports what it finds with the same readers the runtime's
 libraries take: a shared library by `import_library`, its exports indexed, and a linker script (glibc's `libm.so`,
 `GROUP ( libm.so.6 AS_NEEDED ( libmvec.so.1 ) )`) by `import_script`, standing for the libraries it names, by
 absolute path, relative path or `-l` name. A relative input is searched in the script's directory, the current

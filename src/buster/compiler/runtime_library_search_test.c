@@ -86,6 +86,12 @@ static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, c
     bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1 && bind_test_gcc_same_file(path, files[0]),
                      "same-directory shared library before archive", 0);
     runtime_libraries_release(&libraries);
+    Runtime static_selected = selected;
+    static_selected.kind = RUNTIME_KIND_STATIC;
+    libraries = (RuntimeLibraries){ 0 };
+    error = ready ? bind_test_gcc_import(&static_selected, order_file.name, directories, 2, &libraries, path, sizeof(path)) : RUNTIME_ERROR_FILE;
+    bind_test_expect(tally, error == RUNTIME_ERROR_ARCHIVE && libraries.count == 0, "static output skips the shared library", 0);
+    runtime_libraries_release(&libraries);
     ready = ready && unlink(files[0]) == 0;
     libraries = (RuntimeLibraries){ 0 };
     error = ready ? bind_test_gcc_import(&selected, order_file.name, directories, 2, &libraries, path, sizeof(path)) : RUNTIME_ERROR_FILE;
