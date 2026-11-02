@@ -2814,11 +2814,13 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 }
 
 #include "c_check_pic_driver_test.c"
+#include "c_check_instrumentation_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
 {
     check_test_driver_pic(test, executable, directory);
+    check_test_driver_instrumentation(test, executable, directory);
     static const char source_text[] = "int main(void) { return 0; }\n";
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
@@ -5422,6 +5424,8 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
     unlink(object);
 }
 
+#include "c_check_hardening_driver_test.c"
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -5733,6 +5737,20 @@ static int run_checker_driver_tests(int argc, char** argv)
             "#pragma STDC FENV_ACCESS MAYBE\nint value;\n",
             false,
             1,
+        },
+        {
+            .name = "file-scope GCC unroll names its source pragma at the directive",
+            .source = "#pragma GCC unroll 4\nint x;\n",
+            .rejected = true,
+            .message = "invalid '#pragma GCC unroll' directive",
+            .column = 1,
+        },
+        {
+            .name = "a misplaced GCC unroll uses clang's normalized name at the statement",
+            .source = "int f(void){\n#pragma GCC unroll 4\nreturn 0;}\n",
+            .rejected = true,
+            .message = "expected a for, while, or do-while loop to follow '#pragma unroll'",
+            .column = 1,
         },
         {
             "unknown complex pragma state can be promoted at end of file",
@@ -6254,6 +6272,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_unsupported_codegen(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_hardening(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
