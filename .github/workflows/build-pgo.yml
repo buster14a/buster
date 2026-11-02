@@ -1,8 +1,8 @@
 name: build.sh PGO
 
 # BUSTER_PGO=1 is opt-in, and no CI job builds with it, so that its two builds and its training keep off the 9700X
-# (#880). Its refusals cost no build: this runs each on GitHub's runner, with a clang that answers the two queries
-# build.sh makes before them and fails at any compile, so a refusal that moved after the build, or went, fails here.
+# (#880). Its refusals cost no build: this runs each on GitHub's runner, with a clang that answers the queries build.sh
+# makes before them and fails at any compile, so a refusal that moved after the build, or went, fails here.
 on:
   pull_request:
     paths: [build.sh, .github/workflows/build-pgo.yml]
@@ -60,6 +60,8 @@ jobs:
           check 'BUSTER_PGO_TRAIN requires BUSTER_PGO=1' BUSTER_PGO_TRAIN=/dev/null bash build.sh
           check 'BUSTER_PGO must be 0 or 1' BUSTER_PGO=2 bash build.sh
           check 'not a sanitizer build' BUSTER_PGO=1 BUSTER_SANITIZER=address bash build.sh
+          # A fuzzing build is an address sanitizer build unless it names another.
+          check 'not a sanitizer build' BUSTER_PGO=1 BUSTER_FUZZ_AVAILABLE=1 bash build.sh
           check "BUSTER_HOST_RUNTIME's link leaves out" BUSTER_PGO=1 BUSTER_HOST_RUNTIME=/nonexistent bash build.sh
           check 'BUSTER_PGO_TRAIN must name a file' BUSTER_PGO=1 BUSTER_PGO_TRAIN=/nonexistent bash build.sh
           check 'lexer-variant: BUSTER_PGO builds' BUSTER_PGO=1 bash build.sh lexer-variant name=source.c
