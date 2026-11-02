@@ -1124,10 +1124,11 @@ in windows past the first. Each fixture's hits, misses, folds and entries are
 pinned. The windows' keys and hashes must be `check_transition_key`'s and
 `check_transition_hash`'s for every node. A source of 1,500 structs runs in a
 sweep of scratch arenas from too small for the table's growth to room enough,
-then at the least room the run checks in, found by bisection, and in steps of
-512 bytes past it, where not even 16 entries fit and the regions run. Each run
-that checks gives the oracle's stream, and the sweep must reach the regions, a
-table that stops inserting and one that takes every entry.
+then at the least room the run checks in, found by bisection (in any less, it
+fails whichever path it takes), where not even 16 entries fit and the regions
+must run, and in steps of 512 bytes past it, which must reach a table that takes
+entries. Each run that checks gives the oracle's stream, and the sweep must
+reach a table that stops inserting and one that takes every entry.
 
 #### Node order or windows
 
@@ -1207,6 +1208,16 @@ after scalar work, musl's `regcomp.c` by every path, and `sqlite3.c`'s whole
 compile with them and without (`time-runs`, whose objects must be the same
 bytes) where the checker changes.
 
+That whole compile showed no gain ([job 125470563590](https://github.com/buster14a/buster/actions/runs/41499213226/job/125470563590),
+21 runs of each in a rotating order on CPU 2, the objects the same bytes): the
+regions took 118.43 ms (117.96 to 119.12) and the transitions 118.69 ms (117.96
+to 119.82), 0.2% more, with 557.3 and 559.2 million user cycles though the
+transitions ran 3.9% fewer instructions (1,229 million against 1,279 million).
+In the same job the graph run took 33.99 ns a node by the transitions against
+36.77 by the regions on `sqlite3.c`'s bodies (35.40 against 36.82 after scalar
+work), and 25.23 against 29.22 on musl's `regcomp.c`: the gain is real in the
+graph run but doesn't reach the compile.
+
 The gain depends on the source. On the VM, three processes of each file, each
 path a median of 21 interleaved passes, Lua 5.4.8's largest units, musl's from
 the frozen corpus and `sqlite3.c`, in ns a node, the range of the three
@@ -1239,8 +1250,7 @@ to 1,016 ms. `lvm.c` (one CPU, 21 runs) took 29.5 against 29.3 ms at the
 median, and Lua's 32 units in one command (`-c` on the VM's 4 CPUs, 11 runs)
 199.0 against 203.7 ms, with 220 against 233 ms of user time: a unit's table
 starts empty, so small units pay their misses for few hits. Every object was
-the same bytes. The 9700X job's `time-runs` comparison is the measurement that
-decides.
+the same bytes. The 9700X's `time-runs` comparison above decided: no gain.
 
 The table takes 148 bytes an entry (128 for the entry, 16 for its two slots and
 4 for its hash). On `sqlite3.c`'s bodies its 32,768 entries' room took the run's

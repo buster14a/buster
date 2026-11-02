@@ -280,8 +280,9 @@ static void check_test_transition_limit(CheckTest* test)
     {
         check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, room, entries, &seen);
     }
-    // The least room the run checks in, by bisection (it fails in less, as the regions would), and the rooms just past it,
-    // 512 bytes apart, where a quarter of what the run's own arrays leave holds no table of even 16 entries: the regions run.
+    // The least room the run checks in, by bisection (it fails in any less, whichever path it takes). There the run's own
+    // arrays leave too little for a table of even 16 entries within its quarter, so the regions run; the rooms past it,
+    // 512 bytes apart, reach one where the table takes entries.
     uint64_t low = UINT64_C(1) << 12;
     uint64_t high = UINT64_C(1) << 26;
     uint32_t ignored = 0;
@@ -290,21 +291,26 @@ static void check_test_transition_limit(CheckTest* test)
     while (bounded && high - low > 64)
     {
         const uint64_t middle = low + (high - low) / 2;
-        const bool checked = check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, middle, entries, &seen);
+        const bool checked = check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, middle, entries, &ignored);
         high = checked ? middle : high;
         low = checked ? low : middle;
     }
-    for (uint64_t room = high; bounded && room < high + (UINT64_C(1) << 15); room += 512)
+    uint32_t least = 0;
+    uint32_t past = 0;
+    bounded = bounded && check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, high, entries, &least);
+    for (uint64_t room = high + 512; bounded && room < high + (UINT64_C(1) << 15); room += 512)
     {
-        check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, room, entries, &seen);
+        check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, room, entries, &past);
     }
-    const bool fell_back = (seen & 1) != 0;
+    const bool fell_back = (least & 1) != 0;
+    const bool reached = (past & 6) != 0;
     const bool stopped = (seen & 2) != 0;
     const bool grew = (seen & 4) != 0;
     char description[256];
-    snprintf(description, sizeof(description), "the table's limit: the sweep falls back (%d), stops inserting (%d) and grows whole (%d)", fell_back, stopped, grew);
+    snprintf(description, sizeof(description), "the table's limit: at the least room the regions run (%d) and past it a table (%d); the sweep stops inserting (%d) and grows whole (%d)",
+             fell_back, reached, stopped, grew);
     // A scalar host's runs take the scalar path (check_graph_run), whose streams the sweep still compares.
-    check_test_expect(test, (fell_back && stopped && grew) || !BUSTER_HOST_VECTOR, description);
+    check_test_expect(test, (fell_back && reached && stopped && grew) || !BUSTER_HOST_VECTOR, description);
     check_test_types_close(&types);
     parse_release(&parser);
     pp_release(&pp);
