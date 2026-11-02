@@ -864,8 +864,8 @@ static int lower_inventory_compare_counts(const void* left, const void* right)
 }
 
 // How many abstract patterns (lower_inventory_abstract) the deterministic keys have, and how many nodes and own entries
-// the first N of them, the largest first, cover.
-static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t nodes, uint64_t expression_entries)
+// the first N of them, the largest first, cover: whether its memory let it report them all.
+static bool lower_inventory_abstracts(const LowerInventory* inventory, uint64_t nodes, uint64_t expression_entries)
 {
     const uint32_t capacity = BUSTER_LOWER_INVENTORY_TABLE;
     uint64_t* hashes = calloc(capacity, sizeof(uint64_t));
@@ -874,7 +874,8 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
     uint8_t* bytes = calloc(capacity, BUSTER_LOWER_INVENTORY_PATTERN_BYTES);
     uint32_t* lengths = calloc(capacity, sizeof(uint32_t));
     uint32_t distinct = 0;
-    if (hashes != NULL && counts != NULL && bytes != NULL && lengths != NULL)
+    bool complete = hashes != NULL && counts != NULL && bytes != NULL && lengths != NULL;
+    if (complete)
     {
         for (uint32_t i = 0; i < capacity; i += 1)
         {
@@ -901,6 +902,7 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
         uint32_t used = 0;
         // With --abstracts N, the first N abstract patterns, by their nodes, each with a key of it.
         uint8_t* taken = calloc(capacity, 1);
+        complete = taken != NULL;
         for (uint32_t printed = 0; taken != NULL && printed < lower_inventory_print_abstracts; printed += 1)
         {
             uint32_t best = capacity;
@@ -989,17 +991,19 @@ static void lower_inventory_abstracts(const LowerInventory* inventory, uint64_t 
     free(bytes);
     free(counts);
     free(hashes);
+    return complete;
 }
 
 // The maximal subtrees whose every node is in a deterministic key: how many, their nodes and own entries, by size; and the
 // statements' expressions whose whole tree is.
-static void lower_inventory_subtrees(const LowerInventory* inventory, uint64_t nodes, uint64_t expression_entries)
+static bool lower_inventory_subtrees(const LowerInventory* inventory, uint64_t nodes, uint64_t expression_entries)
 {
     const uint64_t count = inventory->node_count;
     uint8_t* full = calloc(count + 1, 1);
     uint64_t* subtree_nodes = calloc(count + 1, sizeof(uint64_t));
     uint64_t* subtree_entries = calloc(count + 1, sizeof(uint64_t));
-    if (full != NULL && subtree_nodes != NULL && subtree_entries != NULL)
+    const bool complete = full != NULL && subtree_nodes != NULL && subtree_entries != NULL;
+    if (complete)
     {
         for (uint64_t g = 0; g < count; g += 1)
         {
@@ -1055,6 +1059,7 @@ static void lower_inventory_subtrees(const LowerInventory* inventory, uint64_t n
     free(subtree_entries);
     free(subtree_nodes);
     free(full);
+    return complete;
 }
 
 static void lower_inventory_report(LowerInventory* inventory, uint32_t top, uint32_t key_limit)
@@ -1065,8 +1070,15 @@ static void lower_inventory_report(LowerInventory* inventory, uint32_t top, uint
         {
             all_nodes += inventory->category_nodes[c];
         }
-        lower_inventory_subtrees(inventory, all_nodes, inventory->entries_nodes + inventory->entries_conversions);
-        lower_inventory_abstracts(inventory, all_nodes, inventory->entries_nodes + inventory->entries_conversions);
+        // A section its memory cut short is a failure, which the summary's line counts.
+        const bool subtrees = lower_inventory_subtrees(inventory, all_nodes, inventory->entries_nodes + inventory->entries_conversions);
+        const bool abstracts = lower_inventory_abstracts(inventory, all_nodes, inventory->entries_nodes + inventory->entries_conversions);
+        if (!subtrees || !abstracts)
+        {
+            printf("lowering-templates: failed=\"no memory for the %s\"\n", !subtrees ? "subtrees' section" : "abstract patterns' section");
+        }
+        inventory->failures += !subtrees;
+        inventory->failures += !abstracts;
     }
     // The used keys, packed and sorted.
     uint32_t used = 0;

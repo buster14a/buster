@@ -60,7 +60,8 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-link` | `link.c` | [link](link.md) |
 | `benchmark-link` | `link_benchmark.c` | [link-benchmark](link-benchmark.md) |
 | `test-lowering, benchmark-lowering-source` | `c_lowering.c` | [lowering](lowering.md) |
-| `measure-lowering-templates, test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
+| `measure-lowering-templates` | `c_check_lower_inventory.c` | [lowering](lowering.md#node-templates-1048) |
+| `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
 | `parallel, test-parallel` | `parallel.c` | [parallel](parallel.md) |
