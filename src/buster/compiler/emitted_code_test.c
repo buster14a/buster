@@ -483,7 +483,7 @@ static bool emitted_test_directory(char* directory, uint64_t size, const char* n
 
 // A fixed frame at the edge of the events' signed 32-bit offsets (#1149): `sub rsp, 0x7ffffff8`, whose CFA offset is
 // 2^31, is EMITTED_FRAME_LIMIT, which the emission reports as unsupported (not as an internal error), and one 16 bytes
-// smaller is described. Then emitted_unwind_same's three answers: the same CFI, different CFI, and a scratch arena
+// smaller is described, and emitted (with --verify) as the fixed descriptor of its size. Then emitted_unwind_same's three answers: the same CFI, different CFI, and a scratch arena
 // without room for a fixed shape's rows, which says neither (a resource failure, which the lanes retry on one).
 static void emitted_test_limits(EmittedTest* test)
 {
@@ -505,12 +505,21 @@ static void emitted_test_limits(EmittedTest* test)
         const EmittedCode emitted = emitted_from_tier0(&code, true, false, false, &test->arena);
         emitted_test_expect(test, emitted.frame_status == (k == 0 ? EMITTED_FRAME_LIMIT : EMITTED_FRAME_DESCRIBED),
                             k == 0 ? "a frame whose CFA offset is 2^31 is past the events' offsets" : "a frame 16 bytes smaller is described", k);
+        // Each record's start (sub and add of rsp by an imm32 are 7 bytes, ret 1), and room for the events' rows: the
+        // smaller frame's emission, with --verify's proof and Tier 0's analyzer, must give the fixed frame of its size.
         uint32_t offsets[4] = { 0, 7, 14, 15 };
-        UnwindFunction frame;
+        EmissionFrameRow rows[8];
+        UnwindFunction frame = { 0 };
         const char* reason = 0;
-        const CheckProgramStatus status = check_program_emit_frame(&emitted, offsets, 15, false, false, 0, &test->scratch, &frame, &reason);
-        emitted_test_expect(test, k == 0 ? status == CHECK_PROGRAM_UNSUPPORTED && reason != 0 && strstr(reason, "#1149") != 0 && strstr(reason, "internal") == 0 : true,
-                            "the emission reports the 2 GB edge as unsupported, naming its follow-up", k);
+        const bool room = emitted.frame_count <= BUSTER_ARRAY_LENGTH(rows);
+        const CheckProgramStatus status = room ? check_program_emit_frame(&emitted, offsets, 15, true, false, rows, &test->scratch, &frame, &reason) :
+                                                 CHECK_PROGRAM_RESOURCE;
+        emitted_test_expect(test, k == 0 ? status == CHECK_PROGRAM_UNSUPPORTED && reason != 0 && strstr(reason, "#1149") != 0 && strstr(reason, "internal") == 0 :
+                                           status == CHECK_PROGRAM_OK && reason == 0 && frame.open != BUSTER_UNWIND_ROWS && frame.size == 15 &&
+                                               frame.saved == 0 && frame.frame_size == sizes[k],
+                            k == 0 ? "the emission reports the 2 GB edge as unsupported, naming its follow-up" :
+                                     "the emission writes the frame 16 bytes smaller as its fixed descriptor, verified",
+                            k);
         arena_pop_to(&test->arena, mark);
     }
     const UnwindFunction pushed = { .size = 16, .saved = 1 };
