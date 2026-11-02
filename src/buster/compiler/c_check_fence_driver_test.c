@@ -9,8 +9,9 @@
 // iterations showed the outcome. Each build is checked: by both paths, by Tier 0 and by --tier1 (every function Tier
 // 1's), its four fences taken directly (--helper-report), its fenced threads' objects with one mfence each and the
 // control's with none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process
-// with one CPU prints that it skipped the runs. Include after c_check_tier1_driver_test.c, whose decoder of a
-// function's object and Tier 1 report readers this test takes.
+// with one CPU prints that it skipped the runs. And --helper-report's counts of a unit with every kind of helper call
+// (check_test_driver_helper_report). Include after c_check_tier1_driver_test.c, whose decoder of a function's object
+// and Tier 1 report readers this test takes.
 
 static const char check_test_fence_litmus_source[] =
     "#define _GNU_SOURCE\n"
@@ -111,6 +112,7 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
     const bool written = parse_test_write(source, check_test_fence_litmus_source, sizeof(check_test_fence_litmus_source) - 1);
     check_test_expect(test, written, "fences: the litmus's source is written");
     const bool ready = written && x86_disassembler_initialize();
+    check_test_expect(test, ready, "fences: the disassembler that reads the builds' objects initializes");
     static const char* const names[4] = { "fenced0", "fenced1", "plain0", "plain1" };
     for (uint32_t build = 0; ready && build < 4; build += 1)
     {
@@ -189,6 +191,61 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
             printf("fences (%s): the litmus skipped its runs: the process may run on one CPU\n", way);
         }
         unlink(output);
+        unlink(object);
+    }
+    unlink(source);
+}
+
+// --helper-report's counts (#1059) of a unit with every kind of helper call: an implicit _Atomic store, load and compound
+// assignment (a load and a compare-exchange in its loop), an explicit store and load, a fence taken directly, and an asm
+// statement with instructions. Its `helper` columns are the lowered code's call sites of each family's helpers, every
+// call in the object; `planned` the signatures (the width's implicit leaves, the explicit ones among them, and the
+// statement's helper). By both paths.
+static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "_Atomic int a;\n"
+                                  "int counter;\n"
+                                  "int f(void)\n"
+                                  "{\n"
+                                  "    a = 1;\n"
+                                  "    a += 2;\n"
+                                  "    __atomic_store_n(&counter, 3, __ATOMIC_RELEASE);\n"
+                                  "    __atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
+                                  "    __asm__ volatile(\"nop\" ::: \"memory\");\n"
+                                  "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE);\n"
+                                  "}\n";
+    static const char* const lines[] = {
+        "helpers\tunits=1\trefused=0\tdirect=1\thelper=7\tplanned=5\n",
+        "helpers.atomic-access\tdirect=0\thelper=5\tplanned=2\n",
+        "helpers.atomic-rmw\tdirect=0\thelper=1\tplanned=2\n",
+        "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+        "helpers.asm\tdirect=0\thelper=1\tplanned=1\n",
+        "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+    };
+    char source[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/helper-report.c", directory);
+    snprintf(object, sizeof(object), "%s/helper-report.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "helper report: the source is written");
+    for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+    {
+        char* vector_arguments[] = { (char*)executable, "--helper-report", "-c", "-o", object, source, NULL };
+        char* scalar_arguments[] = { (char*)executable, "--scalar", "--helper-report", "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(scalar != 0 ? scalar_arguments : vector_arguments, &text);
+        bool reported = status == 0 && text != NULL;
+        for (uint32_t l = 0; reported && l < BUSTER_ARRAY_LENGTH(lines); l += 1)
+        {
+            reported = strstr(text, lines[l]) != NULL;
+        }
+        if (!reported && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        check_test_expect(test, reported, scalar != 0 ? "helper report (scalar path): every helper call counted, implicit _Atomic accesses' and an asm statement's among them"
+                                                      : "helper report (vector path): every helper call counted, implicit _Atomic accesses' and an asm statement's among them");
         unlink(object);
     }
     unlink(source);

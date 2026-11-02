@@ -337,10 +337,10 @@ struct CheckTier1Report
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
-// family's uses the lowering takes directly and those that call their helper (CheckProgramHelpers.direct and .helper, an
-// asm statement's helper a use of its own), the helpers planned, the units the lowering planned, and those it refused
-// an operation of by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a statement no form takes, which -c and the direct
-// path then refuse whole).
+// family's builtin uses the lowering takes directly (CheckProgramHelpers.direct), the lowered code's calls of its helpers
+// (a builtin's, an implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the
+// helpers planned, the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED:
+// a builtin or a statement no form takes, which -c and the direct path then refuse whole).
 typedef struct CheckHelperReport CheckHelperReport;
 struct CheckHelperReport
 {
@@ -351,22 +351,34 @@ struct CheckHelperReport
     uint32_t planned[CHECK_PROGRAM_HELPER_FAMILIES];
 };
 
-// A unit's plan into `report` (check_program_emit's, after the lowering's preparation): its counts where it planned,
-// `planned`, and otherwise a refusal where the lowering refused an operation by name.
-static void check_helper_report_add(CheckHelperReport* report, const CheckProgramLowered* lowered, bool planned)
+// A unit's lowering into `report` (check_program_emit's, once the lowering has finished): where it lowered every body
+// (`lowered_all`), its families' direct uses, its planned helpers, and its `count` bodies' calls of each family's
+// helpers, a call's target a helper's symbol (CheckProgramHelper.symbol: the program's symbols' count, plus one, plus its
+// index); and otherwise a refusal where the lowering refused an operation by name.
+static void check_helper_report_add(CheckHelperReport* report, const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t count, bool lowered_all)
 {
     report->units += 1;
-    report->refused += !planned && lowered->status == CHECK_PROGRAM_UNSUPPORTED ? 1 : 0;
-    for (uint32_t f = 0; planned && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    report->refused += !lowered_all && lowered->status == CHECK_PROGRAM_UNSUPPORTED ? 1 : 0;
+    for (uint32_t f = 0; lowered_all && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
     {
         report->direct[f] += lowered->helpers.direct[f];
-        report->helper[f] += lowered->helpers.helper[f];
     }
-    for (uint32_t h = 0; planned && h < lowered->helpers.count; h += 1)
+    for (uint32_t h = 0; lowered_all && h < lowered->helpers.count; h += 1)
     {
-        const CheckProgramHelperFamily family = check_program_helper_family(&lowered->helpers.items[h]);
-        report->planned[family] += 1;
-        report->helper[family] += family == CHECK_PROGRAM_HELPER_ASM ? 1 : 0;
+        report->planned[check_program_helper_family(&lowered->helpers.items[h])] += 1;
+    }
+    const uint64_t first = (uint64_t)program->symbol_count + 1;
+    for (uint32_t b = 0; lowered_all && b < count; b += 1)
+    {
+        const Tier0Function* function = &lowered->functions[b];
+        for (uint32_t c = 0; c < function->call_count; c += 1)
+        {
+            const uint64_t helper = (uint64_t)function->call_targets[c] - first;
+            if (helper < lowered->helpers.count)
+            {
+                report->helper[check_program_helper_family(&lowered->helpers.items[helper])] += 1;
+            }
+        }
     }
 }
 
@@ -1773,10 +1785,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
     }
-    if (lanes != NULL && lowering)
-    {
-        check_helper_report_add(&lanes->helper_report, &result->lowered, valid);
-    }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
     // check_program_object_access gives them. The helpers are the unit's, and the C runtime's errno function isn't;
@@ -1997,6 +2005,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && !check_lower_finish(&result->lowered, &shared, parts, run.part_count))
     {
         valid = false;
+    }
+    if (lanes != NULL && lowering)
+    {
+        check_helper_report_add(&lanes->helper_report, program, &result->lowered, count, valid && result->lowered.status == CHECK_PROGRAM_OK);
     }
     if (lowering && result->lowered.status != CHECK_PROGRAM_OK)
     {

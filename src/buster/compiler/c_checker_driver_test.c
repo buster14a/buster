@@ -6186,6 +6186,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_helper_report(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_float_classify(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

@@ -171,6 +171,21 @@ static void check_test_program_math_helpers(CheckTest* test)
     arena_release(&output);
 }
 
+// The records of a helper's code whose forms the semantics' tables don't cover and that are none of the known gaps where
+// a family's contract leaves nothing unmodeled: the IEEE maximum's and minimum's sign (c_builtin_atomic_rmw_helpers.c's
+// btr and bts of an immediate). Every uncovered record's, not the first's alone.
+static uint32_t check_test_helper_unknown_forms(const Tier0Code* code)
+{
+    uint32_t unknown = 0;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        const uint16_t form = (uint16_t)(code->records[r].form & BUSTER_X86_FORM_NUMBER);
+        const bool gap = form == X86_FORM_BTR_RM32_IMM8 || form == X86_FORM_BTR_RM64_IMM8 || form == X86_FORM_BTS_RM32_IMM8 || form == X86_FORM_BTS_RM64_IMM8;
+        unknown += x86_effects(form)->operation == X86_OPERATION_NONE && !gap;
+    }
+    return unknown;
+}
+
 // A helper's published contract (#1059) against its code: what its records do, read by x86_semantics.c
 // (check_program_helper_physical), must be within its effects (check_program_helper_effects), and its effects' claims
 // must be its code's. The callee-saved registers its code may write are those its frame saves and restores (its code's
@@ -193,10 +208,8 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     const bool orders = (physical.memory & (BUSTER_X86_MEMORY_EFFECT_FENCE | BUSTER_X86_MEMORY_EFFECT_ATOMIC)) != 0;
     const bool environment = (physical.reads & (BUSTER_X86_RESOURCE_MXCSR | BUSTER_X86_RESOURCE_X87_CONTROL)) != 0;
     const bool raises = (physical.properties & BUSTER_X86_EFFECT_FP_EXCEPTION) != 0;
-    // The forms the semantics' tables don't cover yet where a family's contract leaves nothing unmodeled: the IEEE
-    // maximum's and minimum's sign (c_builtin_atomic_rmw_helpers.c's btr and bts of an immediate), which the test names.
-    const uint16_t gap = physical.uncovered_form;
-    const bool known_gap = gap == X86_FORM_BTR_RM32_IMM8 || gap == X86_FORM_BTR_RM64_IMM8 || gap == X86_FORM_BTS_RM32_IMM8 || gap == X86_FORM_BTS_RM64_IMM8;
+    // Every uncovered form a known gap (check_test_helper_unknown_forms), where its contract models every effect.
+    const bool known_gap = check_test_helper_unknown_forms(code) == 0;
     *reason = NULL;
     if (!physical.valid || code->error != TIER0_OK)
     {
@@ -268,17 +281,53 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     return *reason == NULL;
 }
 
-// #1059's inventory, against the helpers' code: every family has its contract, only the fences a direct form, and every
-// helper each emitter makes (the atomic loads and stores of every width, the fences, every read/modify/write of every
-// width and format, the terminal builtins, FLT_ROUNDS, every math builtin and every x86 leaf) keeps its family's
-// contract (check_test_helper_contract). An asm statement's helper is its template's, which UNMODELED covers whole.
+// #1059's inventory, against the helpers' code: every family has its contract, its effects apart from what a direct
+// form needs of its function, only the fences a direct form, a helper no family names UNMODELED's, and every helper each
+// emitter makes (the atomic loads and stores of every width, the fences, every read/modify/write of every width and
+// format, the terminal builtins, FLT_ROUNDS, every math builtin and every x86 leaf), each family's exact count of them,
+// keeps its family's contract (check_test_helper_contract). An asm statement's helper is its template's, which
+// UNMODELED covers whole, and none is UNMODELED's.
 static void check_test_program_helper_contracts(CheckTest* test)
 {
     for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
     {
         const CheckProgramHelperContract* contract = &check_program_helper_contracts[f];
-        check_test_expect(test, contract->name != NULL && contract->helper != NULL && contract->effects != 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE),
-                          "every helper family publishes its contract, and only the fences a direct form");
+        check_test_expect(test, contract->name != NULL && contract->helper != NULL && contract->effects != 0 && (contract->effects & ~BUSTER_CHECK_HELPER_EFFECTS) == 0 &&
+                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE),
+                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences a direct form");
+    }
+    // The family of each helper by what names it, and a helper no family names (a load or a store of another id, a
+    // read/modify/write without its rule) UNMODELED's, with every effect; a load reads and a store writes, each alone.
+    typedef struct CheckTestHelperClass CheckTestHelperClass;
+    struct CheckTestHelperClass
+    {
+        CBuiltinId id;
+        bool rmw;
+        CheckProgramHelperFamily family;
+        // Its exact effects, or 0 where the case checks only its family.
+        uint32_t effects;
+    };
+    static const CheckTestHelperClass classified[] = {
+        { CBUILTIN_ATOMIC_LOAD_N, false, CHECK_PROGRAM_HELPER_ATOMIC_ACCESS, BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER },
+        { CBUILTIN_ATOMIC_STORE_N, false, CHECK_PROGRAM_HELPER_ATOMIC_ACCESS, BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER },
+        { CBUILTIN_ATOMIC_EXCHANGE_N, true, CHECK_PROGRAM_HELPER_ATOMIC_RMW, 0 },
+        { CBUILTIN_ATOMIC_EXCHANGE_N, false, CHECK_PROGRAM_HELPER_UNMODELED, 0 },
+        { CBUILTIN_ATOMIC_LOAD_N, true, CHECK_PROGRAM_HELPER_UNMODELED, 0 },
+        { CBUILTIN_C11_ATOMIC_LOAD, false, CHECK_PROGRAM_HELPER_UNMODELED, 0 },
+        { CBUILTIN_NONE, false, CHECK_PROGRAM_HELPER_UNMODELED, 0 },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(classified); c += 1)
+    {
+        const CheckProgramHelper helper = { .id = classified[c].id, .rmw = classified[c].rmw, .result_type = BUSTER_TYPE_ULONG, .compiler_barrier = true };
+        const CheckProgramHelperFamily family = check_program_helper_family(&helper);
+        const uint32_t effects = check_program_helper_effects(&helper);
+        const bool exact = classified[c].effects == 0 || effects == classified[c].effects;
+        const bool whole = family != CHECK_PROGRAM_HELPER_UNMODELED || effects == check_program_helper_contracts[CHECK_PROGRAM_HELPER_UNMODELED].effects;
+        char named[160];
+        snprintf(named, sizeof(named), "helper contracts: builtin %u (%s) is the %s family's, with its effects (%#x)", (uint32_t)classified[c].id,
+                 classified[c].rmw ? "read/modify/write" : "plain", check_program_helper_contracts[classified[c].family].name, effects);
+        const uint32_t unmodeled = family == CHECK_PROGRAM_HELPER_UNMODELED ? BUSTER_CHECK_HELPER_UNMODELED : 0;
+        check_test_expect(test, family == classified[c].family && exact && whole && (effects & BUSTER_CHECK_HELPER_UNMODELED) == unmodeled, named);
     }
     Arena output = arena_reserve(UINT64_C(1) << 22);
     Arena scratch = arena_reserve(UINT64_C(1) << 20);
@@ -409,11 +458,26 @@ static void check_test_program_helper_contracts(CheckTest* test)
         check_test_expect(test, kept, description);
         arena_pop_to(&output, mark);
     }
+    // Each family's exact count, which a helper added to an emitter's set, or one an emitter stops making, changes: the
+    // loads' and stores' four widths each, the fences, the read/modify/writes each rule's widths and formats take, the
+    // terminal builtins, FLT_ROUNDS, the math builtins and the x86 leaves.
+    static const uint32_t expected[CHECK_PROGRAM_HELPER_FAMILIES] = {
+        [CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] = 8,
+        [CHECK_PROGRAM_HELPER_ATOMIC_RMW] = 239,
+        [CHECK_PROGRAM_HELPER_FENCE] = 3,
+        [CHECK_PROGRAM_HELPER_TERMINAL] = 2,
+        [CHECK_PROGRAM_HELPER_ROUNDS] = 1,
+        [CHECK_PROGRAM_HELPER_MATH] = 14,
+        [CHECK_PROGRAM_HELPER_X86] = CBUILTIN_X86_HELPER_COUNT - 1,
+        [CHECK_PROGRAM_HELPER_ASM] = 0,
+        [CHECK_PROGRAM_HELPER_UNMODELED] = 0,
+    };
     uint32_t total = 0;
     for (uint32_t f = 0; ready && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
     {
-        snprintf(description, sizeof(description), "helper contracts: the %s family has helpers checked against its contract", check_program_helper_contracts[f].name);
-        check_test_expect(test, checked[f] != 0 || f == CHECK_PROGRAM_HELPER_ASM, description);
+        snprintf(description, sizeof(description), "helper contracts: the %s family has its %u helpers checked against its contract (%u)", check_program_helper_contracts[f].name,
+                 expected[f], checked[f]);
+        check_test_expect(test, checked[f] == expected[f], description);
         total += checked[f];
     }
     printf("  helper contracts: %u helpers' code kept their families' contracts (%u atomic accesses, %u read/modify/writes, %u fences, %u terminal, %u FLT_ROUNDS, "

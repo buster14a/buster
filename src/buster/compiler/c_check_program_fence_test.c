@@ -5,8 +5,9 @@
 // FENCE of its order and scope (check_program_direct_fence), with no helper's call, and Tier 0's code has an mfence for
 // each thread fence of seq_cst and nothing for the others, in its place among the function's accesses to memory, as the
 // resolved effects (x86_instructions_effects) and the form's own (x86_effects: BUSTER_X86_MEMORY_EFFECT_FENCE) read
-// it; a fence of a dynamic or out-of-range order, of an argument with an effect, or of a scoped family keeps its
-// helper, and the plan counts both (CheckProgramHelpers.direct and .helper); and natively against clang, fences of every
+// it; a fence of a dynamic or out-of-range order, of an argument with an effect or the floating environment's, or of a
+// scoped family keeps its helper, and the plan counts both (CheckProgramHelpers.direct and .helper), each of the
+// contract's admission clauses (CheckProgramHelperContract.direct) a case; and natively against clang, fences of every
 // order and scope in statements, in expressions, in a statement expression and in a loop, with the helpers' among them.
 // test-checker-driver runs the concurrent controls (c_check_fence_driver_test.c). Include after
 // c_check_program_folds_test.c, whose summary of a function's accesses this test extends.
@@ -46,7 +47,8 @@ static CheckTestFences check_test_fences_summary(const Tier0Function* function, 
             const X86Instruction* record = &code->records[r];
             const X86Effects* effects = x86_effects(record->form);
             const uint32_t base = record->rm & 15;
-            const bool frame = (record->mode & BUSTER_X86_MODE_BASE) != 0 && (base == X86_REGISTER_RSP || (base == X86_REGISTER_RBP && code->frame_pointer));
+            const bool frame = (record->mode & BUSTER_X86_MODE_BASE) != 0 && (base == X86_REGISTER_RSP || (base == X86_REGISTER_RBP && code->frame_pointer) ||
+                                                                             (base == X86_REGISTER_R15 && code->frame_base));
             const bool operand = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && !frame && (effects->memory & BUSTER_X86_MEMORY_EFFECT_ADDRESS) == 0;
             const bool read = operand && (reads[r] & BUSTER_X86_RESOURCE_MEMORY) != 0;
             const bool written = operand && (writes[r] & BUSTER_X86_RESOURCE_MEMORY) != 0;
@@ -77,7 +79,8 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
                                  "void invalid(void){__atomic_thread_fence(7);}"
                                  "void effect(void){__c11_atomic_thread_fence((g++,__ATOMIC_SEQ_CST));}"
                                  "void scoped(void){__scoped_atomic_thread_fence(__ATOMIC_SEQ_CST,0);}"
-                                 "int tracked(int n){return n+({__atomic_thread_fence(__ATOMIC_SEQ_CST);__atomic_signal_fence(__ATOMIC_ACQUIRE);n*2;});}";
+                                 "int tracked(int n){return n+({__atomic_thread_fence(__ATOMIC_SEQ_CST);__atomic_signal_fence(__ATOMIC_ACQUIRE);n*2;});}"
+                                 "void environment(void){_Pragma(\"STDC FENV_ACCESS ON\")__atomic_thread_fence((int)(5.0+0.5));}";
     typedef struct CheckTestFenceCase CheckTestFenceCase;
     struct CheckTestFenceCase
     {
@@ -90,6 +93,8 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
     // A signal fence's value has BUSTER_TYPED_FENCE_SIGNAL (8). A helper's call ends the trace of each function that
     // keeps one; `effect`'s increment is its argument's, before the call, which no trace here pins. `tracked`'s
     // statement expression makes its lowering track its stack (CheckLowerWriter.track), with fences over a live value.
+    // `environment`'s order is a constant the floating environment computes under FENV_ACCESS, at run time as clang's
+    // code does: its helper keeps the conversion.
     static const CheckTestFenceCase cases[] = {
         { "sequential", 1, 0x5, 0, "f" },
         { "weaker", 5, 0x01432, 0, "" },
@@ -101,6 +106,7 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         { "effect", 0, 0, 1, NULL },
         { "scoped", 0, 0, 1, "c" },
         { "tracked", 2, 0xa5, 0, "f" },
+        { "environment", 0, 0, 1, NULL },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     static InternTable identifiers;
@@ -138,16 +144,22 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         char description[192];
         snprintf(description, sizeof(description), "fences: the functions lower by the %s path", way);
         check_test_expect(test, ready && code.lowered.count == count, description);
-        // The plan: thirteen fences direct, four with their helper, one signature for them all (the thread fence's).
+        // The plan: thirteen fences direct, five with their helper, one signature for them all (the thread fence's); no
+        // other family, which has no direct form (CheckProgramHelperContract.direct), counts a direct use.
         const CheckProgramHelpers* helpers = &code.lowered.helpers;
         uint32_t planned = 0;
         for (uint32_t h = 0; ready && h < helpers->count; h += 1)
         {
             planned += check_program_helper_family(&helpers->items[h]) == CHECK_PROGRAM_HELPER_FENCE;
         }
+        bool admitted = ready;
+        for (uint32_t f = 0; ready && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+        {
+            admitted &= check_program_helper_contracts[f].direct != NULL || helpers->direct[f] == 0;
+        }
         snprintf(description, sizeof(description), "fences (%s path): the plan takes %u fences directly and %u by their helper, of %u signatures", way,
                  ready ? helpers->direct[CHECK_PROGRAM_HELPER_FENCE] : 0, ready ? helpers->helper[CHECK_PROGRAM_HELPER_FENCE] : 0, planned);
-        check_test_expect(test, ready && helpers->direct[CHECK_PROGRAM_HELPER_FENCE] == 13 && helpers->helper[CHECK_PROGRAM_HELPER_FENCE] == 4 && planned == 1,
+        check_test_expect(test, admitted && helpers->direct[CHECK_PROGRAM_HELPER_FENCE] == 13 && helpers->helper[CHECK_PROGRAM_HELPER_FENCE] == 5 && planned == 1,
                           description);
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
