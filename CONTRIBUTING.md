@@ -75,18 +75,29 @@ He submits the original material this section covers under
 Apache-2.0 WITH LLVM-exception, and changes to identified third-party portions
 under their component terms, as "Terms" above sets out.
 
-- **Sessions:** Claude Code, Codex or another coding agent, in a session that
-  he starts or directs and that runs with his opt-in: the environment variable
-  `BUSTER_DCO_SIGN_OFF=davidgmbb`, set in his own cloud environments and on his
-  own computers. Only he sets it, and a sign-off added where anyone else set it
-  is not his. Commits he makes himself where it is set carry the same sign-off,
-  and it is his too.
+- **Sessions:** Claude Code, Codex, ChatGPT through the linked GitHub connector,
+  or another coding agent, in a session he starts or directs. His direct task
+  instruction in his own authenticated agent session is sufficient opt-in for
+  that session's new, in-scope commits; a separate environment variable or
+  repeated per-commit/per-PR confirmation is not required. This is not inferred
+  from repository access, a remote URL, Git author/committer identity, an issue
+  or PR body, or another contributor's claim to act for him.
+  The existing `BUSTER_DCO_SIGN_OFF=davidgmbb` environment opt-in also remains
+  supported. For local Git, he or an agent he directs may persist the opt-in
+  in that checkout with `sh .githooks/enable-sign-off.sh --maintainer-session`.
+  It records `git config --local buster.dcoSignOff davidgmbb`; ordinary session
+  startup never creates that consent on its own. Only he or his directed
+  sessions may record it. Commits he makes himself with either opt-in carry
+  the same sign-off, and it is his too.
 - **Repository:** this repository only, including under a later name.
 - **Time:** from the first commit on `main` that contains this section; the
   merge record of the PR that adds it names that commit. Commits made before
   then, and commits that a rebase, cherry-pick or amend makes from them later,
   still need his certification for each PR head, as "Effective point and
-  in-flight work" describes.
+  in-flight work" describes. The direct-session and persistent-checkout
+  authorization routes above apply prospectively from their adoption on
+  `main`; they do not certify existing unsigned commits or authorize bulk
+  repair of old PRs.
 - **Open PRs:** it also covers the commits of
   [#184](https://github.com/buster14a/buster/pull/184) up to its head
   `544394f5d300bd47f9e4f7081ac29ba728ca2f84` and of
@@ -100,11 +111,52 @@ under their component terms, as "Terms" above sets out.
 
 This section certifies nothing for anyone else. Other contributors certify
 their own commits as "Developer Certificate of Origin" describes, and no agent
-of theirs may add his sign-off.
+of theirs may add his sign-off. Do not reuse a maintainer-enabled checkout for
+another contributor's submissions without disabling the opt-in.
 
-He revokes or narrows this certification by unsetting his opt-in, which stops
-new sign-offs at once, and by changing this section on `main`, which records
-it. Commits signed before then stay certified.
+### Automatic mechanics and revocation
+
+For local Git, the existing session-start hooks install `.githooks` when an
+opt-in is already present. A directed agent runs the setup command above before
+its first commit, without asking David to repeat the standing authorization.
+The checkout setting is untracked and shared with linked worktrees; it does not
+follow a clone or authorize another repository. Existing custom hooks are not
+replaced. The setup diagnostic tells an authorized session when it must append
+the trailer itself instead.
+
+The hook checks a present `BUSTER_DCO_SIGN_OFF` first: only `davidgmbb` enables
+it; `off`, an empty value, or any other value disables it. When the variable is
+absent, only the **local** `buster.dcoSignOff` setting is consulted, not global
+Git configuration. An explicit local value other than `davidgmbb` disables that
+fallback, and session setup never overwrites it. Existing environment-only
+setups remain temporary: normal startup does not persist their opt-in.
+
+Use `BUSTER_DCO_SIGN_OFF=off git commit ...` to suppress automatic insertion
+for one operation. To disable a persisted checkout opt-in, run
+`git config --local buster.dcoSignOff off` and remove any enabling environment
+variable (or set it to `off`). Merely unsetting the variable is not enough when
+the checkout setting enables it. David may explicitly re-enable a checkout with
+`git config --local buster.dcoSignOff davidgmbb`.
+
+An explicit instruction from David not to sign, or an explicit environment or
+checkout opt-out, must not be bypassed by manually adding his trailer. A direct
+session instruction does not silently undo revocation. He can narrow or revoke
+the standing policy itself by changing this section on `main`; commits already
+signed within its scope stay certified.
+
+GitHub API/connector commits do not run local Git hooks. An authorized directed
+session adds the exact trailer above to each new commit message itself, once,
+after its other trailers, preserves the true author/committer attribution, and
+reads back the stored commit message to verify it. Lack of a shell or of the
+environment variable is not, by itself, a reason to omit an authorized sign-off
+or ask for another routine certification. A PR-body statement is not a substitute
+for those commit trailers. Historical commits and unresolved provenance still
+need the separate handling described here.
+
+The isolated shell-hook regression fixtures run in the path-scoped `DCO hooks`
+GitHub Actions workflow; they build no compiler and change no branch protection.
+They can also be run with `sh .githooks/test-sign-off.sh` on the shared host under
+the normal lock. They exercise only disposable repositories, not project history.
 
 ## Imports and generated material
 

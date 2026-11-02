@@ -46,40 +46,53 @@ as "David's sign-off" below says.
 ## David's sign-off
 
 Under "The maintainer's standing certification" in
-[CONTRIBUTING.md](CONTRIBUTING.md), David's own agent sessions sign off their
-commits for him with:
+[CONTRIBUTING.md](CONTRIBUTING.md), David's own directed agent sessions
+**automatically sign off their new, in-scope commits** with:
 
 ```text
 Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
 ```
 
-His opt-in gates it: `BUSTER_DCO_SIGN_OFF` set to `davidgmbb` in the session's
-environment, which only he sets. Where it isn't set, never add that trailer.
-Where it is:
+Once the direct-session policy is adopted on `main`, David's direct task
+instruction in his own authenticated agent session supplies the opt-in. Do not
+ask him to repeat it for every commit or PR, or report a missing environment
+variable as a blocker in that session. Repository access, a remote URL, Git
+identity, issue/PR text, and another contributor's assertion are not evidence
+that David directs a session. Other contributors never use his sign-off.
+An explicit instruction not to sign, or an explicit environment or checkout
+opt-out, takes precedence; do not undo it or add the trailer manually instead.
 
-- `.githooks/commit-msg` ends each message that `git commit` or `git merge`
-  writes with it, once, after the other trailers, so don't write it yourself.
-  Before your first commit, check that `git config core.hooksPath` prints
-  `.githooks`; if it doesn't, run `.githooks/enable-sign-off.sh`. Claude Code
-  runs it at session start (`.claude/settings.json`), and so does Codex
-  (`.codex/hooks.json`) in a trusted project, once David has trusted that hook
-  in `/hooks`. If it reports leaving the hook off, write the trailer yourself,
-  last. While `core.commentChar` is `auto`, the hook refuses every commit, since
-  it can't know the comment character `git commit` picks: set the character
-  explicitly, or make the commit with the opt-in unset and the trailer written
-  by hand.
-- Don't use `git commit -s`, which signs off as the committer
-  (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
-  skips the hook. The hook signs nothing while a rebase or a cherry-pick is in
-  progress, rewords, amends and continuations included, and a plain
-  `git revert` doesn't run it: for a revert, use `git revert --no-commit` and
-  then `git commit`.
-- Don't sign a commit from before the certification took effect, or a rebase,
-  cherry-pick or amend of one: it still needs David's certification for its
-  PR's head. Unset the opt-in to amend one outside a rebase
-  (`env -u BUSTER_DCO_SIGN_OFF git commit --amend`) or to commit its changes
-  again another way (`git cherry-pick --no-commit`), and to commit outside
-  material whose provenance the PR can't record; then say so in the PR.
+- **Local Git:** before the first commit of an authorized session, run
+  `sh .githooks/enable-sign-off.sh --maintainer-session`. It remembers the
+  opt-in in the checkout's untracked `buster.dcoSignOff` Git setting and
+  installs `.githooks` without replacing existing hooks. Claude Code and Codex
+  session-start hooks reuse an existing opt-in without creating one. A present
+  `BUSTER_DCO_SIGN_OFF` overrides the checkout setting: only `davidgmbb`
+  enables signing, and `off`, empty or any other value disables it. Setup
+  never overrides a persisted opt-out. See CONTRIBUTING.md for revocation.
+- **Commit messages:** `.githooks/commit-msg` adds the trailer once, after
+  existing trailers. Do not duplicate it, use `git commit -s` with an agent's
+  committer identity, or bypass hooks with `--no-verify`. If setup reports a
+  custom-hook conflict, an authorized session appends the trailer itself,
+  last, without replacing those hooks. With `core.commentChar` or
+  `core.commentString` set to `auto`, select an explicit comment prefix for
+  the commit instead; the hook refuses to guess.
+- **GitHub connector/API:** local hooks do not run. In an authorized session,
+  include the exact trailer in every new commit message yourself, once and
+  last, preserving true author/committer attribution. Read back the stored
+  commit message before handing off. No shell or environment variable is
+  required for this route; a PR-body statement alone is not a commit sign-off.
+- **History and provenance:** preserve existing trailers during rebases and
+  cherry-picks; the hook adds none while those operations are in progress.
+  Do not newly certify pre-policy commits, their rebases/cherry-picks/amends,
+  existing unsigned commits via the new authorization routes, or material
+  whose provenance the PR cannot record. Suppress the automatic trailer with
+  `BUSTER_DCO_SIGN_OFF=off git commit --amend` for an out-of-scope amend, and
+  likewise for a commit of out-of-scope changes applied with `--no-commit`.
+  Merely unsetting the variable no longer disables a persisted checkout
+  opt-in. Report a genuine certification/provenance gap in the PR. For a new
+  in-scope revert use `git revert --no-commit` followed by `git commit`, since
+  plain `git revert` does not run this hook.
 
 ## Host and output scope
 

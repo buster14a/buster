@@ -1,0 +1,33 @@
+name: DCO hooks
+
+on:
+  pull_request:
+    paths:
+      - '.githooks/**'
+      - '.github/workflows/dco-hooks.yml'
+      - 'AGENTS.md'
+      - 'CONTRIBUTING.md'
+  push:
+    branches: [main]
+    paths:
+      - '.githooks/**'
+      - '.github/workflows/dco-hooks.yml'
+      - 'AGENTS.md'
+      - 'CONTRIBUTING.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    name: DCO hook regression
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Exercise Git hooks in isolated repositories
+        run: sh .githooks/test-sign-off.sh
