@@ -728,12 +728,13 @@ children must be the scalar one's, both kernels' states and rules alike, and
 every node of a class the grammar covers must have a candidate. The same check
 runs on every function `test-tier1-pipeline` plans and every function
 `benchmark-tier1-select-source` selects, outside its time, where a difference
-fails the benchmark. The plan's `costs` column is each computed node's subtree
-cost on both paths (the bottom-up path, which makes a pattern before its tree
-children's, works them out again children first): `test-tier1-select` checks
-it on both paths' plans and `test-tier1-pipeline` on each plan it makes,
-against the definition worked out from the function alone
-(`tier1_select_test_plan_costs`).
+fails the benchmark. The plan's `costs` column is the scalar path's subtree
+costs, which `test-tier1-select` and `test-tier1-pipeline` check against the
+definition worked out from the function alone (`tier1_select_test_plan_costs`).
+Nothing reads it after the plan, and the bottom-up path, which makes a pattern
+before its tree children's, leaves its children's costs out: working them out
+again children first took selection on the frozen `sqlite3.c` from 222.9 core
+cycles per IR instruction to 241.3 on the 9700X (`Tier1SelectPlan`'s header).
 
 `test-tier1-select --manifest` writes CSV with separate origins for actual
 `plan` emission, direct `expansion` fixtures and test `wrapper` records. Every

@@ -1443,9 +1443,14 @@ struct Tier1SelectPlan
     uint32_t* effective_use_offsets;
     uint32_t* effective_use_values;
     uint32_t effective_use_count;
-    // Each node the code computes (covered 0): its pattern's subtree cost, the pattern's intrinsic cost and its distinct
-    // tree children's costs (tier1_select_pattern_cost), on either path. A covered node's is the scalar path's candidate's
-    // there, and 0 on the vector path, which makes no pattern for it.
+    // The scalar path's subtree costs: each node's pattern's intrinsic cost and its distinct tree children's costs
+    // (tier1_select_pattern_cost), its candidates made children first. Nothing reads them after the plan: munch ranks by
+    // rule and folds, and estimated_cost sums the intrinsic costs. The vector path makes most patterns before their tree
+    // children's (the walk back), so its column counts a tree child's cost only where the child's pattern was made first,
+    // and a covered node's is 0.
+    // Working the subtree costs out again children first took selection on the frozen sqlite3.c from 222.9 core cycles
+    // per IR instruction to 241.3 (the 9700X, #1117's review), for a column nothing reads; a consumer that needs them on
+    // the vector path works them out so.
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
@@ -3488,14 +3493,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 failed_node = node;
             }
             pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
-        }
-        // On the bottom-up path the walk back made each pattern before its tree children's, so its cost counted none of
-        // theirs: each computed node's cost again, children first in the levels' order, so that the column is a subtree's
-        // cost on both paths (Tier1SelectPlan.costs).
-        for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
-        {
-            const uint32_t node = level_nodes[position];
-            plan.costs[node] = needed[node] != 0 ? tier1_select_pattern_cost(&forest, node, &plan.patterns[node]) : 0;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
