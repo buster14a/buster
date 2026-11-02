@@ -13,9 +13,13 @@ static bool check_input_builtin_constant_prepare(CheckInputReader* reader, uint3
     const uint32_t open = keyword + 1;
     const uint32_t close = open < parser->tokens.count ? parser->tree.parents[open] : parser->tokens.count;
     CheckValue value = { 0 };
-    const bool valid = (name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF) &&
-                       open < close && close < parser->tokens.count && parser->tree.roles[open] == PARSE_ROLE_OPEN_KEYWORD &&
-                       check_input_evaluate(reader, keyword, close + 1, &value) && check_input_integer_constant(reader, &value);
+    // The builtins of a name (__builtin_FILE, __builtin_FILE_NAME and __builtin_FUNCTION, #148) make their strings here, in
+    // source order, which their constants, addresses of them, point to (check_constant_source_builtin).
+    const bool named = name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME || name == C_NAME_BUILTIN_FUNCTION;
+    const bool shaped = (name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF || check_input_source_builtin(name)) &&
+                        open < close && close < parser->tokens.count && parser->tree.roles[open] == PARSE_ROLE_OPEN_KEYWORD;
+    const bool valid = shaped && (!named || check_input_source_string(reader, keyword) != 0) && check_input_evaluate(reader, keyword, close + 1, &value) &&
+                       (named ? value.constant_kind == CHECK_CONSTANT_ADDRESS : check_input_integer_constant(reader, &value));
     if (valid)
     {
         const uint32_t index = reader->cached_constant_count++;

@@ -524,6 +524,15 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 // A string, or __func__, __FUNCTION__ or __PRETTY_FUNCTION__ (check_input_function_name_token).
 #define BUSTER_CHECK_SYNTAX_STRING 0x04u
 
+// Whether a name is one of the builtins of a constant the walk works out where it reads it (#148,
+// check_input_builtin_constant_prepare): the place's __builtin_LINE, __builtin_COLUMN, __builtin_FILE, __builtin_FILE_NAME
+// and __builtin_FUNCTION, and the queries of a type, __builtin_vectorelements and __builtin_omp_required_simd_align.
+static bool check_input_source_builtin(uint32_t name)
+{
+    return name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN || name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME ||
+           name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN;
+}
+
 // Which tokens the two walks' vector paths visit (#529), and what they test there: CheckInputReader.visits, a byte a
 // token. Before the walk in source order (check_input_resolve_range), the reasons it may act at the token, a bit each,
 // where 0 says it does nothing there: its syntax (check_input_count_tokens), or a write ahead of the walk to one of
@@ -5971,6 +5980,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 check_input_selection_prepare(reader, i);
             }
+            if (!reader->ignored[i] && check_input_source_builtin(parser->tokens.names[i]) && reader->output->report_count == 0 && !reader->output->resource)
+            {
+                check_input_builtin_constant_prepare(reader, i);
+            }
             if (!reader->ignored[i] && (parser->tokens.names[i] == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || parser->tokens.names[i] == C_NAME_BUILTIN_OFFSETOF))
             {
                 const uint32_t close = i + 1 < parser->tokens.count ? parser->tree.parents[i + 1] : parser->tokens.count;
@@ -7803,7 +7816,7 @@ typedef enum CheckInputCountGroup
     CHECK_INPUT_COUNT_GROUPS,
 } CheckInputCountGroup;
 
-#define BUSTER_CHECK_INPUT_COUNT_NAMES 16u
+#define BUSTER_CHECK_INPUT_COUNT_NAMES 24u
 
 // What check_input_run sizes its tables by: the tokens of a few kinds and roles, and of the names it is given, each
 // name (0 for one the unit hasn't) in one of CHECK_INPUT_COUNT_GROUPS.
@@ -7828,7 +7841,8 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
 {
     const uint32_t name = parser->tokens.names[token];
     const bool named = name == C_NAME_BUILTIN_VA_ARG || name == C_NAME_BUILTIN_CONVERTVECTOR || name == C_NAME_BUILTIN_BIT_CAST || name == C_NAME_GENERIC ||
-                       name == C_NAME_BUILTIN_CHOOSE_EXPR || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF;
+                       name == C_NAME_BUILTIN_CHOOSE_EXPR || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF ||
+                       check_input_source_builtin(name);
     const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING || check_input_function_name_token(parser, token);
     return (uint8_t)((named ? BUSTER_CHECK_SYNTAX_NAMED : 0) | (check_input_attribute_starts(parser, token, parser->tokens.count) ? BUSTER_CHECK_SYNTAX_ATTRIBUTE : 0) |
                      (string ? BUSTER_CHECK_SYNTAX_STRING : 0));
@@ -7855,6 +7869,13 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         C_NAME_BUILTIN_CHOOSE_EXPR,
         C_NAME_BUILTIN_TYPES_COMPATIBLE_P,
         C_NAME_BUILTIN_OFFSETOF,
+        C_NAME_BUILTIN_LINE,
+        C_NAME_BUILTIN_COLUMN,
+        C_NAME_BUILTIN_FILE,
+        C_NAME_BUILTIN_FILE_NAME,
+        C_NAME_BUILTIN_FUNCTION,
+        C_NAME_BUILTIN_VECTORELEMENTS,
+        C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN,
         C_NAME_NORETURN,
         C_NAME_NONNULL,
         C_NAME_NULLABLE,
@@ -7921,7 +7942,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             __mmask16 syntax_matched[3] = { 0 };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
             {
-                syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
+                syntax_matched[i < 14 ? 0 : i < 19 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
             }
             named |= (uint64_t)syntax_matched[0] << part;
             attributes |= (uint64_t)syntax_matched[1] << part;
@@ -8086,15 +8107,25 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         "overloadable",
         "__overloadable__",
     };
-    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR };
+    // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them.
+    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR,
+                                                       C_NAME_BUILTIN_LINE, C_NAME_BUILTIN_COLUMN, C_NAME_BUILTIN_FILE, C_NAME_BUILTIN_FILE_NAME,
+                                                       C_NAME_BUILTIN_FUNCTION, C_NAME_BUILTIN_VECTORELEMENTS, C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN };
     uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES] =
     {
         CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
         CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
         CHECK_INPUT_COUNT_SELECTIONS,
         CHECK_INPUT_COUNT_SELECTIONS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
     };
-    uint32_t name_count = 4;
+    uint32_t name_count = 11;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(vararg_spellings); i += 1)
     {
         names[name_count] = intern_find(pp->table, (const uint8_t*)vararg_spellings[i], (uint32_t)strlen(vararg_spellings[i]));

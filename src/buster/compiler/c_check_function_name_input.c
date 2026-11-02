@@ -549,3 +549,87 @@ static const CheckInitString* check_input_function_name(CheckInputReader* reader
     }
     return result;
 }
+
+// The place of builtin call `keyword` as clang's SourceLocExpr gives it (#148): where its outermost macro expansion was
+// invoked, or where it was written, with its presumed line (after #line) and file name, and its column there (1 for a
+// line's first byte). A deferred body's lane can't read the preprocessor's places, whose expansion history and line
+// cursors the reads change: it refuses the body, which source order then reads (check_input_lane_refuse).
+static bool check_input_source_place(CheckInputReader* reader, uint32_t keyword, uint32_t* line, uint32_t* column, const char** name, uint32_t* name_length)
+{
+    Preprocessor* pp = reader->pp;
+    const Parser* parser = reader->parser;
+    check_input_lane_refuse(reader, reader->lane, "a body uses a source-location builtin");
+    const bool ready = !reader->lane && keyword < parser->tokens.count && pp_history_ensure(pp);
+    const uint32_t output = ready ? parser->tokens.sources[keyword] : BUSTER_PP_NONE;
+    const uint32_t location = output < pp->output.count ? pp_expansion_location(pp, output, pp_history_at(pp, output)) : 0;
+    const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const bool valid = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE;
+    if (valid)
+    {
+        *line = pp_presumed(pp, location, name, name_length);
+        pp_line_of(pp, range, location, column);
+    }
+    return valid;
+}
+
+// The string of builtin call `keyword` of a name (#148): __builtin_FILE's presumed file name, __builtin_FILE_NAME's last
+// component of it, or __builtin_FUNCTION's enclosing function's name ("" outside one), a string literal's object of type
+// char[N] (its token's plus one, as __func__'s is), made once per call where the walk reaches it.
+static const CheckInitString* check_input_source_string(CheckInputReader* reader, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t name = parser->tokens.names[keyword];
+    uint32_t index = reader->string_ids[keyword];
+    if (index == BUSTER_CHECK_NONE)
+    {
+        const uint8_t* bytes = 0;
+        uint32_t length = 0;
+        bool valid = true;
+        if (name == C_NAME_BUILTIN_FUNCTION && reader->function_body != BUSTER_CHECK_NONE)
+        {
+            const uint32_t declared = parser->tokens.names[reader->output->body_declarations[reader->function_body]];
+            bytes = intern_bytes(reader->pp->table, declared);
+            length = intern_length(reader->pp->table, declared);
+        }
+        else if (name != C_NAME_BUILTIN_FUNCTION)
+        {
+            uint32_t line = 0;
+            uint32_t column = 0;
+            const char* file = 0;
+            valid = check_input_source_place(reader, keyword, &line, &column, &file, &length);
+            bytes = (const uint8_t*)file;
+            uint32_t start = length;
+            while (valid && name == C_NAME_BUILTIN_FILE_NAME && start > 0 && bytes[start - 1] != '/')
+            {
+                start -= 1;
+            }
+            bytes = valid && name == C_NAME_BUILTIN_FILE_NAME ? bytes + start : bytes;
+            length = valid && name == C_NAME_BUILTIN_FILE_NAME ? length - start : length;
+        }
+        uint8_t* copy = valid ? arena_push(reader->arena, (uint64_t)length + 1, 1) : 0;
+        reader->output->resource |= valid && copy == 0;
+        valid &= copy != 0;
+        const TypeId type = valid ? check_input_type_result(reader, type_array(reader->types, BUSTER_TYPE_CHAR, (uint64_t)length + 1)) : 0;
+        valid &= type != 0;
+        if (valid)
+        {
+            if (length != 0)
+            {
+                memcpy(copy, bytes, length);
+            }
+            copy[length] = 0;
+            index = reader->output->string_count++;
+            reader->output->strings[index] = (CheckInitString)
+            {
+                .object = keyword + 1,
+                .token = keyword,
+                .type = type,
+                .bytes = copy,
+                .byte_count = length + 1,
+                .predefined = true,
+            };
+            reader->string_ids[keyword] = index;
+        }
+    }
+    return index != BUSTER_CHECK_NONE ? &reader->output->strings[index] : 0;
+}

@@ -1541,6 +1541,13 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     check_constant_mark_type(input, separator + 1, close);
                 }
             }
+            else if (valid && (keyword == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN ||
+                               (keyword == C_NAME_BUILTIN_VECTORELEMENTS && token + 1 < close && check_constant_type_start(parser, token + 1))))
+            {
+                // A query of a type (#148): __builtin_vectorelements' of an expression evaluates nothing of it.
+                input->type_begin[close - input->first] = token + 1;
+                check_constant_mark_type(input, token + 1, close);
+            }
             else if (valid && keyword == C_NAME_GENERIC)
             {
                 const uint32_t separator = check_constant_separator(input, token + 1, close);
@@ -1847,6 +1854,70 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
             .flags = BUSTER_CHECK_ICE,
             .constant_kind = CHECK_CONSTANT_INTEGER,
             .integer = number,
+        };
+    }
+    return valid;
+}
+
+// A builtin of a constant the walk works out (#148, check_input_source_builtin), at its `)`: __builtin_LINE's and
+// __builtin_COLUMN's place (an unsigned int, check_input_source_place); __builtin_FILE's, __builtin_FILE_NAME's and
+// __builtin_FUNCTION's string's address (a char *, the string the walk made: check_input_source_string); and an unsigned
+// long, __builtin_vectorelements' count of the elements of its vector type, or of its unevaluated operand's, and
+// __builtin_omp_required_simd_align's alignment in bytes for its type, the unit's target's (16, 32 with AVX, 64 with
+// AVX-512F, as clang's getOpenMPDefaultSimdAlign gives it whatever the type).
+static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t token, uint32_t count, const CheckValue* operands, CheckValue* value)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const uint32_t keyword = reader->first_child[token];
+    const uint32_t name = parser->tokens.names[keyword];
+    const uint32_t type_first = input->type_begin[token - input->first];
+    const TypeId queried = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : count == 1 ? operands[0].type : 0;
+    bool valid = false;
+    bool address = false;
+    uint64_t number = 0;
+    TypeId type = BUSTER_TYPE_ULONG;
+    if (name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN)
+    {
+        uint32_t line = 0;
+        uint32_t column = 0;
+        const char* file = 0;
+        uint32_t length = 0;
+        valid = count == 0 && check_input_source_place(reader, keyword, &line, &column, &file, &length);
+        number = name == C_NAME_BUILTIN_LINE ? line : column;
+        type = BUSTER_TYPE_UINT;
+    }
+    else if (name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME || name == C_NAME_BUILTIN_FUNCTION)
+    {
+        const uint32_t string = reader->string_ids[keyword];
+        type = string != BUSTER_CHECK_NONE ? check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_CHAR)) : 0;
+        valid = count == 0 && type != 0;
+        address = true;
+        number = valid ? reader->output->strings[string].object : 0;
+    }
+    else if (name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN)
+    {
+        const uint64_t features = reader->pp->options.target.features;
+        valid = queried != 0;
+        number = (features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+    }
+    else if (name == C_NAME_BUILTIN_VECTORELEMENTS)
+    {
+        const TypeId base = queried != 0 ? type_unqualified(type_strip_aligned(reader->types, queried)) : 0;
+        const uint8_t kind = base != 0 ? type_kind(reader->types, base) : BUSTER_TYPE_KIND_VOID;
+        valid = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        number = valid ? reader->types->types.extent[type_index(base)] : 0;
+    }
+    if (valid)
+    {
+        *value = (CheckValue)
+        {
+            .type = type,
+            .category = CHECK_RVALUE,
+            .flags = address ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_ICE,
+            .constant_kind = address ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
+            .integer = address ? 0 : number,
+            .object = address ? (uint32_t)number : 0,
         };
     }
     return valid;
@@ -2658,6 +2729,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     CheckValue argument = input->proof_values[first - input->first];
                     valid = check_constant_speculative_call(input, reader->first_child[token], token, (CBuiltinId)builtin, type, &argument, 1, &proof);
                 }
+            }
+            else if (check_input_source_builtin(parser->tokens.names[reader->first_child[token]]))
+            {
+                valid = check_constant_source_builtin(input, token, count, action.operands, &input->values[index]);
+                proof = input->values[index];
             }
             else
             {

@@ -118,6 +118,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void f(const void* p, unsigned long n)\n{\n__builtin_assume_dereferenceable(p, n);\n}\n" },
         { .name = "generic: debugtrap of an argument", .source = "void f(void)\n{\n__builtin_debugtrap(1);\n}\n", .rejected = true },
         { .name = "generic: clear_cache of one", .source = "void f(char* x)\n{\n__builtin___clear_cache(x);\n}\n", .rejected = true },
+        { .name = "generic: vectorelements of an integer", .source = "unsigned long f(int n)\n{\nreturn __builtin_vectorelements(n);\n}\n", .rejected = true },
+        { .name = "generic: vectorelements of an integer type", .source = "unsigned long f(void)\n{\nreturn __builtin_vectorelements(int);\n}\n", .rejected = true },
+        { .name = "generic: LINE of an argument", .source = "unsigned f(void)\n{\nreturn __builtin_LINE(1);\n}\n", .rejected = true },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
     char directory[] = "/tmp/buster-checker-generic-XXXXXX";
@@ -223,6 +226,25 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "int (*f)(int)=__builtin_addressof(callee);mix((unsigned)f(n));mix(ps==(void*)callee);mix(__builtin_function_start(callee)==(void*)&callee);"
         "return (int)(h^(h>>32));}",
         "generic-alloca-checks-and-addresses", clang);
+    // The builtins of a place (#148): __builtin_LINE's and __builtin_COLUMN's, through a macro, in an enumerator, an
+    // _Static_assert and a static initializer; __builtin_FILE's, __builtin_FILE_NAME's and __builtin_FUNCTION's strings, at
+    // file scope ("" for the function) and in one, after a #line that names the file; and the queries of a type,
+    // __builtin_vectorelements' (of a vector, an extended vector type and an expression) and
+    // __builtin_omp_required_simd_align's. (The oracle's tested is a macro's oracle_tested, so a function's name is a
+    // helper's.)
+    check_test_program_source(test,
+        "#line 7 \"dir/places.c\"\n"
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "static void mixs(const char* s){while(*s)mix((unsigned char)*s++);mix(0);}static const char* who(void){return __builtin_FUNCTION();}\n"
+        "#define HERE __builtin_LINE()\n"
+        "typedef int V __attribute__((vector_size(16)));typedef float W __attribute__((ext_vector_type(3)));\n"
+        "static const char* pf=__builtin_FILE();static const char* pn=__builtin_FILE_NAME();static const char* pu=__builtin_FUNCTION();\n"
+        "static unsigned line=__builtin_LINE();enum{E=__builtin_LINE(),C=__builtin_COLUMN()};_Static_assert(__builtin_LINE()==12,\"\");\n"
+        "int tested(int n){h=(unsigned)n;mixs(pf);mixs(pn);mixs(pu);mix(line);mix(E);mix(C);mix(HERE);mix(__builtin_COLUMN());\n"
+        "mixs(who());mixs(__builtin_FILE());V v={n};mix(__builtin_vectorelements(v));mix(__builtin_vectorelements(W));\n"
+        "mix(__builtin_omp_required_simd_align(double));mix(sizeof(__builtin_FILE()));mix(_Generic(__builtin_LINE(),unsigned:1,default:2));\n"
+        "mix(_Generic(__builtin_FILE(),char*:3,default:4));mix(_Generic(__builtin_vectorelements(v),unsigned long:5,default:6));return (int)(h^(h>>32));}\n",
+        "generic-source-places-and-type-queries", clang);
 }
 
 static __attribute__((noinline)) void check_test_generic_builtins(CheckTest* test, const char* clang)

@@ -1216,6 +1216,43 @@ addresses of a local, a member, an array, a function and in static data
 `verbose_trap`'s errors, their places and messages, with clang's by both paths
 (`c_check_generic_builtin_driver_test.c`).
 
+## The builtins of a place and of a type's shape (#148)
+
+`__builtin_LINE`, `__builtin_COLUMN`, `__builtin_FILE`, `__builtin_FILE_NAME`,
+`__builtin_FUNCTION`, `__builtin_vectorelements` and
+`__builtin_omp_required_simd_align` are keywords, as in clang, and the parser
+reads them so. The checker's walk in source order works each one out where it
+reads it (`check_input_source_builtin`, `check_input_builtin_constant_prepare`,
+`c_check_constant.c`'s `check_constant_source_builtin`), as it does
+`__builtin_offsetof`: a constant cached at the call's `)`, which every context
+takes, code, static initializers, enumerators and `_Static_assert` alike.
+
+- `__builtin_LINE()` and `__builtin_COLUMN()` are `unsigned int` constants of the
+  call's place as clang's `SourceLocExpr` gives it: where its outermost macro
+  expansion was invoked, or where it was written, the line presumed after
+  `#line` and the column of the keyword's first byte, from 1
+  (`check_input_source_place`: the expansion history, which a unit that deferred
+  it records then, `pp_presumed` and `pp_line_of`).
+- `__builtin_FILE()`, `__builtin_FILE_NAME()` and `__builtin_FUNCTION()` are
+  `char *` constants, the addresses of strings the walk makes
+  (`check_input_source_string`): the presumed file's name as written (after
+  `#line`), its last component, and the enclosing function's name, `""` outside
+  one. Each is a private string object of its keyword's token, as `__func__`'s
+  array is, which the emission names `.Lbuster_string_N`.
+- `__builtin_vectorelements(T)`, of a vector type or of an expression of one,
+  which isn't evaluated, is its elements' count, and
+  `__builtin_omp_required_simd_align(T)` the unit's target's SIMD alignment in
+  bytes whatever the type (16, 32 with AVX, 64 with AVX-512F, as clang's
+  `getOpenMPDefaultSimdAlign` gives it), each an `unsigned long`. A vector
+  operand that isn't one is an error, as clang's is.
+
+A deferred body's lane refuses a body that uses one of the first five (the
+preprocessor's places change as they are read), which source order then reads.
+`__has_builtin` answers 1 for all seven (`pp_implemented_builtin`), and
+`__has_constexpr_builtin` 0, as clang's. `test-checker`'s
+`generic-source-places-and-type-queries` runs them natively against clang -O0's
+build by both paths, after a `#line` that names the file.
+
 ## Intrinsic checking contracts
 
 The later maintainer decision in #156 includes target intrinsics in #148's

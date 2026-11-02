@@ -2176,10 +2176,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             flags = is_common ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON) : flags;
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
-                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
+                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1) ||
+                  parser->tokens.names[object - 1] == C_NAME_BUILTIN_FILE || parser->tokens.names[object - 1] == C_NAME_BUILTIN_FILE_NAME ||
+                  parser->tokens.names[object - 1] == C_NAME_BUILTIN_FUNCTION))
         {
-            // A string literal's, or a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__), which clang
-            // makes a private constant as it makes a literal's.
+            // A string literal's, a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__) or the string a
+            // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
+            // it makes a literal's.
             char spelling[48];
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);

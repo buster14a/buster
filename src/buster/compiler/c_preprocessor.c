@@ -16768,6 +16768,10 @@ static const PPFeature pp_implemented_feature[] = {
     { "c_thread_local", 1, 2011 },
 };
 static const PPFeature pp_implemented_builtin[] = {
+    // The keywords of builtins the checker works out where it reads them (#148, c_check_input.c's
+    // check_input_source_builtin), in the table's byte order.
+    { "__builtin_COLUMN", 1 }, { "__builtin_FILE", 1 }, { "__builtin_FILE_NAME", 1 }, { "__builtin_FUNCTION", 1 }, { "__builtin_LINE", 1 },
+    { "__builtin_omp_required_simd_align", 1 }, { "__builtin_vectorelements", 1 },
     { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
 };
 
