@@ -488,6 +488,24 @@ does. `test-checker` compares the two on random kinds at a page's end,
 across the masks' tails, with labels that all have entries and with some that
 don't.
 
+On the 9700X (`measure-compile`'s medians of 11 runs on `sqlite3.c`), the
+`lower` stage went from 13.541 ms (13.472 to 13.603, #1143's last run at
+`425f57c7`) to 12.485 ms (12.399 to 12.708) with both, and perf's share of
+`check_lower_prepare`'s own samples from 1.46% to 0.75% of the compile's.
+`--time-stages`' rows (#1048) then split the stage:
+
+| row | ms | of `lower` |
+| --- | ---: | ---: |
+| `lower.prepare` | 1.356 | 10.9% |
+| `lower.statements` | 8.339 | 66.8% |
+| `lower.bodies` | 1.573 | 12.6% |
+| `lower.validate` | 1.194 | 9.6% |
+| `lower.rest` | 0.046 | 0.4% |
+
+The statements, the controls and the tasks' loops, are two thirds of the
+stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
+templates' target.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
