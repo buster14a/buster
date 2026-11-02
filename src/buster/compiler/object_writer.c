@@ -484,10 +484,12 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
     {
         prepared = atoms->unit[atom] < unit_count;
     }
-    // The symbols' sources and types, 64 at a time: an absolute symbol, which no unit holds, refuses the link, and an
-    // IFUNC makes its unit's object ELFOSABI_GNU (whose units are found below, since IFUNCs are rare).
+    // The symbols' sources and types, 64 at a time: an absolute symbol, which no unit holds, refuses the link, an
+    // IFUNC makes its unit's object ELFOSABI_GNU and a common symbol leaves its atom to the linker (whose atoms and
+    // units are found below, since IFUNCs and commons are rare).
     uint64_t absolute = 0;
     uint64_t ifunc = 0;
+    uint64_t common = 0;
     for (SymbolId first = 1; first < symbols->count; first += 64)
     {
         const uint64_t left = symbols->count - first;
@@ -496,6 +498,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
         absolute |= _mm512_mask_cmpeq_epi8_mask(valid, sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
         ifunc |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC));
+        common |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_COMMON));
     }
     prepared = prepared && absolute == 0;
     ObjectUnits result = {
@@ -527,25 +530,22 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
     uint64_t* unnamed = prepared ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, unit_count) : 0;
     prepared = prepared && cursors != 0 && unnamed != 0;
     // A common symbol's atom (BUSTER_LINK_SYMBOL_COMMON, #147), which its object leaves to the linker: no section holds
-    // it, and its symbol is SHN_COMMON's. Few links have one.
-    uint8_t* commons = NULL;
-    for (SymbolId symbol = 1; prepared && symbol < symbols->count; symbol += 1)
+    // it, and its symbol is SHN_COMMON's. Only a link with one, which the pass above found, marks them, 64 symbols'
+    // types at a time.
+    uint8_t* commons = prepared && common != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, atoms->count) : NULL;
+    prepared = prepared && (common == 0 || commons != NULL);
+    if (prepared && commons != NULL)
     {
-        const AtomId atom = symbols->atom[symbol];
-        if ((symbols->flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON && atom != 0)
+        memset(commons, 0, atoms->count);
+        for (SymbolId first = 1; first < symbols->count; first += 64)
         {
-            if (commons == NULL)
+            const uint64_t left = symbols->count - first;
+            const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+            const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+            for (uint64_t found = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_COMMON)); found != 0; found &= found - 1)
             {
-                commons = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, atoms->count);
-                prepared = commons != NULL;
-                if (prepared)
-                {
-                    memset(commons, 0, atoms->count);
-                }
-            }
-            if (prepared)
-            {
-                commons[atom] = 1;
+                const AtomId atom = symbols->atom[first + (SymbolId)__builtin_ctzll(found)];
+                commons[atom] = atom != 0 ? 1 : commons[atom];
             }
         }
     }
