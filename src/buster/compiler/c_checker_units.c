@@ -98,8 +98,9 @@ struct CheckUnitsRun
     // The lanes' board (#777), on which a unit's emission shares its functions' parts with the lanes that have no unit
     // left to take; null on one lane.
     CheckEmitBoard* board;
-    // Whether the command releases its memory (check_driver_units' `release`); when it doesn't, the process's exit frees
-    // the memory of the lane that stops taking units last.
+    // Whether every lane releases its memory, as in a command that releases its memory (check_driver_units' `release`) and
+    // before a link, whose peak then stays the units'; otherwise the process's exit, which follows the lanes, frees the
+    // memory of the lane that stops taking units last.
     bool release;
 };
 
@@ -1573,8 +1574,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 // pool too (check_units_lane_release) and unmaps the pool's arenas, their pages freed, before it helps the others
 // (#777): a lane that compiled a small unit beside a large one frees its memory while the large one compiles, rather
 // than after it, when the command waits for every lane. The lane that stops taking units last has no other unit's work
-// to overlap its release with: in a command that doesn't release its memory (main's, whose process exits after it:
-// run_check_command_mode), the process's exit frees that lane's with the rest of the address space.
+// to overlap its release with: in a -c command that doesn't release its memory (main's, whose process exits after the
+// lanes: run_check_command_mode), the process's exit frees that lane's with the rest of the address space. Before a
+// link it releases it, as every lane does, so that the link's peak stays the units'.
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
@@ -1706,8 +1708,8 @@ static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* leas
 // (check_driver_executable), with -g their DWARF units, one each. -o with -c, a dump and --id-order are refused: their
 // outputs are one unit's.
 // With `stage_clock`, the setup, the lanes' run, the link and the release are its stages. Without `release` (a command
-// whose process exits after it), the last lane to stop taking units leaves its memory to the exit. Returns the command's
-// exit status: 0 when every unit compiled without errors and every output was written.
+// whose process exits after it), the last lane to stop taking units leaves its memory to the exit with -c. Returns the
+// command's exit status: 0 when every unit compiled without errors and every output was written.
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release)
 {
     int result = 1;
@@ -1810,7 +1812,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .order = order,
                 .lanes = states,
                 .board = board,
-                .release = release,
+                .release = release || command->link,
             };
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
@@ -1830,7 +1832,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 }
             }
             arena_pool = 0;
-            if (release)
+            if (run.release)
             {
                 check_units_lane_release(states);
                 arena_pool_release(&states->pool);
@@ -1859,8 +1861,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release), but the last one's in a
-            // command that doesn't release its memory: the kept links are all the link reads.
-            for (uint32_t l = 0; release && l < active; l += 1)
+            // -c command that doesn't release its memory: the kept links are all the link reads.
+            for (uint32_t l = 0; run.release && l < active; l += 1)
             {
                 check_units_lane_release(states + l);
             }
