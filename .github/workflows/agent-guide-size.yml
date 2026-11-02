@@ -1,0 +1,79 @@
+name: Agent guide size
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    name: Agent guide size policy
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Keep automatically loaded instructions bounded
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_size() {
+              local path="$1" budget="$2" bytes
+              if [[ ! -f "$path" || -L "$path" ]]; then
+                  printf '%s must be a regular, non-symlink file.\n' "$path" >&2
+                  return 1
+              fi
+              bytes=$(LC_ALL=C wc -c < "$path") || return 1
+              if (( bytes == 0 || bytes > budget )); then
+                  printf '%s: %s bytes; allowed range is 1..%s bytes. Move detail to docs/commands/.\n' "$path" "$bytes" "$budget" >&2
+                  return 1
+              fi
+              printf '%s: %s / %s bytes\n' "$path" "$bytes" "$budget"
+          }
+
+          # Exercise the exact predicate used below, without expected-failure annotations.
+          fixtures=$(mktemp -d "$RUNNER_TEMP/agent-guide-size.XXXXXX")
+          trap 'rm -rf "$fixtures"' EXIT
+          for bytes in 1 29999 30000; do
+              truncate -s "$bytes" "$fixtures/guide"
+              check_size "$fixtures/guide" 30000
+          done
+          for bytes in 0 30001; do
+              truncate -s "$bytes" "$fixtures/guide"
+              if check_size "$fixtures/guide" 30000 > /dev/null 2>&1; then
+                  echo '::error::Agent-guide budget boundary self-test failed.'
+                  exit 1
+              fi
+          done
+          truncate -s 1024 "$fixtures/wrapper"
+          check_size "$fixtures/wrapper" 1024
+          truncate -s 1025 "$fixtures/wrapper"
+          if check_size "$fixtures/wrapper" 1024 > /dev/null 2>&1; then
+              echo '::error::Import-wrapper budget boundary self-test failed.'
+              exit 1
+          fi
+          printf '\303\251%.0s' {1..15000} > "$fixtures/utf8"
+          check_size "$fixtures/utf8" 30000
+          printf '\303\251' >> "$fixtures/utf8"
+          ln -s guide "$fixtures/symlink"
+          for path in "$fixtures/utf8" "$fixtures/missing" "$fixtures" "$fixtures/symlink"; do
+              if check_size "$path" 30000 > /dev/null 2>&1; then
+                  echo '::error::Agent-guide byte/file-kind self-test failed.'
+                  exit 1
+              fi
+          done
+
+          if ! check_size AGENTS.md 30000 || ! check_size CLAUDE.md 1024; then
+              echo '::error::Keep shared rules and a compact index in AGENTS.md; move module and command detail to docs/commands/. Keep CLAUDE.md a small import wrapper.'
+              exit 1
+          fi
+          if ! grep -qxF '@AGENTS.md' CLAUDE.md; then
+              echo '::error::CLAUDE.md must import the shared AGENTS.md instructions.'
+              exit 1
+          fi
