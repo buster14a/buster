@@ -1511,7 +1511,7 @@ static void bind_test_library_import_cases(BindTestTally* tally, const Runtime* 
         { "buster_nowhere", RUNTIME_ERROR_MISSING, 0 },
         { "buster_members", RUNTIME_ERROR_ARCHIVE, 0 },
         { "buster_empty", RUNTIME_ERROR_NONE, 0 },
-        { "buster_script", RUNTIME_ERROR_IMPORT, 0 },
+        { "buster_script", RUNTIME_ERROR_MISSING, 0 },
     };
     for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -5242,6 +5242,8 @@ static bool bind_test_split_stack(const Runtime* runtime, const Runtime* shared_
     return bind_test_report(&tally);
 }
 
+#include "runtime_library_search_test.c"
+
 // ---------------------------------------------------------------------------------------------------------------------
 // run_bind_tests
 
@@ -5299,6 +5301,7 @@ static int run_bind_tests(int argc, char** argv)
         bool passed = bind_test_programs(&runtime, seed, cross_check, directory, keep, &arena);
         passed = bind_test_rules(&runtime) && passed;
         passed = bind_test_libraries(&runtime, directory) && passed;
+        passed = bind_test_gcc_libraries(&runtime, directory, cross_check) && passed;
         passed = bind_test_atexit_program(&runtime) && passed;
         passed = bind_test_libgcc_program(&runtime) && passed;
         passed = bind_test_room_bound(&runtime, "room", &arena) && passed;
