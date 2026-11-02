@@ -37,7 +37,9 @@ without rows or objects through it against their native code.
 
 Dynamic-stack text uses `alloca.ptr %size`, `stack_save.i64` and
 `stack_restore.void %position` with no extra metadata. A slot's lifetime marker
-is `lifetime.void $N start` or `lifetime.void $N end` (#177); both interpreters
+is `lifetime.void $N start` or `lifetime.void $N end` (#177), and a fence
+`fence.void ORDER` or `fence.void ORDER signal` (#1059: `relaxed`, `consume`,
+`acquire`, `release`, `acq_rel` or `seq_cst`); both interpreters
 take it as reading and writing nothing. Both interpreter fronts
 execute the [shared dynamic-stack contract](ir.md#dynamic-stack-contract).
 `test-ir-lowering` includes their frame/lifetime, overflow/resource, transformation

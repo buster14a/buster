@@ -14,6 +14,17 @@
 //
 // An atomic access's object must be aligned to its size, as clang's code generation gives its address's alignment
 // (c_checker.c's check_graph_atomic_alignment): a misaligned one, which clang calls libatomic for, is refused.
+//
+// #1059: a helper is the fallback, not the representation. Each family publishes its operation's contract
+// (check_program_helper_contracts): what a caller must keep of it whatever code implements it, the language's effects
+// (memory, atomicity, order, the floating environment, errno, termination); apart from them, what a direct form of it
+// needs of its function (target features, fixed registers), which a helper's call hides behind the call's convention;
+// and where a direct form exists, what it admits. A helper no family names is UNMODELED's, whose effects are every one
+// as bounds (it may not return: MAY_TERMINATE, never TERMINATES, which says it doesn't).
+// The physical effects of a helper's code are x86_semantics.c's, read from its records (check_program_helper_physical),
+// never a list of this file's. A fence of a constant order lowers to the typed stream's FENCE
+// (check_program_direct_fence) and plans no helper; every other use keeps its helper, and the plan counts each family's
+// direct and helper uses (CheckProgramHelpers.direct and .helper).
 #ifndef BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 
@@ -51,6 +62,144 @@ struct CheckProgramHelper
     CBuiltinX86HelperKind x86;
 };
 
+// The helper families (#1059's inventory), each a row of check_program_helper_contracts: an atomic load or store
+// (load_n, store_n, C11's and an _Atomic object's), an atomic read/modify/write (c_builtin_atomic_rmw_helpers.c), a
+// fence, a terminal builtin (trap, unreachable), FLT_ROUNDS, a math builtin (sqrt to rint, copysign), an x86 builtin's
+// leaf (c_builtin_x86_helpers.c), an asm statement with instructions (c_check_program_asm.c), and a helper none of
+// these names (UNMODELED: a new one before its family has its row), which keeps every effect.
+typedef enum CheckProgramHelperFamily
+{
+    CHECK_PROGRAM_HELPER_ATOMIC_ACCESS,
+    CHECK_PROGRAM_HELPER_ATOMIC_RMW,
+    CHECK_PROGRAM_HELPER_FENCE,
+    CHECK_PROGRAM_HELPER_TERMINAL,
+    CHECK_PROGRAM_HELPER_ROUNDS,
+    CHECK_PROGRAM_HELPER_MATH,
+    CHECK_PROGRAM_HELPER_X86,
+    CHECK_PROGRAM_HELPER_ASM,
+    CHECK_PROGRAM_HELPER_UNMODELED,
+    CHECK_PROGRAM_HELPER_FAMILIES,
+} CheckProgramHelperFamily;
+
+// An operation's contract's effects, what a caller keeps whatever implements it (CheckProgramHelperContract.effects):
+//   - READS and WRITES: memory through an address it is given (an asm statement's, its operands' and its clobber's);
+//   - ATOMIC: its access is one access of its object's width, aligned to it, atomic as other threads see it;
+//   - ORDERS: a memory order over the thread's other accesses (a helper strengthens every order to seq_cst);
+//   - BARRIER: no access moves across it, nor is one eliminated past it: an unknown call's, the helpers' fallback;
+//   - FP_ENVIRONMENT and FP_EXCEPTIONS: it reads the floating environment (MXCSR's rounding), and may raise its flags;
+//   - ERRNO: it may set errno through the address it is given;
+//   - TERMINATES: it doesn't return, and has no successor;
+//   - MAY_TERMINATE: it may not return (it may trap or end the process): a consumer assumes neither that it returns nor
+//     that it doesn't, and keeps its successor;
+//   - UNMODELED: it has effects past these (system state, a template's own), which a consumer keeps whole.
+// And what a direct form of it needs of the function it is placed in (CheckProgramHelperContract.requirements), which
+// a helper's call doesn't pass to its caller: the call's convention covers the registers, and the helper is compiled
+// for the unit's target:
+//   - FEATURES: its instructions need target features its function must have;
+//   - FIXED: its instructions take fixed or implicit registers past the convention (cmpxchg's rax, a template's).
+#define BUSTER_CHECK_HELPER_READS 0x0001u
+#define BUSTER_CHECK_HELPER_WRITES 0x0002u
+#define BUSTER_CHECK_HELPER_ATOMIC 0x0004u
+#define BUSTER_CHECK_HELPER_ORDERS 0x0008u
+#define BUSTER_CHECK_HELPER_BARRIER 0x0010u
+#define BUSTER_CHECK_HELPER_FP_ENVIRONMENT 0x0020u
+#define BUSTER_CHECK_HELPER_FP_EXCEPTIONS 0x0040u
+#define BUSTER_CHECK_HELPER_ERRNO 0x0080u
+#define BUSTER_CHECK_HELPER_TERMINATES 0x0100u
+#define BUSTER_CHECK_HELPER_FEATURES 0x0200u
+#define BUSTER_CHECK_HELPER_FIXED 0x0400u
+#define BUSTER_CHECK_HELPER_UNMODELED 0x0800u
+#define BUSTER_CHECK_HELPER_MAY_TERMINATE 0x1000u
+
+#define BUSTER_CHECK_HELPER_EFFECTS                                                                                                                   \
+    (BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER |       \
+     BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_ERRNO | BUSTER_CHECK_HELPER_TERMINATES |                   \
+     BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE)
+#define BUSTER_CHECK_HELPER_REQUIREMENTS (BUSTER_CHECK_HELPER_FEATURES | BUSTER_CHECK_HELPER_FIXED)
+
+// A family's published contract: its name, the effects every one of its operations may have (each planned helper's own,
+// check_program_helper_effects, are a subset), what a direct form of it needs of its function, what its direct form
+// admits (NULL where none exists yet: the planner counts no direct use of such a family, which test-checker's fences
+// check) and what keeps its helper.
+typedef struct CheckProgramHelperContract CheckProgramHelperContract;
+struct CheckProgramHelperContract
+{
+    const char* name;
+    uint32_t effects;
+    uint32_t requirements;
+    const char* direct;
+    const char* helper;
+};
+
+static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PROGRAM_HELPER_FAMILIES] = {
+    [CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] = {
+        .name = "atomic-access",
+        .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER,
+        .direct = NULL,
+        .helper = "every load and store of 1, 2, 4 or 8 bytes aligned to its size; a misaligned or wider one is refused",
+    },
+    [CHECK_PROGRAM_HELPER_ATOMIC_RMW] = {
+        .name = "atomic-rmw",
+        .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER |
+                   BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS,
+        .requirements = BUSTER_CHECK_HELPER_FIXED,
+        .direct = NULL,
+        .helper = "every read/modify/write of 1, 2, 4 or 8 bytes aligned to its size, of integer, bool or GNU's float and double formats",
+    },
+    [CHECK_PROGRAM_HELPER_FENCE] = {
+        .name = "fence",
+        .effects = BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER,
+        .direct = "a thread or signal fence, GNU's or C11's, unscoped, and __sync_synchronize, of a constant order 0 to 5 evaluated for no effect: the typed stream's FENCE",
+        .helper = "a fence of a dynamic or out-of-range order, which the helper strengthens to seq_cst, or a scoped family's",
+    },
+    [CHECK_PROGRAM_HELPER_TERMINAL] = {
+        .name = "terminal",
+        .effects = BUSTER_CHECK_HELPER_TERMINATES,
+        .direct = NULL,
+        .helper = "__builtin_trap and __builtin_unreachable",
+    },
+    [CHECK_PROGRAM_HELPER_ROUNDS] = {
+        .name = "flt-rounds",
+        .effects = BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_BARRIER,
+        .direct = NULL,
+        .helper = "__builtin_flt_rounds",
+    },
+    [CHECK_PROGRAM_HELPER_MATH] = {
+        .name = "math",
+        .effects = BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_ERRNO | BUSTER_CHECK_HELPER_BARRIER,
+        .direct = NULL,
+        .helper = "a math builtin the checker doesn't fold: sqrt (with errno), the roundings and copysign",
+    },
+    [CHECK_PROGRAM_HELPER_X86] = {
+        .name = "x86-leaf",
+        .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER | BUSTER_CHECK_HELPER_FP_ENVIRONMENT |
+                   BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE,
+        .requirements = BUSTER_CHECK_HELPER_FEATURES | BUSTER_CHECK_HELPER_FIXED,
+        .direct = NULL,
+        .helper = "an x86 builtin whose instruction no Tier 0 row takes (c_builtin_x86_helpers.c), where the target has its features",
+    },
+    // A template's instructions are its author's: the assembler takes every form whatever the unit's target
+    // (check_asm_matches), as GNU as and clang's integrated assembler do, so a direct form would need no feature the
+    // compiler gates (no FEATURES), only its constraints' and clobbers' registers.
+    [CHECK_PROGRAM_HELPER_ASM] = {
+        .name = "asm",
+        .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER | BUSTER_CHECK_HELPER_FP_ENVIRONMENT |
+                   BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE,
+        .requirements = BUSTER_CHECK_HELPER_FIXED,
+        .direct = NULL,
+        .helper = "an asm statement with instructions, its operands placed by their constraints in the helper's frame (docs/c-inline-assembly.md)",
+    },
+    [CHECK_PROGRAM_HELPER_UNMODELED] = {
+        .name = "unmodeled",
+        .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER |
+                   BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_ERRNO | BUSTER_CHECK_HELPER_UNMODELED |
+                   BUSTER_CHECK_HELPER_MAY_TERMINATE,
+        .requirements = BUSTER_CHECK_HELPER_FEATURES | BUSTER_CHECK_HELPER_FIXED,
+        .direct = NULL,
+        .helper = "a helper no other family names, which a consumer keeps whole until its family has its row",
+    },
+};
+
 typedef struct CheckProgramHelperUse CheckProgramHelperUse;
 struct CheckProgramHelperUse
 {
@@ -65,6 +214,11 @@ struct CheckProgramHelpers
     uint32_t count;
     CheckProgramHelperUse* uses;
     uint32_t use_count;
+    // Each family's builtin uses that lower directly, planning no helper (#1059: check_program_direct_fence's), and those
+    // the plan gives their helper (`uses`). An implicit _Atomic access's and a generic form's leaves, and an asm statement's
+    // helper, have no builtin use here: --helper-report counts the lowered code's calls of every helper instead.
+    uint32_t direct[CHECK_PROGRAM_HELPER_FAMILIES];
+    uint32_t helper[CHECK_PROGRAM_HELPER_FAMILIES];
     CheckProgramStatus status;
     uint32_t token;
     // What an UNSUPPORTED status lacks, or NULL.
@@ -79,6 +233,148 @@ static bool check_program_helper_vector(const TypeTable* types, TypeId type)
     const uint8_t kind = type_kind(types, base);
     const bool vector = (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && type_size(types, base) == 16;
     return vector && type_unqualified(type_strip_aligned(types, type_element(types, base))) != BUSTER_TYPE_BOOL;
+}
+
+// A planned helper's family (check_program_helper_contracts' row), by what names it: one no family names is UNMODELED's,
+// whose contract keeps every effect, never a neighbour's.
+static CheckProgramHelperFamily check_program_helper_family(const CheckProgramHelper* helper)
+{
+    const bool plain = !helper->rmw && helper->assembly == 0 && helper->x86 == CBUILTIN_X86_HELPER_NONE;
+    const bool fence = plain && (helper->id == CBUILTIN_ATOMIC_THREAD_FENCE || helper->id == CBUILTIN_ATOMIC_SIGNAL_FENCE || helper->id == CBUILTIN_SYNC_SYNCHRONIZE);
+    const bool access = plain && (helper->id == CBUILTIN_ATOMIC_LOAD_N || helper->id == CBUILTIN_ATOMIC_STORE_N);
+    const bool rmw = helper->rmw && check_builtin_atomic_rmw_rule(helper->id) != NULL;
+    return helper->assembly != 0                        ? CHECK_PROGRAM_HELPER_ASM :
+           helper->x86 != CBUILTIN_X86_HELPER_NONE      ? CHECK_PROGRAM_HELPER_X86 :
+           helper->terminates                           ? CHECK_PROGRAM_HELPER_TERMINAL :
+           helper->math_kind != CHECK_BUILTIN_MATH_NONE ? CHECK_PROGRAM_HELPER_MATH :
+           helper->id == CBUILTIN_FLT_ROUNDS            ? CHECK_PROGRAM_HELPER_ROUNDS :
+           rmw                                          ? CHECK_PROGRAM_HELPER_ATOMIC_RMW :
+           fence                                        ? CHECK_PROGRAM_HELPER_FENCE :
+           access                                       ? CHECK_PROGRAM_HELPER_ATOMIC_ACCESS :
+                                                          CHECK_PROGRAM_HELPER_UNMODELED;
+}
+
+// A planned helper's own effects within its family's contract: a load's read (load_n's), a store's write (store_n's, the
+// only other id the family takes), a release's or a clear's
+// write (a read/modify/write leaf's without a result), the floating environment and exceptions of clang's IEEE maximum
+// and minimum (whose maxss, minss and ucomiss read MXCSR and may raise invalid) but no other read/modify/write's, and the
+// floating environment, exceptions and errno a math builtin's plan has.
+static __attribute__((unused)) uint32_t check_program_helper_effects(const CheckProgramHelper* helper)
+{
+    const CheckProgramHelperFamily family = check_program_helper_family(helper);
+    uint32_t effects = check_program_helper_contracts[family].effects;
+    if (family == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS)
+    {
+        effects &= helper->id == CBUILTIN_ATOMIC_LOAD_N ? ~BUSTER_CHECK_HELPER_WRITES : helper->id == CBUILTIN_ATOMIC_STORE_N ? ~BUSTER_CHECK_HELPER_READS : ~0u;
+    }
+    else if (family == CHECK_PROGRAM_HELPER_ATOMIC_RMW)
+    {
+        const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(helper->id);
+        const bool ieee = rule != NULL && check_builtin_atomic_rmw_ieee(rule->operation);
+        effects &= (helper->result_type == BUSTER_TYPE_VOID ? ~BUSTER_CHECK_HELPER_READS : ~0u) &
+                   (ieee ? ~0u : ~(BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS));
+    }
+    else if (family == CHECK_PROGRAM_HELPER_MATH)
+    {
+        effects &= (helper->reads_fp_environment ? ~0u : ~BUSTER_CHECK_HELPER_FP_ENVIRONMENT) &
+                   (helper->may_raise_fp_exceptions ? ~0u : ~BUSTER_CHECK_HELPER_FP_EXCEPTIONS) & (helper->requires_errno_address ? ~0u : ~BUSTER_CHECK_HELPER_ERRNO);
+    }
+    return effects;
+}
+
+// A helper's code's physical effects (#1059), read from its records by x86_semantics.c (x86_instructions_effects and
+// x86_effects), not from a list of this file's: the resources its records read and write (BUSTER_X86_RESOURCE_*: general
+// and vector registers, flags, MXCSR, the x87's control word), their forms' memory effects (BUSTER_X86_MEMORY_EFFECT_*:
+// a fence, a locked access) and properties (BUSTER_X86_EFFECT_*: a fault, a floating exception), whether it reads or
+// writes memory through an operand other than its own frame's (an object a pointer names: an access based on rsp, on
+// rbp where the code has a frame pointer, or on r15 where it has a realigned frame's base is its frame's), and whether it returns or
+// traps; all of its covered records'. A record of a form the tables don't cover has only the conservative record (every
+// resource, every effect), which says nothing of it: it is counted apart (`uncovered`, the first's form), and a consumer
+// takes a helper with one as having unknown effects. `valid` is false where its scratch had no room for the resolved
+// effects.
+typedef struct CheckProgramHelperPhysical CheckProgramHelperPhysical;
+struct CheckProgramHelperPhysical
+{
+    uint64_t reads;
+    uint64_t writes;
+    uint16_t properties;
+    uint8_t memory;
+    bool reads_object;
+    bool writes_object;
+    bool returns;
+    bool traps;
+    bool valid;
+    uint32_t uncovered;
+    uint16_t uncovered_form;
+};
+
+static __attribute__((unused)) CheckProgramHelperPhysical check_program_helper_physical(const Tier0Code* code, Arena* scratch)
+{
+    CheckProgramHelperPhysical physical = { 0 };
+    const uint64_t mark = scratch->length;
+    uint64_t* reads = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)code->count + 1);
+    uint64_t* writes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)code->count + 1);
+    physical.valid = reads != NULL && writes != NULL;
+    if (physical.valid)
+    {
+        x86_instructions_effects(code->records, code->count, reads, writes);
+    }
+    for (uint32_t r = 0; physical.valid && r < code->count; r += 1)
+    {
+        const X86Instruction* record = &code->records[r];
+        const X86Effects* effects = x86_effects(record->form & BUSTER_X86_FORM_NUMBER);
+        if (effects->operation == X86_OPERATION_NONE)
+        {
+            physical.uncovered_form = physical.uncovered == 0 ? (uint16_t)(record->form & BUSTER_X86_FORM_NUMBER) : physical.uncovered_form;
+            physical.uncovered += 1;
+        }
+        else
+        {
+            const uint32_t base = record->rm & 15;
+            const bool stack = (record->mode & BUSTER_X86_MODE_BASE) != 0 && (base == X86_REGISTER_RSP || (base == X86_REGISTER_RBP && code->frame_pointer) ||
+                                                                             (base == X86_REGISTER_R15 && code->frame_base));
+            const bool object = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && !stack && (effects->memory & BUSTER_X86_MEMORY_EFFECT_ADDRESS) == 0;
+            const uint32_t control = x86_effects_control(effects);
+            physical.reads |= reads[r];
+            physical.writes |= writes[r];
+            physical.properties |= effects->properties;
+            physical.memory |= effects->memory;
+            physical.reads_object |= object && (reads[r] & BUSTER_X86_RESOURCE_MEMORY) != 0;
+            physical.writes_object |= object && (writes[r] & BUSTER_X86_RESOURCE_MEMORY) != 0;
+            physical.returns |= control == BUSTER_X86_CONTROL_RETURN;
+            physical.traps |= control == BUSTER_X86_CONTROL_TRAP || (effects->properties & BUSTER_X86_EFFECT_FAULT) != 0;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return physical;
+}
+
+// A fence that lowers to the typed stream's FENCE rather than its helper's call (#1059, CHECK_PROGRAM_HELPER_FENCE's
+// direct form): __atomic_thread_fence, __atomic_signal_fence, __c11_atomic_thread_fence and __c11_atomic_signal_fence,
+// unscoped, of an order the checker knows (CheckBuiltinAtomicEffect.known_orders) that is one of C's (0 to 5) and whose
+// argument evaluates for no effect (no side effect, and nothing of the floating environment: a conversion under
+// FENV_ACCESS, which clang evaluates at run time), and __sync_synchronize; `effect` is the node's. Returns its FENCE value (the order,
+// with BUSTER_TYPED_FENCE_SIGNAL for a signal fence), or UINT32_MAX for one its helper takes (a dynamic or out-of-range
+// order, which the helper strengthens to seq_cst where clang emits a switch or nothing, or a scoped family's, whose scope
+// it evaluates) and for any other node. The planner and the lowering ask it alike.
+static uint32_t check_program_direct_fence(const CheckProgram* program, uint32_t node, const CheckBuiltinAtomicEffect* effect)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool synchronize = id == CBUILTIN_SYNC_SYNCHRONIZE;
+    const bool fence = id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE || id == CBUILTIN_C11_ATOMIC_THREAD_FENCE ||
+                       id == CBUILTIN_C11_ATOMIC_SIGNAL_FENCE;
+    const uint32_t arguments = graph->argument_counts != NULL ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
+    uint32_t value = UINT32_MAX;
+    if (effect != NULL && effect->node == node && effect->unsupported == 0 && ((synchronize && arguments == 0) || (fence && arguments == 1)) &&
+        (effect->known_orders & BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER) != 0 && effect->success_order <= BUSTER_TYPED_FENCE_SEQ_CST &&
+        effect->fence_scope != CHECK_BUILTIN_ATOMIC_FENCE_NONE)
+    {
+        const uint32_t order = synchronize ? BUSTER_CHECK_NONE : graph->argument_nodes[graph->argument_offsets[node]];
+        const bool quiet = synchronize || (check_stream_flags(program->stream, order) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+        value = quiet ? effect->success_order | (effect->fence_scope == CHECK_BUILTIN_ATOMIC_FENCE_SIGNAL ? BUSTER_TYPED_FENCE_SIGNAL : 0) : UINT32_MAX;
+    }
+    return value;
 }
 
 static uint32_t check_program_helper_key(CBuiltinId id, uint64_t bytes, bool rmw, CBuiltinAtomicRmwFormat format)
@@ -592,7 +888,13 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                             scope_less.evaluated_operands &= (UINT32_C(1) << arguments) - 1;
                         }
                         const CheckBuiltinAtomicEffect* effect = &scope_less;
-                        if (base == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || base == CBUILTIN_ATOMIC_IS_LOCK_FREE || check_builtin_atomic_generic(base))
+                        if (check_program_direct_fence(program, node, stream->atomics + atomic) != UINT32_MAX)
+                        {
+                            // The typed stream's FENCE, which the lowering writes in the call's place: no helper.
+                            folded = true;
+                            result->direct[CHECK_PROGRAM_HELPER_FENCE] += 1;
+                        }
+                        else if (base == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || base == CBUILTIN_ATOMIC_IS_LOCK_FREE || check_builtin_atomic_generic(base))
                         {
                             // A lock-free query is a constant or libatomic's runtime query (check_lower_atomic_query), and GNU's
                             // generic forms use the implicit widths' leaves or libatomic (check_lower_atomic_prepare).
@@ -656,6 +958,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                             .node = node,
                             .helper = keys[key] - 1,
                         };
+                        result->helper[check_program_helper_family(planned + keys[key] - 1)] += 1;
                     }
                 }
             }

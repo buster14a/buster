@@ -1718,6 +1718,20 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
                                          &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
         arena_small_floor = 0;
+        // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
+        if (command->helper_report != NULL)
+        {
+            CheckHelperReport* report = command->helper_report;
+            const CheckHelperReport* unit_report = &lane->functions.helper_report;
+            __atomic_fetch_add(&report->units, unit_report->units, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->refused, unit_report->refused, __ATOMIC_RELAXED);
+            for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+            {
+                __atomic_fetch_add(&report->direct[f], unit_report->direct[f], __ATOMIC_RELAXED);
+                __atomic_fetch_add(&report->helper[f], unit_report->helper[f], __ATOMIC_RELAXED);
+                __atomic_fetch_add(&report->planned[f], unit_report->planned[f], __ATOMIC_RELAXED);
+            }
+        }
         // The unit's --tier1 outcomes into the command's report, which the other lanes' units add to too.
         for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_STAGE_COUNT; k += 1)
         {
