@@ -5023,7 +5023,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // --tier1 requests Tier 1 even when -O0 is present, as reported by the real driver.
 static void check_test_driver_optimization_tier(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char code[] = "int optimization_mapping(int x) { return x * 17 + 3; }\\n";
+    static const char code[] = "int optimization_mapping(int x) { return x * 17 + 3; }\n";
     static const char* const levels[] = { NULL, "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og", "-Ofast", "-O" };
     char source[PATH_MAX], baseline[PATH_MAX], candidate[PATH_MAX];
     snprintf(source, sizeof(source), "%s/optimization-tier.c", directory);
