@@ -2353,7 +2353,13 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
                 snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
-                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
+                const bool named = reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0);
+                check_test_expect(test, named, description);
+                if (!named || lowered_ok != machine)
+                {
+                    fprintf(stderr, "test-checker: %s: lowered=%d status=%u reason=\"%s\", expected \"%s\"\n", name, lowered_ok, lowered.status,
+                            lowered.reason != NULL ? lowered.reason : "", reason != NULL ? reason : "");
+                }
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,

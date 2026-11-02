@@ -782,6 +782,54 @@ static bool check_lower_tile_type(const TypeTable* types, TypeId type)
            type_unqualified(type_strip_aligned(types, type_element(types, base))) == BUSTER_TYPE_INT;
 }
 
+// A vector type Tier 0 has no VECTOR class for (check_lower_vector_bytes is 0, #137): a vector of bool, whose extended
+// vectors pack a bit per element, one of 1 or 2 bytes, or one of more than 64 bytes (AMX's tile among them). Its value is
+// its object's address, an aggregate's (check_lower_aggregate): it is copied, stored, passed and returned by its bytes, at
+// the locations the convention gives its type, and an element of one of 1 or 2 bytes or more than 64 is read and written
+// through that address; what would compute with one is refused by name (check_lower_transport_refusal).
+static bool check_lower_transport_type(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type_conversion_operand(types, type);
+    const uint8_t kind = type_kind(types, base);
+    return (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && check_lower_vector_bytes(types, base) == 0;
+}
+
+// Whether a vector type is a vector of bool (an extended vector of a bit per element).
+static bool check_lower_bool_vector(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type_conversion_operand(types, type);
+    const uint8_t kind = type_kind(types, base);
+    return (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) &&
+           type_unqualified(type_strip_aligned(types, type_element(types, base))) == BUSTER_TYPE_BOOL;
+}
+
+// What the lowering refuses of a transport vector's values (check_lower_transport_type), by what it would do.
+typedef enum CheckLowerTransportUse
+{
+    CHECK_LOWER_TRANSPORT_ARITHMETIC,
+    CHECK_LOWER_TRANSPORT_CONVERSION,
+    CHECK_LOWER_TRANSPORT_CONSTANT,
+    CHECK_LOWER_TRANSPORT_ELEMENT,
+    CHECK_LOWER_TRANSPORT_USES,
+} CheckLowerTransportUse;
+
+// The refusal of `use` of a transport vector's values, named by its kind: AMX's tile, a vector of bool, one of 1 or 2
+// bytes, or one of more than 64 bytes.
+static const char* check_lower_transport_refusal(const TypeTable* types, TypeId type, CheckLowerTransportUse use)
+{
+    static const char* const refusals[4][CHECK_LOWER_TRANSPORT_USES] = {
+        { "arithmetic on 1024-byte tile vectors", "conversions or splats of 1024-byte tile vectors", "constant expressions of 1024-byte tile vectors",
+          "elements of 1024-byte tile vectors" },
+        { "arithmetic on vectors of bool", "conversions or splats of vectors of bool", "constant expressions of vectors of bool", "elements of vectors of bool" },
+        { "arithmetic on vectors of 1 or 2 bytes", "conversions or splats of vectors of 1 or 2 bytes", "constant expressions of vectors of 1 or 2 bytes",
+          "elements of vectors of 1 or 2 bytes" },
+        { "arithmetic on vectors of more than 64 bytes", "conversions or splats of vectors of more than 64 bytes",
+          "constant expressions of vectors of more than 64 bytes", "elements of vectors of more than 64 bytes" },
+    };
+    const uint32_t kind = check_lower_tile_type(types, type) ? 0 : check_lower_bool_vector(types, type) ? 1 : type_size(types, type_conversion_operand(types, type)) <= 2 ? 2 : 3;
+    return refusals[kind][use];
+}
+
 // The value of a LOAD, STORE or SET of a class's value of a type: a vector's bytes, which Tier 0 takes the width of a
 // VECTOR entry that touches memory from (check_lower_vector_bytes); 0 for every other class.
 static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, TypeId type)
@@ -1039,7 +1087,7 @@ static uint8_t check_lower_type_facts(const TypeTable* types, TypeId type)
     // A __float128's value is its 16-byte object's address, an aggregate's (check_lower_quad), and so is a _BitInt's past
     // 128 bits, of its limbs (check_lower_limb_type).
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || complex || base == BUSTER_TYPE_FLOAT128 ||
-                           check_lower_limb_type(types, type).count != 0 || check_lower_tile_type(types, type);
+                           check_lower_limb_type(types, type).count != 0 || check_lower_transport_type(types, type);
     const bool address = kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) || aggregate;
     return (aggregate ? BUSTER_CHECK_LOWER_TYPE_AGGREGATE : 0) | (complex ? BUSTER_CHECK_LOWER_TYPE_COMPLEX : 0) | (address ? BUSTER_CHECK_LOWER_TYPE_ADDRESS : 0) |
            (kind == BUSTER_TYPE_KIND_POINTER ? BUSTER_CHECK_LOWER_TYPE_POINTER : 0) | (base == BUSTER_TYPE_BOOL ? BUSTER_CHECK_LOWER_TYPE_BOOL : 0) |
@@ -2412,10 +2460,11 @@ static __attribute__((noinline)) void check_lower_aggregate_conversion(CheckLowe
     const bool from_aggregate = check_lower_aggregate(writer, from);
     const bool to_aggregate = check_lower_aggregate(writer, to);
     const bool limbs = check_lower_limb_value(writer, from) || check_lower_limb_value(writer, to);
-    if (((from_aggregate && check_lower_tile_type(types, from)) || (to_aggregate && check_lower_tile_type(types, to))) &&
+    if (((from_aggregate && check_lower_transport_type(types, from)) || (to_aggregate && check_lower_transport_type(types, to))) &&
         type_conversion_operand(types, from) != type_conversion_operand(types, to))
     {
-        check_lower_unsupported(writer, "conversions or splats of 1024-byte tile vectors");
+        check_lower_unsupported(writer, check_lower_transport_refusal(types, from_aggregate && check_lower_transport_type(types, from) ? from : to,
+                                                                      CHECK_LOWER_TRANSPORT_CONVERSION));
     }
     else if (limbs && type_conversion_operand(types, from) != type_conversion_operand(types, to))
     {
@@ -5108,9 +5157,9 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
         // A __float128's, the one aggregate whose value the checker folds to a floating constant.
         check_lower_quad_constant(writer, value);
     }
-    else if (check_lower_aggregate(writer, value->type) && check_lower_tile_type(writer->program->types, value->type))
+    else if (check_lower_aggregate(writer, value->type) && check_lower_transport_type(writer->program->types, value->type))
     {
-        check_lower_unsupported(writer, "constant expressions of 1024-byte tile vectors");
+        check_lower_unsupported(writer, check_lower_transport_refusal(writer->program->types, value->type, CHECK_LOWER_TRANSPORT_CONSTANT));
     }
     else if (class == BUSTER_TYPED_CLASS_F80 && value->constant_kind != CHECK_CONSTANT_FLOATING)
     {
@@ -9169,11 +9218,12 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (((op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_LOGICAL_OR) || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
               (op == CHECK_OP_CONDITIONAL && check_lower_aggregate(writer, type_a))) &&
              (aggregate || check_lower_aggregate(writer, type_a)) &&
-             (check_lower_tile_type(types, value->type) || check_lower_tile_type(types, type_a)))
+             (check_lower_transport_type(types, value->type) || check_lower_transport_type(types, type_a)))
     {
-        // The tile type gains value transport, not the ordinary VECTOR rows' arithmetic. In particular its address
+        // A transport vector gains value transport, not the ordinary VECTOR rows' arithmetic. In particular its address
         // must never reach a scalar arithmetic row or the complex-number path merely because it is an aggregate.
-        check_lower_unsupported(writer, "arithmetic on 1024-byte tile vectors");
+        check_lower_unsupported(writer, check_lower_transport_refusal(types, check_lower_transport_type(types, value->type) ? value->type : type_a,
+                                                                      CHECK_LOWER_TRANSPORT_ARITHMETIC));
     }
     else if (check_lower_complex_operation(writer, op, value->type, type_a))
     {
@@ -9332,6 +9382,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             // their volatile vector before extraction, so their owned temporary remains supported.
             check_lower_unsupported(writer, "element access through volatile vectors");
         }
+        else if (check_lower_bool_vector(types, vector))
+        {
+            // An element of a vector of bool is a bit of its bytes, which no address reaches.
+            check_lower_unsupported(writer, check_lower_transport_refusal(types, vector, CHECK_LOWER_TRANSPORT_ELEMENT));
+        }
         else if (!address && !address_value)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
@@ -9342,10 +9397,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             check_lower_operand(writer, node, 0, true, 0);
         }
-        else if (check_lower_tile_type(types, vector))
+        else if (check_lower_transport_type(types, vector))
         {
-            // A returned tile value already is the address of its complete object, unlike an ordinary VECTOR's
-            // register value. An element of that rvalue reads through the address directly.
+            // A transport vector's value (a returned tile's among them) already is the address of its complete object,
+            // unlike an ordinary VECTOR's register value. An element of that rvalue reads through the address directly.
             check_lower_operand(writer, node, 0, false, vector);
         }
         else

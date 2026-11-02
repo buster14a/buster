@@ -602,7 +602,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         {
                             const bool aligned = effect->alignment_known && effect->minimum_alignment >= effect->object_size;
                             const uint8_t kind = check_action_kind(program->types, effect->value_type);
-                            const bool representation = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
+                            const bool representation = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX ||
+                                                        kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
                             if (representation || !check_builtin_atomic_c11_native(program->types, base, effect->value_type, effect->object_size, aligned))
                             {
                                 // The lowering uses libatomic's generic ABI for representations the native leaves don't take.

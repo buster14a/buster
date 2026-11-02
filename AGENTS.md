@@ -5970,9 +5970,10 @@ make, and `_Complex __float128` in clang's),
 GNU's complex integer types (of `__int128` too) and in clang's complex
 `_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of every type C
 makes atomic, but `_BitInt`s (themselves, records holding them and aligned
-typedefs of them, as in the record runs), at 64 bytes the vectors of 4, 8, 16,
-32 and 64 bytes the producer lowers with AVX-512 (no vector of 1 or 2 bytes or
-of `bool`, which it refuses by name), and the
+typedefs of them, as in the record runs), the vectors of 4, 8, 16, 32 and 64
+bytes the producer lowers (with SSE's registers at 16 bytes, AVX-512's at 64),
+and those of 1 and 2 bytes and of `bool`, which it passes by their bytes (#137:
+`check_lower_transport_type`, nothing that computes with them), and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a

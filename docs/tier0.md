@@ -449,6 +449,16 @@ left below the vector path's 16: the masks took the last one): each entry that m
 `tier0_validate` follows each depth's width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than
 an entry's is refused, not miscompiled.
 
+A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of more than 64 (AMX's 1024-byte tile among
+them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
+its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
+does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
+and an element of one whose elements are bytes is read and written through that address. What would compute with one
+(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
+builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
+builtins on vectors, as on structs, call libatomic's generic functions.
+
 - **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
   `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,
   `STORE_LOCAL` and `SET_LOCAL` (of an object of the vector's bytes, all of which they read or write), `DISCARD` and

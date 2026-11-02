@@ -84,6 +84,35 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h;}",
         },
         {
+            // Vectors Tier 0 has no class for (#137), which the producer passes, returns, copies and stores by their bytes
+            // (check_lower_transport_type): of 1 and 2 bytes, of bools (an initializer's element at run time among them),
+            // clang's extended ones of 2 bytes and one of 128, as parameters, results, va_arg's, members, an array's
+            // elements, globals and an _Atomic's value, and elements of the ones whose elements are bytes.
+            "vector-transport",
+            "typedef signed char t1 __attribute__((vector_size(1)));typedef char t2 __attribute__((vector_size(2)));typedef short t2s __attribute__((vector_size(2)));"
+            "typedef _Bool b8 __attribute__((ext_vector_type(8)));typedef _Bool b16 __attribute__((ext_vector_type(16)));typedef _Bool b64 __attribute__((ext_vector_type(64)));"
+            "typedef unsigned char e2 __attribute__((ext_vector_type(2)));typedef int w32 __attribute__((vector_size(128)));"
+            "struct tr{t2 b[2];t2s d;b8 c;t1 a;};"
+            "static t2 pick2(t2 a,t2 b,int k){return k?a:b;}static t1 back1(t1 a){t1 r=a;return r;}"
+            "static b8 back8(b8 a,b16 b,b64 c,b64*out){*out=c;(void)b;return a;}static e2 backe(e2 a){return a;}"
+            "static w32 backw(w32 a,int k){w32 r=a;r[k&31]=k;return r;}static struct tr backs(struct tr s,t1 x){s.a=x;s.b[1]=s.b[0];return s;}"
+            "static t2 variadic(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);t2 a=__builtin_va_arg(ap,t2);b8 b=__builtin_va_arg(ap,b8);"
+            "t2s c=__builtin_va_arg(ap,t2s);b64 d=__builtin_va_arg(ap,b64);__builtin_va_end(ap);a[0]^=*(char*)&b^*(char*)&c^*(char*)&d;return a;}"
+            "static _Atomic(t2) atomic2;static t2 global2={3,4};static b8 globalb={1,0,1,1,0,0,0,1};"
+            "int tested(int n){unsigned h=2166136261u;"
+            "t2 a={(char)n,2},b;fill(&b,2,n);t2 c=pick2(a,b,n&1);FOLD(c);a[1]=(char)(n*3);FOLD(a);"
+            "t1 o;fill(&o,1,n+1);t1 p=back1(o);FOLD(p);"
+            "b8 m={1,0,(_Bool)(n&1),1,0,1,0,0};b16 q;fill(&q,2,n+2);b64 r,s;fill(&r,8,n+3);b8 k=back8(m,q,r,&s);FOLD(k);FOLD(s);"
+            "e2 e={(unsigned char)n,0x20};e2 f=backe(e);FOLD(f);"
+            "w32 w;fill(&w,128,n+4);w32 x=backw(w,n);FOLD(x);int y=x[n&31];FOLD(y);"
+            "struct tr t;fill(&t,sizeof(t),n+5);struct tr u=backs(t,o);FOLD(u);"
+            "t2s z;fill(&z,2,n+6);t2 v=variadic(4,c,m,z,r);FOLD(v);"
+            "atomic2=c;t2 g=atomic2;FOLD(g);"
+            "global2=n&2?global2:c;FOLD(global2);FOLD(globalb);"
+            "t2 arr[3]={a,b,c};t2 el=arr[(unsigned)n%3];FOLD(el);char ch=el[1];FOLD(ch);"
+            "return (int)h;}",
+        },
+        {
             "vector-memory",
             "static v8si global_vector={1,2,3,4,5,6,7,8};static v4sf global_array[3];struct holder{int tag;v4si v;v8df d;};static struct holder global_holder;"
             "static v16su through(const v16su*p,int i){return p[i]+p[i+1];}"
@@ -326,9 +355,34 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
-            "vector-of-2-bytes",
-            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n},b={2};a=b;return a[0];}",
-            "vector types of other than 4, 8, 16, 32 or 64 bytes",
+            // Vectors passed by their bytes (#137, check_lower_transport_type): nothing computes with their values yet.
+            "vector-arithmetic-of-2-bytes",
+            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n},b={2};a=a+b;return a[0];}",
+            "arithmetic on vectors of 1 or 2 bytes",
+            2,
+        },
+        {
+            "vector-conversion-of-2-bytes",
+            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n,1};return (short)a;}",
+            "conversions or splats of vectors of 1 or 2 bytes",
+            1,
+        },
+        {
+            "vector-of-bool-element",
+            "typedef _Bool b8 __attribute__((ext_vector_type(8)));int tested(int n){b8 a={(_Bool)n,1};return a[n&7];}",
+            "elements of vectors of bool",
+            1,
+        },
+        {
+            "vector-of-bool-arithmetic",
+            "typedef _Bool b8 __attribute__((ext_vector_type(8)));int tested(int n){b8 a={(_Bool)n,1},b=~a;return *(unsigned char*)&b;}",
+            "arithmetic on vectors of bool",
+            2,
+        },
+        {
+            "vector-arithmetic-past-64-bytes",
+            "typedef int w32 __attribute__((vector_size(128)));int tested(int n){w32 a={n},b=a+a;return b[0];}",
+            "arithmetic on vectors of more than 64 bytes",
             2,
         },
         {
@@ -488,6 +542,13 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "C t=s.v+2;s.v=t;FOLD(s);V a={n,-n},b=narrow(a);V out[2]={a,b};out[0]=out[1];FOLD(out);\n"
           "v16su x;fill(&x,64,n);wide(x);v16su z=hold;FOLD(z);v16su y=back(x);FOLD(y);v8sf f;fillf((float*)&f,8,n);v8sf g=half(f);FOLD(g);\n"
           "v8df d;fill(&d,64,n+3);v8df e=pair(d,y);FOLD(e);FOLD(hold);return (int)h;}\n"
+        },
+        { "baseline-transport",
+          "typedef char t2 __attribute__((vector_size(2)));typedef _Bool b8 __attribute__((ext_vector_type(8)));typedef _Bool b64 __attribute__((ext_vector_type(64)));\n"
+          "typedef int w32 __attribute__((vector_size(128)));static t2 pick2(t2 a,t2 b,int k){return k?a:b;}static b64 back64(b8 a,b64 b,b8*out){*out=a;return b;}\n"
+          "static w32 backw(w32 a,int k){w32 r=a;r[k&31]=k;return r;}\n"
+          "int tested(int n){unsigned h=2166136261u;t2 a={(char)n,2},b;fill(&b,2,n);t2 c=pick2(a,b,n&1);FOLD(c);b8 m={1,0,(_Bool)(n&1),1,0,1,0,0},k;\n"
+          "b64 r;fill(&r,8,n+3);b64 s=back64(m,r,&k);FOLD(k);FOLD(s);w32 w;fill(&w,128,n+4);w32 x=backw(w,n);FOLD(x);return (int)h;}\n"
         },
         { "baseline-floating-pressure",
           "static double consume(double a,double b,double c,double d,double e,double f,double g,double h,double i,double j,double k,double l,double m,double o,double p,double q,v4si v){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+v[1];}\n"

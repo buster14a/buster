@@ -41,14 +41,19 @@ static CBuiltinId check_builtin_atomic_c11_runtime(CBuiltinId id)
     return check_builtin_atomic_c11(id) ? mapped[id - CBUILTIN_C11_ATOMIC_INIT] : id;
 }
 
+// Whether an atomic operation of `id` on a value of type `value` and `bytes` is lock-free, an instruction's, as clang's code
+// makes it: of 1, 2, 4 or 8 bytes aligned to them, of an integer, a pointer, a float, a double, a struct, a union, a complex
+// type or a vector (#137: clang's IR loads and stores a vector's bytes as an integer of their width), an arithmetic one of
+// an integer or a pointer alone.
 static bool check_builtin_atomic_c11_native(const TypeTable* table, CBuiltinId id, TypeId value, uint64_t bytes, bool aligned)
 {
     const uint8_t kind = value != 0 ? check_action_kind(table, value) : BUSTER_TYPE_KIND_VOID;
     const bool fence = id == CBUILTIN_C11_ATOMIC_THREAD_FENCE || id == CBUILTIN_C11_ATOMIC_SIGNAL_FENCE;
     const bool arithmetic = id >= CBUILTIN_C11_ATOMIC_FETCH_ADD && id <= CBUILTIN_C11_ATOMIC_FETCH_MAX;
+    const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
     const bool scalar = check_action_is_integer(table, value) || kind == BUSTER_TYPE_KIND_POINTER || value == BUSTER_TYPE_FLOAT ||
                         value == BUSTER_TYPE_DOUBLE || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
-                        kind == BUSTER_TYPE_KIND_COMPLEX;
+                        kind == BUSTER_TYPE_KIND_COMPLEX || (vector && !arithmetic);
     const bool result =
         fence || (aligned && (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8) && scalar &&
                   (!arithmetic || (value != BUSTER_TYPE_FLOAT && value != BUSTER_TYPE_DOUBLE && value != BUSTER_TYPE_BOOL)));
