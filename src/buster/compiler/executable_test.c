@@ -2537,8 +2537,8 @@ static bool executable_test_zero_fill_file(const Link* link, String8 file, uint6
     return result;
 }
 
-// A program whose 3 GiB .bss atom makes `_end` far, with a PC32 fixup to it: the writer refuses the fixup as SYMBOL_FAR,
-// naming the linker symbol. *end gets the symbol and *field the fixup.
+// A program whose 3 GiB .bss atom makes `_end` far, with a PC32 fixup to it: the writer refuses the fixup, naming the
+// linker symbol. *end gets the symbol and *field the fixup.
 static bool executable_test_far_linker(ExecutableTestLink* test, SymbolId* start, SymbolId* end, FixupId* field, uint64_t size)
 {
     bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
@@ -2554,6 +2554,47 @@ static bool executable_test_far_linker(ExecutableTestLink* test, SymbolId* start
     const AtomId table = *end != 0 ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
     *field = table != 0 ? link_add_fixup(link, table, 0, BUSTER_LINK_FIXUP_PC32, *end, 0) : 0;
     return result && bss != 0 && *end != 0 && table != 0 && *field != 0 && link_check(link) == LINK_ERROR_NONE;
+}
+
+// A link whose atoms stay under the far-possible slack while a 70 MiB dynamic string table pushes the image past 2 GiB:
+// its LOAD_GOT candidate to `_end` relaxed away, so the far check must refuse it as FAR_GOT instead of reading slot 0.
+// *start, *end, *field and *exported get the entry, the linker symbol, the fixup and the export whose name is huge.
+static bool executable_test_far_got(ExecutableTestLink* test, SymbolId* start, SymbolId* end, FixupId* field, SymbolId* exported)
+{
+    const LinkCapacity capacity = {
+        .names = 8,
+        .atoms = 8,
+        .symbols = 8,
+        .fixups = 8,
+        .wide_addends = 2,
+    };
+    test->tables = arena_reserve(link_capacity_bytes(capacity));
+    test->names = arena_reserve(96ull << 20);
+    test->bytes = arena_reserve(80ull << 20);
+    bool result = test->tables.base != 0 && test->names.base != 0 && test->bytes.base != 0 &&
+                  link_initialize(&test->link, &test->tables, &test->names, capacity);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    result = result && *start != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    const uint64_t bss_size = BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE - BUSTER_EXECUTABLE_FAR_SLACK - (1ull << 20);
+    const AtomId bss = result ? link_add_atom(link, BUSTER_LINK_CLASS_BSS, 3, bss_size, 0, 0) : 0;
+    const NameId end_name = bss != 0 ? link_add_name(link, (const uint8_t*)"_end", 4) : 0;
+    *end = end_name != 0 ? link_add_symbol(link, end_name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_LINKER) : 0;
+    const AtomId table = *end != 0 ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    *field = table != 0 ? link_add_fixup(link, table, 0, BUSTER_LINK_FIXUP_LOAD_GOT, *end, -4) : 0;
+    const uint32_t name_length = 70u << 20;
+    uint8_t* name = BUSTER_ARENA_PUSH_ARRAY(&test->bytes, uint8_t, name_length);
+    if (name != 0)
+    {
+        memset(name, 'n', name_length);
+    }
+    const NameId export_name = name != 0 ? link_add_name(link, name, name_length) : 0;
+    const AtomId data = export_name != 0 ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    *exported = data != 0 ? link_add_symbol(link, export_name, data, 0, 8, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    return result && bss != 0 && *end != 0 && table != 0 && *field != 0 && *exported != 0 && link_check(link) == LINK_ERROR_NONE;
 }
 
 // A program that exits 0, with a table of `atom_class` at `alignment_log2` of `size` bytes (zeros), and `failures` ABS32
@@ -2731,6 +2772,31 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     }
     executable_test_expect(&tally, far_near, "a PC32 whose distance reaches a target past 2 GiB links and runs", 0);
     executable_test_link_end(&far_linker);
+
+    // A far GOT candidate whose slot the atom counts didn't reserve, because only the linker's own string table pushes
+    // the image past the reach: it is refused as FAR_GOT, naming the linker symbol, rather than reading slot 0.
+    ExecutableTestLink far_got;
+    SymbolId far_got_start = 0;
+    SymbolId far_got_end = 0;
+    SymbolId far_got_export = 0;
+    FixupId far_got_field = 0;
+    built = executable_test_far_got(&far_got, &far_got_start, &far_got_end, &far_got_field, &far_got_export);
+    executable_test_expect(&tally, built, "the far GOT program", 0);
+    if (built)
+    {
+        ExecutableDynamic dynamic = { .exports = &far_got_export, .export_count = 1 };
+        ExecutableTestWrite write = {
+            .link = &far_got.link,
+            .options = { .path = path, .entry = far_got_start, .dynamic = &dynamic },
+        };
+        unlink(path.pointer);
+        lane_run(1, executable_test_lane_main, &write, 0);
+        const bool far_got_refused = !write.succeeded && write.result.error == EXECUTABLE_ERROR_LAYOUT && write.result.cause == EXECUTABLE_CAUSE_FAR_GOT &&
+                                     write.result.symbol == far_got_end && write.result.fixup == far_got_field && access(path.pointer, F_OK) != 0;
+        executable_test_expect(&tally, far_got_refused, "a far GOT target without a slot is refused by name", 0);
+        unlink(path.pointer);
+    }
+    executable_test_link_end(&far_got);
 
     // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with
     // a symbol defined nowhere beside it), the first of two symbols defined nowhere in different lanes' ranges, the
