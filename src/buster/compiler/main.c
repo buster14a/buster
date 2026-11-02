@@ -104,12 +104,7 @@
 
 #include "buster/compiler/c_lexer.c"
 
-typedef struct String8 String8;
-struct String8
-{
-    char* pointer;
-    uint64_t length;
-};
+#include "buster/compiler/string8.h"
 
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
@@ -161,8 +156,13 @@ int run_dominator_benchmark(int argc, char** argv);
 
 #include "buster/compiler/tier1_allocate.c"
 #include "buster/compiler/tier1_rematerialize.c"
+// #939's allocation certificates: the checker of a source/stream program, the interval allocator's fragment adapter and
+// the CFG allocator's producer, which Tier 1's consumers run when their options ask for it.
+#include "buster/compiler/tier1_certificate.c"
+#include "buster/compiler/tier1_certificate_interval.c"
 #include "buster/compiler/tier1_allocate_test.c"
 #include "buster/compiler/tier1_cfg.c"
+#include "buster/compiler/tier1_certificate_cfg.c"
 #include "buster/compiler/tier1_cfg_test.c"
 int run_tier1_allocate_benchmark(int argc, char** argv);
 
@@ -563,6 +563,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_cfg_ir.c"
 #include "buster/compiler/tier1_cfg_source_test.c"
 #include "buster/compiler/tier1_cfg_source_benchmark.c"
+#include "buster/compiler/tier1_certificate_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -667,88 +668,12 @@ int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
 
-// Driver information actions may follow other options, but a value such as `-o --version` is not an action.
-// A null status only tests for an action, so implicit assembly dispatch can leave information actions to the driver.
-// Explicit command names are dispatched first. -dumpmachine wins when both actions are present.
-static bool main_information(int count, char** arguments, int* status)
-{
-    const char* target = NULL;
-    bool missing_target = false;
-    bool version = false;
-    bool machine = false;
-    for (int i = 0; i < count; i += 1)
-    {
-        const char* argument = arguments[i];
-        if (strcmp(argument, "--") == 0)
-        {
-            break;
-        }
-        if (strcmp(argument, "-target") == 0)
-        {
-            missing_target = i + 1 >= count;
-            target = !missing_target ? arguments[++i] : NULL;
-        }
-        else if (strncmp(argument, "--target=", 9) == 0)
-        {
-            target = argument + 9;
-            missing_target = false;
-        }
-        else if (strcmp(argument, "--version") == 0)
-        {
-            version = true;
-        }
-        else if (strcmp(argument, "-dumpmachine") == 0)
-        {
-            machine = true;
-        }
-        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 ||
-                  strcmp(argument, "--worker-budget") == 0 || strcmp(argument, "--id-order") == 0 ||
-                  strcmp(argument, "-l") == 0 || strcmp(argument, "-L") == 0) && i + 1 < count)
-        {
-            i += 1;
-        }
-    }
-    const bool found = version || machine;
-    if (found && status != NULL)
-    {
-        if (missing_target || (target != NULL && !predefines_target_valid(target)))
-        {
-            fprintf(stderr, "error: unsupported or missing target for driver information\n");
-            *status = 1;
-        }
-        else
-        {
-            const PredefinesOptions options = { .target = target };
-            const size_t length = strlen(target != NULL ? target : BUSTER_CLANG_DEFAULT_TARGET);
-            char* triple = length <= SIZE_MAX - 32 ? malloc(length + 32) : NULL;
-            if (triple == NULL)
-            {
-                fprintf(stderr, "error: cannot allocate target triple\n");
-                *status = 1;
-            }
-            else
-            {
-                predefines_target_triple(&options, triple, length + 32);
-                if (!machine)
-                {
-                    printf("buster (development build)\nTarget: ");
-                }
-                printf("%s\n", triple);
-                free(triple);
-                *status = 0;
-            }
-        }
-    }
-    return found;
-}
+#include "buster/compiler/c_driver_information.c"
 
 // Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
 // options in step with pp_option_takes_value and the C driver's own options.
 static bool main_preprocessing(int count, char** arguments)
 {
-    static const char* const valued[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter",
-                                          "-target", "--predefines", "--location-limit", "--window-bytes", "--lanes",
-                                          "--worker-budget", "--id-order", "-l", "-L" };
     bool result = false;
     for (int i = 0; !result && i < count; i += 1)
     {
@@ -756,14 +681,11 @@ static bool main_preprocessing(int count, char** arguments)
         {
             break;
         }
-        result = strcmp(arguments[i], "-E") == 0;
-        for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(valued); v += 1)
+        result = strcmp(arguments[i], "-E") == 0 || strcmp(arguments[i], "-M") == 0 || strcmp(arguments[i], "-MM") == 0;
+        if ((pp_option_takes_value(arguments[i]) || strcmp(arguments[i], "--lanes") == 0 || strcmp(arguments[i], "--worker-budget") == 0 ||
+             strcmp(arguments[i], "--id-order") == 0 || strcmp(arguments[i], "-l") == 0 || strcmp(arguments[i], "-L") == 0 || strcmp(arguments[i], "-Xlinker") == 0) && i + 1 < count)
         {
-            if (strcmp(arguments[i], valued[v]) == 0 && i + 1 < count)
-            {
-                i += 1;
-                break;
-            }
+            i += 1;
         }
     }
     return result;
@@ -1342,6 +1264,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-cfg-source") == 0)
     {
         result = run_tier1_cfg_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-certificate") == 0)
+    {
+        result = run_tier1_certificate_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select-source") == 0)
     {

@@ -92,6 +92,7 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
     const bool planned = created && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the variadic fixture selects");
     const Tier1EmitOptions options = {
+        .certify = true,
         .register_mask = register_mask,
         .vector = vector,
         .rematerialize = rematerialize,

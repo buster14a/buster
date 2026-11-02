@@ -25,8 +25,9 @@ static const CheckTier1Cause check_tier1_emission_causes[] = {
     CHECK_TIER1_CAUSE_ALLOCATION,
     CHECK_TIER1_CAUSE_CFG_ALLOCATION,
     CHECK_TIER1_CAUSE_FRAME,
+    CHECK_TIER1_CAUSE_CERTIFICATE,
 };
-_Static_assert(BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_FRAME + 1, "every Tier1EmitCause has a CheckTier1Cause");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_CERTIFICATE + 1, "every Tier1EmitCause has a CheckTier1Cause");
 
 // The test control's raw emitter handoff, from the outcome's cause domain. A forced nested failure uses the same
 // outcome classification and wrapper path as a real Tier1EmitDiagnostic.
@@ -39,6 +40,7 @@ static Tier1EmitCause check_tier1_fault_emission_cause(CheckTier1Cause cause)
         case CHECK_TIER1_CAUSE_ALLOCATION: return TIER1_EMIT_CAUSE_ALLOCATION;
         case CHECK_TIER1_CAUSE_CFG_ALLOCATION: return TIER1_EMIT_CAUSE_CFG_ALLOCATION;
         case CHECK_TIER1_CAUSE_FRAME: return TIER1_EMIT_CAUSE_FRAME;
+        case CHECK_TIER1_CAUSE_CERTIFICATE: return TIER1_EMIT_CAUSE_CERTIFICATE;
         default: return TIER1_EMIT_CAUSE_NONE;
     }
 }
@@ -80,6 +82,10 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
             break;
         case CHECK_TIER1_CAUSE_FRAME:
             category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            break;
+        case CHECK_TIER1_CAUSE_CERTIFICATE:
+            // A refused certificate is an allocation the allocator got wrong (#939): internal, never Tier 0's to hide.
+            category = error == TIER1_CERT_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         default:
             break;
@@ -220,8 +226,8 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 }
 
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                             bool rematerialize, bool gvn, bool sources, Arena* output, EmittedCode* code, CheckTier1Counts* counts,
-                                             const CheckTier1Fault* fault)
+                                             bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
+                                             CheckTier1Counts* counts, const CheckTier1Fault* fault)
 {
     *code = (EmittedCode){ 0 };
     *counts = (CheckTier1Counts){ 0 };
@@ -325,6 +331,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
+            .certify = certify,
         };
         uint32_t node = BUSTER_IR_NONE;
         Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);

@@ -39,6 +39,8 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_ALLOCATION, TIER1_ALLOCATION_CONSTRAINT, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CFG_ALLOCATION, TIER1_CFG_INVALID, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_FRAME, TIER1_FRAME_REGISTER_CONFLICT, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
+    { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_VALUE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
+    { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_CAPACITY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_EMISSION, TIER1_EMIT_INVALID, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION, BUSTER_CHECK_TIER1_FRAME_PUBLICATION, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, 0xfedcba98, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
@@ -104,6 +106,13 @@ static const CheckTier1ClassCase check_tier1_classification_cases[] = {
     { CHECK_TIER1_CAUSE_FRAME, TIER1_FRAME_OVERFLOW, CHECK_TIER1_RESOURCE_FAILURE },
     { CHECK_TIER1_CAUSE_FRAME, TIER1_FRAME_INVALID, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_FRAME, TIER1_FRAME_REGISTER_CONFLICT, CHECK_TIER1_INTERNAL },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_CAPACITY, CHECK_TIER1_RESOURCE_FAILURE },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_INVALID, CHECK_TIER1_INTERNAL },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_CORRESPONDENCE, CHECK_TIER1_INTERNAL },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_VALUE, CHECK_TIER1_INTERNAL },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_TRANSITION, CHECK_TIER1_INTERNAL },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_ENTRY, CHECK_TIER1_INTERNAL },
+    { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_EDGE, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_PUBLICATION, BUSTER_CHECK_TIER1_FRAME_PUBLICATION, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_PUBLICATION, 0, CHECK_TIER1_INTERNAL },
 };
@@ -123,13 +132,15 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
                                 failure.fallback == expected && strict.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN,
                                 "the classification table follows the documented policy", detail);
     }
-    check_lanes_test_expect(tally, BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_FRAME + 1 &&
+    check_lanes_test_expect(tally, BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_CERTIFICATE + 1 &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_NONE] == CHECK_TIER1_CAUSE_EMISSION &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_IR] == CHECK_TIER1_CAUSE_IR &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_LIVENESS] == CHECK_TIER1_CAUSE_LIVENESS &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_ALLOCATION] == CHECK_TIER1_CAUSE_ALLOCATION &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_CFG_ALLOCATION] == CHECK_TIER1_CAUSE_CFG_ALLOCATION &&
-                            check_tier1_emission_causes[TIER1_EMIT_CAUSE_FRAME] == CHECK_TIER1_CAUSE_FRAME,
+                            check_tier1_emission_causes[TIER1_EMIT_CAUSE_FRAME] == CHECK_TIER1_CAUSE_FRAME &&
+                            check_tier1_emission_causes[TIER1_EMIT_CAUSE_CERTIFICATE] == CHECK_TIER1_CAUSE_CERTIFICATE &&
+                            check_tier1_fault_emission_cause(CHECK_TIER1_CAUSE_CERTIFICATE) == TIER1_EMIT_CAUSE_CERTIFICATE,
                             "every emitter cause has its outcome cause", NULL);
     check_lanes_test_expect(tally, !tier1_emit_cfg_preference_fatal(TIER1_CFG_OK) && !tier1_emit_cfg_preference_fatal(TIER1_CFG_CONSTRAINT) &&
                             !tier1_emit_cfg_preference_fatal(TIER1_CFG_CAPACITY) && tier1_emit_cfg_preference_fatal(TIER1_CFG_INVALID),
@@ -173,7 +184,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
             memset(&code, 0xa5, sizeof(code));
             memset(&counts, 0xa5, sizeof(counts));
             const CheckTier1FailureCase* test = check_tier1_failure_cases + i;
-            const CheckTier1Outcome outcome = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, test->fault.stage == CHECK_TIER1_VALUE_NUMBERING, false, &output, &code, &counts, &test->fault);
+            const CheckTier1Outcome outcome = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, test->fault.stage == CHECK_TIER1_VALUE_NUMBERING, true, false, &output, &code, &counts, &test->fault);
             bool empty = lane.scratch.length == 0;
             for (uint32_t step = 0; step < BUSTER_CHECK_TIER1_STEPS; step += 1)
             {
@@ -188,7 +199,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
                 check_lanes_test_expect(tally, prefix[k] == 0xa5, "refusal leaves the output prefix untouched", NULL);
             }
             // Reuse the same lane after every failure, not merely a fresh lane whose state cannot expose leftovers.
-            const CheckTier1Outcome success = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+            const CheckTier1Outcome success = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, true, false, &output, &code, &counts, NULL);
             check_lanes_test_expect(tally, success.category == CHECK_TIER1_SUCCESS && code.count != 0 && counts.records == code.count,
                                     "a refused lane can subsequently publish a genuine Tier 1 function", NULL);
             arena_pop_to(&output, mark);
@@ -197,7 +208,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         output.capacity = mark;
         EmittedCode code = { 0 };
         CheckTier1Counts counts = { 0 };
-        const CheckTier1Outcome full = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+        const CheckTier1Outcome full = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, false, &output, &code, &counts, NULL);
         check_lanes_test_expect(tally, full.stage == CHECK_TIER1_PUBLICATION && full.category == CHECK_TIER1_RESOURCE_FAILURE &&
                                 full.error == BUSTER_CHECK_TIER1_ARENA_OUTPUT && output.length == mark && code.records == NULL && counts.records == 0,
                                 "real publication exhaustion is a resource error, not Tier 0 coverage", NULL);
@@ -211,7 +222,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         const uint64_t emitter_capacity = lane.steps[1].capacity;
         EmittedCode chain_code = { 0 };
         CheckTier1Counts chain_counts = { 0 };
-        const CheckTier1Outcome chain_full = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &chain_code, &chain_counts, NULL);
+        const CheckTier1Outcome chain_full = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &chain_code, &chain_counts, NULL);
         check_lanes_test_expect(tally, chain_full.category == CHECK_TIER1_SUCCESS && chain_code.count != 0 && chain_counts.records == chain_code.count,
                                 "the chain body fits its full emission arena", NULL);
         const uint64_t peak = lane.steps[1].peak;
@@ -221,12 +232,12 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         EmittedCode probe_code = { 0 };
         CheckTier1Counts probe_counts = { 0 };
         lane.steps[1].capacity = high;
-        CheckTier1Outcome probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+        CheckTier1Outcome probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
         if (probe.category != CHECK_TIER1_SUCCESS && high != emitter_capacity)
         {
             high = emitter_capacity;
             lane.steps[1].capacity = high;
-            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
         }
         check_lanes_test_expect(tally, probe.category == CHECK_TIER1_SUCCESS, "the chain body fits the binary search's high bound", NULL);
         arena_pop_to(&output, mark);
@@ -234,7 +245,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         {
             const uint64_t middle = low + (high - low) / 2;
             lane.steps[1].capacity = middle;
-            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
             if (probe.stage == CHECK_TIER1_PROMOTION)
             {
                 low = middle;
@@ -246,7 +257,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
             arena_pop_to(&output, mark);
         }
         lane.steps[1].capacity = high;
-        CheckTier1Outcome nested = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+        CheckTier1Outcome nested = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &code, &counts, NULL);
         arena_pop_to(&output, mark);
         char nested_detail[160];
         snprintf(nested_detail, sizeof(nested_detail), "stage=%u category=%u cause=%u error=%" PRIu32 " emission=%" PRIu32 " capacity=%" PRIu64 " peak=%" PRIu64,
